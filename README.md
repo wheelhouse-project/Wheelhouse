@@ -16,12 +16,12 @@ by default: no cloud account, no subscription, no telemetry.
   words stream in as you talk — the first word typically lands in under two
   seconds and the rest flow continuously, instead of appearing all at once
   after you stop. Spoken punctuation ("comma", "new line") becomes symbols.
-- **Voice commands.** Switch windows, press keys, open programs, control
-  volume and brightness — driven by a pattern catalog you can extend with
-  your own commands through the built-in Pattern Manager.
+- **Voice commands.** Switch windows, press keys, launch programs — driven
+  by a pattern catalog you can extend with your own commands through the
+  built-in Pattern Manager.
 - **Click by voice.** Say `click cancel` or `click the submit button` and
   WheelHouse finds the control in the focused window and clicks it. When
-  names are ambiguous or unlabeled, say `show numbers` to badge every
+  names are ambiguous or unlabeled, say `apply numbers` to badge every
   clickable control with a number and `click 5` to pick one.
 - **Offline by default.** The default speech engine (NVIDIA Parakeet,
   running locally on your CPU) never sends audio or text anywhere.

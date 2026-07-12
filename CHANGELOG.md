@@ -13,14 +13,14 @@ installable by anyone.
 
 ### Added
 
-- Voice commands: window switching, key presses, program launch, volume
-  and brightness control, driven by an extensible pattern catalog with a
-  built-in Pattern Manager for user-defined commands.
+- Voice commands: window switching, key presses, program launch, driven
+  by an extensible pattern catalog with a built-in Pattern Manager for
+  user-defined commands.
 - Streaming dictation into any application, with spoken punctuation,
   context-aware spacing and capitalization, and a text-target check that
   keeps keystrokes out of controls that don't accept text.
 - Voice element clicking: `click <name>` finds and clicks controls in the
-  focused window; `show numbers` overlays numbered badges on every
+  focused window; `apply numbers` overlays numbered badges on every
   clickable control for `click <N>`.
 - Terminal dictation editor: dictating at a shell prompt opens a small
   editor so text is reviewed before it reaches the terminal.
