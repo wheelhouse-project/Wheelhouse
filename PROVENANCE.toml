@@ -81,3 +81,9 @@ license = "Apache-2.0 (project license)"
 path = "services/wheelhouse/wheelhouse_plaque.jpg"
 origin = "AI-generated for WheelHouse at the maintainer's direction"
 license = "Apache-2.0 (project license)"
+
+# Copy of the plaque served by GitHub Pages (Pages only serves /docs).
+[[asset]]
+path = "docs/wheelhouse_plaque.jpg"
+origin = "AI-generated for WheelHouse at the maintainer's direction"
+license = "Apache-2.0 (project license)"
