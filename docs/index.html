@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WheelHouse — control your Windows PC with your voice</title>
+<meta name="description" content="WheelHouse is free, open-source voice control for Windows: dictate into any application, run commands, and click things by name. Offline by default. Built for people who need hands-free computer use.">
+<style>
+  :root {
+    --bg: #ffffff;
+    --text: #1a1a1a;
+    --muted: #444444;
+    --accent: #0b5cad;
+    --accent-text: #ffffff;
+    --card: #f2f5f8;
+    --border: #c9d4dd;
+    --code-bg: #10222f;
+    --code-text: #e8f0f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12181e;
+      --text: #eef2f5;
+      --muted: #b8c2cb;
+      --accent: #7db8ea;
+      --accent-text: #0c1319;
+      --card: #1b242d;
+      --border: #3a4a58;
+      --code-bg: #0a1219;
+      --code-text: #dcebf7;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { font-size: 112.5%; }
+  body {
+    margin: 0;
+    font-family: system-ui, "Segoe UI", Arial, sans-serif;
+    line-height: 1.6;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .skip-link {
+    position: absolute;
+    left: -999px;
+    top: 0;
+    background: var(--accent);
+    color: var(--accent-text);
+    padding: 0.75rem 1.25rem;
+    z-index: 10;
+  }
+  .skip-link:focus { left: 0.5rem; top: 0.5rem; }
+  .wrap {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 0 1.25rem;
+  }
+  header.hero {
+    padding: 3.5rem 0 2.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  h1 {
+    font-size: 2.4rem;
+    line-height: 1.15;
+    margin: 0 0 0.75rem;
+  }
+  .tagline {
+    font-size: 1.3rem;
+    color: var(--muted);
+    margin: 0 0 1.5rem;
+  }
+  h2 {
+    font-size: 1.6rem;
+    margin: 2.5rem 0 0.75rem;
+  }
+  h3 { font-size: 1.15rem; margin: 1.5rem 0 0.35rem; }
+  p { margin: 0.6rem 0 1rem; }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1.25rem 0 0; }
+  .btn {
+    display: inline-block;
+    padding: 0.9rem 1.6rem;
+    font-size: 1.15rem;
+    font-weight: 600;
+    border-radius: 8px;
+    text-decoration: none;
+    min-height: 48px;
+  }
+  .btn-primary { background: var(--accent); color: var(--accent-text); }
+  .btn-secondary {
+    background: transparent;
+    color: var(--accent);
+    border: 2px solid var(--accent);
+  }
+  ul.features { list-style: none; padding: 0; margin: 1rem 0; }
+  ul.features > li {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin: 0 0 0.9rem;
+  }
+  ul.features h3 { margin: 0 0 0.3rem; }
+  ul.features p { margin: 0; }
+  .say {
+    display: inline-block;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.1rem 0.7rem;
+    font-style: italic;
+    white-space: nowrap;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-text);
+    padding: 1rem 1.25rem;
+    border-radius: 10px;
+    overflow-x: auto;
+    font-size: 0.95rem;
+    line-height: 1.5;
+  }
+  code { font-family: Consolas, "Cascadia Mono", monospace; }
+  ol.steps { padding-left: 1.4rem; }
+  ol.steps > li { margin: 0 0 0.9rem; }
+  .note {
+    background: var(--card);
+    border-left: 5px solid var(--accent);
+    border-radius: 0 10px 10px 0;
+    padding: 0.9rem 1.25rem;
+    margin: 1.25rem 0;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td {
+    text-align: left;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { border-bottom-width: 2px; }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem 1.1rem;
+    margin: 0 0 0.75rem;
+    background: var(--card);
+  }
+  summary {
+    font-weight: 600;
+    font-size: 1.05rem;
+    cursor: pointer;
+    padding: 0.25rem 0;
+  }
+  details > p { margin-top: 0.75rem; }
+  .demo-placeholder {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 2.25rem 1.25rem;
+    text-align: center;
+    color: var(--muted);
+    margin: 1.25rem 0;
+  }
+  footer {
+    border-top: 1px solid var(--border);
+    margin-top: 3rem;
+    padding: 2rem 0 2.5rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+  footer p { margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>WheelHouse</h1>
+    <p class="tagline">Control your Windows PC with your voice — completely hands-free.</p>
+    <p>
+      WheelHouse is free, open-source voice control built for people who need it.
+      If using a keyboard and mouse is painful, difficult, or impossible, WheelHouse
+      aims to give you the whole computer by voice: speak to type into any program,
+      run commands, and click buttons by saying their names. No account, no
+      subscription, and with the default settings your voice never leaves your machine.
+    </p>
+    <div class="buttons">
+      <a class="btn btn-primary" href="#install">Get WheelHouse</a>
+      <a class="btn btn-secondary" href="https://github.com/wheelhouse-project/WheelHouse">View on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <div class="wrap">
+
+    <h2 id="what">What you can do</h2>
+    <ul class="features">
+      <li>
+        <h3>Dictate anywhere</h3>
+        <p>
+          Speak into whatever program has focus — email, documents, chat, web forms —
+          and the words stream in as you talk, usually starting in under two seconds.
+          Say <span class="say">comma</span> or <span class="say">new line</span>
+          and WheelHouse types the punctuation for you.
+        </p>
+      </li>
+      <li>
+        <h3>Command your computer</h3>
+        <p>
+          <span class="say">switch to Chrome</span>,
+          <span class="say">volume down</span>,
+          <span class="say">open notepad</span> — WheelHouse ships with a catalog
+          of commands, and a built-in Pattern Manager lets you add your own phrases
+          without touching any code.
+        </p>
+      </li>
+      <li>
+        <h3>Click things by name</h3>
+        <p>
+          Say <span class="say">click cancel</span> or
+          <span class="say">click the submit button</span> and WheelHouse finds that
+          control in the focused window and clicks it. If a control has no useful
+          name, say <span class="say">show numbers</span> to put a number on
+          everything clickable, then <span class="say">click 5</span>.
+        </p>
+      </li>
+      <li>
+        <h3>Private by default</h3>
+        <p>
+          The default speech engine runs entirely on your machine, on the CPU —
+          no cloud account, no audio leaving your computer, and no telemetry of any
+          kind. Dictated text is even kept out of WheelHouse's own log files.
+        </p>
+      </li>
+      <li>
+        <h3>Careful about where text goes</h3>
+        <p>
+          Before typing a single word, WheelHouse checks that the thing you are
+          focused on actually accepts text — so dictation does not spill keystrokes
+          into the wrong window.
+        </p>
+      </li>
+    </ul>
+
+    <h2 id="demo">See it in action</h2>
+    <div class="demo-placeholder">
+      <p>Demo video coming soon.</p>
+    </div>
+
+    <h2 id="install">Install WheelHouse</h2>
+    <p>
+      <strong>You need:</strong> Windows 10 or 11 (64-bit), a microphone, and a few
+      gigabytes of free disk space for the speech model.
+    </p>
+    <ol class="steps">
+      <li>
+        <strong>Open PowerShell.</strong> Press the Start button, type
+        <code>powershell</code>, and press Enter. A window with a text prompt opens.
+      </li>
+      <li>
+        <strong>Paste this command and press Enter:</strong>
+<pre><code>irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/install-wheelhouse.ps1 | iex</code></pre>
+        The installer checks your hardware, sets up its own private Python environment
+        (it installs nothing system-wide), downloads the offline speech model, and adds
+        WheelHouse to your Start menu.
+      </li>
+      <li>
+        <strong>Start WheelHouse</strong> from the Start menu and start talking.
+      </li>
+    </ol>
+    <div class="note">
+      <p>
+        <strong>About security warnings:</strong> WheelHouse is currently unsigned —
+        the project does not yet have a code-signing certificate — so Windows
+        SmartScreen or your antivirus may warn you the first time. The warning is
+        about the missing signature, not about what the software does: the complete
+        source code is public, and the
+        <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/INSTALL.md">install guide</a>
+        explains each warning and how to proceed.
+      </p>
+    </div>
+    <p>
+      Full details — optional speech engines, troubleshooting, and how to uninstall —
+      are in the
+      <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/INSTALL.md">install guide</a>.
+    </p>
+
+    <h2 id="engines">Choose where speech is processed</h2>
+    <table>
+      <thead>
+        <tr><th scope="col">Engine</th><th scope="col">Where your speech goes</th><th scope="col">When to choose it</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Parakeet</strong> (default)</td>
+          <td>Stays on your machine (CPU)</td>
+          <td>No account, no cloud, works offline. The default for everyone.</td>
+        </tr>
+        <tr>
+          <td>Distil-Whisper (opt-in)</td>
+          <td>Stays on your machine (NVIDIA GPU)</td>
+          <td>You have a CUDA-capable graphics card and want lower latency.</td>
+        </tr>
+        <tr>
+          <td>Google Cloud (opt-in)</td>
+          <td>Streams to Google's servers</td>
+          <td>You have a Google Cloud account and prefer its recognition quality.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="faq">Questions people ask</h2>
+    <details>
+      <summary>Does it need an internet connection?</summary>
+      <p>
+        Only for the initial download. After installing, the default speech engine
+        works completely offline. Internet is needed again only if you opt into the
+        Google Cloud engine or the optional AI features.
+      </p>
+    </details>
+    <details>
+      <summary>Is it really free?</summary>
+      <p>
+        Yes. WheelHouse is open source under the Apache 2.0 license. There is no
+        account, no subscription, no paid tier, and no advertising.
+      </p>
+    </details>
+    <details>
+      <summary>Is my voice recorded or sent anywhere?</summary>
+      <p>
+        With the default engine, no — audio and recognized text never leave your
+        machine, and WheelHouse reports nothing to the project or anyone else.
+        The engines and features that do make network connections are opt-in, and
+        <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/PRIVACY.md">the privacy document</a>
+        states exactly what each one sends.
+      </p>
+    </details>
+    <details>
+      <summary>How do I uninstall it?</summary>
+      <p>
+        The installer doubles as the uninstaller and can keep or remove your personal
+        settings — see the
+        <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/INSTALL.md">install guide</a>
+        for the exact steps.
+      </p>
+    </details>
+    <details>
+      <summary>Something didn't work. Where do I get help?</summary>
+      <p>
+        Please open an issue on
+        <a href="https://github.com/wheelhouse-project/WheelHouse/issues">the GitHub issue tracker</a> —
+        reports from people who depend on hands-free input are especially valuable.
+        WheelHouse is a young project from a single primary author: it has been the
+        author's daily driver for years, but it has met only a small set of machines
+        so far, so expect some rough edges on hardware it has not seen yet.
+      </p>
+    </details>
+
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>WheelHouse is open source under the Apache 2.0 license.</p>
+    <p>
+      <a href="https://github.com/wheelhouse-project/WheelHouse">Source code</a> ·
+      <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/PRIVACY.md">Privacy</a> ·
+      <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/INSTALL.md">Install guide</a> ·
+      <a href="https://github.com/wheelhouse-project/WheelHouse/issues">Report a problem</a>
+    </p>
+    <p>
+      Default speech model: NVIDIA Parakeet TDT, served through sherpa-onnx.
+      Full third-party attribution is in the repository's NOTICE file.
+    </p>
+  </div>
+</footer>
+</body>
+</html>
