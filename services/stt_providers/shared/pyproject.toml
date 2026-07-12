@@ -1,0 +1,57 @@
+[project]
+name = "wheelhouse-shared"
+version = "0.1.0"
+description = "Shared components for WheelHouse STT providers"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{name = "WheelHouse"}]
+dependencies = [
+    "websockets>=13.0,<16",
+    "sounddevice>=0.5",
+    "numpy>=2.0",
+    # 3.3.0 has no Windows wheel, source build fails (LNK1104)
+    "pysilero-vad>=3.0,<3.3",
+    "openwakeword>=0.6.0,<0.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2,<10",
+    "pytest-asyncio>=1.3.0,<2",
+    "pytest-cov>=7.0.0,<8",
+    "edge-tts>=7.2.7,<8",
+    "pydub>=0.25.1,<0.26",
+    "jiwer>=4.0.0,<5",
+    # See sherpa service pyproject: 1.13.0 broke parakeet-tdt-0.6b-v3 via a
+    # vocab_size metadata change; upstream fixed it by 1.13.3 (verified
+    # 2026-07-06, wh-3g3s). One pin now serves both Parakeet TDT v3 and the
+    # csukuangfj Nemotron streaming exports (ORT API 24 needs >=1.13.1).
+    "sherpa-onnx>=1.13.3,<1.14",
+    # Explicit because uv locks sherpa-onnx from its sdist metadata, which
+    # omits the sherpa-onnx-core dependency the wheel declares; without the
+    # native runtime the binding binds to the stale System32 onnxruntime
+    # 1.17.1 and fails (wh-3g3s).
+    "sherpa-onnx-core>=1.13.3,<1.14",
+    "google-cloud-speech>=2.37.0,<3",
+    "faster-whisper>=1.2.1,<2",
+    # The Vulkan whisper.cpp binding wheel is deliberately NOT a declared
+    # dependency. uv validates path-source metadata on every `uv sync --locked`
+    # regardless of dependency-group selection, so a path-source reference
+    # breaks fresh clones that lack the wheel (wh-797.2.1). Evaluation-harness
+    # users install it manually from vendor/wheels/ (dev machines) or the
+    # hosted release asset (contributors); see wh-kft.
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["shared_stt", "shared_audio"]
+
+[tool.uv]
+environments = ["sys_platform == 'win32'"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

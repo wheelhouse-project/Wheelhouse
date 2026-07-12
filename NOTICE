@@ -1,0 +1,11 @@
+WheelHouse
+Copyright 2025-2026 David Hite
+
+This product includes software developed by David Hite and WheelHouse
+contributors, licensed under the Apache License, Version 2.0.
+
+Third-party model and asset attributions are added by the dependency and
+model-artifact license audit before the first public release (tracked in
+the release checklist). Entries expected here include the NVIDIA NeMo
+Parakeet TDT 0.6B v3 speech-recognition model (CC-BY-4.0, exported for
+sherpa-onnx by the k2-fsa project).

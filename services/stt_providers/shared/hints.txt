@@ -1,0 +1,50 @@
+# Shared hints for all STT providers (Google, Parakeet, whisper, etc.)
+# One phrase per line. Empty lines and lines starting with # are ignored.
+# Used for contextual biasing - helps the recognizer with uncommon words
+# and with the short command words WheelHouse listens for.
+#
+# This is a starter list. Add the names, jargon, and phrases YOU dictate
+# often; remove anything you never say. Keep the list focused - very long
+# lists dilute the boost (and on the Parakeet provider, hotword biasing
+# adds decoding latency proportional to list size).
+
+# punctuation commands
+period
+comma
+question mark
+exclamation point
+colon
+semicolon
+hyphen
+new line
+new paragraph
+
+# editing and command words
+undo
+press
+delete
+backspace
+back space
+spacebar
+space bar
+submit
+zoom in
+
+# cursor navigation
+right
+left
+character
+characters
+paragraph
+paragraphs
+beginning
+end
+
+# project
+wheelhouse
+
+# short words that recognizers often miss
+okay
+whether
+accept
+than

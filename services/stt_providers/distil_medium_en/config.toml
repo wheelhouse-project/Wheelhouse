@@ -1,0 +1,57 @@
+# Distil-Whisper Medium.en STT (GPU)
+# High-accuracy local speech-to-text using distil-medium.en on CUDA.
+# Stage B benchmark: WER 0.0093 (4.4x better than Vulkan Small baseline).
+
+[provider]
+name = "distil_medium_en"
+display_name = "Distil Medium (GPU)"
+launcher = "launcher.py"
+enabled = true
+
+[model]
+# CTranslate2-converted distil-medium.en from Systran
+model_size_or_path = "Systran/faster-distil-whisper-medium.en"
+device = "cuda"
+compute_type = "float16"
+language = "en"
+beam_size = 5
+
+[engine]
+# Chunked re-inference streaming parameters
+re_inference_interval_ms = 400
+endpoint_silence_ms = 800
+silence_rms_threshold = 0.01
+# wh-7ou.2 hallucination filter: suppress utterances whose peak avg_logprob
+# across all inference runs fell below this threshold. Calibrated on a single
+# male voice with a studio mic; dictations peaked at -0.17 to -0.40 and
+# hallucinations at -0.61 to -0.86. Default -0.55 gives ~0.15 margin below
+# dictation and ~0.06 margin above hallucination. Users with strong accents,
+# quiet speech, or laptop mics may see dictation peak near -0.5 to -0.7 and
+# need to LOWER this value (more negative) if real speech gets silently
+# suppressed. Watch `[hallucination_suppressed]` log lines to observe peaks.
+# Set to a large negative number (e.g. -999) to disable the filter entirely.
+# If tuning does not work for your voice, switch to google_stt in the tray.
+hallucination_logprob_threshold = -0.55
+
+[client]
+rate = 16000
+chunk_ms = 30
+silero_threshold = 0.5
+vad_lead_in_ms = 300
+
+[agc]
+enabled = true
+target_speech_rms = 0.1
+vad_threshold_rms = 0.08
+noise_floor_alpha = 0.02
+min_gain = 0.1
+max_gain = 10.0
+initial_noise_floor = 0.01
+
+[hotwords]
+# Decoder bias built from shared/hints.txt (the "x-ray boost" hints).
+# Set false if hint words start appearing in unrelated speech -- that
+# turns off the bias for THIS provider only, without touching
+# hints.txt (which also feeds Google STT phrase adaptation and the
+# parakeet provider). Takes effect at the next service restart.
+enabled = true

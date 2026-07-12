@@ -1,0 +1,25 @@
+[project]
+name = "syscheck"
+version = "0.1.0"
+description = "System check utility for WheelHouse"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [
+    {name = "David Hite", email = "14855188+ghbaud@users.noreply.github.com"},
+]
+dependencies = [
+    "psutil>=7.1.0,<8.0.0",
+    "py-cpuinfo>=9.0.0,<10.0.0",
+    "wmi>=1.5.1,<2.0.0",
+    "comtypes>=1.4.13,<2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2,<10",
+    "pytest-cov>=7.0.0,<8",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'win32'"]

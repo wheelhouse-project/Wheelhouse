@@ -1,0 +1,920 @@
+# WheelHouse Unified Pattern Configuration
+#
+# This file contains ALL speech patterns - both commands and text replacements.
+# Patterns are processed in file order, with first match winning.
+#
+# SCHEMA:
+# - pattern: Regex pattern (case-insensitive)
+#   * ^ anchor at start = Must match from beginning of utterance (fullmatch mode)
+#   * $ anchor at end = Must match to end of utterance
+#   * No ^ anchor = Can match mid-utterance (search mode)
+# - position: "leading" (default) or "trailing". Trailing-position commands
+#   (wh-2vz) fire when the word is the LAST word of an utterance; the words
+#   BEFORE it are inserted as dictation, and the trailing word itself is
+#   stripped from the transcription. v1 only supports single-word literal
+#   trailing patterns (e.g. "submit"). The escape hatch for dictating the
+#   trailing word as text is the existing "literal (.+)$" pattern.
+# - requires_hotword: Boolean, whether pattern needs "x-ray" prefix (default: false)
+# - actions: Array of {function, params, awaits_done?} action steps
+#
+# ORDERING RULES:
+# 1. Commands with ^ anchor checked before replacements without ^ anchor
+# 2. More specific patterns before generic patterns
+# 3. Patterns with longer trigger phrases before shorter ones
+#
+# FILE FORMAT: TOML (Tom's Obvious Minimal Language)
+# Parsed using Python's built-in tomllib module (Python 3.11+)
+
+# =============================================================================
+# GLOBAL CONFIGURATION
+# =============================================================================
+
+# Hotword for command activation - must be the first word in 
+# the utterance to trigger command mode for those the commands that require it.
+# Must not be two words or a hyphenated word
+COMMAND_HOTWORD = "x-ray"
+
+# =============================================================================
+# COMMANDS - Special Bypass
+# =============================================================================
+
+# Literal bypass - insert text without any pattern processing
+# Must come FIRST to prevent "literal X" from matching other patterns.
+# This is also the escape hatch for trailing-position commands below:
+# "literal submit" inserts the word "submit" as text instead of firing Enter.
+[[pattern]]
+pattern = '''literal (.+)$'''
+actions = [
+    { function = "insert_text", params = ["g1"] }
+]
+
+# =============================================================================
+# COMMANDS - Trailing-position (wh-2vz)
+# =============================================================================
+
+# Trailing-position commands fire when the word is the LAST word of an
+# utterance. The words BEFORE the trailing word are inserted as dictation;
+# the trailing word itself is NOT inserted. v1 supports single-word literals.
+#
+# "submit" -> press Enter. Example: dictating "hello world submit" inserts
+# "hello world" then presses Enter. Dictating just "submit" alone presses
+# Enter without inserting anything.
+[[pattern]]
+pattern = '''submit'''
+position = "trailing"
+actions = [
+    { function = "press_keys", params = ["enter"] }
+]
+
+# =============================================================================
+# COMMANDS - Window Management
+# =============================================================================
+
+[[pattern]]
+pattern = '''^zoom in$'''
+actions = [
+    { function = "hk", params = ["ctrl", "+"] }
+]
+
+[[pattern]]
+pattern = '''^zoom out$'''
+actions = [
+    { function = "hk", params = ["ctrl", "-"] }
+]
+
+[[pattern]]
+pattern = '''^save$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "s"] }
+]
+
+[[pattern]]
+pattern = '''^create tab$'''
+actions = [
+    { function = "hk", params = ["ctrl", "n"] }
+]
+
+[[pattern]]
+pattern = '''^create window$'''
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "n"] }
+]
+
+[[pattern]]
+pattern = '''^close window$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["alt", "f4"] }
+]
+
+[[pattern]]
+pattern = '''^desktop$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["win", "d"] }
+]
+
+[[pattern]]
+pattern = '''^maximize$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["win", "up"] }
+]
+
+[[pattern]]
+pattern = '''^minimize$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["win", "down"] }
+]
+
+[[pattern]]
+pattern = '''^Windows? settings$'''
+actions = [
+    { function = "run", params = ["explorer.exe ms-settings:"] }
+]
+
+# =============================================================================
+# COMMANDS - Window Activation
+# =============================================================================
+
+[[pattern]]
+pattern = '''^activates? (.+)$'''
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["g1"] }
+]
+
+# "default_browser" is a reserved target: the activate action resolves it to
+# the default browser's executable (from the Windows registry) at the moment
+# the command is spoken, falling back to msedge.exe if the lookup fails.
+[[pattern]]
+pattern = '''^browser$'''
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["default_browser"] }
+]
+
+[[pattern]]
+pattern = '''^notepad$'''
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["notepad.exe"] }
+]
+
+# =============================================================================
+# COMMANDS - Basic Editing
+# =============================================================================
+
+# Item-number pattern: "item one" -> "1.", "item 5" -> "5."
+# Must begin utterance (^ anchor) to trigger command buffering
+[[pattern]]
+pattern = '''^item (\d+)$'''
+actions = [
+    { function = "number_point", params = ["g1"] }
+]
+
+# delete word must come BEFORE delete N to avoid "word" being captured as invalid number
+[[pattern]]
+pattern = '''^delete word$'''
+actions = [
+    { function = "hk", params = ["ctrl", "left"], awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "right"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete\s*(\d+)?$'''
+actions = [
+    { function = "press", params = ["del", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^back ?space\s*(\d+)?$'''
+actions = [
+    { function = "press", params = ["backspace", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(tab|indent)\s+(\d+)$'''
+actions = [
+    { function = "press", params = ["tab", "g2"] }
+]
+
+[[pattern]]
+pattern = '''^(shift tab|outdent)$'''
+actions = [
+    { function = "hk", params = ["shift", "tab"] }
+]
+
+# Generic keystroke command - executes arbitrary key combinations
+# Examples: "press enter", "press control alt delete", "press F5"
+# Key order doesn't matter: "press delete control" = "press control delete"
+[[pattern]]
+pattern = '''^press\s*(.+)$'''
+actions = [
+    { function = "press_keys", params = ["g1"] }
+]
+
+# Insert raw text at cursor without intelligent insertion.
+# No prefix space, no capitalization, no TextPerfector, no letter buffering.
+# Requires hotword for safety (avoids accidental insertion during dictation).
+# Examples: "insert hello world", "insert @example.com", "insert TODO:"
+#
+# wh-qoyk9: this pattern intentionally has no awaits_done. Logic emits
+# end_utterance immediately after dispatching insert_raw, which then
+# schedules a deferred clipboard restore via PendingRestore (wh-d0lr1)
+# rather than relying on a synchronous restore inside the input process.
+# Adding awaits_done here would block end_utterance on the IPC ack, which
+# is unnecessary and would slow the next dictation. The deferred-restore
+# mechanism is itself race-free and ownership-aware (Win32 clipboard
+# sequence number check at fire time), so the previous slow-target race
+# the no-awaits_done choice exposed is no longer a concern.
+[[pattern]]
+pattern = '''^insert\s*(.+)$'''
+actions = [
+    { function = "insert_raw", params = ["g1"] }
+]
+
+# "submit" lives in the trailing-position section near the top of this
+# file (wh-2vz). The previous leading-position entry was removed when
+# the trailing entry was added; a leading + trailing pair would
+# silently pre-empt the trailing intercept in single-word utterances.
+
+[[pattern]]
+pattern = '''^escape$'''
+actions = [
+    { function = "press", params = ["esc"] }
+]
+
+[[pattern]]
+pattern = '''\bnew ?line\b'''
+actions = [
+    { function = "hk", params = ["shift", "enter"] }
+]
+
+[[pattern]]
+pattern = '''\bnew ?paragraph\b'''
+actions = [
+    { function = "hk", params = ["shift", "enter", 2] }
+]
+
+ 
+# =============================================================================
+# COMMANDS - Undo/Redo
+# =============================================================================
+
+[[pattern]]
+pattern = '''^undo\s*(\d+)?$'''
+actions = [
+    { function = "hk", params = ["ctrl", "z", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^undue\s*(\d+)?$'''
+actions = [
+    { function = "hk", params = ["ctrl", "z", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^undu\s*(\d+)?$'''
+actions = [
+    { function = "hk", params = ["ctrl", "z", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^redo\s*(\d+)?$'''
+actions = [
+    { function = "hk", params = ["ctrl", "y", "g1"] }
+] 
+
+[[pattern]]
+pattern = '''^redu\s*(\d+)?$'''
+actions = [
+    { function = "hk", params = ["ctrl", "y", "g1"] }
+]
+
+
+# =============================================================================
+# COMMANDS - Clipboard Operations
+# =============================================================================
+
+[[pattern]]
+pattern = '''^copy all$'''
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["ctrl", "a"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy line$'''
+requires_hotword = false
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "end"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true },
+    { function = "press", params = ["left"] }
+]
+
+[[pattern]]
+pattern = '''^copy screen$'''
+actions = [
+    { function = "hk", params = ["win", "shift", "s"] }
+]
+
+[[pattern]]
+pattern = '''^copy$'''
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut$'''
+requires_hotword = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^paste$'''
+actions = [
+    { function = "hk", params = ["ctrl", "v"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^replace all$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "a"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "v"], awaits_done = true }
+]
+
+# =============================================================================
+# COMMANDS - Selection Commands
+# =============================================================================
+
+[[pattern]]
+pattern = '''^select all$'''
+actions = [
+    { function = "hk", params = ["ctrl", "a"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^select word$'''
+actions = [
+    { function = "hk", params = ["ctrl", "left"], awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "right"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^select line$'''
+actions = [
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "end"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^select paragraph$'''
+actions = [
+    { function = "hk", params = ["ctrl", "down"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "up"], awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "down"], awaits_done = true }
+]
+
+# =============================================================================
+# COMMANDS - Cursor Navigation
+# =============================================================================
+
+# Composable cursor movement: "go right two words", "go home", etc.
+# Chaining: "go home then grab to end" (multiple commands in one utterance)
+# Invalid input falls through to dictation (inserted as text)
+[[pattern]]
+pattern = '''^go (.+)'''
+actions = [{ function = "cursor_navigate", params = ["go g1"] }]
+
+
+# =============================================================================
+# COMMANDS - Search and Replace
+# =============================================================================
+
+[[pattern]]
+pattern = '''^find\s*(.*)$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "f"], awaits_done = true },
+    { function = "type_text", params = ["g1"] }
+]
+
+[[pattern]]
+pattern = '''^replace$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "h"] }
+]
+
+[[pattern]]
+pattern = '''^search$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true },
+    { function = "capture_clipboard", params = [], awaits_done = true  },
+    { function = "gs", params = ["capture_clipboard"] }
+]
+
+# =============================================================================
+# COMMANDS - Text Formatting
+# =============================================================================
+
+[[pattern]]
+pattern = '''^bold text$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^italics$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^underline$'''
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+# =============================================================================
+# COMMANDS - Selection Transformations (more specific patterns first)
+# =============================================================================
+# NOTE: Wrapping patterns (quotes, brackets, parentheses) have been moved to
+# the "Wrapping Operations (Ambiguous Patterns)" section below for clarity.
+
+[[pattern]]
+pattern = '''^upper ?case$'''
+actions = [
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case$'''
+actions = [
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize$'''
+actions = [
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^title case$'''
+actions = [
+    { function = "transform_selection", params = ["title_case"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^snake case$'''
+actions = [
+    { function = "transform_selection", params = ["snake_case"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^camel case$'''
+actions = [
+    { function = "transform_selection", params = ["camel_case"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^pascal case$'''
+actions = [
+    { function = "transform_selection", params = ["pascal_case"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^kebab case$'''
+actions = [
+    { function = "transform_selection", params = ["kebab_case"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^compress$'''
+actions = [
+    { function = "transform_selection", params = ["compress"], awaits_done = true }
+]
+
+# Add selected text to STT hints list - "x-ray boost"
+# Select text, speak "x-ray boost", and the text will be added to the STT server's hints
+[[pattern]]
+pattern = '''^boost$'''
+requires_hotword = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true },
+    { function = "add_hint_to_stt", awaits_done = true }
+]
+
+# =============================================================================
+# COMMANDS - AI Service
+# =============================================================================
+
+[[pattern]]
+pattern = '''^fix'''
+requires_hotword = true
+actions = [
+    { function = "fix_text_ai" }
+]
+[[pattern]]
+pattern = '''^cancel fix$'''
+requires_hotword = true
+actions = [
+    { function = "cancel_fix" }
+]
+
+# Local-model help is DISABLED. The local model gave slow, wrong, or truncated
+# answers, so the spoken "wheelhouse help" question-and-answer was turned off.
+# The two patterns below are the ONLY way to open the local help chat window, so
+# commenting them out makes that window unreachable by a user
+# (guard: tests/test_help_patterns_disabled.py). The wheelhouse_help action
+# function and the help window code stay in the tree for a future help path.
+# The online help pattern further down is intentionally kept active.
+#
+# Local help -- open chat window (no question):
+# [[pattern]]
+# pattern = '''^wheelhouse help$'''
+# requires_hotword = true
+# actions = [
+#     { function = "wheelhouse_help" }
+# ]
+#
+# Local help -- open chat window AND submit the spoken question:
+# [[pattern]]
+# pattern = '''^wheelhouse help (.+)$'''
+# requires_hotword = true
+# actions = [
+#     { function = "wheelhouse_help", params = ["g1"] }
+# ]
+
+# Online help -- opens the configured help URL in a browser. No local model.
+[[pattern]]
+pattern = '''^wheelhouse help online$'''
+requires_hotword = true
+actions = [
+    { function = "wheelhouse_help_online" }
+]
+
+# =============================================================================
+# COMMANDS - Pattern Manager
+# =============================================================================
+
+[[pattern]]
+pattern = '''^patterns?$'''
+requires_hotword = true
+actions = [
+    { function = "open_pattern_manager" }
+]
+
+# =============================================================================
+# COMMANDS - Speech Mode
+# =============================================================================
+
+[[pattern]]
+pattern = '''^push to talk mode$'''
+actions = [
+    { function = "set_speech_interaction_mode", params = ["push_to_talk"] }
+]
+
+[[pattern]]
+pattern = '''^click to talk mode$'''
+actions = [
+    { function = "set_speech_interaction_mode", params = ["toggle"] }
+]
+
+# Voice element clicking (wh-vjwdl). Hotword-required: "click" is a common
+# dictation word, so without requires_hotword a dictated "click here..." would
+# be parsed as a click command. MUST stay AFTER the exact "click to talk mode"
+# entry above so first-match-wins lets that specific command win.
+# The forward-to-Input execution lands in slice wh-tab7j; this slice only
+# parses g1 into an ElementQuery.
+[[pattern]]
+pattern = '''^click\s+(.+)$'''
+actions = [
+    { function = "click_element", params = ["g1"], awaits_done = true }
+]
+
+# Numbered-overlay toggle (wh-n29v.17). Hotword-gated, matching the
+# "click <name>" style. Anchored "^show numbers$" / "^hide numbers$" so they
+# do not start with "click" and never collide with the broad click pattern
+# above. The action delegates to LogicController.handle_overlay_command, which
+# applies SHOW_NUMBERS / HIDE_NUMBERS to the overlay state machine and hands
+# the returned effects to the integration stub seam (wh-h9a8v2).
+[[pattern]]
+pattern = '''^apply numbers$'''
+requires_hotword = false
+actions = [
+    { function = "show_overlay_command", awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^dismiss numbers$'''
+requires_hotword = false
+actions = [
+    { function = "hide_overlay_command", awaits_done = true }
+]
+
+# =============================================================================
+# COMMANDS/REPLACEMENTS - Wrapping Operations
+# =============================================================================
+#
+# Smart wrapping patterns with simplified behavior:
+#
+# Replacements (no ^ anchor, optional capture) - Wrap text OR insert empty
+#    Example: "parentheses hello" → inserts "(hello)"
+#    Example: "parentheses" → inserts "()"
+#    Uses: wrap_or_insert function with fence characters
+#
+# ORDERING: Commands (^) checked before replacements (no ^) due to pattern priority
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Parentheses
+# -----------------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''\bparentheses(.*)$'''
+requires_hotword = false
+actions = [
+    { function = "wrap_or_insert", params = ["(", ")", "g1"] }
+]
+
+# -----------------------------------------------------------------------------
+# Angle Brackets
+# -----------------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''\bangle brackets(.*)$'''
+requires_hotword = false
+actions = [
+    { function = "wrap_or_insert", params = ["<", ">", "g1"] }
+]
+
+# -----------------------------------------------------------------------------
+# Square Brackets
+# -----------------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''\bbrackets(.*)$'''
+requires_hotword = false
+actions = [
+    { function = "wrap_or_insert", params = ["[", "]", "g1"] }
+]
+
+# -----------------------------------------------------------------------------
+# Curly Braces
+# -----------------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''\bbraces(.*)$'''
+requires_hotword = false
+actions = [
+    { function = "wrap_or_insert", params = ["{", "}", "g1"] }
+]
+
+# -----------------------------------------------------------------------------
+# Quotation Marks
+# -----------------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''\bsingle quotes?(.*)$'''
+requires_hotword = false
+actions = [
+    { function = "wrap_or_insert", params = ["'", "'", "g1"] }
+]
+
+[[pattern]]
+pattern = '''\bquotes?(.*)$'''
+requires_hotword = false
+actions = [
+    { function = "wrap_or_insert", params = ['"', '"', "g1"] }
+]
+
+# =============================================================================
+# REPLACEMENTS - Name Corrections
+# =============================================================================
+# Personal name corrections (your own name and the ways the speech engine
+# mishears it) belong in the writable user patterns file
+# (data/user_patterns.toml), not here. Example:
+#
+# [[pattern]]
+# pattern = '''\bjohn (?:dough|doh)\b'''
+# actions = [
+#     { function = "text", params = ["John Doe"] }
+# ]
+
+# =============================================================================
+# REPLACEMENTS - Command Filtering
+# =============================================================================
+
+[[pattern]]
+pattern = '''^okay Google.*$'''
+actions = [
+    { function = "text", params = [""] }
+]
+
+[[pattern]]
+pattern = '''^ok Google.*$'''
+actions = [
+    { function = "text", params = [""] }
+]
+
+[[pattern]]
+pattern = '''^hey Google.*$'''
+actions = [
+    { function = "text", params = [""] }
+]
+# =============================================================================
+# REPLACEMENTS - Punctuation Basic
+# =============================================================================
+
+[[pattern]]
+pattern = '''\bperiod\b'''
+actions = [
+    { function = "text", params = ["."] }
+]
+
+[[pattern]]
+pattern = '''\bslash\b'''
+actions = [
+    { function = "text", params = ["/"] }
+]
+
+[[pattern]]
+pattern = '''\bbackslash\b'''
+actions = [
+    { function = "text", params = ["\\"] }
+]
+
+[[pattern]]
+pattern = '''\bcomma\b'''
+actions = [
+    { function = "text", params = [","] }
+]
+
+[[pattern]]
+pattern = '''\bcolon\b'''
+actions = [
+    { function = "text", params = [":"] }
+]
+
+[[pattern]]
+pattern = '''\bsemicolon\b'''
+actions = [
+    { function = "text", params = [";"] }
+]
+
+[[pattern]]
+pattern = '''\bquestion mark\b'''
+actions = [
+    { function = "text", params = ["?"] }
+]
+
+[[pattern]]
+pattern = '''\bexclamation (?:point|mark)\b'''
+actions = [
+    { function = "text", params = ["!"] }
+]
+
+[[pattern]]
+pattern = '''\bapostrophe\b'''
+actions = [
+    { function = "text", params = ["'"] }
+]
+
+[[pattern]]
+pattern = '''\bback ?tick\b'''
+actions = [
+    { function = "text", params = ["`"] }
+]
+
+[[pattern]]
+pattern = '''\bat sign\b'''
+actions = [
+    { function = "text", params = ["@"] }
+]
+
+[[pattern]]
+pattern = '''\bhashtag\b'''
+actions = [
+    { function = "text", params = ["#"] }
+]
+
+[[pattern]]
+pattern = '''\bdollar sign\b'''
+actions = [
+    { function = "text", params = ["$"] }
+]
+
+[[pattern]]
+pattern = '''\bpercent\b'''
+actions = [
+    { function = "text", params = ["%"] }
+]
+
+[[pattern]]
+pattern = '''\b(?:caret|carrot) sign\b'''
+actions = [
+    { function = "text", params = ["^"] }
+]
+
+[[pattern]]
+pattern = '''\b(?:ampersand|and sign(?:ed)?)\b'''
+actions = [
+    { function = "text", params = ["&"] }
+]
+
+[[pattern]]
+pattern = '''\basterisk\b'''
+actions = [
+    { function = "text", params = ["*"] }
+]
+
+[[pattern]]
+pattern = '''\bunderscore\b'''
+actions = [
+    { function = "text", params = ["_"] }
+]
+
+[[pattern]]
+pattern = '''\bplus sign\b'''
+actions = [
+    { function = "text", params = ["+"] }
+]
+
+[[pattern]]
+pattern = '''\bequal sign\b'''
+actions = [
+    { function = "text", params = ["="] }
+]
+
+[[pattern]]
+pattern = '''\b(?:tilde|tilda)\b'''
+actions = [
+    { function = "text", params = ["~"] }
+]
+
+[[pattern]]
+pattern = '''\bvertical bar\b'''
+actions = [
+    { function = "text", params = ["|"] }
+]
+
+[[pattern]]
+pattern = '''\bellipsis\b'''
+actions = [
+    { function = "text", params = ["..."] }
+]
+
+# =============================================================================
+# REPLACEMENTS - Punctuation Spacing
+# =============================================================================
+
+[[pattern]]
+pattern = '''\bhyphen\b'''
+actions = [
+    { function = "text", params = ["-"] }
+]
+
+[[pattern]]
+pattern = '''\bdash\b'''
+actions = [
+    { function = "text", params = ["—"] }
+]
+
+[[pattern]]
+pattern = '''\bspace ?bar\b'''
+actions = [
+    { function = "text", params = [" "] }
+]
+
+
+# =============================================================================
+# REPLACEMENTS - Transcription Error Correction
+# =============================================================================
+# Corrections for words the speech engine mishears in YOUR vocabulary (tool
+# names, jargon, places) belong in the writable user patterns file
+# (data/user_patterns.toml). Example:
+#
+# [[pattern]]
+# pattern = '''\b(?:cube|coob)ernetes\b'''
+# actions = [
+#     { function = "text", params = ["Kubernetes"] }
+# ]

@@ -1,0 +1,40 @@
+# Starter approved-control list (wh-k535r).
+#
+# Shipped with WheelHouse. Read by the text-target predicate at startup
+# and merged with the user's soft_allow_tuples.toml. A control whose
+# (process_name, class_name, control_type) triple appears in either file
+# is treated as an approved text input target -- the predicate returns
+# accept_soft_allow_tuple and the router silently pastes via Ctrl+V.
+#
+# This file is READ-ONLY at runtime. The grant writer at
+# services/wheelhouse/utils/soft_allow_writer.py only rewrites
+# soft_allow_tuples.toml; starter entries cannot be clobbered by a user
+# grant against the same triple. The same triple appearing in both
+# files is harmless -- it appears once in the merged in-memory set.
+#
+# Schema (same as soft_allow_tuples.toml): each entry is a TOML table
+# with four required string fields. process_name and class_name match
+# what the text-target predicate sees on the focused control; the
+# control_type is one of the auto.ControlType names (WindowControl,
+# EditControl, PaneControl, etc.). added_at records when the starter
+# entry was first added to this file; the predicate ignores it.
+#
+# Adding an entry: dictate into the target control with DEBUG logging
+# on, find the "soft_allow loader" log lines and the captured
+# (process_name, class_name, control_type) on the rejection event, then
+# append an entry table here. Verify with a manual smoke test against
+# the live app before shipping the change.
+#
+# Initial state is no entries. The entries list is filled in as
+# starter targets are verified on real machines. The schema parser
+# treats a missing entries section as the empty initial state, so a
+# fresh file with only this comment block is valid -- do not add
+# entries = [] here or the array-of-tables append below would conflict.
+#
+# Example entry layout (uncomment and adapt with verified data):
+#
+#   [[entries]]
+#   process_name = "zed.exe"
+#   class_name = "Zed::Window"
+#   control_type = "WindowControl"
+#   added_at = "2026-05-13T00:00:00Z"

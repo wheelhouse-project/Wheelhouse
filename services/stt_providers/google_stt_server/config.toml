@@ -1,0 +1,227 @@
+# Google STT Tuner configuration (WheelHouse)
+# Purpose: single source of truth for model (server) and program (client) parameters.
+# Format: TOML (comments allowed).
+#
+# Section order follows data flow: Provider -> Server -> Adaptation -> Client -> Latency -> Forwarding -> Operations
+
+
+# ------------------------------
+# [provider]
+# Provider metadata for discovery and management by WheelHouse.
+# ------------------------------
+[provider]
+
+# name: Internal identifier (used in config, logs, PID files)
+name = "google_stt"
+
+# display_name: User-facing name shown in UI menus
+display_name = "Google Speech to Text"
+
+# launcher: Entry point script for the provider launcher
+launcher = "launcher.py"
+
+
+# ------------------------------
+# [server]
+# Parameters sent to Google Speech-to-Text API.
+# ------------------------------
+[server]
+
+# model: Recognition model id.
+#   - latest_short: optimized for short utterances and low latency
+#   - latest_long: optimized for longer dictation stability
+model = "latest_short"
+
+# language_code: BCP-47 language/locale tag, e.g., "en-US".
+language_code = "en-US"
+
+# enable_automatic_punctuation: server inserts punctuation for readability.
+#   true = more readable text, may add latency; false = raw text
+enable_automatic_punctuation = false
+
+# single_utterance: if true, server ends stream after the first utterance.
+#   Requires client restart between utterances; sensitive to restart timing.
+single_utterance = false
+
+
+# ------------------------------
+# [adaptation]
+# Speech adaptation (phrase hints) to improve uncommon names/terms.
+# ------------------------------
+[adaptation]
+
+# hints: list of phrases to boost. Keep focused; avoid long sentences.
+# Note that this does not work for capitalization, only for recognition.
+# This is a starter list - add the names and jargon YOU dictate often,
+# and remove anything you never say.
+hints = [
+  "period",
+  "comma",
+  "question mark",
+  "exclamation point",
+  "colon",
+  "semicolon",
+  "hyphen",
+  "new line",
+  "new paragraph",
+  "undo",
+  "press",
+  "delete",
+  "backspace",
+  "back space",
+  "spacebar",
+  "space bar",
+  "submit",
+  "zoom in",
+  "right",
+  "left",
+  "character",
+  "characters",
+  "paragraph",
+  "paragraphs",
+  "beginning",
+  "end",
+  "WheelHouse",
+  "okay",
+  "whether",
+  "accept",
+  "than",
+]
+
+# hints_boost: numeric strength (e.g., 5.0 - 20.0). Higher = stronger bias.
+# Use with care; very high boosts can hurt general accuracy.
+hints_boost = 10.0
+
+# class_tokens: special tokens for model-driven formatting (numbers, currency).
+# See https://cloud.google.com/speech-to-text/docs/adaptation-model#class-tokens
+class_tokens = [
+  "$CARDINAL",
+  "$CURRENCY",
+]
+
+
+# ------------------------------
+# [client]
+# Local audio capture and streaming behavior.
+# ------------------------------
+[client]
+
+# --- Audio Capture ---
+
+# device_index: input device id (see --list-devices). Omit for system default.
+# device_index = null
+
+# rate: microphone capture rate; must match server sample rate (16000 Hz).
+rate = 16000
+
+# chunk_ms: frame size (10/20/30 ms). Smaller = lower latency; larger = more stability.
+chunk_ms = 30
+
+
+# max_stream_seconds: hard limit on a single stream duration. Prevents very long-lived sessions.
+max_stream_seconds = 60.0
+
+# --- VAD (Voice Activity Detection) ---
+
+# silero_threshold: Confidence threshold (0.0-1.0) for Silero VAD.
+# Higher = fewer false positives, may miss quiet speech.
+silero_threshold = 0.5
+
+# vad_lead_in_ms: Duration of audio to buffer and prepend when speech starts.
+# Ensures the start of the word isn't cut off.
+vad_lead_in_ms = 200
+
+# --- Utterance Finalization ---
+
+# silence_finalize_ms: Duration of silence (in milliseconds) from last Google response
+# to finalize the current utterance. Increased from 1500ms to give Google's actual
+# is_final response time to arrive (observed ~1700ms latency from last stable response).
+silence_finalize_ms = 2500
+
+# max_no_text_seconds: Hard timeout - abort stream if no stable text received within this
+# many seconds of utterance start, regardless of VAD state. Catches persistent noise. Set to 0 to disable.
+max_no_text_seconds = 3.9
+
+
+# ------------------------------
+# [latency]
+# Parameters for low-latency partial result committing.
+# ------------------------------
+[latency]
+
+# stability_commit_threshold: The stability score (0.0 to 1.0) at which to
+# commit a partial result. Higher values are more reliable but increase latency.
+# Note: Google's 0.9 stability often arrives as 0.8999999762 due to floating-point precision
+stability_commit_threshold = 0.89
+
+
+# ------------------------------
+# [overflow_detection]
+# Automatic restart on PortAudio overflow events.
+# ------------------------------
+[overflow_detection]
+
+enabled = true
+overflow_threshold = 50
+window_seconds = 30.0
+restart_cooldown_seconds = 60.0
+max_restart_attempts = 3
+stable_reset_seconds = 300.0
+
+
+# ------------------------------
+# [debug]
+# Logging controls for diagnostics.
+# ------------------------------
+[debug]
+
+# log_lifecycle: Log high-level events like stream start/stop and VAD commit decisions.
+log_lifecycle = true
+
+# log_stream_responses: Log raw responses from the Google API.
+log_stream_responses = true
+
+# log_frame_stats: Log per-frame statistics (very verbose).
+log_frame_stats = true
+
+# log_overflow_diagnostics: Periodic logging of queue depths and operation timing for overflow diagnosis.
+log_overflow_diagnostics = false
+
+
+# ------------------------------
+# [agc]
+# Automatic gain control with noise floor tracking.
+# ------------------------------
+[agc]
+
+# enabled: Enable automatic gain control
+enabled = true
+
+# target_speech_rms: Target RMS level for normalized speech (0.0 to 1.0)
+target_speech_rms = 0.1
+
+# vad_threshold_rms: Approximate VAD trigger level - used to calculate safe max gain
+vad_threshold_rms = 0.08
+
+# noise_floor_alpha: Smoothing factor for noise floor EMA (lower = slower decay, bumps persist longer)
+noise_floor_alpha = 0.02
+
+# min_gain / max_gain: Limits to prevent extreme adjustments
+min_gain = 0.1
+max_gain = 10.0
+
+# initial_noise_floor: Starting noise floor estimate
+initial_noise_floor = 0.01
+
+
+# ------------------------------
+# [diagnostics]
+# Mic check and capture helpers (no STT).
+# ------------------------------
+[diagnostics]
+
+# mic_check_seconds: if > 0, capture raw audio for N seconds (STT disabled).
+mic_check_seconds = 0.0
+
+# mic_check_write: optional WAV path to write the mic check capture.
+mic_check_write = ""

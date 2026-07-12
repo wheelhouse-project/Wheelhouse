@@ -1,0 +1,63 @@
+# Parakeet TDT STT Provider (Sherpa-ONNX)
+# NeMo Parakeet TDT 0.6B via sherpa-onnx OfflineRecognizer.
+# Stage B benchmark: WER 0.0057 (v3), 7x better than Vulkan Small baseline.
+
+[provider]
+name = "parakeet_tdt"
+display_name = "Parakeet v3 ({mode})"
+launcher = "launcher.py"
+enabled = true
+
+[model]
+# Path to the extracted Sherpa-ONNX Parakeet model directory. Left empty on
+# purpose: resolution order is (1) the per-machine override file
+# %LOCALAPPDATA%\WheelHouse\stt_model_overrides.toml ([parakeet_tdt] section,
+# key model_path -- written by the installer, or by hand on a dev machine),
+# (2) this value, (3) the coded default
+# %LOCALAPPDATA%\WheelHouse\models\<v1 model dir>. See _resolve_model_path
+# in main.py (wh-797.6.8).
+model_path = ""
+
+# Use GPU if available (requires CUDA-enabled sherpa-onnx)
+use_gpu = false
+gpu_device_id = 0
+
+# CPU thread count for ONNX runtime
+num_threads = 4
+
+[engine]
+# Chunked re-inference streaming parameters
+# Parakeet is ~400ms per inference on CPU, so use a longer interval
+re_inference_interval_ms = 600
+endpoint_silence_ms = 800
+silence_rms_threshold = 0.01
+
+[hotwords]
+# Bias recognition toward the phrases in shared/hints.txt (the "x-ray boost"
+# hint list). At startup the service regenerates runtime/parakeet-hotwords.txt
+# from hints.txt and passes it to sherpa-onnx.
+#
+# Off by default: enabling forces decoding_method=modified_beam_search
+# (greedy ignores hotwords), which measured +25% mean inference latency on
+# the reference CPU (30-utterance corpus sample, 127 hotwords, 2026-07-06).
+# Turn on if you rely on proper-noun hints and accept the latency cost.
+enabled = false
+
+# Biasing strength. sherpa-onnx typical range 1.0-5.0; higher values cause
+# false-positive hotword insertions.
+score = 2.0
+
+[client]
+rate = 16000
+chunk_ms = 30
+silero_threshold = 0.5
+vad_lead_in_ms = 300
+
+[agc]
+enabled = true
+target_speech_rms = 0.1
+vad_threshold_rms = 0.08
+noise_floor_alpha = 0.02
+min_gain = 0.1
+max_gain = 10.0
+initial_noise_floor = 0.01

@@ -1,0 +1,40 @@
+[project]
+name = "parakeet-tdt-stt"
+version = "0.1.0"
+description = "Parakeet TDT STT provider via Sherpa-ONNX for WheelHouse"
+requires-python = ">=3.12,<3.13"
+authors = [{name = "WheelHouse"}]
+dependencies = [
+    "wheelhouse-shared",
+    # Floor at 1.13.3: 1.13.0 briefly required 'vocab_size' in the model
+    # metadata, which the parakeet-tdt-0.6b-v3 model does not contain;
+    # upstream restored compatibility by 1.13.3 (load + decode verified
+    # 2026-07-06, wh-3g3s). 1.13.1-1.13.2 were not tested, so the floor is
+    # the verified version. 1.13.1+ also carries the ONNX Runtime that the
+    # csukuangfj Nemotron streaming exports need (ORT API 24), so one pin
+    # now serves both model families.
+    "sherpa-onnx>=1.13.3,<1.14",
+    # Explicit because uv locks sherpa-onnx from its sdist metadata, which
+    # omits the sherpa-onnx-core dependency the wheel declares. Without
+    # core (the native runtime), the binding falls back to the stale
+    # C:/Windows/System32 onnxruntime 1.17.1 and dies with 'requested API
+    # version [24] is not available' (wh-3g3s).
+    "sherpa-onnx-core>=1.13.3,<1.14",
+    "sounddevice>=0.5,<0.6",
+    "numpy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2,<10",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'win32'"]
+
+[tool.uv.sources]
+wheelhouse-shared = { path = "../shared", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

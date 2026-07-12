@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "schema_audio_minor": 1,
+  "generated_at_utc": "2026-05-01T16:19:01+00:00",
+  "host": {
+    "machine_name": "IKON",
+    "os_name": "Windows",
+    "os_release": "10.0.26200",
+    "arch": "x64"
+  },
+  "cpu": {
+    "vendor": "GenuineIntel",
+    "model": "12th Gen Intel(R) Core(TM) i7-12700F",
+    "physical_cores": 12,
+    "logical_cores": 20,
+    "base_mhz": 0,
+    "flags": {
+      "sse4_1": true,
+      "sse4_2": true,
+      "avx": true,
+      "avx2": true,
+      "avx512": false,
+      "fma": true,
+      "avx_vnni": false
+    }
+  },
+  "memory": {
+    "total_bytes": 34163920896,
+    "available_bytes": 10502754304
+  },
+  "disks": [
+    {
+      "drive": "C:",
+      "kind": "ssd",
+      "filesystem": "NTFS",
+      "total_bytes": 1999359934464,
+      "free_bytes": 1390530473984,
+      "status": "ok"
+    },
+    {
+      "drive": "D:",
+      "kind": "ssd",
+      "filesystem": "NTFS",
+      "total_bytes": 500105216000,
+      "free_bytes": 187798790144,
+      "status": "ok"
+    },
+    {
+      "drive": "F:",
+      "kind": "hdd",
+      "filesystem": "NTFS",
+      "total_bytes": 5000945201152,
+      "free_bytes": 2205306396672,
+      "status": "ok"
+    },
+    {
+      "drive": "G:",
+      "kind": "virtual",
+      "filesystem": "FAT32",
+      "total_bytes": 1999359934464,
+      "free_bytes": 1321003950080,
+      "status": "ok"
+    }
+  ],
+  "gpu": [
+    {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 3060",
+      "vendor_id": 4318,
+      "device_id": 9351,
+      "dedicated_vram_bytes": 12696158208,
+      "shared_system_bytes": 17081960448,
+      "software": false,
+      "driver_version": "32.0.15.9186",
+      "dx_feature_level_max": "11_1",
+      "compute_support": {
+        "dx12": false,
+        "d3d11": true
+      }
+    },
+    {
+      "index": 1,
+      "name": "Microsoft Basic Render Driver",
+      "vendor_id": 5140,
+      "device_id": 140,
+      "dedicated_vram_bytes": 0,
+      "shared_system_bytes": 17081960448,
+      "software": true,
+      "driver_version": "",
+      "dx_feature_level_max": "11_1",
+      "compute_support": {
+        "dx12": false,
+        "d3d11": true
+      }
+    }
+  ],
+  "gpu_feature_level_max": "11_1",
+  "gpu_compute_capable": true,
+  "audio": {
+    "wasapi_available": true,
+    "default_render_present": true,
+    "default_capture_present": true,
+    "render_device": {
+      "friendly_name": "SONY TV  *30 (NVIDIA High Definition Audio)",
+      "id": "{0.0.0.00000000}.{e6165188-2c57-43d3-a329-fb89a8825ffb}",
+      "endpoint_state": 1
+    },
+    "capture_device": {
+      "friendly_name": "Microphone (2- Scarlett Solo USB)",
+      "id": "{0.0.1.00000000}.{359b82eb-047d-42e3-aa33-a5aee644279b}",
+      "endpoint_state": 1
+    },
+    "activity_snapshot": {
+      "render_peak_0to1": 0.0,
+      "capture_peak_0to1": 0.0009529715753160417,
+      "render_sessions_active": 1,
+      "capture_sessions_active": 1
+    },
+    "capabilities": {
+      "loopback_supported": true,
+      "capture_supported": true,
+      "default_device_direction": "duplex"
+    },
+    "diagnostics": {
+      "last_hr": 0,
+      "last_error": ""
+    }
+  },
+  "privilege": {
+    "is_admin": true,
+    "missing_capabilities": [],
+    "recommend_elevation": false,
+    "note": "Run elevated only if you need disk SMART or deeper GPU info."
+  },
+  "diagnostics": {
+    "python_version": "3.12.10",
+    "python_executable": "C:\\Users\\user\\AppData\\Local\\pypoetry\\Cache\\virtualenvs\\syscheck-XQnG2c-2-py3.12\\Scripts\\python.exe",
+    "missing_modules": [],
+    "dlls": {
+      "d3d11": "C:\\WINDOWS\\system32\\d3d11.dll",
+      "dxgi": "C:\\WINDOWS\\system32\\dxgi.dll",
+      "mmdevapi": "C:\\WINDOWS\\system32\\MMDevAPI.dll"
+    },
+    "gpu_diagnostics": {
+      "create_factory1_hr": "0x80004002",
+      "create_factory0_hr": "0x00000000",
+      "enum_path": "factory0/EnumAdapters",
+      "enum_first_hr": "0x00000000",
+      "per_adapter_create_hr": [
+        "0x00000000",
+        "0x00000000"
+      ],
+      "fallback_hw_hr": null,
+      "fallback_warp_hr": null,
+      "fallback_ref_hr": null
+    }
+  },
+  "build": {
+    "script_path": "C:\\Users\\user\\Projects\\python\\WheelHouse\\services\\syscheck\\syscheck.py",
+    "script_mtime_utc": "2025-12-04T14:47:00Z",
+    "script_sha_hint": "0x19e999fa073ae32e"
+  }
+}

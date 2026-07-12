@@ -1,0 +1,5 @@
+{
+  "extraPaths": [".", "services"],
+  "pythonVersion": "3.12",
+  "reportMissingImports": "warning"
+}

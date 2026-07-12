@@ -1,0 +1,22 @@
+[project]
+name = "distil-medium-en"
+version = "0.1.0"
+description = "Distil-Whisper Medium.en STT provider (GPU) for WheelHouse"
+requires-python = ">=3.12,<3.13"
+authors = [{name = "WheelHouse"}]
+dependencies = [
+    "wheelhouse-shared",
+    "faster-whisper>=1.2.1,<2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2,<10",
+]
+
+[tool.uv]
+package = false
+environments = ["sys_platform == 'win32'"]
+
+[tool.uv.sources]
+wheelhouse-shared = { path = "../shared", editable = true }

@@ -1,0 +1,246 @@
+# WheelHouse Configuration -- template
+#
+# Copy this file to config.toml in the same directory, then edit the values
+# for your setup:  cp config.toml.example config.toml
+#
+# config.toml is ignored by git so your personal settings (device addresses,
+# keys, paths) never get committed. Only this template is tracked.
+#
+# Every value below is a working default. You can run WheelHouse without
+# changing anything except the device-specific plugins near the bottom.
+
+# Optional: full path to the NirSoft "svcl" tool, used only for Dolby Atmos
+# spatial-sound switching. Leave empty if you do not use that feature.
+SPATIAL_SOUND_EXEC = ""
+SPATIAL_SOUND_FORMAT = "Dolby Atmos for home theater"
+
+# Network address the speech service connects to. 127.0.0.1 keeps the
+# speech websocket local to this machine; set a LAN bind address only if
+# you run STT on another machine (advanced, exposes the port on the LAN).
+SPEECH_WEBSOCKET_HOST = "127.0.0.1"
+
+# Speech timing, in milliseconds. Increase these on a slower machine if
+# commands fire before you finish speaking.
+REPLACEMENT_TIMEOUT_MS = 700
+COMMAND_TIMEOUT_MS = 700
+GREEDY_TIMEOUT_MS = 5000
+COMMAND_COMPLETION_WAIT_MS = 1000
+
+# Silence WheelHouse speech while other audio is playing.
+ENABLE_AUDIO_SUPPRESSION = true
+ENABLE_SONOS_SUPPRESSION = true
+ENABLE_IDLE_SUPPRESSION = true
+
+LOG_FILE = ""
+LOG_LEVEL = "DEBUG"
+
+# Privacy: when false (the default), log lines never contain dictated text
+# or clipboard content -- they carry a length-only placeholder instead.
+# Set true to log full transcripts while troubleshooting recognition
+# problems. Applies to every WheelHouse process, including the STT
+# providers. Remember to turn it back off: with it on, everything you
+# dictate (including passwords) accumulates in the rotated log files.
+LOG_TRANSCRIPTS = false
+
+SIDE_OFFSET = 10
+BRIGHTNESS_INCREMENT = 1.0
+VOLUME_INCREMENT = 0.5
+
+# The small on-screen status button.
+FLOATING_BUTTON_SIZE = 30
+FLOATING_BUTTON_POS = [
+    -18,
+    -15,
+]
+FLOATING_BUTTON_VISIBLE = false
+
+SPEECH_ENABLED_ON_STARTUP = true
+SHOW_SPEECH_PULSE = true
+ICON_PATH = "WheelHouse.ico"
+
+# Optional Gemini text-correction key. Leave empty to disable. Prefer putting
+# secrets in a .env file (see .env.example) rather than here.
+GEMINI_API_KEY = ""
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
+GEMINI_PROMPT = "Fix the grammar, punctuation, spelling, spacing, and any other technical aspects of the text, and respond with the modified text. You will preserve all new lines exactly as they appear in my input. Apply standard English grammatical rules for capitalization, including capitalizing the first word of any sentence or phrase that begins on a new line."
+
+[brightness_coordinator]
+software_dimmer = "gamma_dimmer"
+unwinding_threshold = 10
+flux_transition_percent = 2
+flux_dim_hotkey = [
+    "alt",
+    "pagedown",
+]
+flux_brighten_hotkey = [
+    "alt",
+    "pageup",
+]
+
+[plugins.internal_panel]
+enabled = true
+
+[plugins.sonos]
+# Set true only if you have Sonos speakers on your network.
+enabled = false
+polling_interval = 2
+
+[plugins.system_volume]
+enabled = true
+device_type = "default"
+volume_step_db = 1.5
+min_volume_db = -96.0
+max_volume_db = 0.0
+
+[plugins.bravia]
+# Set true only if you have a Sony Bravia TV. Fill in its address on your
+# local network and the pre-shared key you set in the TV's settings.
+enabled = false
+ip_address = ""
+psk = ""
+device_name = "SONY TV"
+
+[plugins.software_dimmer]
+enabled = false
+initial_brightness = 100
+dim_step = 20
+
+[plugins.idle_monitor]
+enabled = true
+idle_timeout_minutes = 10
+polling_interval_seconds = 4
+
+[plugins.window_positioning]
+enabled = true
+target_window_names = [
+    "On-Screen Keyboard",
+    "osk",
+]
+move_cooldown_seconds = 0.5
+clearance_gap_pixels = 5
+ignore_window_titles = [
+    "Program Manager",
+    "Task Switching",
+    "SoftwareDimmerOverlay_AlphaBlend_v12",
+    "MainWindow",
+]
+ignore_window_classes = [
+    "Shell_TrayWnd",
+    "Progman",
+]
+
+[wake_word]
+# Say this word to wake WheelHouse after an idle pause.
+enabled = true
+keyword = "computer"
+sensitivity = 0.5
+mode = "idle_recovery"
+model_dir = "../shared/data/wake_words"
+
+[ui_actions.timing]
+clipboard_verification_timeout_ms = 250
+clipboard_operation_delay_ms = 50
+selection_clear_delay_ms = 20
+context_gather_delay_ms = 10
+post_paste_delay_ms = 30
+utterance_clipboard_timeout_seconds = 60.0
+
+[ui_actions.verified_unicode]
+max_chars = 50
+
+[ui_actions.foreground_check]
+same_process_browser_names = [
+    "brave.exe",
+    "brave_beta.exe",
+    "chrome.exe",
+    "chromium.exe",
+    "msedge.exe",
+    "edge.exe",
+    "vivaldi.exe",
+    "opera.exe",
+    "operagx.exe",
+    "arc.exe",
+]
+same_process_browser_names_extend = []
+
+[ui_actions.text_target]
+allow_class_names_extend = []
+deny_control_types_extend = []
+deny_class_names_extend = []
+browser_process_names_extend = []
+
+[speech]
+notify_on_revision = false
+interaction_mode = "toggle"
+ptt_safety_timeout_seconds = 30
+
+[stt]
+# Which speech-to-text provider to use. "google_stt" needs a Google Cloud
+# account; local providers need no account.
+last_provider = "parakeet_tdt"
+
+[stt.google]
+boost_words = []
+
+[stt.azure]
+# Azure Speech Services key, only if you use the Azure provider.
+subscription_key = ""
+region = "eastus"
+
+[ai]
+# Master switch for the optional AI text-correction and help-chat features.
+enabled = true
+knowledge_base = "knowledge/wheelhouse_help.md"
+
+[ai.server]
+# WheelHouse talks to an external OpenAI-compatible server for AI features.
+# base_url is the server address (a local Ollama endpoint by default). Leave
+# base_url empty to turn AI off. If the server is unreachable, AI features
+# quietly disable themselves and everything else keeps working.
+base_url = "http://localhost:11434/v1"
+model = "gemma3:12b"
+api_key = ""
+timeout_s = 30
+kind = "local"
+
+[ai.help]
+gem_url = ""
+max_response_tokens = 800
+
+[terminal]
+submit_delay_ms = 100
+
+[click]
+enabled = true
+use_focus_targeting = true
+enable_offmonitor_fallback = false
+min_confidence = 0.4
+clear_winner_margin = 0.15
+tiebreaker_min_separation_logical_px = 30
+tiebreaker_influence_logical_px = 400
+notice_max_names = 3
+enable_screen_reader_flag = false
+snapshot_ttl_seconds = 30
+response_timeout_ms = 3000
+walk_deadline_ms = 2500
+min_substring_query_length = 4
+min_substring_overlap_ratio = 0.6
+enable_coordinate_click_on_com_error = false
+overlay_badge_font_pt = 12
+
+browser_processes = [
+    "brave.exe",
+    "chrome.exe",
+    "msedge.exe",
+    "vivaldi.exe",
+    "slack.exe",
+    "discord.exe",
+    "code.exe",
+    "ms-teams.exe",
+    "Teams.exe",
+    "spotify.exe",
+    "notion.exe",
+    "obsidian.exe",
+    "ChatGPT.exe",
+]
+browser_processes_extend = []

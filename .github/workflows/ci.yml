@@ -1,0 +1,59 @@
+# WheelHouse CI -- honest scope (see the release plan and CONTRIBUTING.md):
+# lint plus the test subset that needs no microphone, GPU, or human
+# interaction. A green run is NOT the release gate; the manual pre-release
+# checklist (clean-VM install, live voice tests on real hardware) covers
+# what a hosted runner cannot.
+#
+# The distil_medium_en provider is excluded from the matrix: its
+# dependency stack (torch + CUDA) assumes an NVIDIA GPU that hosted
+# runners don't have.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Errors-only ruleset: syntax errors and undefined names. Style is
+      # deliberately not CI-enforced.
+      - name: Ruff (E9, F63, F7, F82)
+        run: uvx ruff check --select E9,F63,F7,F82 services
+
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - wheelhouse
+          - stt_providers/shared
+          - stt_providers/sherpa_offline_parakeet_stt_server
+          - stt_providers/google_stt_server
+    name: test (${{ matrix.service }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # The wrapper cds into the service, runs `uv run pytest` (which
+      # syncs the service's own venv on first use), and parses the JUnit
+      # XML so results survive output truncation.
+      - name: Run tests
+        run: python scripts/run_tests.py --service ${{ matrix.service }}

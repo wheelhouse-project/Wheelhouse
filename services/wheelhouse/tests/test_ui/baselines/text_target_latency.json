@@ -1,0 +1,56 @@
+{
+  "captured_phase": "wh-9weum Phase 1",
+  "iterations_per_scenario": 200,
+  "scenarios": {
+    "browser_edit_control_exemption_accept": {
+      "iterations": 200,
+      "max_us": 360.40000850334764,
+      "mean_us": 52.63599712634459,
+      "min_us": 38.50000211969018,
+      "stdev_us": 39.99613297470048
+    },
+    "browser_empty_class_trap": {
+      "iterations": 200,
+      "max_us": 5.300040356814861,
+      "mean_us": 2.587501658126712,
+      "min_us": 2.00001522898674,
+      "stdev_us": 0.4759182745997105
+    },
+    "default_reject_empty_class_non_browser": {
+      "iterations": 200,
+      "max_us": 67.29998858645558,
+      "mean_us": 18.5680013964884,
+      "min_us": 14.699995517730713,
+      "stdev_us": 5.252674230743045
+    },
+    "denylist_control_type": {
+      "iterations": 200,
+      "max_us": 5.799985956400633,
+      "mean_us": 2.5080019258894026,
+      "min_us": 1.900014467537403,
+      "stdev_us": 0.5352916463295576
+    },
+    "edit_control_accept": {
+      "iterations": 200,
+      "max_us": 46.600005589425564,
+      "mean_us": 12.720500235445797,
+      "min_us": 10.399962775409222,
+      "stdev_us": 3.8548220783664706
+    },
+    "soft_reject_paste_capable_class": {
+      "iterations": 200,
+      "max_us": 53.60000068321824,
+      "mean_us": 17.944998980965465,
+      "min_us": 14.79999627918005,
+      "stdev_us": 4.698272157587811
+    },
+    "text_pattern_accept": {
+      "iterations": 200,
+      "max_us": 336.50000113993883,
+      "mean_us": 51.173998799640685,
+      "min_us": 37.699996028095484,
+      "stdev_us": 36.66180711144207
+    }
+  },
+  "warmup_iterations_per_scenario": 50
+}

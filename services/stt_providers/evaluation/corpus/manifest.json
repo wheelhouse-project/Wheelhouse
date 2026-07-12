@@ -1,0 +1,3107 @@
+{
+  "generated": "2026-04-27T02:29:52.145839+00:00",
+  "tts_engine": "edge-tts",
+  "format": "16kHz mono PCM WAV",
+  "voices": {
+    "aria": "en-US-AriaNeural",
+    "guy": "en-US-GuyNeural"
+  },
+  "utterance_count": 309,
+  "utterances": [
+    {
+      "id": "si_delete_aria",
+      "text": "delete",
+      "expected_transcription": "delete",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/delete_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_delete_guy",
+      "text": "delete",
+      "expected_transcription": "delete",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/delete_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_select_aria",
+      "text": "select",
+      "expected_transcription": "select",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/select_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_select_guy",
+      "text": "select",
+      "expected_transcription": "select",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/select_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_copy_aria",
+      "text": "copy",
+      "expected_transcription": "copy",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/copy_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_copy_guy",
+      "text": "copy",
+      "expected_transcription": "copy",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/copy_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_paste_aria",
+      "text": "paste",
+      "expected_transcription": "paste",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/paste_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_paste_guy",
+      "text": "paste",
+      "expected_transcription": "paste",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/paste_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_cut_aria",
+      "text": "cut",
+      "expected_transcription": "cut",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/cut_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_cut_guy",
+      "text": "cut",
+      "expected_transcription": "cut",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/cut_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_undo_aria",
+      "text": "undo",
+      "expected_transcription": "undo",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/undo_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_undo_guy",
+      "text": "undo",
+      "expected_transcription": "undo",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/undo_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_redo_aria",
+      "text": "redo",
+      "expected_transcription": "redo",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/redo_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_redo_guy",
+      "text": "redo",
+      "expected_transcription": "redo",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/redo_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_escape_aria",
+      "text": "escape",
+      "expected_transcription": "escape",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/escape_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_escape_guy",
+      "text": "escape",
+      "expected_transcription": "escape",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/escape_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_enter_aria",
+      "text": "enter",
+      "expected_transcription": "enter",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/enter_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_enter_guy",
+      "text": "enter",
+      "expected_transcription": "enter",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/enter_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_tab_aria",
+      "text": "tab",
+      "expected_transcription": "tab",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/tab_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_tab_guy",
+      "text": "tab",
+      "expected_transcription": "tab",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/tab_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_save_aria",
+      "text": "save",
+      "expected_transcription": "save",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/save_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_save_guy",
+      "text": "save",
+      "expected_transcription": "save",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/save_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_engage_aria",
+      "text": "engage",
+      "expected_transcription": "engage",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/engage_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_engage_guy",
+      "text": "engage",
+      "expected_transcription": "engage",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/engage_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_keyboard_aria",
+      "text": "keyboard",
+      "expected_transcription": "keyboard",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/keyboard_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_keyboard_guy",
+      "text": "keyboard",
+      "expected_transcription": "keyboard",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/keyboard_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_maximize_aria",
+      "text": "maximize",
+      "expected_transcription": "maximize",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/maximize_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_maximize_guy",
+      "text": "maximize",
+      "expected_transcription": "maximize",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/maximize_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_minimize_aria",
+      "text": "minimize",
+      "expected_transcription": "minimize",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/minimize_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_minimize_guy",
+      "text": "minimize",
+      "expected_transcription": "minimize",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/minimize_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_desktop_aria",
+      "text": "desktop",
+      "expected_transcription": "desktop",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/desktop_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_desktop_guy",
+      "text": "desktop",
+      "expected_transcription": "desktop",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/desktop_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_browser_aria",
+      "text": "browser",
+      "expected_transcription": "browser",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/browser_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_browser_guy",
+      "text": "browser",
+      "expected_transcription": "browser",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/browser_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_editor_aria",
+      "text": "editor",
+      "expected_transcription": "editor",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/editor_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_editor_guy",
+      "text": "editor",
+      "expected_transcription": "editor",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/editor_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_find_aria",
+      "text": "find",
+      "expected_transcription": "find",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/find_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_find_guy",
+      "text": "find",
+      "expected_transcription": "find",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/find_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_replace_aria",
+      "text": "replace",
+      "expected_transcription": "replace",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/replace_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_replace_guy",
+      "text": "replace",
+      "expected_transcription": "replace",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/replace_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_search_aria",
+      "text": "search",
+      "expected_transcription": "search",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/search_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_search_guy",
+      "text": "search",
+      "expected_transcription": "search",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/search_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_bold_aria",
+      "text": "bold",
+      "expected_transcription": "bold",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/bold_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_bold_guy",
+      "text": "bold",
+      "expected_transcription": "bold",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/bold_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_italics_aria",
+      "text": "italics",
+      "expected_transcription": "italics",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/italics_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_italics_guy",
+      "text": "italics",
+      "expected_transcription": "italics",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/italics_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_underline_aria",
+      "text": "underline",
+      "expected_transcription": "underline",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/underline_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_underline_guy",
+      "text": "underline",
+      "expected_transcription": "underline",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/underline_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_uppercase_aria",
+      "text": "uppercase",
+      "expected_transcription": "uppercase",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/uppercase_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_uppercase_guy",
+      "text": "uppercase",
+      "expected_transcription": "uppercase",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/uppercase_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_lowercase_aria",
+      "text": "lowercase",
+      "expected_transcription": "lowercase",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/lowercase_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_lowercase_guy",
+      "text": "lowercase",
+      "expected_transcription": "lowercase",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/lowercase_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_capitalize_aria",
+      "text": "capitalize",
+      "expected_transcription": "capitalize",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/capitalize_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_capitalize_guy",
+      "text": "capitalize",
+      "expected_transcription": "capitalize",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/capitalize_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_compress_aria",
+      "text": "compress",
+      "expected_transcription": "compress",
+      "category": "single_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "single_word/compress_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "si_compress_guy",
+      "text": "compress",
+      "expected_transcription": "compress",
+      "category": "single_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "single_word/compress_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_all_aria",
+      "text": "select all",
+      "expected_transcription": "select all",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_all_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_all_guy",
+      "text": "select all",
+      "expected_transcription": "select all",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_all_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_word_aria",
+      "text": "select word",
+      "expected_transcription": "select word",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_word_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_word_guy",
+      "text": "select word",
+      "expected_transcription": "select word",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_word_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_line_aria",
+      "text": "select line",
+      "expected_transcription": "select line",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_line_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_line_guy",
+      "text": "select line",
+      "expected_transcription": "select line",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_line_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_paragraph_aria",
+      "text": "select paragraph",
+      "expected_transcription": "select paragraph",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_paragraph_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_select_paragraph_guy",
+      "text": "select paragraph",
+      "expected_transcription": "select paragraph",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/select_paragraph_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_delete_word_aria",
+      "text": "delete word",
+      "expected_transcription": "delete word",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/delete_word_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_delete_word_guy",
+      "text": "delete word",
+      "expected_transcription": "delete word",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/delete_word_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_copy_all_aria",
+      "text": "copy all",
+      "expected_transcription": "copy all",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/copy_all_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_copy_all_guy",
+      "text": "copy all",
+      "expected_transcription": "copy all",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/copy_all_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_copy_line_aria",
+      "text": "copy line",
+      "expected_transcription": "copy line",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/copy_line_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_copy_line_guy",
+      "text": "copy line",
+      "expected_transcription": "copy line",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/copy_line_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_copy_screen_aria",
+      "text": "copy screen",
+      "expected_transcription": "copy screen",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/copy_screen_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_copy_screen_guy",
+      "text": "copy screen",
+      "expected_transcription": "copy screen",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/copy_screen_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_zoom_in_aria",
+      "text": "zoom in",
+      "expected_transcription": "zoom in",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/zoom_in_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_zoom_in_guy",
+      "text": "zoom in",
+      "expected_transcription": "zoom in",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/zoom_in_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_zoom_out_aria",
+      "text": "zoom out",
+      "expected_transcription": "zoom out",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/zoom_out_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_zoom_out_guy",
+      "text": "zoom out",
+      "expected_transcription": "zoom out",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/zoom_out_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_create_tab_aria",
+      "text": "create tab",
+      "expected_transcription": "create tab",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/create_tab_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_create_tab_guy",
+      "text": "create tab",
+      "expected_transcription": "create tab",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/create_tab_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_create_window_aria",
+      "text": "create window",
+      "expected_transcription": "create window",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/create_window_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_create_window_guy",
+      "text": "create window",
+      "expected_transcription": "create window",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/create_window_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_close_window_aria",
+      "text": "close window",
+      "expected_transcription": "close window",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/close_window_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_close_window_guy",
+      "text": "close window",
+      "expected_transcription": "close window",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/close_window_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_new_line_aria",
+      "text": "new line",
+      "expected_transcription": "new line",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/new_line_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_new_line_guy",
+      "text": "new line",
+      "expected_transcription": "new line",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/new_line_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_new_paragraph_aria",
+      "text": "new paragraph",
+      "expected_transcription": "new paragraph",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/new_paragraph_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_new_paragraph_guy",
+      "text": "new paragraph",
+      "expected_transcription": "new paragraph",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/new_paragraph_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_shift_tab_aria",
+      "text": "shift tab",
+      "expected_transcription": "shift tab",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/shift_tab_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_shift_tab_guy",
+      "text": "shift tab",
+      "expected_transcription": "shift tab",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/shift_tab_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_replace_all_aria",
+      "text": "replace all",
+      "expected_transcription": "replace all",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/replace_all_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_replace_all_guy",
+      "text": "replace all",
+      "expected_transcription": "replace all",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/replace_all_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_bold_text_aria",
+      "text": "bold text",
+      "expected_transcription": "bold text",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/bold_text_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_bold_text_guy",
+      "text": "bold text",
+      "expected_transcription": "bold text",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/bold_text_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_title_case_aria",
+      "text": "title case",
+      "expected_transcription": "title case",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/title_case_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_title_case_guy",
+      "text": "title case",
+      "expected_transcription": "title case",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/title_case_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_snake_case_aria",
+      "text": "snake case",
+      "expected_transcription": "snake case",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/snake_case_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_snake_case_guy",
+      "text": "snake case",
+      "expected_transcription": "snake case",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/snake_case_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_camel_case_aria",
+      "text": "camel case",
+      "expected_transcription": "camel case",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/camel_case_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_camel_case_guy",
+      "text": "camel case",
+      "expected_transcription": "camel case",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/camel_case_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_pascal_case_aria",
+      "text": "pascal case",
+      "expected_transcription": "pascal case",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/pascal_case_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_pascal_case_guy",
+      "text": "pascal case",
+      "expected_transcription": "pascal case",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/pascal_case_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_kebab_case_aria",
+      "text": "kebab case",
+      "expected_transcription": "kebab case",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/kebab_case_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_kebab_case_guy",
+      "text": "kebab case",
+      "expected_transcription": "kebab case",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/kebab_case_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_fix_it_aria",
+      "text": "fix it",
+      "expected_transcription": "fix it",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/fix_it_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_fix_it_guy",
+      "text": "fix it",
+      "expected_transcription": "fix it",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/fix_it_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_cancel_fix_aria",
+      "text": "cancel fix",
+      "expected_transcription": "cancel fix",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/cancel_fix_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_cancel_fix_guy",
+      "text": "cancel fix",
+      "expected_transcription": "cancel fix",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/cancel_fix_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_scroll_down_aria",
+      "text": "scroll down",
+      "expected_transcription": "scroll down",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/scroll_down_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_scroll_down_guy",
+      "text": "scroll down",
+      "expected_transcription": "scroll down",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/scroll_down_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_go_back_aria",
+      "text": "go back",
+      "expected_transcription": "go back",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/go_back_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_go_back_guy",
+      "text": "go back",
+      "expected_transcription": "go back",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/go_back_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_move_left_aria",
+      "text": "move left",
+      "expected_transcription": "move left",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/move_left_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_move_left_guy",
+      "text": "move left",
+      "expected_transcription": "move left",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/move_left_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_go_right_aria",
+      "text": "go right",
+      "expected_transcription": "go right",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/go_right_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_go_right_guy",
+      "text": "go right",
+      "expected_transcription": "go right",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/go_right_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_go_home_aria",
+      "text": "go home",
+      "expected_transcription": "go home",
+      "category": "multi_word",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "multi_word/go_home_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "mu_go_home_guy",
+      "text": "go home",
+      "expected_transcription": "go home",
+      "category": "multi_word",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "multi_word/go_home_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_one_aria",
+      "text": "delete one",
+      "expected_transcription": "delete one",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_one_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_one_guy",
+      "text": "delete one",
+      "expected_transcription": "delete one",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_one_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_two_aria",
+      "text": "delete two",
+      "expected_transcription": "delete two",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_two_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_two_guy",
+      "text": "delete two",
+      "expected_transcription": "delete two",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_two_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_three_aria",
+      "text": "delete three",
+      "expected_transcription": "delete three",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_three_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_three_guy",
+      "text": "delete three",
+      "expected_transcription": "delete three",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_three_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_four_aria",
+      "text": "delete four",
+      "expected_transcription": "delete four",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_four_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_four_guy",
+      "text": "delete four",
+      "expected_transcription": "delete four",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_four_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_five_aria",
+      "text": "delete five",
+      "expected_transcription": "delete five",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_five_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_delete_five_guy",
+      "text": "delete five",
+      "expected_transcription": "delete five",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/delete_five_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_backspace_one_aria",
+      "text": "backspace one",
+      "expected_transcription": "backspace one",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/backspace_one_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_backspace_one_guy",
+      "text": "backspace one",
+      "expected_transcription": "backspace one",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/backspace_one_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_backspace_two_aria",
+      "text": "backspace two",
+      "expected_transcription": "backspace two",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/backspace_two_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_backspace_two_guy",
+      "text": "backspace two",
+      "expected_transcription": "backspace two",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/backspace_two_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_backspace_three_aria",
+      "text": "backspace three",
+      "expected_transcription": "backspace three",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/backspace_three_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_backspace_three_guy",
+      "text": "backspace three",
+      "expected_transcription": "backspace three",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/backspace_three_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_tab_two_aria",
+      "text": "tab two",
+      "expected_transcription": "tab two",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/tab_two_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_tab_two_guy",
+      "text": "tab two",
+      "expected_transcription": "tab two",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/tab_two_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_tab_three_aria",
+      "text": "tab three",
+      "expected_transcription": "tab three",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/tab_three_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_tab_three_guy",
+      "text": "tab three",
+      "expected_transcription": "tab three",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/tab_three_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_one_aria",
+      "text": "item one",
+      "expected_transcription": "item one",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_one_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_one_guy",
+      "text": "item one",
+      "expected_transcription": "item one",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_one_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_two_aria",
+      "text": "item two",
+      "expected_transcription": "item two",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_two_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_two_guy",
+      "text": "item two",
+      "expected_transcription": "item two",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_two_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_three_aria",
+      "text": "item three",
+      "expected_transcription": "item three",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_three_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_three_guy",
+      "text": "item three",
+      "expected_transcription": "item three",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_three_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_four_aria",
+      "text": "item four",
+      "expected_transcription": "item four",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_four_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_four_guy",
+      "text": "item four",
+      "expected_transcription": "item four",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_four_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_five_aria",
+      "text": "item five",
+      "expected_transcription": "item five",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_five_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_item_five_guy",
+      "text": "item five",
+      "expected_transcription": "item five",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/item_five_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_press_enter_aria",
+      "text": "press enter",
+      "expected_transcription": "press enter",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/press_enter_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_press_enter_guy",
+      "text": "press enter",
+      "expected_transcription": "press enter",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/press_enter_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_press_escape_aria",
+      "text": "press escape",
+      "expected_transcription": "press escape",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/press_escape_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_press_escape_guy",
+      "text": "press escape",
+      "expected_transcription": "press escape",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/press_escape_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_press_tab_aria",
+      "text": "press tab",
+      "expected_transcription": "press tab",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/press_tab_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_press_tab_guy",
+      "text": "press tab",
+      "expected_transcription": "press tab",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/press_tab_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_go_left_aria",
+      "text": "go left",
+      "expected_transcription": "go left",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/go_left_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_go_left_guy",
+      "text": "go left",
+      "expected_transcription": "go left",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/go_left_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_grab_right_aria",
+      "text": "grab right",
+      "expected_transcription": "grab right",
+      "category": "parameterized",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "parameterized/grab_right_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pa_grab_right_guy",
+      "text": "grab right",
+      "expected_transcription": "grab right",
+      "category": "parameterized",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "parameterized/grab_right_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_period_aria",
+      "text": "period",
+      "expected_transcription": "period",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/period_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_period_guy",
+      "text": "period",
+      "expected_transcription": "period",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/period_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_comma_aria",
+      "text": "comma",
+      "expected_transcription": "comma",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/comma_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_comma_guy",
+      "text": "comma",
+      "expected_transcription": "comma",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/comma_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_colon_aria",
+      "text": "colon",
+      "expected_transcription": "colon",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/colon_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_colon_guy",
+      "text": "colon",
+      "expected_transcription": "colon",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/colon_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_semicolon_aria",
+      "text": "semicolon",
+      "expected_transcription": "semicolon",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/semicolon_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_semicolon_guy",
+      "text": "semicolon",
+      "expected_transcription": "semicolon",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/semicolon_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_question_mark_aria",
+      "text": "question mark",
+      "expected_transcription": "question mark",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/question_mark_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_question_mark_guy",
+      "text": "question mark",
+      "expected_transcription": "question mark",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/question_mark_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_exclamation_point_aria",
+      "text": "exclamation point",
+      "expected_transcription": "exclamation point",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/exclamation_point_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_exclamation_point_guy",
+      "text": "exclamation point",
+      "expected_transcription": "exclamation point",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/exclamation_point_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_hyphen_aria",
+      "text": "hyphen",
+      "expected_transcription": "hyphen",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/hyphen_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_hyphen_guy",
+      "text": "hyphen",
+      "expected_transcription": "hyphen",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/hyphen_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_dash_aria",
+      "text": "dash",
+      "expected_transcription": "dash",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/dash_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_dash_guy",
+      "text": "dash",
+      "expected_transcription": "dash",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/dash_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_slash_aria",
+      "text": "slash",
+      "expected_transcription": "slash",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/slash_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_slash_guy",
+      "text": "slash",
+      "expected_transcription": "slash",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/slash_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_backslash_aria",
+      "text": "backslash",
+      "expected_transcription": "backslash",
+      "category": "punctuation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "punctuation/backslash_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "pu_backslash_guy",
+      "text": "backslash",
+      "expected_transcription": "backslash",
+      "category": "punctuation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "punctuation/backslash_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_the_quick_brown_fox_jumps_over_the_lazy_dog_aria",
+      "text": "The quick brown fox jumps over the lazy dog",
+      "expected_transcription": "the quick brown fox jumps over the lazy dog",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/the_quick_brown_fox_jumps_over_the_lazy_dog_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_the_quick_brown_fox_jumps_over_the_lazy_dog_guy",
+      "text": "The quick brown fox jumps over the lazy dog",
+      "expected_transcription": "the quick brown fox jumps over the lazy dog",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/the_quick_brown_fox_jumps_over_the_lazy_dog_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_please_send_me_the_updated_report_by_friday_aria",
+      "text": "Please send me the updated report by Friday",
+      "expected_transcription": "please send me the updated report by Friday",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/please_send_me_the_updated_report_by_friday_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_please_send_me_the_updated_report_by_friday_guy",
+      "text": "Please send me the updated report by Friday",
+      "expected_transcription": "please send me the updated report by Friday",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/please_send_me_the_updated_report_by_friday_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_i_need_to_fix_the_bug_in_the_authentication_module_aria",
+      "text": "I need to fix the bug in the authentication module",
+      "expected_transcription": "I need to fix the bug in the authentication module",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/i_need_to_fix_the_bug_in_the_authentication_module_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_i_need_to_fix_the_bug_in_the_authentication_module_guy",
+      "text": "I need to fix the bug in the authentication module",
+      "expected_transcription": "I need to fix the bug in the authentication module",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/i_need_to_fix_the_bug_in_the_authentication_module_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_can_you_review_the_pull_request_when_you_get_a_chance_aria",
+      "text": "Can you review the pull request when you get a chance",
+      "expected_transcription": "can you review the pull request when you get a chance",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/can_you_review_the_pull_request_when_you_get_a_chance_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_can_you_review_the_pull_request_when_you_get_a_chance_guy",
+      "text": "Can you review the pull request when you get a chance",
+      "expected_transcription": "can you review the pull request when you get a chance",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/can_you_review_the_pull_request_when_you_get_a_chance_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_we_should_refactor_this_function_to_be_more_readable_aria",
+      "text": "We should refactor this function to be more readable",
+      "expected_transcription": "we should refactor this function to be more readable",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/we_should_refactor_this_function_to_be_more_readable_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_we_should_refactor_this_function_to_be_more_readable_guy",
+      "text": "We should refactor this function to be more readable",
+      "expected_transcription": "we should refactor this function to be more readable",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/we_should_refactor_this_function_to_be_more_readable_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_open_the_terminal_and_run_the_test_suite_aria",
+      "text": "Open the terminal and run the test suite",
+      "expected_transcription": "open the terminal and run the test suite",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/open_the_terminal_and_run_the_test_suite_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_open_the_terminal_and_run_the_test_suite_guy",
+      "text": "Open the terminal and run the test suite",
+      "expected_transcription": "open the terminal and run the test suite",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/open_the_terminal_and_run_the_test_suite_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_save_the_file_and_close_the_editor_window_aria",
+      "text": "Save the file and close the editor window",
+      "expected_transcription": "save the file and close the editor window",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/save_the_file_and_close_the_editor_window_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_save_the_file_and_close_the_editor_window_guy",
+      "text": "Save the file and close the editor window",
+      "expected_transcription": "save the file and close the editor window",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/save_the_file_and_close_the_editor_window_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_delete_the_selected_text_and_paste_the_replacement_aria",
+      "text": "Delete the selected text and paste the replacement",
+      "expected_transcription": "delete the selected text and paste the replacement",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/delete_the_selected_text_and_paste_the_replacement_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_delete_the_selected_text_and_paste_the_replacement_guy",
+      "text": "Delete the selected text and paste the replacement",
+      "expected_transcription": "delete the selected text and paste the replacement",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/delete_the_selected_text_and_paste_the_replacement_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_go_to_the_beginning_of_the_line_and_select_all_aria",
+      "text": "Go to the beginning of the line and select all",
+      "expected_transcription": "go to the beginning of the line and select all",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/go_to_the_beginning_of_the_line_and_select_all_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_go_to_the_beginning_of_the_line_and_select_all_guy",
+      "text": "Go to the beginning of the line and select all",
+      "expected_transcription": "go to the beginning of the line and select all",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/go_to_the_beginning_of_the_line_and_select_all_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_copy_the_error_message_from_the_console_output_aria",
+      "text": "Copy the error message from the console output",
+      "expected_transcription": "copy the error message from the console output",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/copy_the_error_message_from_the_console_output_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_copy_the_error_message_from_the_console_output_guy",
+      "text": "Copy the error message from the console output",
+      "expected_transcription": "copy the error message from the console output",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/copy_the_error_message_from_the_console_output_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_undo_the_last_three_changes_and_redo_the_first_one_aria",
+      "text": "Undo the last three changes and redo the first one",
+      "expected_transcription": "undo the last three changes and redo the first one",
+      "category": "dictation",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "dictation/undo_the_last_three_changes_and_redo_the_first_one_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_undo_the_last_three_changes_and_redo_the_first_one_guy",
+      "text": "Undo the last three changes and redo the first one",
+      "expected_transcription": "undo the last three changes and redo the first one",
+      "category": "dictation",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "dictation/undo_the_last_three_changes_and_redo_the_first_one_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_delete_the_selected_text_aria",
+      "text": "Delete the selected text",
+      "expected_transcription": "delete the selected text",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/delete_the_selected_text_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_delete_the_selected_text_guy",
+      "text": "Delete the selected text",
+      "expected_transcription": "delete the selected text",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/delete_the_selected_text_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_and_paste_the_replacement_aria",
+      "text": "and paste the replacement",
+      "expected_transcription": "and paste the replacement",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/and_paste_the_replacement_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_and_paste_the_replacement_guy",
+      "text": "and paste the replacement",
+      "expected_transcription": "and paste the replacement",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/and_paste_the_replacement_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_go_to_the_beginning_aria",
+      "text": "Go to the beginning",
+      "expected_transcription": "go to the beginning",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/go_to_the_beginning_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_go_to_the_beginning_guy",
+      "text": "Go to the beginning",
+      "expected_transcription": "go to the beginning",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/go_to_the_beginning_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_of_the_line_aria",
+      "text": "of the line",
+      "expected_transcription": "of the line",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/of_the_line_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_of_the_line_guy",
+      "text": "of the line",
+      "expected_transcription": "of the line",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/of_the_line_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_copy_the_error_message_aria",
+      "text": "Copy the error message",
+      "expected_transcription": "copy the error message",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/copy_the_error_message_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_copy_the_error_message_guy",
+      "text": "Copy the error message",
+      "expected_transcription": "copy the error message",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/copy_the_error_message_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_from_the_console_output_aria",
+      "text": "from the console output",
+      "expected_transcription": "from the console output",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/from_the_console_output_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_from_the_console_output_guy",
+      "text": "from the console output",
+      "expected_transcription": "from the console output",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/from_the_console_output_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_i_need_to_fix_aria",
+      "text": "I need to fix",
+      "expected_transcription": "I need to fix",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/i_need_to_fix_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_i_need_to_fix_guy",
+      "text": "I need to fix",
+      "expected_transcription": "I need to fix",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/i_need_to_fix_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_the_bug_in_the_authentication_module_aria",
+      "text": "the bug in the authentication module",
+      "expected_transcription": "the bug in the authentication module",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/the_bug_in_the_authentication_module_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_the_bug_in_the_authentication_module_guy",
+      "text": "the bug in the authentication module",
+      "expected_transcription": "the bug in the authentication module",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/the_bug_in_the_authentication_module_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_open_the_terminal_aria",
+      "text": "Open the terminal",
+      "expected_transcription": "open the terminal",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/open_the_terminal_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_open_the_terminal_guy",
+      "text": "Open the terminal",
+      "expected_transcription": "open the terminal",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/open_the_terminal_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_and_run_the_test_suite_aria",
+      "text": "and run the test suite",
+      "expected_transcription": "and run the test suite",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/and_run_the_test_suite_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_and_run_the_test_suite_guy",
+      "text": "and run the test suite",
+      "expected_transcription": "and run the test suite",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/and_run_the_test_suite_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_save_the_file_aria",
+      "text": "Save the file",
+      "expected_transcription": "save the file",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/save_the_file_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_save_the_file_guy",
+      "text": "Save the file",
+      "expected_transcription": "save the file",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/save_the_file_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_and_close_the_editor_aria",
+      "text": "and close the editor",
+      "expected_transcription": "and close the editor",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/and_close_the_editor_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_and_close_the_editor_guy",
+      "text": "and close the editor",
+      "expected_transcription": "and close the editor",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/and_close_the_editor_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_we_should_refactor_this_aria",
+      "text": "We should refactor this",
+      "expected_transcription": "we should refactor this",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/we_should_refactor_this_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_we_should_refactor_this_guy",
+      "text": "We should refactor this",
+      "expected_transcription": "we should refactor this",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/we_should_refactor_this_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_function_to_be_more_readable_aria",
+      "text": "function to be more readable",
+      "expected_transcription": "function to be more readable",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/function_to_be_more_readable_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_function_to_be_more_readable_guy",
+      "text": "function to be more readable",
+      "expected_transcription": "function to be more readable",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/function_to_be_more_readable_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_please_send_me_the_aria",
+      "text": "Please send me the",
+      "expected_transcription": "please send me the",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/please_send_me_the_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_please_send_me_the_guy",
+      "text": "Please send me the",
+      "expected_transcription": "please send me the",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/please_send_me_the_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_updated_report_by_friday_aria",
+      "text": "updated report by Friday",
+      "expected_transcription": "updated report by Friday",
+      "category": "discontinuous",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "discontinuous/updated_report_by_friday_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "di_updated_report_by_friday_guy",
+      "text": "updated report by Friday",
+      "expected_transcription": "updated report by Friday",
+      "category": "discontinuous",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "discontinuous/updated_report_by_friday_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_three_aria",
+      "text": "three",
+      "expected_transcription": "3",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/three_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_three_guy",
+      "text": "three",
+      "expected_transcription": "3",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/three_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_fifteen_aria",
+      "text": "fifteen",
+      "expected_transcription": "15",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/fifteen_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_fifteen_guy",
+      "text": "fifteen",
+      "expected_transcription": "15",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/fifteen_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_forty_two_aria",
+      "text": "forty two",
+      "expected_transcription": "42",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/forty_two_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_forty_two_guy",
+      "text": "forty two",
+      "expected_transcription": "42",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/forty_two_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_one_hundred_aria",
+      "text": "one hundred",
+      "expected_transcription": "100",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/one_hundred_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_one_hundred_guy",
+      "text": "one hundred",
+      "expected_transcription": "100",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/one_hundred_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_first_aria",
+      "text": "first",
+      "expected_transcription": "first",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/first_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_first_guy",
+      "text": "first",
+      "expected_transcription": "first",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/first_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_second_aria",
+      "text": "second",
+      "expected_transcription": "second",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/second_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_second_guy",
+      "text": "second",
+      "expected_transcription": "second",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/second_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_third_aria",
+      "text": "third",
+      "expected_transcription": "third",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/third_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_third_guy",
+      "text": "third",
+      "expected_transcription": "third",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/third_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_there_are_five_items_in_the_list_aria",
+      "text": "there are five items in the list",
+      "expected_transcription": "there are 5 items in the list",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/there_are_five_items_in_the_list_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_there_are_five_items_in_the_list_guy",
+      "text": "there are five items in the list",
+      "expected_transcription": "there are 5 items in the list",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/there_are_five_items_in_the_list_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_move_to_line_forty_two_aria",
+      "text": "move to line forty two",
+      "expected_transcription": "move to line 42",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/move_to_line_forty_two_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_move_to_line_forty_two_guy",
+      "text": "move to line forty two",
+      "expected_transcription": "move to line 42",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/move_to_line_forty_two_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_server_is_running_on_port_eight_thousand_aria",
+      "text": "the server is running on port eight thousand",
+      "expected_transcription": "the server is running on port 8000",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_server_is_running_on_port_eight_thousand_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_server_is_running_on_port_eight_thousand_guy",
+      "text": "the server is running on port eight thousand",
+      "expected_transcription": "the server is running on port 8000",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_server_is_running_on_port_eight_thousand_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_it_costs_five_dollars_aria",
+      "text": "it costs five dollars",
+      "expected_transcription": "it costs $5",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/it_costs_five_dollars_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_it_costs_five_dollars_guy",
+      "text": "it costs five dollars",
+      "expected_transcription": "it costs $5",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/it_costs_five_dollars_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_total_is_twenty_three_fifty_aria",
+      "text": "the total is twenty three fifty",
+      "expected_transcription": "the total is 2350",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_total_is_twenty_three_fifty_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_total_is_twenty_three_fifty_guy",
+      "text": "the total is twenty three fifty",
+      "expected_transcription": "the total is 2350",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_total_is_twenty_three_fifty_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_price_is_five_dollars_and_seventeen_cents_aria",
+      "text": "the price is five dollars and seventeen cents",
+      "expected_transcription": "the price is $5.17",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_price_is_five_dollars_and_seventeen_cents_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_price_is_five_dollars_and_seventeen_cents_guy",
+      "text": "the price is five dollars and seventeen cents",
+      "expected_transcription": "the price is $5.17",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_price_is_five_dollars_and_seventeen_cents_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_price_is_five_seventeen_aria",
+      "text": "the price is five seventeen",
+      "expected_transcription": "the price is $5.17",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_price_is_five_seventeen_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_price_is_five_seventeen_guy",
+      "text": "the price is five seventeen",
+      "expected_transcription": "the price is $5.17",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_price_is_five_seventeen_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_price_is_five_dollars_seventeen_cents_aria",
+      "text": "the price is five dollars seventeen cents",
+      "expected_transcription": "the price is $5.17",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_price_is_five_dollars_seventeen_cents_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_price_is_five_dollars_seventeen_cents_guy",
+      "text": "the price is five dollars seventeen cents",
+      "expected_transcription": "the price is $5.17",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_price_is_five_dollars_seventeen_cents_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_it_costs_ninety_nine_cents_aria",
+      "text": "it costs ninety nine cents",
+      "expected_transcription": "it costs $0.99",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/it_costs_ninety_nine_cents_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_it_costs_ninety_nine_cents_guy",
+      "text": "it costs ninety nine cents",
+      "expected_transcription": "it costs $0.99",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/it_costs_ninety_nine_cents_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_time_is_eleven_fifteen_p_m_aria",
+      "text": "the time is eleven fifteen p m",
+      "expected_transcription": "the time is 11:15 PM",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_time_is_eleven_fifteen_p_m_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_time_is_eleven_fifteen_p_m_guy",
+      "text": "the time is eleven fifteen p m",
+      "expected_transcription": "the time is 11:15 PM",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_time_is_eleven_fifteen_p_m_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_wake_me_at_six_thirty_in_the_morning_aria",
+      "text": "wake me at six thirty in the morning",
+      "expected_transcription": "wake me at 6:30 AM",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/wake_me_at_six_thirty_in_the_morning_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_wake_me_at_six_thirty_in_the_morning_guy",
+      "text": "wake me at six thirty in the morning",
+      "expected_transcription": "wake me at 6:30 AM",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/wake_me_at_six_thirty_in_the_morning_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_set_an_alarm_for_two_thirty_aria",
+      "text": "set an alarm for two thirty",
+      "expected_transcription": "set an alarm for 2:30",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/set_an_alarm_for_two_thirty_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_set_an_alarm_for_two_thirty_guy",
+      "text": "set an alarm for two thirty",
+      "expected_transcription": "set an alarm for 2:30",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/set_an_alarm_for_two_thirty_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_value_is_three_point_one_four_aria",
+      "text": "the value is three point one four",
+      "expected_transcription": "the value is 3.14",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_value_is_three_point_one_four_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_value_is_three_point_one_four_guy",
+      "text": "the value is three point one four",
+      "expected_transcription": "the value is 3.14",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_value_is_three_point_one_four_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_version_is_two_point_seven_aria",
+      "text": "the version is two point seven",
+      "expected_transcription": "the version is 2.7",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_version_is_two_point_seven_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_version_is_two_point_seven_guy",
+      "text": "the version is two point seven",
+      "expected_transcription": "the version is 2.7",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_version_is_two_point_seven_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_battery_is_at_fifty_percent_aria",
+      "text": "battery is at fifty percent",
+      "expected_transcription": "battery is at 50%",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/battery_is_at_fifty_percent_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_battery_is_at_fifty_percent_guy",
+      "text": "battery is at fifty percent",
+      "expected_transcription": "battery is at 50%",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/battery_is_at_fifty_percent_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_discount_is_twenty_five_percent_aria",
+      "text": "the discount is twenty five percent",
+      "expected_transcription": "the discount is 25%",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_discount_is_twenty_five_percent_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_discount_is_twenty_five_percent_guy",
+      "text": "the discount is twenty five percent",
+      "expected_transcription": "the discount is 25%",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_discount_is_twenty_five_percent_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_date_is_january_first_twenty_twenty_six_aria",
+      "text": "the date is January first twenty twenty six",
+      "expected_transcription": "the date is January 1, 2026",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_date_is_january_first_twenty_twenty_six_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_date_is_january_first_twenty_twenty_six_guy",
+      "text": "the date is January first twenty twenty six",
+      "expected_transcription": "the date is January 1, 2026",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_date_is_january_first_twenty_twenty_six_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_she_was_born_on_may_fifteenth_aria",
+      "text": "she was born on May fifteenth",
+      "expected_transcription": "she was born on May 15",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/she_was_born_on_may_fifteenth_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_she_was_born_on_may_fifteenth_guy",
+      "text": "she was born on May fifteenth",
+      "expected_transcription": "she was born on May 15",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/she_was_born_on_may_fifteenth_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_call_me_at_five_five_five_one_two_one_two_aria",
+      "text": "call me at five five five one two one two",
+      "expected_transcription": "call me at 555-1212",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/call_me_at_five_five_five_one_two_one_two_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_call_me_at_five_five_five_one_two_one_two_guy",
+      "text": "call me at five five five one two one two",
+      "expected_transcription": "call me at 555-1212",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/call_me_at_five_five_five_one_two_one_two_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_number_is_five_five_five_eight_three_two_five_seven_six_four_aria",
+      "text": "the number is five five five eight three two five seven six four",
+      "expected_transcription": "the number is 555-832-5764",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_number_is_five_five_five_eight_three_two_five_seven_six_four_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_number_is_five_five_five_eight_three_two_five_seven_six_four_guy",
+      "text": "the number is five five five eight three two five seven six four",
+      "expected_transcription": "the number is 555-832-5764",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_number_is_five_five_five_eight_three_two_five_seven_six_four_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_send_it_to_john_at_example_dot_com_aria",
+      "text": "send it to john at example dot com",
+      "expected_transcription": "send it to john@example.com",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/send_it_to_john_at_example_dot_com_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_send_it_to_john_at_example_dot_com_guy",
+      "text": "send it to john at example dot com",
+      "expected_transcription": "send it to john@example.com",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/send_it_to_john_at_example_dot_com_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_visit_example_dot_com_aria",
+      "text": "visit example dot com",
+      "expected_transcription": "visit example.com",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/visit_example_dot_com_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_visit_example_dot_com_guy",
+      "text": "visit example dot com",
+      "expected_transcription": "visit example.com",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/visit_example_dot_com_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_connect_to_one_nine_two_dot_one_six_eight_dot_one_dot_seventeen_aria",
+      "text": "connect to one nine two dot one six eight dot one dot seventeen",
+      "expected_transcription": "connect to 192.168.1.17",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/connect_to_one_nine_two_dot_one_six_eight_dot_one_dot_seventeen_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_connect_to_one_nine_two_dot_one_six_eight_dot_one_dot_seventeen_guy",
+      "text": "connect to one nine two dot one six eight dot one dot seventeen",
+      "expected_transcription": "connect to 192.168.1.17",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/connect_to_one_nine_two_dot_one_six_eight_dot_one_dot_seventeen_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_room_number_is_one_one_five_nine_aria",
+      "text": "the room number is one one five nine",
+      "expected_transcription": "the room number is 1159",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_room_number_is_one_one_five_nine_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_room_number_is_one_one_five_nine_guy",
+      "text": "the room number is one one five nine",
+      "expected_transcription": "the room number is 1159",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_room_number_is_one_one_five_nine_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_meeting_is_in_boston_on_friday_aria",
+      "text": "the meeting is in Boston on Friday",
+      "expected_transcription": "the meeting is in Boston on Friday",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/the_meeting_is_in_boston_on_friday_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_the_meeting_is_in_boston_on_friday_guy",
+      "text": "the meeting is in Boston on Friday",
+      "expected_transcription": "the meeting is in Boston on Friday",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/the_meeting_is_in_boston_on_friday_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_john_went_to_microsoft_headquarters_aria",
+      "text": "John went to Microsoft headquarters",
+      "expected_transcription": "John went to Microsoft headquarters",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/john_went_to_microsoft_headquarters_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_john_went_to_microsoft_headquarters_guy",
+      "text": "John went to Microsoft headquarters",
+      "expected_transcription": "John went to Microsoft headquarters",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/john_went_to_microsoft_headquarters_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_we_use_python_and_javascript_aria",
+      "text": "we use Python and JavaScript",
+      "expected_transcription": "we use Python and JavaScript",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/we_use_python_and_javascript_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_we_use_python_and_javascript_guy",
+      "text": "we use Python and JavaScript",
+      "expected_transcription": "we use Python and JavaScript",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/we_use_python_and_javascript_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_bill_smith_called_this_morning_aria",
+      "text": "Bill Smith called this morning",
+      "expected_transcription": "Bill Smith called this morning",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/bill_smith_called_this_morning_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_bill_smith_called_this_morning_guy",
+      "text": "Bill Smith called this morning",
+      "expected_transcription": "Bill Smith called this morning",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/bill_smith_called_this_morning_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_dolores_wrote_the_report_aria",
+      "text": "Dolores wrote the report",
+      "expected_transcription": "Dolores wrote the report",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/dolores_wrote_the_report_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_dolores_wrote_the_report_guy",
+      "text": "Dolores wrote the report",
+      "expected_transcription": "Dolores wrote the report",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/dolores_wrote_the_report_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_edward_hopper_painted_nighthawks_aria",
+      "text": "Edward Hopper painted Nighthawks",
+      "expected_transcription": "Edward Hopper painted Nighthawks",
+      "category": "itn",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "file": "itn/edward_hopper_painted_nighthawks_aria.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "it_edward_hopper_painted_nighthawks_guy",
+      "text": "Edward Hopper painted Nighthawks",
+      "expected_transcription": "Edward Hopper painted Nighthawks",
+      "category": "itn",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "file": "itn/edward_hopper_painted_nighthawks_guy.wav",
+      "is_litmus": false
+    },
+    {
+      "id": "lt_delete_aria_normal",
+      "text": "delete",
+      "expected_transcription": "delete",
+      "category": "litmus",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "variant": "normal",
+      "file": "litmus/delete_aria_normal.wav",
+      "is_litmus": true
+    },
+    {
+      "id": "lt_delete_guy_normal",
+      "text": "delete",
+      "expected_transcription": "delete",
+      "category": "litmus",
+      "voice": "en-US-GuyNeural",
+      "rate": "+0%",
+      "variant": "normal",
+      "file": "litmus/delete_guy_normal.wav",
+      "is_litmus": true
+    },
+    {
+      "id": "lt_delete_aria_slow",
+      "text": "delete",
+      "expected_transcription": "delete",
+      "category": "litmus",
+      "voice": "en-US-AriaNeural",
+      "rate": "-20%",
+      "variant": "slow",
+      "file": "litmus/delete_aria_slow.wav",
+      "is_litmus": true
+    },
+    {
+      "id": "lt_delete_aria_fast",
+      "text": "delete",
+      "expected_transcription": "delete",
+      "category": "litmus",
+      "voice": "en-US-AriaNeural",
+      "rate": "+30%",
+      "variant": "fast",
+      "file": "litmus/delete_aria_fast.wav",
+      "is_litmus": true
+    },
+    {
+      "id": "lt_delete_aria_soft",
+      "text": "delete",
+      "expected_transcription": "delete",
+      "category": "litmus",
+      "voice": "en-US-AriaNeural",
+      "rate": "+0%",
+      "variant": "soft",
+      "file": "litmus/delete_aria_soft.wav",
+      "is_litmus": true
+    }
+  ]
+}

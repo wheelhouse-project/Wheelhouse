@@ -1,0 +1,83 @@
+# Provenance manifest for binary assets shipped in this repository.
+#
+# Every binary file in the release (audio, images, models) is listed here
+# with where it came from and the license it is distributed under. The
+# release pipeline verifies this file stays in sync: an unlisted binary,
+# or a listed asset missing from the tree, fails the export.
+
+# --- Notification sounds -------------------------------------------------
+# All nine beep/notification sounds are sound effects from Pixabay,
+# distributed under the Pixabay Content License
+# (https://pixabay.com/service/license-summary/), which permits free
+# commercial use and redistribution as part of a larger work, with no
+# attribution required. Attribution given anyway: each entry links its
+# source page.
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/alert-ding-tone-383727.mp3"
+origin = "https://pixabay.com/sound-effects/alert-ding-tone-383727/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/beep-104060.mp3"
+origin = "https://pixabay.com/sound-effects/beep-104060/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/beep-401570.mp3"
+origin = "https://pixabay.com/sound-effects/beep-401570/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/beep-sound-short-237619.mp3"
+origin = "https://pixabay.com/sound-effects/beep-sound-short-237619/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/minimal-ui-pop-383735.mp3"
+origin = "https://pixabay.com/sound-effects/minimal-ui-pop-383735/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/new-notification-018-363746.mp3"
+origin = "https://pixabay.com/sound-effects/new-notification-018-363746/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/short-beep-351721.mp3"
+origin = "https://pixabay.com/sound-effects/short-beep-351721/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/short-beep-tone-47916.mp3"
+origin = "https://pixabay.com/sound-effects/short-beep-tone-47916/"
+license = "Pixabay Content License"
+
+[[asset]]
+path = "services/wheelhouse/Sounds/Beeps/system-notification-02-352442.mp3"
+origin = "https://pixabay.com/sound-effects/system-notification-02-352442/"
+license = "Pixabay Content License"
+
+# --- Wake-word model -----------------------------------------------------
+# The default "computer" wake-word model is an openWakeWord community
+# model from the Home Assistant wakewords collection (MIT).
+
+[[asset]]
+path = "services/stt_providers/shared/data/wake_words/computer_v2.onnx"
+origin = "https://github.com/fwartner/home-assistant-wakewords-collection (en/computer)"
+license = "MIT"
+
+# --- Project artwork ------------------------------------------------------
+# The icon and plaque image were AI-generated at the maintainer's
+# direction, for this project. They are distributed with the project
+# under its license to the extent rights subsist in them.
+
+[[asset]]
+path = "services/wheelhouse/WheelHouse.ico"
+origin = "AI-generated for WheelHouse at the maintainer's direction"
+license = "Apache-2.0 (project license)"
+
+[[asset]]
+path = "services/wheelhouse/wheelhouse_plaque.jpg"
+origin = "AI-generated for WheelHouse at the maintainer's direction"
+license = "Apache-2.0 (project license)"
