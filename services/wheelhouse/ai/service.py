@@ -153,10 +153,18 @@ class AIService:
         """
         base_url = self._config.get("ai.server.base_url", "")
         return OpenAIProvider(
-            api_key=self._config.get("ai.server.api_key", ""),
+            # The API key is never read from config.toml: that file is tracked
+            # in git, so a stored secret is one commit from leaking. Passing an
+            # empty key makes OpenAIProvider read WHEELHOUSE_AI_API_KEY from the
+            # environment instead (wh-ai-key-from-env).
+            api_key="",
             model=self._config.get("ai.server.model", ""),
             base_url=base_url or "http://localhost:8781/v1",
             timeout_s=self._config.get("ai.server.timeout_s", 60),
+            # Tell the provider whether this is a cloud endpoint so it can
+            # suppress the non-/v1 warning for cloud paths like Gemini's
+            # /v1beta/openai/ (finding 1.4).
+            is_cloud=(self._server_kind() == "cloud"),
         )
 
     async def stop(self) -> None:

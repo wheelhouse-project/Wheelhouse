@@ -5,6 +5,41 @@ All notable changes to WheelHouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-07-16
+
+### Added
+
+- Graphical installer: `WheelHouse-Setup.exe`, a click-through setup wizard
+  that runs the PowerShell installer for you. Built and attached to each
+  release automatically. The download is unsigned in this release, so
+  Windows SmartScreen shows a warning; see INSTALL.md for the
+  "More info" / "Run anyway" steps.
+- Installer AI setup step: choose whether to enable the AI text-correction
+  and help features and which server they use. The installer writes the
+  server settings into `config.toml` and stores the API key in your user
+  environment (never in a file); uninstalling removes the stored key, and
+  re-running the installer preserves an existing AI setup by default.
+- Installer options for unattended runs (`-SttProvider`, `-AutoStart`,
+  `-StartNow`, machine-readable progress output) -- these are what the
+  graphical wizard uses to drive the install without console prompts.
+- "pattern manager" is now accepted as a spoken trigger for the Pattern
+  Manager, alongside "x-ray patterns".
+
+### Fixed
+
+- Speech-engine fallback now resolves to the local Parakeet engine instead
+  of cloud Google STT when the configured provider is unavailable -- audio
+  no longer leaves the machine unless you explicitly chose a cloud engine.
+- The AI API key is read from the environment, not from `config.toml`, so
+  a shared or backed-up config file cannot leak it.
+- Removed a misleading warning about cloud AI endpoints whose URL does not
+  end in `/v1`.
+- Dictation now uses the fast caret-position read it was designed to use,
+  instead of always taking the slow fallback path.
+- Quieter logs: per-keystroke and per-word diagnostic lines no longer
+  repeat at INFO level during normal dictation.
+- Corrected stale voice-command names and examples in the in-app help.
+
 ## [1.0.0] - 2026-07-12
 
 First public release. WheelHouse was developed privately as its author's

@@ -51,7 +51,10 @@ class MicrophoneStream:
         self.overflow_callback = overflow_callback
 
         self._stream = None
-        self._q = queue.Queue(maxsize=100)
+        # ~10s of audio at 30ms chunks -- matches WinRTAudioCapture: survives
+        # consumer stalls from whole-machine CPU saturation without dropping
+        # (wh-stt-audio-consumer-behind-realtime).
+        self._q = queue.Queue(maxsize=333)
 
         # Initialize overflow monitoring
         overflow_config = OverflowConfig(

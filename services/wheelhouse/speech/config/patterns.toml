@@ -576,7 +576,7 @@ actions = [
 # =============================================================================
 
 [[pattern]]
-pattern = '''^patterns?$'''
+pattern = '''^(?:patterns?|pattern manager)$'''
 requires_hotword = true
 actions = [
     { function = "open_pattern_manager" }
@@ -610,10 +610,11 @@ actions = [
     { function = "click_element", params = ["g1"], awaits_done = true }
 ]
 
-# Numbered-overlay toggle (wh-n29v.17). Hotword-gated, matching the
-# "click <name>" style. Anchored "^show numbers$" / "^hide numbers$" so they
-# do not start with "click" and never collide with the broad click pattern
-# above. The action delegates to LogicController.handle_overlay_command, which
+# Numbered-overlay toggle (wh-n29v.17; renamed and hotword dropped in
+# bc91e701). Hotword-free, matching the "click <name>" style. Anchored
+# "^apply numbers$" / "^dismiss numbers$" so they do not start with "click"
+# and never collide with the broad click pattern above.
+# The action delegates to LogicController.handle_overlay_command, which
 # applies SHOW_NUMBERS / HIDE_NUMBERS to the overlay state machine and hands
 # the returned effects to the integration stub seam (wh-h9a8v2).
 [[pattern]]

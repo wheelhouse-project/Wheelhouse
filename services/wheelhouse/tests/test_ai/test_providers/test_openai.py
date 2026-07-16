@@ -612,6 +612,30 @@ class TestListModels:
         assert caplog.text.lower().count("does not end in '/v1'".lower()) == 1
 
     @pytest.mark.asyncio
+    async def test_list_models_cloud_non_v1_does_not_warn(self, caplog):
+        """A configured cloud provider (is_cloud=True) legitimately uses a
+        non-/v1 path: Google's Gemini OpenAI-compatible endpoint is
+        /v1beta/openai/. The 'does not end in /v1' warning -- whose only purpose
+        is the LOCAL Ollama /api/tags fallback -- must NOT fire for it, or every
+        cloud-AI startup logs a misleading warning the user cannot act on
+        (deepseek round 2, finding 1.4)."""
+        import logging
+        p = OpenAIProvider(
+            api_key="",
+            model="m",
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            is_cloud=True,
+        )
+        mock_resp = make_mock_response(status=404, json_data={})
+        session = AsyncMock()
+        session.get = MagicMock(return_value=mock_resp)
+        with caplog.at_level(logging.WARNING):
+            with patch.object(p, "_get_session", return_value=session):
+                await p.list_models()
+                await p.list_models()
+        assert "does not end in '/v1'".lower() not in caplog.text.lower()
+
+    @pytest.mark.asyncio
     async def test_list_models_failure_returns_empty(self, provider):
         session = AsyncMock()
         session.get = MagicMock(side_effect=aiohttp.ClientConnectionError("down"))

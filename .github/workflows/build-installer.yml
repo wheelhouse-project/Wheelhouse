@@ -1,0 +1,286 @@
+# Build the graphical installer (WheelHouse-Setup.exe) and attach it to a release.
+#
+# This runs in the PUBLIC repo. It compiles the Inno Setup wizard
+# (installer/WheelHouse-Setup.iss) into WheelHouse-Setup.exe and uploads it to an
+# already-published GitHub release, so releases/latest/download/WheelHouse-Setup.exe
+# serves the newest build (whichever release the author marked "latest").
+#
+# WHY IT TRIGGERS ON A PUBLISHED RELEASE, NOT A TAG PUSH
+# ------------------------------------------------------
+# The wizard bundles the engine (install-wheelhouse.ps1). The engine committed at
+# the repo ROOT is deliberately UNSTAMPED: it carries the literal <ARCHIVE-SHA256>
+# placeholder because it ships inside the app archive and cannot contain that
+# archive's own hash (a fixed-point paradox). The engine that has the real archive
+# hash and the release version stamped in is produced by `export_release.py
+# --package` and uploaded by the release author as a release ASSET, alongside the
+# app archive. So the release author's flow is:
+#
+#   1. run  export_release.py --package  -> app archive + STAMPED install-wheelhouse.ps1
+#   2. gh release create vX.Y.Z ... --draft  (or the web UI)
+#   3. upload BOTH files (archive + stamped engine) to that release
+#   4. publish the release  ->  this workflow fires
+#
+# The workflow then downloads the STAMPED engine from the release, compiles the
+# .exe against it, and uploads the .exe back to the same release. Bundling the
+# committed placeholder engine instead would make every end-user install abort at
+# the archive integrity check (wh-build-exe-review.3), so a guard below refuses to
+# build if the downloaded engine still holds the placeholder.
+#
+# The version is passed to ISCC as a BARE /DAppVer define. Quoting it makes pwsh
+# hand ISCC literal backslash-quotes, which becomes an invalid VersionInfoVersion
+# and fails every compile (wh-build-exe-review.1). A bare /D value is never
+# numeric-collapsed; only a numeric literal written in .iss source is.
+#
+# v1 ships UNSIGNED by decision (installer spec section 12): users see the
+# SmartScreen "Windows protected your PC" warning. The signing step slots in where
+# the marked placeholder is, before the .exe is uploaded. Because the build is
+# unsigned, every action is pinned to a full commit SHA (wh-build-exe-review.6):
+# signing a tampered binary would just sign the tamper.
+
+name: Build installer
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build for -- the leading v is required (e.g. v1.2.3). The release must already carry the stamped install-wheelhouse.ps1 asset.'
+        required: true
+
+permissions:
+  contents: write        # download the stamped engine + upload the exe asset
+
+concurrency:
+  group: build-installer-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false   # never cancel a release build partway through
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          # Pin to the release tag so a workflow_dispatch re-run rebuilds the
+          # EXACT tagged wizard, not the current branch tip. A bare checkout
+          # resolves to the tag on release: published but to the selected branch
+          # on a manual re-run, which would pair the current wizard with the old
+          # stamped engine and --clobber the known-good asset
+          # (wh-build-exe-review.10).
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Resolve release tag and version
+        id: rel
+        shell: pwsh
+        run: |
+          # Strict error handling: a cmdlet failure terminates the step. Native
+          # command failures stay on the explicit $LASTEXITCODE checks
+          # ($PSNativeCommandUseErrorActionPreference pinned $false; wh-build-exe-review.21).
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = '${{ github.event.release.tag_name }}'
+          if (-not $tag) { $tag = '${{ inputs.tag }}' }
+          if (-not $tag) { throw 'No release tag resolved (release event or workflow_dispatch tag input required).' }
+          # Require the leading v BEFORE stripping it. The shipped engine builds
+          # its default archive URL as .../releases/download/v<version>/..., so a
+          # tag without the leading v (e.g. 1.2.3) would pass a numeric-only check
+          # yet ship an installer whose default download URL 404s
+          # (wh-build-exe-review.9).
+          if ($tag -notmatch '^v\d+(\.\d+){1,3}$') {
+            throw "Tag '$tag' must be a v-prefixed numeric version like v1.2.3. The installer's default archive URL is built as .../download/v<version>/..., so a tag without the leading v ships an installer that 404s (wh-build-exe-review.9)."
+          }
+          $version = $tag -replace '^v', ''
+          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Building installer for $tag (version $version)"
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        # Pin an Inno Setup version that actually exists on the Chocolatey
+        # community feed. 6.7.3 is a real upstream release but is NOT packaged on
+        # Chocolatey (the feed tops out at 6.7.1), so pinning it failed this step
+        # on every build before anything compiled (wh-build-exe-review.12). Bump
+        # this only to a version confirmed installable from the feed.
+        run: choco install innosetup --version=6.7.1 -y --no-progress
+
+      - name: Fetch the stamped engine from the release
+        shell: pwsh
+        run: |
+          # Strict error handling: a cmdlet failure terminates the step. Native
+          # command failures stay on the explicit $LASTEXITCODE checks
+          # ($PSNativeCommandUseErrorActionPreference pinned $false; wh-build-exe-review.21).
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = '${{ steps.rel.outputs.tag }}'
+          $version = '${{ steps.rel.outputs.version }}'
+          # Download the STAMPED engine (release asset) beside the wizard. installer/
+          # already holds WheelHouse-Setup.iss (shipped by the manifest); the engine
+          # lands next to it so the wizard's bare-sibling Source path resolves.
+          gh release download $tag --repo '${{ github.repository }}' --pattern 'install-wheelhouse.ps1' --dir installer --clobber
+          # A failed native command does NOT fail a pwsh step on its own; check
+          # explicitly so a download failure reports its real cause (network,
+          # auth, rate limit, missing release) rather than falling through to the
+          # missing-asset message below (wh-build-exe-review.8).
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed (exit $LASTEXITCODE) for '$tag' -- likely a network, auth, rate-limit, or missing-release problem, not a missing asset." }
+          $engine = Join-Path 'installer' 'install-wheelhouse.ps1'
+          if (-not (Test-Path $engine)) { throw "The release '$tag' has no install-wheelhouse.ps1 asset; upload the stamped installer before publishing." }
+          $text = Get-Content $engine -Raw
+          # Guard wh-build-exe-review.3: refuse to bundle the unstamped placeholder engine.
+          if ($text -match '<ARCHIVE-SHA256>') {
+            throw "The release's install-wheelhouse.ps1 still holds the <ARCHIVE-SHA256> placeholder: it is the unstamped engine. Upload the export_release.py --package output (the stamped installer) to the release, then re-run."
+          }
+          # Guard the version: the stamped engine must target this exact release.
+          $verPattern = '\$AppVersion\s*=\s*"' + [regex]::Escape($version) + '"'
+          if ($text -notmatch $verPattern) {
+            throw "The release's engine `$AppVersion does not match tag version $version. Re-stamp for $version and re-upload."
+          }
+          Write-Host "Stamped engine verified for version $version."
+
+      - name: Verify the app archive matches the stamped engine
+        shell: pwsh
+        run: |
+          # Strict error handling: a cmdlet failure terminates the step. Native
+          # command failures stay on the explicit $LASTEXITCODE checks
+          # ($PSNativeCommandUseErrorActionPreference pinned $false; wh-build-exe-review.21).
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = '${{ steps.rel.outputs.tag }}'
+          $version = '${{ steps.rel.outputs.version }}'
+          # wh-build-exe-review.13: the engine only carries the archive's hash; the
+          # earlier guards never proved the archive itself exists and is correct on
+          # the release. A stamped engine paired with a missing, wrong, or corrupt
+          # wheelhouse-<version>.zip passed every guard, ISCC built, the exe was
+          # attached, and then every default end-user install 404s or aborts at the
+          # integrity check. Verify here -- BEFORE compilation -- that the archive
+          # the installer will download exists and its bytes match the hash stamped
+          # into the engine.
+          $engine = Join-Path 'installer' 'install-wheelhouse.ps1'
+          $text = Get-Content $engine -Raw
+          $shaMatches = [regex]::Matches($text, '\$DefaultArchiveSha256\s*=\s*"([0-9a-fA-F]{64})"')
+          if ($shaMatches.Count -ne 1) {
+            throw "Expected exactly one 64-hex `$DefaultArchiveSha256 in the stamped engine; found $($shaMatches.Count). The engine is not correctly stamped (wh-build-exe-review.13)."
+          }
+          $expected = $shaMatches[0].Groups[1].Value.ToLower()
+          gh release download $tag --repo '${{ github.repository }}' --pattern "wheelhouse-$version.zip" --dir archive --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed for wheelhouse-$version.zip (exit $LASTEXITCODE); the required app archive asset is missing or unreachable on release '$tag' (wh-build-exe-review.13)." }
+          $zip = Join-Path 'archive' "wheelhouse-$version.zip"
+          if (-not (Test-Path $zip)) { throw "The release '$tag' has no wheelhouse-$version.zip asset; publish the app archive before building the installer (wh-build-exe-review.13)." }
+          $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "App archive SHA256 mismatch: the stamped engine expects $expected but wheelhouse-$version.zip hashes to $actual. Re-stamp and re-upload so the engine and archive agree (wh-build-exe-review.13)."
+          }
+          Write-Host "App archive verified against the stamped engine ($expected)."
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          # BARE /DAppVer define (see the header note on wh-build-exe-review.1).
+          $args = @(
+            "/O$dist",
+            "/FWheelHouse-Setup",
+            "/DAppVer=${{ steps.rel.outputs.version }}",
+            "installer\WheelHouse-Setup.iss"
+          )
+          & $iscc @args
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+      # ----------------------------------------------------------------------
+      # Code signing (deferred -- v1 ships unsigned by decision).
+      # Add the signing step HERE, before the exe is uploaded, so the SIGNED
+      # exe is the one attached to the release. Planned path: Azure Trusted
+      # Signing via azure/login (OIDC, no stored secret) then
+      # azure/trusted-signing-action pointed at dist\WheelHouse-Setup.exe.
+      # See installer spec section 12.
+      # ----------------------------------------------------------------------
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: WheelHouse-Setup-exe
+          path: dist/WheelHouse-Setup.exe
+          if-no-files-found: error
+
+      - name: Attach the installer to the release
+        shell: pwsh
+        run: |
+          # Run under strict error handling so a cmdlet failure -- e.g. ConvertFrom-Json
+          # on unparseable `gh release view` output that still exited 0 -- TERMINATES the
+          # step instead of falling through with $existing = $null to the "no existing
+          # asset" branch, which would --clobber the published installer with no backup
+          # (wh-build-exe-review.21). Native command failures are deliberately kept OFF
+          # this terminating path: $PSNativeCommandUseErrorActionPreference = $false is
+          # the pwsh 7.6 default, but it is pinned here so a future default flip cannot
+          # make a failed `gh release upload --clobber` throw before the explicit
+          # $LASTEXITCODE check below, which would bypass the backup-restore logic and
+          # leave the release with no installer (wh-build-exe-review.14/.15).
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = '${{ steps.rel.outputs.tag }}'
+          $repo = '${{ github.repository }}'
+          $asset = 'WheelHouse-Setup.exe'
+          $new = "dist/$asset"
+          # Only ADD the asset to the release the author already published; never
+          # create or publish a release here, so the workflow cannot move the
+          # "latest" pointer (wh-build-exe-review.4 / .5).
+          #
+          # gh release upload --clobber DELETES the existing same-name asset before
+          # uploading its replacement. If that upload then fails (a transient
+          # network/API error on a re-run), the previous installer is gone and the
+          # stable download URL 404s (wh-build-exe-review.14). Back up the currently
+          # published installer first and restore it if the new upload fails, so a
+          # failed re-run never leaves the release with no installer.
+          #
+          # A backup download that fails for a TRANSIENT reason must NOT be mistaken
+          # for "no existing asset" -- that would run the destructive --clobber with
+          # nothing to restore (wh-build-exe-review.15). So first query the release
+          # asset metadata to learn whether the installer already exists; only then
+          # decide whether a backup is required.
+          $assetsRaw = gh release view $tag --repo $repo --json assets
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not query release '$tag' assets (exit $LASTEXITCODE) before replacing the installer; refusing to run the destructive --clobber blind (wh-build-exe-review.15)."
+          }
+          $existing = ($assetsRaw | ConvertFrom-Json).assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1
+          $haveBackup = $false
+          if ($existing) {
+            # The installer already exists on this release. A validated backup is
+            # MANDATORY before the destructive replacement; if it cannot be made,
+            # refuse to replace rather than risk losing the last good installer.
+            $backupDir = 'asset-backup'
+            New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+            gh release download $tag --repo $repo --pattern $asset --dir $backupDir --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "The release already publishes $asset but backing it up failed (exit $LASTEXITCODE); refusing to replace it so a failed upload cannot lose the last good installer. Re-run when the backup can be fetched (wh-build-exe-review.15)."
+            }
+            $backup = Join-Path $backupDir $asset
+            if (-not (Test-Path $backup)) {
+              throw "The backup download reported success but produced no $asset; refusing to replace the published installer (wh-build-exe-review.15)."
+            }
+            $expectedSize = [int64]$existing.size
+            $actualSize = (Get-Item $backup).Length
+            if ($expectedSize -gt 0 -and $actualSize -ne $expectedSize) {
+              throw "The backup of $asset is incomplete ($actualSize bytes; the release reports $expectedSize); refusing to replace the published installer with an unverifiable backup (wh-build-exe-review.15)."
+            }
+            $haveBackup = $true
+            Write-Host "Backed up the currently-published $asset ($actualSize bytes) before replacing it."
+          } else {
+            Write-Host "No existing $asset on release '$tag'; this is the first upload."
+          }
+          gh release upload $tag $new --repo $repo --clobber
+          if ($LASTEXITCODE -ne 0) {
+            if ($haveBackup) {
+              Write-Host "New upload failed; restoring the previous installer so the stable URL keeps working."
+              gh release upload $tag $backup --repo $repo --clobber
+              if ($LASTEXITCODE -ne 0) {
+                throw "The new installer upload FAILED and restoring the previous installer ALSO failed; the release '$tag' may have no installer at its stable URL -- manual recovery required (wh-build-exe-review.14)."
+              }
+              throw "The new installer upload failed; the previously-published installer was restored. Investigate and re-run (wh-build-exe-review.14)."
+            }
+            throw "gh release upload failed (exit $LASTEXITCODE) and there was no previous installer to restore; the release '$tag' has no installer attached (wh-build-exe-review.7)."
+          }
+          Write-Host "Installer attached to release $tag."

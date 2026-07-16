@@ -25,6 +25,13 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Default remote STT provider used when stt.last_provider is absent from config.
+# Must match the value config.toml.example ships (guarded by
+# tests/test_stt_default_provider.py). Kept local/offline on purpose: a config
+# that has lost the key degrades to the no-account Parakeet provider rather than
+# a cloud provider that needs a Google account (wh-stt-fallback-default-google).
+DEFAULT_STT_PROVIDER = "parakeet_tdt"
+
 class ConfigService:
     """
     A service to manage application configuration.

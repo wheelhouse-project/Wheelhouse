@@ -4,17 +4,49 @@ This module handles the "sniffing" of the current UI state to determine
 the appropriate insertion strategy.
 """
 import logging
+import threading
 import psutil
 import uiautomation as auto
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Per-word de-duplication for the terminal-detection DEBUG logging below.
+# capture_context() runs once per dictated word in the Input process, so an
+# unchanged focused target would otherwise repeat the same detection line for
+# every word (one 2026-07-16 session logged 30 identical "Not detected as
+# terminal: _DictationTextEdit" lines for 30 words). The Input process calls
+# capture_context() from more than one thread, so this state is guarded by a
+# lock. wh-context-terminal-log-dedup.
+_last_target_log: Optional[str] = None
+_last_target_log_lock = threading.Lock()
+
+
+def _log_target_detection(message: str) -> None:
+    """Log a per-call target-detection result at DEBUG, de-duplicated.
+
+    Logs ``message`` only when it differs from the previous call. That removes
+    the per-word repetition while keeping every distinct detection -- and every
+    transition between targets -- visible. ``stacklevel=2`` makes the log record
+    report the branch in capture_context() that produced the message (for
+    example ``context.py:85`` for a console host), not this helper.
+
+    The last-message state is read and updated under the lock; the
+    ``logger.debug`` call runs outside it. The worst case of a race is one extra
+    duplicate DEBUG line, which is harmless.
+    """
+    global _last_target_log
+    with _last_target_log_lock:
+        if message == _last_target_log:
+            return
+        _last_target_log = message
+    logger.debug(message, stacklevel=2)
 
 @dataclass
 class UIContext:
     """Snapshot of the current UI state."""
-    focused_control: any  # uiautomation control
+    focused_control: Any  # uiautomation control
     is_flutter: bool
     is_terminal: bool
     process_name: str
@@ -66,7 +98,7 @@ def capture_context() -> UIContext:
             # 1. Modern Windows Terminal
             if class_name == 'TermControl' and process_name == 'windowsterminal.exe':
                 is_terminal = True
-                logger.debug(f"Target is Windows Terminal (class={class_name}, process={process_name})")
+                _log_target_detection(f"Target is Windows Terminal (class={class_name}, process={process_name})")
 
             # 2. Legacy Console (Task Scheduler, CMD, or Direct Python execution)
             elif class_name == 'ConsoleWindowClass':
@@ -75,18 +107,18 @@ def capture_context() -> UIContext:
                 # - Task Scheduler launching cmd.exe
                 # - You manually running 'cmd.exe' or 'powershell.exe' (classic)
                 is_terminal = True
-                logger.debug(f"Target is Legacy Console (class={class_name}, process={process_name})")
+                _log_target_detection(f"Target is Legacy Console (class={class_name}, process={process_name})")
             
             # 3. Console Window Host (conhost.exe) - Task Scheduler execution
             elif process_name == 'conhost.exe':
                 # When WheelHouse runs from Task Scheduler, the focused control
                 # is managed by conhost.exe (Console Window Host) with empty class name
                 is_terminal = True
-                logger.debug(f"Target is Console Host (class={class_name}, process={process_name})")
-            
+                _log_target_detection(f"Target is Console Host (class={class_name}, process={process_name})")
+
             # 4. Debug logging for undetected cases
             else:
-                logger.debug(f"Not detected as terminal: class={class_name}, process={process_name}")
+                _log_target_detection(f"Not detected as terminal: class={class_name}, process={process_name}")
 
         except Exception as e:
             logger.error(f"Error capturing UI context: {e}")

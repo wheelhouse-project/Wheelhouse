@@ -58,12 +58,6 @@ SPEECH_ENABLED_ON_STARTUP = true
 SHOW_SPEECH_PULSE = true
 ICON_PATH = "WheelHouse.ico"
 
-# Optional Gemini text-correction key. Leave empty to disable. Prefer putting
-# secrets in a .env file (see .env.example) rather than here.
-GEMINI_API_KEY = ""
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
-GEMINI_PROMPT = "Fix the grammar, punctuation, spelling, spacing, and any other technical aspects of the text, and respond with the modified text. You will preserve all new lines exactly as they appear in my input. Apply standard English grammatical rules for capitalization, including capitalizing the first word of any sentence or phrase that begins on a new line."
-
 [brightness_coordinator]
 software_dimmer = "gamma_dimmer"
 unwinding_threshold = 10
@@ -199,7 +193,9 @@ knowledge_base = "knowledge/wheelhouse_help.md"
 # quietly disable themselves and everything else keeps working.
 base_url = "http://localhost:11434/v1"
 model = "gemma3:12b"
-api_key = ""
+# An API key is only needed for a cloud server (a local Ollama needs none). It
+# is NOT stored here -- set the WHEELHOUSE_AI_API_KEY environment variable
+# instead, so a secret never lands in this git-tracked file.
 timeout_s = 30
 kind = "local"
 

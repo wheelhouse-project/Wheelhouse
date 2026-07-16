@@ -196,6 +196,7 @@ def load_config() -> tuple[argparse.Namespace, AppConfig]:
         log_lifecycle=dbg.get("log_lifecycle", False),
         log_stream_responses=dbg.get("log_stream_responses", False),
         log_frame_stats=dbg.get("log_frame_stats", False),
+        log_overflow_diagnostics=dbg.get("log_overflow_diagnostics", False),
     )
 
     latency_config = LatencyConfig(

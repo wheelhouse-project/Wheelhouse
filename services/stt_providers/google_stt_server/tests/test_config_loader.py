@@ -737,3 +737,39 @@ class TestDataclassDefaults:
         """LatencyConfig requires stability_commit_threshold (no default)."""
         with pytest.raises(TypeError):
             LatencyConfig()
+
+
+# ---------------------------------------------------------------------------
+# debug.log_overflow_diagnostics wiring (wh-stt-audio-consumer-behind-realtime)
+# ---------------------------------------------------------------------------
+
+class TestDebugOverflowDiagnosticsFlag:
+    """The [debug] log_overflow_diagnostics flag must be read from config.toml.
+
+    It gates the main loop's [overflow-diag] timing block; before this fix it
+    was silently hard-coded False, so the diagnostics could never be enabled.
+    """
+
+    def _load_with_debug(self, debug_dict):
+        with patch("config_loader.argparse.ArgumentParser.parse_args", return_value=MagicMock(
+            list_devices=False, ws_host=None, ws_port=None,
+            wake_word_enabled=False, wake_word_keyword=None,
+            wake_word_sensitivity=None, wake_word_mode=None,
+            wake_word_model_dir=None,
+        )):
+            with patch("config_loader.load_config_or_exit") as mock_load:
+                with patch("config_loader.validate_config_or_exit"):
+                    with patch("config_loader._load_hints", return_value=[]):
+                        cfg_dict = _minimal_toml_dict()
+                        cfg_dict["debug"] = debug_dict
+                        mock_load.return_value = cfg_dict
+                        args, config = load_config()
+        return config
+
+    def test_log_overflow_diagnostics_true_from_config(self):
+        config = self._load_with_debug({"log_overflow_diagnostics": True})
+        assert config.debug.log_overflow_diagnostics is True
+
+    def test_log_overflow_diagnostics_defaults_false(self):
+        config = self._load_with_debug({})
+        assert config.debug.log_overflow_diagnostics is False

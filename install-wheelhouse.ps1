@@ -28,7 +28,54 @@ param(
     # irm|iex path can be overridden too: WHEELHOUSE_ARCHIVE_URL and
     # WHEELHOUSE_ARCHIVE_SHA256.
     [string]$ArchiveUrl = "",
-    [string]$ArchiveSha256 = ""
+    [string]$ArchiveSha256 = "",
+    # Speech engine, supplied by the graphical installer so its choice skips
+    # the interactive question. Empty means "ask" (the one-liner path). The
+    # ValidateSet rejects an unknown value at the command line; an unset
+    # default is exempt from validation.
+    [ValidateSet("parakeet_tdt", "google_stt", "distil_medium_en")]
+    [string]$SttProvider = "",
+    # Install-flow answers the graphical installer supplies so its yes/no
+    # questions are not asked. A yes/no string sentinel, NOT a [switch]: the
+    # installer launches this script with `powershell -File`, and under -File a
+    # switch passed as "-Switch:$false" is a hard parameter-binding error (Inno
+    # Setup passes literal args), so a switch cannot carry a definite "no". A
+    # string binds cleanly -- pass "-AutoStart no" / "-AutoStart yes". Empty
+    # (the default) means "ask", which is the interactive one-liner path.
+    [ValidateSet("yes", "no")]
+    [string]$AutoStart = "",
+    [ValidateSet("yes", "no")]
+    [string]$StartNow = "",
+    # AI helper choice, supplied by the graphical installer. "keep" (the default,
+    # meaning -AiMode was omitted) preserves an existing install's AI config on a
+    # re-run and defaults a FRESH install to off -- so a re-run without -AiMode
+    # never clobbers a working cloud setup, and a first install still does not
+    # ship AI on and pointed at an Ollama the installer never sets up (codex 2.1).
+    # "off" is explicit: it writes an empty base_url -- the documented "AI off"
+    # switch -- AND clears the persisted cloud key so no stale secret lingers in
+    # the user environment (codex 2.3). "cloud" writes Google's Gemini Flash Lite
+    # OpenAI-compatible endpoint + model + kind=cloud. -AiApiKey is the cloud key;
+    # it is routed to the environment, never config.toml (git-tracked --
+    # wh-ai-key-from-env). The graphical installer must NOT pass the key with
+    # -AiApiKey (a command line is readable via Win32_Process.CommandLine while
+    # the install runs); it sets WHEELHOUSE_AI_API_KEY_INPUT on the child process
+    # instead, which Resolve-AiApiKey reads. -AiApiKey stays for the developer /
+    # one-liner path. -AiBaseUrl / -AiModel are optional cloud overrides that
+    # default to the pinned Gemini values above.
+    [ValidateSet("keep", "off", "cloud")]
+    [string]$AiMode = "keep",
+    [string]$AiApiKey = "",
+    [string]$AiBaseUrl = "",
+    [string]$AiModel = "",
+    # Uninstall-flow answers. -Force skips the "are you sure" confirmation;
+    # -KeepData preserves personal data without asking. -Force without
+    # -KeepData removes personal data without asking. These stay bare switches
+    # (safe under -File): the wizard only ever passes them present or omits
+    # them, never "-Force:$false". The graphical installer always passes -Force
+    # for an uninstall (it cannot answer an interactive prompt); the one-liner
+    # -Uninstall path passes neither and is asked both questions.
+    [switch]$Force,
+    [switch]$KeepData
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,7 +89,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.0"
+$AppVersion = "1.0.1"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/WheelHouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -65,6 +112,18 @@ $DiskFloorBytes = 10GB           # app + venvs + model archive + extraction
 # NVIDIA PCI vendor id, for the CUDA provider offer.
 $NvidiaVendorId = 4318
 $CudaMinVramBytes = 4GB
+
+# Cloud AI defaults. The graphical installer pre-fills Google's Gemini Flash
+# Lite (OpenAI-compatible endpoint) so the user supplies only a key; the engine
+# writes these into [ai.server] for -AiMode cloud unless -AiBaseUrl / -AiModel
+# override them. The key is NEVER written to config.toml (git-tracked) -- it
+# goes to the WHEELHOUSE_AI_API_KEY environment variable (wh-ai-key-from-env).
+# This endpoint answers the app's readiness probe: Google documents a supported
+# GET /v1beta/openai/models under this root (returns 200 with a valid key), so
+# the app's is_available() check (GET base_url/models) correctly reports the
+# cloud AI as reachable rather than a false "AI not available" (deepseek 1.3).
+$DefaultAiBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/"
+$DefaultAiModel = "gemini-2.5-flash-lite"
 
 # --- Paths ------------------------------------------------------------------
 
@@ -98,6 +157,33 @@ function Write-Status { param([string]$Message) Write-Host "[+] $Message" -Foreg
 function Write-Warn { param([string]$Message) Write-Host "[!] $Message" -ForegroundColor Yellow }
 function Write-Fail { param([string]$Message) Write-Host "[x] $Message" -ForegroundColor Red }
 
+# The single choke point for every yes/no question the installer asks, so the
+# graphical installer can answer each one non-interactively. When -Specified
+# is true the caller-supplied -Value is returned and nothing is asked;
+# otherwise the user is prompted and only the exact word "yes" is a yes.
+function Resolve-YesNoChoice {
+    param([bool]$Specified, [bool]$Value, [string]$Prompt)
+    if ($Specified) { return $Value }
+    return ((Read-Host $Prompt) -eq "yes")
+}
+
+# Machine-readable progress for a wizard reading this script's stdout as a child
+# process (Write-Progress is invisible across that boundary). A PROGRESS line
+# advances a real bar; a heartbeat is emitted immediately before each silent
+# step (uv sync, archive/model extraction) so the wizard shows an honest "still
+# working" state, and the next PROGRESS milestone is the after-the-step signal
+# that it did not freeze (design 7). [Console]::Out.WriteLine targets the real
+# stdout stream directly, past any PowerShell host-redirection quirks.
+function Write-InstallProgress {
+    param([int]$Pct, [string]$Label)
+    [Console]::Out.WriteLine("PROGRESS $Pct $Label")
+}
+
+function Write-InstallHeartbeat {
+    param([string]$Label)
+    [Console]::Out.WriteLine("HEARTBEAT $Label")
+}
+
 function Write-TomlFile {
     param([string]$Path, [string[]]$Lines, [string]$NewLine = "`r`n")
     # The app reads its TOML files in binary mode with tomllib, which
@@ -116,6 +202,17 @@ function Write-TomlFile {
         $text = ($Lines -join $NewLine) + $NewLine
     }
     [System.IO.File]::WriteAllText($Path, $text, $encoding)
+}
+
+function ConvertTo-TomlBasicString {
+    param([string]$Value)
+    # Encode a TOML basic (double-quoted) string: escape backslash first, then
+    # double-quote. Enough for the values the installer writes (endpoint, model,
+    # kind) and any wizard override of -AiBaseUrl / -AiModel; control characters
+    # do not occur in these. Without this, an override containing a quote or
+    # backslash would produce malformed TOML and the app's tomllib load would
+    # reject the whole config.
+    '"' + ($Value -replace '\\', '\\' -replace '"', '\"') + '"'
 }
 
 function Stop-Install {
@@ -356,6 +453,58 @@ function Add-DirToUserPath {
         $key.Close()
     }
     Send-EnvironmentChangeBroadcast
+}
+
+function Set-UserEnvVar {
+    param([string]$Name, [string]$Value)
+    # Persist a User-scope environment variable (HKCU\Environment) and tell
+    # running programs, so a shortcut launched from the current Explorer sees
+    # it without a sign-out. Wrapped in its own function so the key-routing
+    # logic (Set-AiApiKeyEnv) can be tested without mutating the real user
+    # environment. A plain secret carries no %VARIABLE% to preserve, so the
+    # REG_SZ that SetEnvironmentVariable writes is correct here (unlike PATH,
+    # which must keep its REG_EXPAND_SZ kind).
+    [Environment]::SetEnvironmentVariable($Name, $Value, "User")
+    Send-EnvironmentChangeBroadcast
+}
+
+function Set-AiApiKeyEnv {
+    param([string]$Key)
+    # Route the cloud AI key to the environment, never config.toml (git-tracked
+    # -- wh-ai-key-from-env). Persist it User-scope for future launches AND set
+    # it in this process so the optional "start now" child launched at the end
+    # of the install inherits it (a freshly-persisted User var is not yet in
+    # this process's own environment block).
+    Set-UserEnvVar -Name "WHEELHOUSE_AI_API_KEY" -Value $Key
+    $env:WHEELHOUSE_AI_API_KEY = $Key
+}
+
+function Clear-AiApiKeyEnv {
+    # Explicitly turning AI off removes the persisted cloud key (codex 2.3).
+    # Leaving a stale secret in the user environment is a hygiene problem and a
+    # latent cost/leak risk: a later accidental AI re-enable would silently reach
+    # a paid endpoint with the old key. Passing "" to Set-UserEnvVar removes the
+    # User-scope variable (.NET deletes a User/Machine var set to empty), reusing
+    # the same wrapper Set-AiApiKeyEnv persists through so it is stub-testable.
+    # Then clear this process's copy so an optional "start now" child does not
+    # inherit it. Only EXPLICIT "off" clears the key; "keep" never touches it.
+    Set-UserEnvVar -Name "WHEELHOUSE_AI_API_KEY" -Value ""
+    Remove-Item Env:\WHEELHOUSE_AI_API_KEY -ErrorAction SilentlyContinue
+}
+
+function Resolve-AiApiKey {
+    param([string]$AiApiKey)
+    # Resolve the cloud key without exposing it on the installer's command line.
+    # The graphical installer sets WHEELHOUSE_AI_API_KEY_INPUT on this child
+    # process instead of passing -AiApiKey, because a command line is readable
+    # via Win32_Process.CommandLine by any local process for the duration of the
+    # install (a transient exposure the git-tracked-file rule does not cover).
+    # An explicit -AiApiKey still wins for the developer / one-liner path. This
+    # input var is distinct from the persisted WHEELHOUSE_AI_API_KEY that the
+    # app reads at runtime.
+    if ($AiApiKey) { return $AiApiKey }
+    if ($env:WHEELHOUSE_AI_API_KEY_INPUT) { return $env:WHEELHOUSE_AI_API_KEY_INPUT }
+    return ""
 }
 
 function Install-Uv {
@@ -860,11 +1009,27 @@ function Get-CurrentProvider {
 }
 
 function Select-SttProvider {
-    param([bool]$CudaCapable, [string]$CurrentProvider = "")
+    param([bool]$CudaCapable, [string]$CurrentProvider = "", [string]$SttProvider = "")
     $names = @{
         "parakeet_tdt" = "Parakeet"
         "google_stt" = "Google Cloud"
         "distil_medium_en" = "Distil-Whisper"
+    }
+    # Non-interactive path: the graphical installer supplies the engine
+    # directly, so the speech-engine question is skipped entirely. An unknown
+    # value is a caller bug and stops rather than installing a nonexistent
+    # engine; Distil-Whisper asked for without a capable NVIDIA card falls
+    # back to Parakeet, mirroring the interactive path that never offers it
+    # there.
+    if ($SttProvider) {
+        if (-not $names.ContainsKey($SttProvider)) {
+            throw "Unknown speech engine '$SttProvider'. Valid values: parakeet_tdt, google_stt, distil_medium_en."
+        }
+        if ($SttProvider -eq "distil_medium_en" -and -not $CudaCapable) {
+            Write-Warn "Distil-Whisper needs an NVIDIA graphics card, which was not detected; using Parakeet instead."
+            return "parakeet_tdt"
+        }
+        return $SttProvider
     }
     # On an update, pressing Enter keeps the engine the user already has --
     # as long as it is still offerable on this hardware.
@@ -1045,6 +1210,119 @@ function Write-UserConfig {
     Write-Status "Configuration written (speech engine: $Provider)."
 }
 
+function Set-TomlSectionValues {
+    param(
+        [string]$ConfigPath,
+        [string]$Section,
+        $Updates
+    )
+    # Update-or-insert each key of $Updates inside the named TOML section,
+    # section-scoped and BOM-less and line-ending preserving (same approach as
+    # Set-TomlProviderDisabled). $Updates maps a key to its RAW TOML value text
+    # -- the caller encodes it (a quoted basic string via ConvertTo-
+    # TomlBasicString, or a bare true/false). The section header is matched
+    # exactly on its dotted name, so -Section "ai" never matches [ai.server] or
+    # [ai.help], and -Section "ai.server" never matches [ai] or [ai.help].
+    if (-not (Test-Path $ConfigPath)) { return }
+
+    # Build the header pattern from the literal section name. Each dotted part is
+    # regex-escaped (a literal name matches a literal name), then the parts are
+    # joined with a whitespace-tolerant dot: TOML allows optional whitespace
+    # around the dot in a table header, so [ai . server] is the SAME table as
+    # [ai.server] and must update in place, not append a duplicate table (which
+    # tomllib then refuses to load -- defining a table twice is invalid TOML).
+    $escapedParts = ($Section -split '\.') | ForEach-Object { [regex]::Escape($_) }
+    $namePattern = $escapedParts -join '\s*\.\s*'
+    $headerPattern = "^\s*\[\s*$namePattern\s*\]\s*(#.*)?$"
+
+    # .NET read: Get-Content without -Encoding decodes BOM-less UTF-8 as ANSI on
+    # PowerShell 5.1 and corrupts any non-ASCII byte. Preserve the file's
+    # existing line-ending style (the shipped config.toml.example is LF).
+    $raw = [System.IO.File]::ReadAllText($ConfigPath)
+    $newLine = if ($raw -match "`r`n") { "`r`n" } else { "`n" }
+    $lines = [System.IO.File]::ReadAllLines($ConfigPath)
+
+    $out = New-Object System.Collections.Generic.List[string]
+    $inSection = $false
+    $sectionSeen = $false
+    $written = @{}
+    foreach ($k in $Updates.Keys) { $written[$k] = $false }
+
+    foreach ($line in $lines) {
+        # The target header. Matched before the generic "any header ends the
+        # section" check below so entering is not mistaken for leaving.
+        if ($line -match $headerPattern) {
+            $inSection = $true
+            $sectionSeen = $true
+            $out.Add($line)
+            continue
+        }
+        # Any other section header closes the target section: flush not-yet-
+        # written keys before leaving so an inserted key lands inside it.
+        if ($inSection -and $line -match '^\s*\[') {
+            foreach ($k in $Updates.Keys) {
+                if (-not $written[$k]) {
+                    $out.Add("$k = $($Updates[$k])")
+                    $written[$k] = $true
+                }
+            }
+            $inSection = $false
+        }
+        if ($inSection) {
+            # \s*= (not just the key) so "model" never matches a "model_path"
+            # line; same anchoring the last_provider rewrite uses.
+            $matched = $false
+            foreach ($k in $Updates.Keys) {
+                if ($line -match "^\s*$k\s*=") {
+                    $out.Add("$k = $($Updates[$k])")
+                    $written[$k] = $true
+                    $matched = $true
+                    break
+                }
+            }
+            if ($matched) { continue }
+        }
+        $out.Add($line)
+    }
+    # The target was the file's last section: flush remaining keys at EOF.
+    if ($inSection) {
+        foreach ($k in $Updates.Keys) {
+            if (-not $written[$k]) { $out.Add("$k = $($Updates[$k])") }
+        }
+    }
+    # The section is absent (a very old preserved config): append it so an
+    # intended write is applied rather than silently lost.
+    if (-not $sectionSeen) {
+        if ($out.Count -gt 0 -and $out[$out.Count - 1] -ne "") { $out.Add("") }
+        $out.Add("[$Section]")
+        foreach ($k in $Updates.Keys) { $out.Add("$k = $($Updates[$k])") }
+    }
+    Write-TomlFile -Path $ConfigPath -Lines $out.ToArray() -NewLine $newLine
+}
+
+function Set-AiServerConfig {
+    param(
+        [string]$ConfigPath,
+        [string]$BaseUrl,
+        [string]$Model,
+        [string]$Kind
+    )
+    # Writes the [ai.server] section from the installer's AI choice. base_url
+    # (empty = AI off, the documented switch at ai/service.py _ai_off) and kind
+    # are always set; model only when the caller passes it (the "off" path
+    # leaves the shipped model alone -- an empty base_url already disables AI).
+    # NEVER writes api_key: the cloud key goes to the environment, never this
+    # git-tracked file (wh-ai-key-from-env). Delegates the section surgery to
+    # Set-TomlSectionValues; the values are TOML-escaped so a wizard override of
+    # base_url/model containing a quote or backslash cannot corrupt the config.
+    $updates = [ordered]@{ base_url = (ConvertTo-TomlBasicString $BaseUrl) }
+    if ($PSBoundParameters.ContainsKey('Model')) {
+        $updates['model'] = (ConvertTo-TomlBasicString $Model)
+    }
+    $updates['kind'] = (ConvertTo-TomlBasicString $Kind)
+    Set-TomlSectionValues -ConfigPath $ConfigPath -Section "ai.server" -Updates $updates
+}
+
 function Write-ModelOverrideFile {
     # The per-machine model-path channel: the provider resolves
     # [parakeet_tdt].model_path from this file ahead of its tracked config.
@@ -1103,20 +1381,28 @@ function Invoke-Uninstall {
     }
     Test-RunningWheelHouse
 
-    $confirm = Read-Host "Remove WheelHouse from this computer? Type yes to continue"
-    if ($confirm -ne "yes") {
+    # -Force skips this confirmation. -Force:$false (or omitting -Force) still
+    # asks, so an accidental switch value cannot silently green-light removal.
+    $confirm = Resolve-YesNoChoice -Specified $Force.IsPresent -Value $true `
+        -Prompt "Remove WheelHouse from this computer? Type yes to continue"
+    if (-not $confirm) {
         Write-Status "Nothing was removed."
         return
     }
 
-    $keep = Read-Host "Keep your personal data (settings, voice patterns, downloaded speech model)? Type yes to keep it"
+    # -KeepData keeps data; -Force alone removes it; neither asks. Specified is
+    # true when either switch is present, and the value is whether -KeepData
+    # was the one present.
+    $keep = Resolve-YesNoChoice -Specified ($KeepData.IsPresent -or $Force.IsPresent) `
+        -Value $KeepData.IsPresent `
+        -Prompt "Keep your personal data (settings, voice patterns, downloaded speech model)? Type yes to keep it"
 
     # Re-check right before the destructive step -- the first check ran
     # before the prompts, and the app can have been started since.
     # Verified or stop: an unverifiable check must not proceed to removal.
     Test-RunningWheelHouse -RequireVerified
 
-    if ($keep -eq "yes") {
+    if ($keep) {
         # Relocate the preserved user files out of the app tree, then remove
         # the app. Models and the override file already live outside it.
         $keepDir = Join-Path $LocalRoot "preserved-user-data"
@@ -1136,6 +1422,18 @@ function Invoke-Uninstall {
         Write-Host "    Re-running the installer later will offer a fresh install; copy files back from there if you want them."
     } else {
         if (Test-Path $LocalRoot) { Remove-Item $LocalRoot -Recurse -Force }
+    }
+
+    # The persisted cloud AI key (WHEELHOUSE_AI_API_KEY) is an app credential,
+    # not user data. On a FULL removal, clear it too so a paid-endpoint key does
+    # not outlive the app in the user environment (glm52 3.1). On -KeepData we
+    # deliberately keep it: -KeepData preserves config.toml, which can enable
+    # cloud AI, and a reinstall would then have an enabled cloud config with no
+    # key (the keyless-cloud 401 deepseek 1.1 guards against). Guard the clear so
+    # a failure to remove the variable cannot abort a completed removal.
+    if (-not $keep) {
+        try { Clear-AiApiKeyEnv }
+        catch { Write-Warn "Could not clear the saved AI key from your environment: $($_.Exception.Message). You can remove WHEELHOUSE_AI_API_KEY manually in Windows Environment Variables." }
     }
 
     # The roaming root holds provider PID and port files, never user data. A
@@ -1164,11 +1462,17 @@ function Invoke-MainInstall {
 
     New-Item -ItemType Directory -Force -Path $LocalRoot | Out-Null
 
+    Write-InstallProgress 5 "Installing the package manager"
+    Write-InstallHeartbeat "Installing the package manager (uv)"
     $uv = Install-Uv
+    Write-InstallProgress 15 "Downloading WheelHouse"
+    Write-InstallHeartbeat "Downloading and unpacking WheelHouse (this can take a few minutes)"
     Install-AppArchive -Url $ArchiveUrl -Sha256 $ArchiveSha256
 
     # Core app first (fatal), then detection, then the providers the user
     # needs.
+    Write-InstallProgress 35 "Setting up WheelHouse"
+    Write-InstallHeartbeat "Setting up the WheelHouse application (this can take a few minutes)"
     Invoke-UvSync -Uv $uv -ServiceRelPath "services\wheelhouse" -Fatal | Out-Null
     $syscheckOk = Invoke-UvSync -Uv $uv -ServiceRelPath "services\syscheck"
 
@@ -1176,7 +1480,7 @@ function Invoke-MainInstall {
     if ($syscheckOk) { $cudaCapable = Get-CudaCapable -Uv $uv }
 
     $currentProvider = Get-CurrentProvider
-    $provider = Select-SttProvider -CudaCapable $cudaCapable -CurrentProvider $currentProvider
+    $provider = Select-SttProvider -CudaCapable $cudaCapable -CurrentProvider $currentProvider -SttProvider $SttProvider
 
     $providerDirs = @{
         "parakeet_tdt" = "services\stt_providers\sherpa_offline_parakeet_stt_server"
@@ -1189,6 +1493,8 @@ function Invoke-MainInstall {
     # CUDA provider is set up only when chosen -- its torch stack is large
     # and only useful on NVIDIA hardware. Anything not set up is disabled in
     # its config.
+    Write-InstallProgress 55 "Setting up speech engines"
+    Write-InstallHeartbeat "Setting up the speech engine (this can take several minutes)"
     $syncedProviders = @()
     foreach ($name in @("parakeet_tdt", "google_stt", "distil_medium_en")) {
         $shouldSync = $false
@@ -1209,11 +1515,99 @@ function Invoke-MainInstall {
         }
     }
 
+    Write-InstallProgress 75 "Speech engine ready"
+
     if ($provider -eq "parakeet_tdt") {
+        Write-InstallProgress 80 "Downloading the speech model"
+        Write-InstallHeartbeat "Downloading and unpacking the speech model (this can take a few minutes)"
         Install-ParakeetModel
     }
     Write-ModelOverrideFile
+    # Fresh-vs-update signal for the AI "keep" default below: config.toml exists
+    # here ONLY if Restore-PreservedFiles brought it back from a prior install
+    # (the release archive excludes it -- manifest.toml). Capture it BEFORE
+    # Write-UserConfig, which creates it from config.toml.example on a fresh
+    # install. So $configPreexisted true == re-run/update, false == first install.
+    $configPreexisted = Test-Path (Join-Path $AppDir "services\wheelhouse\config.toml")
     Write-UserConfig -Provider $provider
+
+    # AI helper: write [ai.server] from the -AiMode choice. Three intents:
+    #   cloud -- pin Google's Gemini Flash Lite and route the key to the
+    #            environment (never config.toml, git-tracked -- wh-ai-key-from-env).
+    #   off   -- explicit: write the AI-off state (empty base_url, disabled) AND
+    #            clear the persisted key so no stale secret lingers (codex 2.3).
+    #   keep  -- the default when -AiMode is omitted. A re-run/update PRESERVES
+    #            the existing [ai] config (do not clobber a working cloud setup --
+    #            codex 2.1); a FRESH install falls back to the off state, so it
+    #            does not ship pointed at an Ollama the installer never sets up.
+    # $configPreexisted (captured above, before Write-UserConfig) is the
+    # fresh-vs-update signal. Runs after Write-UserConfig, which has created
+    # config.toml. The AI helper is optional and secondary, so the whole block is
+    # guarded: a failure here (for example a transient file lock on the
+    # just-written config) must only warn, never abort an otherwise-complete
+    # install.
+    try {
+        $aiConfigPath = Join-Path $AppDir "services\wheelhouse\config.toml"
+        if ($AiMode -eq "cloud") {
+            $aiKey = Resolve-AiApiKey -AiApiKey $AiApiKey
+            if ($aiKey) {
+                # Persist the key BEFORE writing the cloud endpoint. If this
+                # throws, the surrounding try/catch warns and config.toml is left
+                # in its prior state -- not switched on to a cloud endpoint with
+                # no key, which would 401 every AI request (deepseek 1.1). The key
+                # goes to the environment only, never config.toml (git-tracked).
+                Set-AiApiKeyEnv -Key $aiKey
+                $aiBaseUrl = if ($AiBaseUrl) { $AiBaseUrl } else { $DefaultAiBaseUrl }
+                $aiModel = if ($AiModel) { $AiModel } else { $DefaultAiModel }
+                Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl $aiBaseUrl -Model $aiModel -Kind "cloud"
+                # Re-enable the [ai] master switch (a prior "off" install may have
+                # turned it off); base_url alone does not undo that.
+                Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "true" })
+                Write-Status "AI helper configured (cloud model: $aiModel)."
+            } else {
+                # Cloud was requested but no key is available. Do not switch AI on
+                # with no key -- write the safe off state (empty base_url,
+                # disabled) so the app is not left failing every AI request
+                # against a keyless cloud endpoint. The user can set the key and
+                # re-run, or enable AI in config.toml later.
+                Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl "" -Kind "local"
+                Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "false" })
+                # Also clear any previously-persisted key, so the off state is
+                # consistent end to end -- config off AND no stale key (glm52 3.2).
+                # Otherwise a later manual re-enable in config.toml would silently
+                # reuse the old key. Recovery is unaffected: Resolve-AiApiKey reads
+                # the out-of-band -AiApiKey / WHEELHOUSE_AI_API_KEY_INPUT, not this
+                # persisted variable.
+                Clear-AiApiKeyEnv
+                Write-Warn "AI helper was set to cloud but no API key was provided, so AI is left off. Set the WHEELHOUSE_AI_API_KEY environment variable and enable AI in config.toml to turn it on later."
+            }
+        } elseif ($AiMode -eq "off") {
+            # Explicit off: write the off state and clear the persisted key so a
+            # switch-off actually turns AI off end to end (codex 2.3).
+            Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl "" -Kind "local"
+            # Disable the [ai] master switch too, so the app does not log an
+            # every-startup "enabled but no server" upgrade warning on a fresh
+            # off install (ai/service.py). base_url="" alone leaves that warning.
+            Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "false" })
+            Clear-AiApiKeyEnv
+            Write-Status "AI helper turned off. You can set one up later in config.toml."
+        } elseif ($configPreexisted) {
+            # keep + re-run/update: preserve the existing [ai] config and the
+            # persisted key untouched, so a re-run without -AiMode never clobbers
+            # a working cloud setup the user configured earlier (codex 2.1).
+            Write-Status "AI helper left as previously configured."
+        } else {
+            # keep + fresh install: no prior config to preserve, so fall back to
+            # the off state (empty base_url, disabled) rather than shipping the
+            # example's default pointed at an Ollama the installer never set up.
+            # No persisted key exists on a fresh machine, so nothing to clear.
+            Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl "" -Kind "local"
+            Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "false" })
+            Write-Status "AI helper left off. You can set one up later in config.toml."
+        }
+    } catch {
+        Write-Warn "Could not configure the AI helper: $($_.Exception.Message). WheelHouse is installed; you can set up AI later in config.toml."
+    }
 
     if ($provider -eq "google_stt") {
         Write-Warn "The Google Cloud engine needs credentials before it can hear you. See the Google Cloud section of INSTALL.md in the install folder: $AppDir"
@@ -1222,26 +1616,30 @@ function Invoke-MainInstall {
         Write-Warn "The Distil-Whisper engine downloads its own model on first start; the first launch will take a few minutes."
     }
 
+    Write-InstallProgress 95 "Finishing up"
     # Shortcuts + the auto-start question.
     New-AppShortcut -LnkPath (Join-Path ([Environment]::GetFolderPath("Programs")) $ShortcutName)
     New-AppShortcut -LnkPath (Join-Path ([Environment]::GetFolderPath("Desktop")) $ShortcutName)
     Write-Status "Start-menu and desktop shortcuts created."
 
     Write-Host ""
-    $autoStart = Read-Host "Start WheelHouse automatically when you log in? For hands-free use this is strongly recommended. Type yes or no (default: no)"
-    if ($autoStart -eq "yes") {
+    $autoStart = Resolve-YesNoChoice -Specified ($AutoStart -ne "") -Value ($AutoStart -eq "yes") `
+        -Prompt "Start WheelHouse automatically when you log in? For hands-free use this is strongly recommended. Type yes or no (default: no)"
+    if ($autoStart) {
         New-AppShortcut -LnkPath (Join-Path ([Environment]::GetFolderPath("Startup")) $ShortcutName)
         Write-Status "WheelHouse will start automatically at login."
     }
 
     Write-Host ""
     Write-Status "WheelHouse $AppVersion is installed."
+    Write-InstallProgress 100 "WheelHouse is installed"
     Write-Host "    Before the first run: check Windows microphone permission is on"
     Write-Host "    (Settings > Privacy and security > Microphone > Let desktop apps access your microphone)."
     Write-Host ""
 
-    $startNow = Read-Host "Start WheelHouse now? Type yes or no (default: no)"
-    if ($startNow -eq "yes") {
+    $startNow = Resolve-YesNoChoice -Specified ($StartNow -ne "") -Value ($StartNow -eq "yes") `
+        -Prompt "Start WheelHouse now? Type yes or no (default: no)"
+    if ($startNow) {
         # --directory mirrors the shortcut arguments: the app path must be in
         # the uv command line (not only the working directory) so the
         # running-app check can see a just-launched WheelHouse.

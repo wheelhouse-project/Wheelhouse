@@ -16,6 +16,7 @@ from unittest.mock import Mock, AsyncMock, patch, MagicMock
 import pytest
 
 from state_manager import StateManager
+from config_service import DEFAULT_STT_PROVIDER
 from events import (
     SonosStateChangedEvent,
     AudioStateChangedEvent,
@@ -439,7 +440,9 @@ class TestSTTHelpers:
         assert sm._get_current_stt_mode() == "in_process"
 
     def test_get_stt_provider_default(self, sm):
-        assert sm._get_current_stt_provider() == "google_stt"
+        # With no stt.last_provider in config, the remote default is the local
+        # offline provider, not a cloud one (wh-stt-fallback-default-google).
+        assert sm._get_current_stt_provider() == DEFAULT_STT_PROVIDER
 
     def test_get_available_providers_no_launcher(self, sm):
         # Remote mode but no launcher - falls through to in-process check

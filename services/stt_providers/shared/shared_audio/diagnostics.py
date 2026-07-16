@@ -8,6 +8,11 @@ recordings to disk for troubleshooting purposes.
 Key Functions:
   - run_mic_check: Tests microphone capture for a specified duration.
 
+Key Classes:
+  - LoopStallTracker: Detects when a per-frame consumer loop stops being
+    scheduled (whole-machine CPU starvation), the root cause behind capture
+    queue overflow bursts (wh-stt-audio-consumer-behind-realtime).
+
 Typical Usage:
   from shared_audio.diagnostics import run_mic_check
   from shared_audio.capture import get_audio_provider, AudioConfig
@@ -35,6 +40,86 @@ class AudioProviderProtocol(Protocol):
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def read(self, timeout: float = 1.0) -> Optional[bytes]: ...
+
+
+class LoopStallTracker:
+    """Detects when a per-frame consumer loop stops making progress.
+
+    The STT main loop normally iterates every <=80ms (one 30ms frame plus the
+    mic-read timeout). When the machine is CPU-saturated the loop can go
+    unscheduled for seconds; the capture queue then fills and frames drop with
+    no direct log signature -- only the resulting overflow counts. Call
+    record() once per loop iteration: after a gap longer than the threshold it
+    returns a log-ready message (rate-limited), and window counters accumulate
+    for periodic diagnostics.
+
+    State ownership: reset() owns only the gap-measurement state (_last_time);
+    the window counters (stall_count, max_gap_ms) are owned by
+    snapshot_and_reset_window(), which defines the reporting window. A mic
+    restart therefore does NOT clear the window counters -- stalls recorded
+    before the restart still belong to the current reporting window, matching
+    the other [overflow-diag] accumulators (VAD/AGC timing lists).
+
+    Not thread-safe; call from the loop thread only.
+    """
+
+    def __init__(self, stall_threshold_s: float = 1.0,
+                 min_log_interval_s: float = 5.0, clock=time.monotonic):
+        self._threshold = stall_threshold_s
+        self._min_log_interval = min_log_interval_s
+        self._clock = clock
+        self._last_time: Optional[float] = None
+        self._last_log_time: Optional[float] = None
+        self.stall_count = 0
+        self.max_gap_ms = 0.0
+
+    def record(self, queue_depth: Optional[int] = None) -> Optional[str]:
+        """Record one loop iteration; return a log message if a stall ended.
+
+        Args:
+            queue_depth: Current capture queue depth, included in the message
+                so the log shows whether the stall was long enough to drop.
+
+        Returns:
+            A message describing the stall, or None (no stall, or rate-limited).
+        """
+        now = self._clock()
+        last, self._last_time = self._last_time, now
+        if last is None:
+            return None
+
+        gap = now - last
+        gap_ms = gap * 1000.0
+        if gap_ms > self.max_gap_ms:
+            self.max_gap_ms = gap_ms
+        if gap < self._threshold:
+            return None
+
+        self.stall_count += 1
+        if (self._last_log_time is not None
+                and (now - self._last_log_time) < self._min_log_interval):
+            return None
+        self._last_log_time = now
+        depth = "" if queue_depth is None else f"; capture queue depth now {queue_depth}"
+        return (f"[stall] consumer loop made no progress for {gap:.1f}s "
+                f"(likely whole-machine CPU starvation){depth}")
+
+    def reset(self) -> None:
+        """Forget the last iteration time after an intentional pause
+        (for example a mic restart), so the pause is not counted as a stall.
+
+        Deliberately leaves stall_count and max_gap_ms alone: those belong to
+        the reporting window (see snapshot_and_reset_window), and stalls that
+        happened before the pause are real evidence that must still appear in
+        the next [overflow-diag] summary."""
+        self._last_time = None
+
+    def snapshot_and_reset_window(self) -> dict:
+        """Return {'stalls', 'max_gap_ms'} for the window and start a new one."""
+        snap = {"stalls": self.stall_count, "max_gap_ms": self.max_gap_ms}
+        self.stall_count = 0
+        self.max_gap_ms = 0.0
+        return snap
 
 
 def run_mic_check(

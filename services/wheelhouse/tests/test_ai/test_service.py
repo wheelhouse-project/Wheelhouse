@@ -96,6 +96,36 @@ class TestLifecycle:
         assert "[ai.server]" in caplog.text
         assert service._provider is None
 
+    def test_build_server_provider_marks_cloud_kind(self):
+        """A cloud [ai.server].kind is passed to the provider as is_cloud=True,
+        so the provider suppresses the misleading non-/v1 warning for the Gemini
+        cloud endpoint the installer pins as the default (deepseek round 2,
+        finding 1.4)."""
+        config = MagicMock()
+        config.get = MagicMock(side_effect=lambda key, default=None: {
+            "ai.server.base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "ai.server.model": "gemini-2.5-flash-lite",
+            "ai.server.kind": "cloud",
+            "ai.server.timeout_s": 60,
+        }.get(key, default))
+        service = AIService(config)
+        provider = service._build_server_provider()
+        assert provider._is_cloud is True
+
+    def test_build_server_provider_local_kind_is_not_cloud(self):
+        """The default local kind leaves is_cloud False, so the non-/v1 warning
+        still fires for a local endpoint that is not a /v1 root."""
+        config = MagicMock()
+        config.get = MagicMock(side_effect=lambda key, default=None: {
+            "ai.server.base_url": "http://localhost:11434/v1",
+            "ai.server.model": "gemma3:12b",
+            "ai.server.kind": "local",
+            "ai.server.timeout_s": 60,
+        }.get(key, default))
+        service = AIService(config)
+        provider = service._build_server_provider()
+        assert provider._is_cloud is False
+
     @pytest.mark.asyncio
     async def test_stop_unloads_model_ollama(self, ai_config, mock_provider):
         """stop() calls unload_model() for Ollama-style providers."""
@@ -822,6 +852,48 @@ def _server_config(enabled=True, base_url="http://localhost:11434/v1",
     }
     config.get = MagicMock(side_effect=lambda key, default=None: values.get(key, default))
     return config
+
+
+class TestServerProviderApiKeyFromEnvOnly:
+    """wh-ai-key-from-env: the AI API key must come only from the
+    WHEELHOUSE_AI_API_KEY environment variable, never from config.toml (a
+    git-tracked file where a stored secret is one commit from leaking).
+    _build_server_provider must not hand any config-stored key to the
+    provider, so a key placed in [ai.server].api_key is inert."""
+
+    def _config_with_stored_key(self, stored_key):
+        config = MagicMock()
+        values = {
+            "ai.enabled": True,
+            "ai.provider": "ollama",
+            "ai.knowledge_base": "knowledge/wheelhouse_help.md",
+            "ai.server.base_url": "http://localhost:8781/v1",
+            "ai.server.model": "m",
+            "ai.server.api_key": stored_key,
+            "ai.server.timeout_s": 60,
+            "ai.server.kind": "local",
+            "ai.server.enabled": True,
+            "ai.models_directory": "D:/Models",
+            "ai.active_model": "",
+            "ai.help.max_response_tokens": 800,
+        }
+        config.get = MagicMock(
+            side_effect=lambda key, default=None: values.get(key, default))
+        return config
+
+    def test_config_stored_key_is_ignored(self, monkeypatch):
+        monkeypatch.delenv("WHEELHOUSE_AI_API_KEY", raising=False)
+        service = AIService(self._config_with_stored_key("secret-in-config"))
+        provider = service._build_server_provider()
+        assert provider._api_key == "", (
+            "a key stored in config.toml must never reach the provider"
+        )
+
+    def test_env_var_key_is_used(self, monkeypatch):
+        monkeypatch.setenv("WHEELHOUSE_AI_API_KEY", "env-secret")
+        service = AIService(self._config_with_stored_key("secret-in-config"))
+        provider = service._build_server_provider()
+        assert provider._api_key == "env-secret"
 
 
 class TestThinClientCoordinator:

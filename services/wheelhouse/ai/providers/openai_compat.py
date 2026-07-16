@@ -148,12 +148,18 @@ class OpenAIProvider:
         base_url: str = "https://api.openai.com/v1",
         think: bool = False,
         timeout_s: int = _DEFAULT_CHAT_TIMEOUT_S,
+        is_cloud: bool = False,
     ):
         self._api_key = api_key or os.environ.get("WHEELHOUSE_AI_API_KEY", "")
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._think = think
         self._timeout_s = timeout_s
+        # True when [ai.server].kind is "cloud". A cloud provider legitimately
+        # uses a non-/v1 path (Google's Gemini root is /v1beta/openai/), so the
+        # non-/v1 warning -- which only matters for the local Ollama /api/tags
+        # fallback -- is suppressed for it (finding 1.4).
+        self._is_cloud = is_cloud
         self._session: Optional[aiohttp.ClientSession] = None
         # One-time warning latches (each fires at most once per instance).
         self._warned_http_non_local = False
@@ -220,10 +226,14 @@ class OpenAIProvider:
         if self._base_url.endswith("/v1"):
             host_root = self._base_url[: -len("/v1")]
             return primary, f"{host_root}/api/tags"
-        # base_url is non-/v1: warn once. No /api/tags fallback, because a
-        # successful tags probe on an address whose chat path 404s would
-        # populate the model list while every chat silently fails.
-        if not self._warned_non_v1:
+        # base_url is non-/v1: no /api/tags fallback, because a successful tags
+        # probe on an address whose chat path 404s would populate the model list
+        # while every chat silently fails. Warn once for LOCAL endpoints only:
+        # the /v1 convention and the Ollama fallback are local-server concepts,
+        # and a cloud provider legitimately uses a non-/v1 path (Gemini's root is
+        # /v1beta/openai/), so the warning would be misleading noise on every
+        # cloud-AI startup (finding 1.4).
+        if not self._is_cloud and not self._warned_non_v1:
             self._warned_non_v1 = True
             log.warning(
                 "AI base_url %s does not end in '/v1'; it is expected to be "

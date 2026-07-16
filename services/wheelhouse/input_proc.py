@@ -530,12 +530,12 @@ def input_process_main(shm_name: str, command_ready_event: multiprocessing.Event
             if hasattr(key, 'char') and key.char is not None:
                 result = key.char.lower()
                 if not result.isprintable():
-                    logger.info("Non-printable KeyCode: char=%r, vk=%s, type=%s",
-                                key.char, getattr(key, 'vk', '?'), type(key).__name__)
+                    logger.debug("Non-printable KeyCode: char=%r, vk=%s, type=%s",
+                                 key.char, getattr(key, 'vk', '?'), type(key).__name__)
                 return result
             fallback = str(key).lower()
-            logger.info("KeyCode fallback: str=%r, vk=%s, type=%s",
-                        fallback, getattr(key, 'vk', '?'), type(key).__name__)
+            logger.debug("KeyCode fallback: str=%r, vk=%s, type=%s",
+                         fallback, getattr(key, 'vk', '?'), type(key).__name__)
             return fallback
 
         def on_user_click(x, y, button, pressed):

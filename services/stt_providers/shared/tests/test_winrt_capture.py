@@ -165,11 +165,17 @@ class TestWinRTCaptureInitialization:
         assert capture.overflow_monitor is not None
 
     def test_init_creates_queue(self):
-        """Should create queue with maxsize=100."""
+        """Should create queue holding ~10s of audio (333 x 30ms chunks).
+
+        Depth is the defense against whole-machine CPU starvation stalls
+        (wh-stt-audio-consumer-behind-realtime): the consumer drains at many
+        times real time once it is scheduled again, so a deeper queue turns
+        dropped frames into briefly delayed frames.
+        """
         capture = WinRTAudioCapture()
 
         assert isinstance(capture._q, queue.Queue)
-        assert capture._q.maxsize == 100
+        assert capture._q.maxsize == 333
 
     def test_init_initializes_stats(self):
         """Should initialize statistics to zero."""
@@ -179,6 +185,25 @@ class TestWinRTCaptureInitialization:
         assert capture._drops == 0
         assert capture._max_queue_depth == 0
         assert capture._start_time is None
+
+
+class TestWinRTCaptureThreadPriority:
+    """The capture thread must elevate its own priority.
+
+    Keeps audio capture scheduled when the machine is saturated by bulk
+    compute (wh-stt-audio-consumer-behind-realtime).
+    """
+
+    def test_capture_loop_elevates_to_time_critical(self):
+        capture = WinRTAudioCapture()
+        with patch.object(capture, '_setup_graph'), \
+                patch.object(capture, '_poll_frames'), \
+                patch.object(capture, '_cleanup_graph'), \
+                patch('shared_audio.capture.winrt_capture.elevate_current_thread',
+                      return_value=True) as mock_elevate:
+            capture._capture_loop()
+
+        mock_elevate.assert_called_once_with('time_critical')
 
 
 class TestWinRTCaptureStartStop:
@@ -542,7 +567,7 @@ class TestWinRTCaptureAdversarial:
         capture.overflow_monitor.report_overflow = Mock()
 
         # Fill the queue to maxsize
-        for i in range(100):
+        for i in range(capture._q.maxsize):
             capture._q.put(b'x')
 
         # Now try to add more (this is what _poll_frames does)

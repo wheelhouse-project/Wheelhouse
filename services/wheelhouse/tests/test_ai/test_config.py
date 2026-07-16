@@ -93,6 +93,37 @@ class TestAIConfigParsing:
         assert config_data["ai"]["help"]["gem_url"] == ""
 
 
+class TestAIConfigExampleTemplate:
+    """wh-ai-key-from-env: the shipped template (config.toml.example) must not
+    invite users to store an AI secret in a git-tracked config file, and the
+    dead Gemini keys are gone. This reads the example template, not the live
+    config.toml (which is a per-machine user artifact)."""
+
+    @pytest.fixture
+    def example_text(self):
+        path = Path(__file__).parent.parent.parent / "config.toml.example"
+        return path.read_text(encoding="utf-8")
+
+    @pytest.fixture
+    def example_data(self, example_text):
+        return tomllib.loads(example_text)
+
+    def test_ai_server_has_no_api_key_field(self, example_data):
+        assert "api_key" not in example_data["ai"]["server"], (
+            "config.toml.example must not ship an [ai.server].api_key field -- "
+            "the key comes from the WHEELHOUSE_AI_API_KEY environment variable"
+        )
+
+    def test_env_var_mechanism_is_documented(self, example_text):
+        assert "WHEELHOUSE_AI_API_KEY" in example_text
+
+    def test_legacy_gemini_keys_removed(self, example_text):
+        for key in ("GEMINI_API_KEY", "GEMINI_MODEL_NAME", "GEMINI_PROMPT"):
+            assert key not in example_text, (
+                f"dead template key {key} must be removed (gemini_client.py deleted)"
+            )
+
+
 class TestAIConfigViaMockService:
     """Verify dotted-key access works (mirrors how AIService reads config)."""
 

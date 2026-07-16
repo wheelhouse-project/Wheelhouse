@@ -78,6 +78,10 @@ services/wheelhouse/data/user_patterns.toml.tmp
 # Large Model Files
 models/
 *.onnx
+# ...except the shipped wake-word model: small, tracked, and must survive
+# publish staging into the public repo (the 1.0.0 drop,
+# wh-export-publish-gitignore-guard)
+!services/stt_providers/shared/data/wake_words/*.onnx
 tokens.txt
 
 # Claude Code (local settings are user-specific)

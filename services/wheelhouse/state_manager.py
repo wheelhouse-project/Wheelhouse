@@ -55,6 +55,7 @@ from services.wheelhouse.events import (
 )
 from services.wheelhouse.integrations.websocket_manager import WebSocketManager
 from services.wheelhouse.utils.speech_notifier import SpeechNotifier
+from services.wheelhouse.config_service import DEFAULT_STT_PROVIDER
 
 if TYPE_CHECKING:
     from services.wheelhouse.config_service import ConfigService
@@ -575,7 +576,7 @@ class StateManager:
         mode = self._get_current_stt_mode()
         if mode == "remote":
             # Return actual remote provider name from config
-            provider = self.config_service.get("stt.last_provider", "google_stt")
+            provider = self.config_service.get("stt.last_provider", DEFAULT_STT_PROVIDER)
             # Expand zipformer to CPU/GPU variant
             if provider == "zipformer":
                 return self._get_zipformer_variant()

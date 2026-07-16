@@ -65,10 +65,11 @@ from version_info import get_startup_banner
 import collections
 
 # Import from shared libraries
-from shared_audio.diagnostics import run_mic_check
+from shared_audio.diagnostics import run_mic_check, LoopStallTracker
 from shared_audio.capture import get_audio_provider, get_available_providers, AudioConfig
 from shared_audio.silero_vad import SileroVAD
 from shared_audio.agc import SmartAGC, AGCConfig
+from shared_audio.thread_priority import elevate_current_thread
 from shared_stt.ws_forwarder import WSForwarder, WebSocketLogHandler
 
 from usage_metrics import UsageMetrics
@@ -888,6 +889,12 @@ def main(argv=None):
     vad_times_ms = []
     agc_times_ms = []
 
+    # Always-on consumer stall detection: when this loop goes unscheduled for
+    # seconds (whole-machine CPU saturation) the capture queue fills and
+    # frames drop with no other direct log signature
+    # (wh-stt-audio-consumer-behind-realtime).
+    stall_tracker = LoopStallTracker()
+
     if cfg.agc.enabled:
         logger.info(f"[agc] Smart AGC enabled: target_rms={cfg.agc.target_speech_rms}, max_gain={cfg.agc.max_gain}")
     else:
@@ -923,7 +930,14 @@ def main(argv=None):
 
     # Initialize audio processing
     mic.start()
-    
+
+    # Keep the per-frame consumer loop scheduled under machine-wide CPU load;
+    # it needs only a few percent of one core but must get it on time
+    # (wh-stt-audio-consumer-behind-realtime).
+    consumer_elevated = elevate_current_thread('highest')
+    logger.info(f"[priority] Consumer thread priority elevated: {consumer_elevated}")
+
+
     # --- Lead-in Buffer ---
     # Keeps rolling audio so first syllables aren't cut off when speech starts
     lead_in_frames = int(cfg.vad_lead_in_ms / cfg.chunk_ms)
@@ -957,6 +971,10 @@ def main(argv=None):
     # Main processing loop
     try:
         while not stop:
+            stall_msg = stall_tracker.record(mic.get_queue_size())
+            if stall_msg:
+                logger.info(stall_msg)
+
             # Check if restart was requested (thread-safe check)
             if restart_requested_event.is_set():
                 restart_count += 1
@@ -1032,7 +1050,10 @@ def main(argv=None):
                         "STT Service",
                         "Service restart completed. Ready."
                     )
-                
+
+                # The restart block pauses this loop for seconds on purpose;
+                # don't count that pause as a scheduling stall.
+                stall_tracker.reset()
                 continue
             
             # Skip all audio processing if transcription is disabled (audio suppression active)
@@ -1160,8 +1181,11 @@ def main(argv=None):
                 agc_avg = sum(agc_times_ms) / len(agc_times_ms) if agc_times_ms else 0
                 agc_max = max(agc_times_ms) if agc_times_ms else 0
 
+                stall_snap = stall_tracker.snapshot_and_reset_window()
+
                 logger.info(f"[overflow-diag] queues: mic={mic_q}, google_audio={streamer_diag.get('audio_q_size', 0)}, google_resp={streamer_diag.get('response_q_size', 0)}")
                 logger.info(f"[overflow-diag] timing: vad={vad_avg:.1f}ms(max={vad_max:.1f}), agc={agc_avg:.2f}ms(max={agc_max:.2f})")
+                logger.info(f"[overflow-diag] loop stalls: count={stall_snap['stalls']}, max_gap={stall_snap['max_gap_ms']:.0f}ms")
 
                 vad_times_ms.clear()
                 agc_times_ms.clear()

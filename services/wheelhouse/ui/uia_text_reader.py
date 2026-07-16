@@ -182,21 +182,21 @@ def _read_via_text_pattern2(focused_control, max_chars: int) -> dict | None:
         pattern2 = focused_control.GetPattern(pattern_id)
         if pattern2 is None:
             return None
-        # GetCaretRange returns (range, is_active). The active flag
-        # signals whether the caret is at an active editing position;
-        # treat False as a fallback signal but proceed if we got a
-        # range, since the range itself is what we need.
-        caret_result = pattern2.GetCaretRange()
-        # Handle both tuple-return and bare-range bindings; older
-        # uiautomation bindings return just the range, newer ones a
-        # (bool, range) pair.
-        if isinstance(caret_result, tuple):
-            if len(caret_result) >= 2:
-                caret_range = caret_result[1]
-            else:
-                caret_range = caret_result[0]
-        else:
-            caret_range = caret_result
+        # GetCaretRange lives on the RAW comtypes pointer, not the
+        # uiautomation wrapper. Calling it on the wrapper raises
+        # AttributeError ("'TextPattern2' object has no attribute
+        # 'GetCaretRange'"), which the except-clause below swallows --
+        # so before this fix the fast path returned None on every call
+        # and silently degraded to the ~500ms legacy path
+        # (wh-uia-caret-fastpath-dead). Unwrap the raw pointer first,
+        # mirroring shadow_buffer.py:_get_cursor_pos_fast.
+        raw_pattern2 = pattern2.pattern
+        if not hasattr(raw_pattern2, "GetCaretRange"):
+            return None
+        # The raw GetCaretRange returns (is_active, range). The active
+        # flag says whether the caret is at an active editing position;
+        # the range itself is what we need, so proceed on any range.
+        _is_active, caret_range = raw_pattern2.GetCaretRange()
         if caret_range is None:
             return None
 
@@ -217,7 +217,13 @@ def _read_via_text_pattern2(focused_control, max_chars: int) -> dict | None:
         doc_range = text_pattern.DocumentRange if text_pattern else None
         if doc_range is None:
             return None
-        pre_range = doc_range.Clone()
+        # Walk the document range over the RAW comtypes pointer. The
+        # uiautomation wrapper's MoveEndpointByRange is the flat ~500ms
+        # cost on a QPlainTextEdit that this fast path exists to avoid;
+        # the raw range does the same walk in ~0.3ms. caret_range is
+        # already a raw range from raw_pattern2.GetCaretRange() above.
+        raw_doc = doc_range.textRange
+        pre_range = raw_doc.Clone()
         pre_range.MoveEndpointByRange(
             auto.TextPatternRangeEndpoint.End,
             caret_range,

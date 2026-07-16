@@ -50,6 +50,7 @@ from typing import Optional, Callable
 
 from .base import AudioConfig, AudioStats
 from ..overflow_monitor import OverflowMonitor, OverflowConfig
+from ..thread_priority import elevate_current_thread
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,12 @@ class WinRTAudioCapture:
         # Threading
         self._capture_thread: Optional[threading.Thread] = None
         self._running = False
-        self._q: queue.Queue = queue.Queue(maxsize=100)
+        # ~10s of audio at 30ms chunks. Deep on purpose: when the whole
+        # machine is CPU-saturated the consumer loop can stall for seconds
+        # while capture keeps producing; once rescheduled it drains at many
+        # times real time, so depth turns dropped frames into briefly
+        # delayed frames (wh-stt-audio-consumer-behind-realtime).
+        self._q: queue.Queue = queue.Queue(maxsize=333)
 
         # Statistics
         self._frames_captured = 0
@@ -271,6 +277,11 @@ class WinRTAudioCapture:
         and queuing for consumption by read().
         """
         try:
+            # Audio capture must stay scheduled when the machine is saturated
+            # by bulk compute; the thread sleeps most of every poll interval,
+            # so time-critical priority costs the rest of the system nothing.
+            elevated = elevate_current_thread('time_critical')
+            logger.debug(f"Capture thread priority elevated: {elevated}")
             self._setup_graph()
             self._poll_frames()
         except Exception as e:

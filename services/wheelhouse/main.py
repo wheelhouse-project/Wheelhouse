@@ -98,7 +98,7 @@ from services.wheelhouse.utils.screen_reader_flag import (
 from services.wheelhouse.utils.soft_allow_writer import append_soft_allow_tuple
 from services.wheelhouse.utils.declined_writer import append_declined_tuple
 from services.wheelhouse.utils.system import get_app_data_path
-from services.wheelhouse.config_service import ConfigService
+from services.wheelhouse.config_service import ConfigService, DEFAULT_STT_PROVIDER
 
 # Import version info from parent services directory
 import sys
@@ -108,6 +108,18 @@ from version_info import get_startup_banner
 
 
 logger = logging.getLogger(__name__)
+
+# Dedicated logger for the overlay focus-hook no-op / debounce-coalesced lines.
+# These fire on every foreground change, menu pop-up, and no-op state-machine
+# event -- one idle desktop can emit hundreds per minute -- and carry no
+# diagnostic value unless you are actively debugging the overlay focus hooks.
+# Pinning this child logger to INFO gates its own DEBUG records even when the
+# root logger runs at DEBUG (LOG_LEVEL=DEBUG), so the noise stays out of the
+# file. setup_logging() only sets the root level and a fixed list of
+# third-party loggers, so this import-time level survives. Flip it to DEBUG
+# here to get the lines back when debugging the overlay. wh-log-noise-debug-demote.
+_overlay_focus_logger = logging.getLogger(f"{__name__}.overlay_focus")
+_overlay_focus_logger.setLevel(logging.INFO)
 
 
 def _utc_now_iso() -> str:
@@ -1366,7 +1378,7 @@ class LogicController:
         3. In-process provider switching: use STTManager.switch_provider()
         """
         current_mode = self.config_service.get("stt.mode", "remote")
-        current_provider = self.config_service.get("stt.last_provider", "google_stt")
+        current_provider = self.config_service.get("stt.last_provider", DEFAULT_STT_PROVIDER)
 
         # Map zipformer variants to base provider name for lookup
         base_provider = provider
@@ -3793,7 +3805,7 @@ class LogicController:
 
         now_ms = time.monotonic() * 1000.0
         if not self._overlay_focus_debouncer.should_fire(now_ms=now_ms):
-            logger.debug(
+            _overlay_focus_logger.debug(
                 "overlay: foreground change to hwnd=%s coalesced by debounce.",
                 hwnd,
             )
@@ -3839,7 +3851,7 @@ class LogicController:
         now_ms = time.monotonic() * 1000.0
         verb = "closed" if event_id == EVENT_SYSTEM_MENUPOPUPEND else "opened"
         if not self._overlay_focus_debouncer.should_fire(now_ms=now_ms):
-            logger.debug(
+            _overlay_focus_logger.debug(
                 "overlay: menu pop-up event %#06x coalesced by debounce.",
                 event_id,
             )
@@ -4006,7 +4018,7 @@ class LogicController:
         prev_state = machine.state
         result = machine.apply(event)
         if result.outcome is OverlayOutcome.NO_OP and not result.effects:
-            logger.debug(
+            _overlay_focus_logger.debug(
                 "overlay: %s -> %s no_op (state=%s)",
                 source, event.kind.value, machine.state.value,
             )

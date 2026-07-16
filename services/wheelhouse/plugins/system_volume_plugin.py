@@ -14,7 +14,8 @@ Key Features:
   - Robust error handling for device availability
 
 Integration Points:
-  - **Subscribes to:** `VolumeAdjustCommand` (from MouseHandler, speech commands)
+  - **Subscribes to:** `VolumeAdjustCommand` (from MouseHandler's volume zones;
+    there is no shipped voice volume command)
   - **Configuration:** `[plugins.system_volume]` section in config.toml
   - **Hardware:** Any Windows audio device supported by Core Audio
 
