@@ -15,6 +15,16 @@
 #   trailing patterns (e.g. "submit"). The escape hatch for dictating the
 #   trailing word as text is the existing "literal (.+)$" pattern.
 # - requires_hotword: Boolean, whether pattern needs "x-ray" prefix (default: false)
+# - whole_utterance_only: Boolean (default: false). The pattern may fire ONLY
+#   when it matches the ENTIRE utterance: the router skips every early-execute
+#   path (immediate single-word execute, buffering execute-on-complete,
+#   command-prefix splitting) and resolves it at utterance end. For ^...$
+#   anchored patterns whose trigger words must stay dictatable inside longer
+#   utterances (sound-alike punctuation aliases, wh-int8-punctuation-mishears).
+#   Supported ONLY on ^-anchored command patterns: the router's whole-utterance
+#   gates exist only on the command paths, so the flag on an unanchored
+#   replacement is ignored with a startup warning
+#   (wh-int8-punctuation-mishears.1.4).
 # - actions: Array of {function, params, awaits_done?} action steps
 #
 # ORDERING RULES:
@@ -919,3 +929,34 @@ actions = [
 # actions = [
 #     { function = "text", params = ["Kubernetes"] }
 # ]
+
+# Sound-alike punctuation mishears (wh-int8-punctuation-mishears). The shipped
+# default STT engine (Parakeet TDT int8) consistently transcribes spoken
+# "comma" as come/kama/commer/"come on" and spoken "colon" as colin, which
+# breaks dictating those marks out of the box. Verified live 2026-07-16 and
+# against a synthetic corpus; hotword boosting cannot fix it (score 2.0
+# unchanged, score 4.0 collapses overall accuracy).
+#
+# Anchored ^...$ AND whole_utterance_only on purpose: the alias fires ONLY
+# when the mishear is the entire utterance (how punctuation is dictated
+# word-by-word), so "come", "on", and "Colin" remain dictatable inside
+# normal sentences. The flag suppresses every early-execute path (immediate
+# single-word execute, buffering execute-on-complete, and command-prefix
+# splitting), so the pattern fires only at utterance end. Accepted
+# trade-off: dictating one of these words as a stand-alone single-word
+# utterance now yields punctuation; the escape is "literal come" /
+# "literal colin", or overriding the trigger in data/user_patterns.toml.
+
+[[pattern]]
+pattern = '''^colin$'''
+whole_utterance_only = true
+actions = [
+    { function = "text", params = [":"] }
+]
+
+[[pattern]]
+pattern = '''^(?:come|kama|commer|come on)$'''
+whole_utterance_only = true
+actions = [
+    { function = "text", params = [","] }
+]

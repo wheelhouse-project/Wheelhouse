@@ -48,6 +48,12 @@ WizardStyle=modern
 UninstallDisplayName=WheelHouse
 VersionInfoVersion={#AppVer}
 VersionInfoProductName=WheelHouse
+; Always write a setup log (%TEMP%\Setup Log YYYY-MM-DD #NNN.txt). The engine's
+; console output -- including any shortcut-creation error -- is captured via
+; EngineLog into this log; without it a field failure leaves no evidence
+; (wh-startmenu-shortcut-check: first physical install lost the Start-menu
+; shortcut and nothing recorded why).
+SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

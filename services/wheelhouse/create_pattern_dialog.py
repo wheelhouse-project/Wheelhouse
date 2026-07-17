@@ -1206,6 +1206,12 @@ class CreatePatternDialog(QDialog):
         self._entry_position = (
             raw_position if isinstance(raw_position, str) else None
         )
+        # Same carry-forward for the whole_utterance_only alias flag: a
+        # Customize of a shipped punctuation alias must not turn it into
+        # an eager command (wh-int8-punctuation-mishears.1.1).
+        self._entry_whole_utterance = (
+            (entry or {}).get("whole_utterance_only") is True
+        )
         self.setWindowTitle("Edit Pattern" if self._edit_mode else "New Pattern")
         self.setMinimumWidth(480)
 
@@ -2683,6 +2689,8 @@ class CreatePatternDialog(QDialog):
             }
             if self._entry_position is not None:
                 data["position"] = self._entry_position
+            if self._entry_whole_utterance:
+                data["whole_utterance_only"] = True
             return data
 
         if self._hotkey_radio.isChecked():
@@ -2717,4 +2725,6 @@ class CreatePatternDialog(QDialog):
         }
         if self._entry_position is not None:
             data["position"] = self._entry_position
+        if self._entry_whole_utterance:
+            data["whole_utterance_only"] = True
         return data

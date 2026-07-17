@@ -281,7 +281,13 @@ class SpeechRouter:
             case (True, PatternType.COMMAND):
                 # Check if single word is complete and cannot continue
                 if self._is_single_word_complete(word, "command", hotword_active) and self._cannot_match_with_next_word([word], "command"):
-                     return Decision(Action.EXECUTE, payload=word, reason="Single word command complete")
+                    # wh-int8-punctuation-mishears: a whole-utterance-only
+                    # pattern (sound-alike punctuation alias) must not fire
+                    # until the utterance provably ends -- the next word, if
+                    # one arrives, disproves the alias. Buffer instead; the
+                    # end marker or timeout finalizes it.
+                    if not self._matches_whole_utterance_only([word], "command", hotword_active):
+                        return Decision(Action.EXECUTE, payload=word, reason="Single word command complete")
 
                 # wh-l4h.1.14: hotword-aware impossibility check. If the word's
                 # only candidate command patterns require the hotword and the
@@ -420,6 +426,20 @@ class SpeechRouter:
         # 2. Check for Complete Pattern
         result = self.matcher.match_for_routing(new_buffer, target_type, hotword_active)
         if result and result.matched and not result.is_greedy:
+            # wh-int8-punctuation-mishears: a whole-utterance-only pattern
+            # (sound-alike punctuation alias) matches the buffer, but the
+            # utterance may still continue ("come on" -> "come on over").
+            # Keep buffering; the end marker (step 1), a disproving next
+            # word (step 3), or the timeout finalizes it.
+            if result.pattern_data.get("whole_utterance_only"):
+                timeout = command_timeout_ms if mode in (ProcessingMode.COMMAND_BUFFERING, ProcessingMode.HOTWORD_BUFFERING) else replacement_timeout_ms
+                return Decision(
+                    Action.BUFFER,
+                    payload=word,
+                    timeout_ms=timeout,
+                    reason="Whole-utterance-only pattern matched; awaiting utterance end",
+                )
+
             # Check for unfilled optional numeric group: if the pattern has a
             # validation_group but the captured value is None, the optional count
             # hasn't been spoken yet. Continue buffering so it can arrive.
@@ -574,6 +594,13 @@ class SpeechRouter:
                     and not result.is_greedy
                     and not result.before_remainder
                 ):
+                    # wh-int8-punctuation-mishears: a whole-utterance-only
+                    # pattern (sound-alike punctuation alias) may never fire
+                    # as a prefix of a longer utterance -- "come home" must
+                    # dictate, not execute "come" as a comma. Skip it; the
+                    # buffer falls through to dictation.
+                    if result.pattern_data.get("whole_utterance_only"):
+                        continue
                     # wh-midword-punct-severs-count.3.1: reject a prefix
                     # whose optional numeric count is UNFILLED when a
                     # number that would fill it sits just past standalone
@@ -647,6 +674,23 @@ class SpeechRouter:
 
     def _is_single_word_complete(self, word: str, target_type: str, hotword_active: bool = False) -> bool:
         return self._is_pattern_complete([word], target_type, hotword_active)
+
+    def _matches_whole_utterance_only(
+        self, buffer: List[str], target_type: str, hotword_active: bool = False
+    ) -> bool:
+        """True when the buffer's routing match is a whole-utterance-only pattern.
+
+        Whole-utterance-only patterns (sound-alike punctuation aliases,
+        wh-int8-punctuation-mishears) must not execute before the utterance
+        provably ends. Uses the same first-match-wins lookup the execute
+        paths use, so the check agrees with the pattern that would fire.
+        """
+        result = self.matcher.match_for_routing(buffer, target_type, hotword_active)
+        return bool(
+            result
+            and result.matched
+            and result.pattern_data.get("whole_utterance_only")
+        )
 
     def _is_pattern_complete(self, buffer: List[str], target_type: str, hotword_active: bool = False) -> bool:
         """Check if buffer contains a complete pattern.

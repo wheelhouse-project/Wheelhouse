@@ -302,6 +302,63 @@ class TestGetAllPatternsStructured:
         assert "type" not in user_pats[0]
         assert "position" not in user_pats[0]
 
+    def test_whole_utterance_flag_passed_through(self, tmp_path, user_file):
+        # The shipped punctuation-alias patterns carry
+        # ``whole_utterance_only = true`` (wh-int8-punctuation-mishears).
+        # The Customize flow rebuilds a user block from this entry, so the
+        # entry must carry the flag or Customize silently strips the
+        # whole-utterance safety (review finding
+        # wh-int8-punctuation-mishears.1.1).
+        sysf = tmp_path / "patterns_alias.toml"
+        sysf.write_text(
+            "[[pattern]]\n"
+            "pattern = '''^colin$'''\n"
+            "whole_utterance_only = true\n"
+            'actions = [{ function = "text", params = [":"] }]\n',
+            encoding="utf-8",
+        )
+        pm = PatternManager(str(sysf), user_file)
+        result = pm.get_all_patterns_structured()
+        entries = [
+            p for c in result["categories"].values() for p in c["patterns"]
+        ]
+        assert entries[0]["whole_utterance_only"] is True
+
+    def test_garbage_whole_utterance_flag_omitted(self, system_file, user_file):
+        # Non-bool values are hand-edit garbage; omit the key so downstream
+        # consumers never see a truthy string (same rule as position/type).
+        with open(user_file, "w", encoding="utf-8") as fh:
+            fh.write(
+                "[[pattern]]\n"
+                "pattern = '''^deploy$'''\n"
+                'whole_utterance_only = "true"\n'
+                'actions = [{ function = "hk", params = ["ctrl", "d"] }]\n'
+            )
+        pm = PatternManager(system_file, user_file)
+        result = pm.get_all_patterns_structured()
+        user_pats = result["categories"]["User Patterns"]["patterns"]
+        assert "whole_utterance_only" not in user_pats[0]
+
+    def test_whole_utterance_flag_omitted_on_replacement(
+        self, system_file, user_file,
+    ):
+        # The flag is supported only on ^-anchored command patterns; the
+        # catalog disables it on replacements with a warning. Carrying it
+        # into the UI entry anyway would make the manager keep re-writing
+        # a flag the runtime never honors
+        # (wh-int8-punctuation-mishears.1.5).
+        with open(user_file, "w", encoding="utf-8") as fh:
+            fh.write(
+                "[[pattern]]\n"
+                "pattern = '''deploy'''\n"
+                "whole_utterance_only = true\n"
+                'actions = [{ function = "hk", params = ["ctrl", "d"] }]\n'
+            )
+        pm = PatternManager(system_file, user_file)
+        result = pm.get_all_patterns_structured()
+        user_pats = result["categories"]["User Patterns"]["patterns"]
+        assert "whole_utterance_only" not in user_pats[0]
+
 
 class TestCreatePattern:
     """create_pattern writes only to the user file; the system file is untouched."""
@@ -419,6 +476,59 @@ class TestCreatePattern:
         with open(user_file, "rb") as fh:
             data = tomllib.load(fh)
         assert any(p["pattern"] == "^deploy$" for p in data["pattern"])
+
+    def test_create_with_whole_utterance_flag(self, system_file, user_file):
+        # Customize on a shipped punctuation alias re-creates it as a user
+        # block; the flag must land in the written TOML or the override
+        # loses whole-utterance safety (wh-int8-punctuation-mishears.1.1).
+        pm = PatternManager(system_file, user_file)
+        result = pm.create_pattern(
+            trigger="colin",
+            pattern_type="command",
+            action_type="text",
+            action_params={"output": ":"},
+            requires_hotword=False,
+            whole_utterance_only=True,
+        )
+        assert result["success"] is True, result
+        with open(user_file, "rb") as fh:
+            block = tomllib.load(fh)["pattern"][0]
+        assert block["whole_utterance_only"] is True
+
+    def test_create_without_flag_omits_key(self, system_file, user_file):
+        # Ordinary creates must not spray the key across every user block.
+        pm = PatternManager(system_file, user_file)
+        pm.create_pattern(
+            trigger="deploy",
+            pattern_type="command",
+            action_type="hotkey",
+            action_params={"keys": ["ctrl", "d"]},
+            requires_hotword=False,
+        )
+        with open(user_file, "rb") as fh:
+            block = tomllib.load(fh)["pattern"][0]
+        assert "whole_utterance_only" not in block
+
+    def test_create_drops_flag_on_replacement_expression(
+        self, system_file, user_file,
+    ):
+        # A Customize of a flagged alias can be edited into an unanchored
+        # replacement before saving. The flag is meaningless there (the
+        # catalog disables it with a startup warning), so the manager
+        # drops it instead of writing a block that violates the schema
+        # restriction (wh-int8-punctuation-mishears.1.5).
+        pm = PatternManager(system_file, user_file)
+        result = pm.create_pattern(
+            pattern_type="replacement",
+            expression="colin",
+            actions=[{"function": "text", "params": [":"]}],
+            requires_hotword=False,
+            whole_utterance_only=True,
+        )
+        assert result["success"] is True, result
+        with open(user_file, "rb") as fh:
+            block = tomllib.load(fh)["pattern"][0]
+        assert "whole_utterance_only" not in block
 
 
 class TestDuplicateTriggerCreate:

@@ -322,6 +322,89 @@
       </tbody>
     </table>
 
+    <h2 id="llm-help">Use WheelHouse help with your LLM</h2>
+    <p>
+      WheelHouse's complete user guide is a single file, written so an AI chat
+      service can answer questions from it. If you already use ChatGPT, Gemini,
+      Claude, or Perplexity, you can turn that guide into your personal
+      WheelHouse support assistant in a few minutes: ask it things like
+      "how do I make my microphone work?" or "what do I say to select a whole
+      line?" and it answers from the guide, in plain language. No new account
+      is needed — it works with the AI service you already have, on that
+      service's free plan for all four (with one caveat for Perplexity, noted
+      below).
+    </p>
+    <p><strong>You need exactly two files:</strong></p>
+    <ul class="features">
+      <li>
+        <h3>wheelhouse_help.md — the help document (upload this)</h3>
+        <p>
+          Open
+          <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/services/wheelhouse/knowledge/wheelhouse_help.md">wheelhouse_help.md on GitHub</a>
+          and save it to your computer with the "Download raw file" button
+          (the down-arrow icon near the top right of the file view). You will
+          upload this file to your AI service.
+        </p>
+      </li>
+      <li>
+        <h3>assistant-instructions.txt — a short instruction text (copy and paste this)</h3>
+        <p>
+          Open
+          <a href="https://github.com/wheelhouse-project/WheelHouse/blob/main/llm/assistant-instructions.txt">assistant-instructions.txt on GitHub</a>
+          and copy its text (the "Copy raw file" button, two overlapping
+          squares, copies the whole file at once). You will paste it into your
+          AI service's instructions field.
+        </p>
+      </li>
+    </ul>
+    <div class="note">
+      <p>
+        Pasting the instructions is recommended but optional: the same
+        rules are written into the top of the help document itself, so an
+        assistant that only has the uploaded file still behaves sensibly. And
+        if a service refuses a <code>.md</code> file upload, rename the file to
+        <code>wheelhouse_help.txt</code> and upload that instead — the content
+        is plain text.
+      </p>
+    </div>
+    <p>
+      Then follow the steps for your service. These were verified against each
+      provider's official documentation in July 2026; the exact button names
+      shift as these products evolve, but the shape of the steps stays the same.
+    </p>
+
+    <h3 id="llm-chatgpt">ChatGPT — use a Project</h3>
+    <ol class="steps">
+      <li>Sign in at chatgpt.com and click <strong>New project</strong> in the sidebar. Give the project a name like "WheelHouse Help". (Projects are available on every plan, including Free. Custom GPTs are not the right tool here — creating one requires a paid plan.)</li>
+      <li>Inside the project, add <code>wheelhouse_help.md</code> in the project's files area.</li>
+      <li>Open the project's settings (the three-dots menu in the upper right), choose <strong>Project settings</strong>, and paste the instruction text as the project instructions.</li>
+      <li>Start a new chat inside the project and ask your question. To come back later, click the project's name in the sidebar.</li>
+    </ol>
+
+    <h3 id="llm-gemini">Google Gemini — create a Gem</h3>
+    <ol class="steps">
+      <li>Go to gemini.google.com, open the sidebar, and click <strong>Gems</strong>, then <strong>New Gem</strong>. (Some accounts word it "Explore Gems" then "New Gem". Gems are available without a paid plan.)</li>
+      <li>Give the Gem a name and paste the instruction text into the instructions box.</li>
+      <li>Scroll down to <strong>Knowledge</strong>, click <strong>Add files</strong> then <strong>Upload files</strong>, and upload <code>wheelhouse_help.md</code>.</li>
+      <li>Click <strong>Save</strong>. To use it later: sidebar, <strong>Gems</strong>, pick your Gem under "My Gems", and ask away.</li>
+    </ol>
+
+    <h3 id="llm-claude">Claude — use a Project</h3>
+    <ol class="steps">
+      <li>Sign in at claude.ai and open <strong>Projects</strong> from the sidebar, then click <strong>New Project</strong> and name it. (The free plan includes up to five projects.)</li>
+      <li>On the project page, find the knowledge section and use its <strong>+</strong> button to upload <code>wheelhouse_help.md</code>.</li>
+      <li>Click <strong>Set project instructions</strong>, paste the instruction text, and save.</li>
+      <li>Start a chat from the project page — every chat in the project uses the file and the instructions automatically.</li>
+    </ol>
+
+    <h3 id="llm-perplexity">Perplexity — use a Project</h3>
+    <ol class="steps">
+      <li>Sign in at perplexity.ai and click the projects icon in the left panel, then <strong>New Project</strong>. (Perplexity renamed this feature — older guides call it "Spaces". One caveat: Perplexity documents per-project file uploads only for its paid plans, so on the free plan you may not be able to upload the help file into a project.)</li>
+      <li>In the project's settings, paste the instruction text as the project's custom AI instructions.</li>
+      <li>Upload <code>wheelhouse_help.md</code> as a project file.</li>
+      <li>Ask questions inside the project — answers draw on the uploaded file, and the instructions apply to every thread in the project.</li>
+    </ol>
+
     <h2 id="faq">Questions people ask</h2>
     <details>
       <summary>Does it need an internet connection?</summary>

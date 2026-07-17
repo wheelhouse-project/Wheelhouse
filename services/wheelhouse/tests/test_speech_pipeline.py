@@ -574,6 +574,237 @@ class TestPunctuationPatterns:
 
 
 # ============================================================================
+# SOUND-ALIKE MISHEAR ALIAS TESTS (wh-int8-punctuation-mishears)
+# ============================================================================
+
+class TestMishearAliases:
+    """Known sound-alike mishears of punctuation words map to punctuation.
+
+    The shipped default STT engine (Parakeet TDT int8) consistently
+    transcribes spoken "comma" as come/kama/commer (or "come on") and
+    spoken "colon" as colin, so dictating those punctuation marks is
+    broken out of the box. The aliases accept the mishears ONLY when they
+    arrive as the complete utterance on their own (^...$ anchors), so the
+    real words stay dictatable inside normal sentences.
+
+    The ^ anchor classifies these as command-type patterns, which buffer
+    on the command timeout. Both STT paths emit is_utterance_end_marker
+    after every utterance, and the processor finalizes a pending buffer
+    immediately on that marker, so these tests send the marker the way
+    real STT finals do instead of waiting out the wall-clock timeout.
+    """
+
+    async def _end_utterance(self, harness):
+        """Send the utterance-end marker for the current utterance."""
+        await harness.send_utterance_end_marker(harness._utterance_counter)
+
+    @pytest.mark.asyncio
+    async def test_colin_alone_inserts_colon(self, running_harness):
+        """'colin' as a whole utterance is the known mishear of 'colon'."""
+        await running_harness.send_word("colin", start_of_utterance=True)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        assert "colin" not in " ".join(texts), (
+            f"Should not dictate literal 'colin'. Got: {texts}"
+        )
+        assert any(t.strip() == ":" for t in texts), (
+            f"Should insert ':'. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_colin_capitalized_inserts_colon(self, running_harness):
+        """Parakeet capitalizes the name form ('Colin'); match is case-insensitive."""
+        await running_harness.send_word("Colin", start_of_utterance=True)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        assert "Colin" not in " ".join(texts), (
+            f"Should not dictate literal 'Colin'. Got: {texts}"
+        )
+        assert any(t.strip() == ":" for t in texts), (
+            f"Should insert ':'. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_come_alone_inserts_comma(self, running_harness):
+        """'come' as a whole utterance is the known mishear of 'comma'."""
+        await running_harness.send_word("come", start_of_utterance=True)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        assert "come" not in " ".join(texts), (
+            f"Should not dictate literal 'come'. Got: {texts}"
+        )
+        assert any(t.strip() == "," for t in texts), (
+            f"Should insert ','. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_kama_alone_inserts_comma(self, running_harness):
+        """'kama' as a whole utterance is the known mishear of 'comma'."""
+        await running_harness.send_word("kama", start_of_utterance=True)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        assert "kama" not in " ".join(texts), (
+            f"Should not dictate literal 'kama'. Got: {texts}"
+        )
+        assert any(t.strip() == "," for t in texts), (
+            f"Should insert ','. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_commer_alone_inserts_comma(self, running_harness):
+        """'commer' as a whole utterance is the known mishear of 'comma'."""
+        await running_harness.send_word("commer", start_of_utterance=True)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        assert "commer" not in " ".join(texts), (
+            f"Should not dictate literal 'commer'. Got: {texts}"
+        )
+        assert any(t.strip() == "," for t in texts), (
+            f"Should insert ','. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_come_on_utterance_inserts_comma(self, running_harness):
+        """'come on' as a whole utterance is the known two-word mishear of 'comma'."""
+        await running_harness.send_word("come", start_of_utterance=True)
+        await running_harness.send_word("on", start_of_utterance=False, delay_before_ms=50)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        combined = " ".join(texts)
+        assert "come" not in combined, (
+            f"Should not dictate literal 'come'. Got: {texts}"
+        )
+        assert "on" not in texts, (
+            f"Should not dictate literal 'on'. Got: {texts}"
+        )
+        assert any(t.strip() == "," for t in texts), (
+            f"Should insert ','. Got: {texts}"
+        )
+
+    # ------------------------------------------------------------------
+    # Anchor guards: the aliases must NOT fire inside normal sentences.
+    # These protect against loosening ^...$ to \b...\b (mutation gate).
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_colin_mid_utterance_stays_text(self, running_harness):
+        """'ask colin tomorrow' keeps 'colin' as a dictated word."""
+        await running_harness.send_utterance(["ask", "colin", "tomorrow"])
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        combined = " ".join(texts)
+        assert "colin" in combined, (
+            f"'colin' inside a sentence must stay text. Got: {texts}"
+        )
+        assert not any(t.strip() == ":" for t in texts), (
+            f"No ':' should be inserted mid-sentence. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_come_mid_utterance_stays_text(self, running_harness):
+        """'please come home' keeps 'come' as a dictated word."""
+        await running_harness.send_utterance(["please", "come", "home"])
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        combined = " ".join(texts)
+        assert "come" in combined, (
+            f"'come' inside a sentence must stay text. Got: {texts}"
+        )
+        assert not any(t.strip() == "," for t in texts), (
+            f"No ',' should be inserted mid-sentence. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_come_followed_by_other_word_stays_text(self, running_harness):
+        """'come home' (utterance continues past 'come') dictates both words.
+
+        Exercises the buffering path: after 'come' the router may wait for
+        a possible 'come on', but 'home' breaks the match and both words
+        must fall back to dictation.
+        """
+        await running_harness.send_word("come", start_of_utterance=True)
+        await running_harness.send_word("home", start_of_utterance=False, delay_before_ms=50)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        combined = " ".join(texts)
+        assert "come" in combined, (
+            f"'come home' must dictate 'come'. Got: {texts}"
+        )
+        assert "home" in combined, (
+            f"'come home' must dictate 'home'. Got: {texts}"
+        )
+        assert not any(t.strip() == "," for t in texts), (
+            f"No ',' should be inserted for 'come home'. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_colin_followed_by_word_stays_text(self, running_harness):
+        """'colin tomorrow' dictates both words.
+
+        Guards the immediate-execute path: 'colin' alone is a complete
+        pattern with no possible extension, but a whole-utterance-only
+        alias must wait for the utterance to actually end before firing.
+        """
+        await running_harness.send_word("colin", start_of_utterance=True)
+        await running_harness.send_word("tomorrow", start_of_utterance=False, delay_before_ms=50)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        combined = " ".join(texts)
+        assert "colin" in combined, (
+            f"'colin tomorrow' must dictate 'colin'. Got: {texts}"
+        )
+        assert "tomorrow" in combined, (
+            f"'colin tomorrow' must dictate 'tomorrow'. Got: {texts}"
+        )
+        assert not any(t.strip() == ":" for t in texts), (
+            f"No ':' should be inserted for 'colin tomorrow'. Got: {texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_come_on_followed_by_word_stays_text(self, running_harness):
+        """'come on over' dictates all three words.
+
+        Guards the buffering execute-on-complete path: 'come on' matches
+        the alias, but the utterance continues, so it must stay text.
+        """
+        await running_harness.send_word("come", start_of_utterance=True)
+        await running_harness.send_word("on", start_of_utterance=False, delay_before_ms=50)
+        await running_harness.send_word("over", start_of_utterance=False, delay_before_ms=50)
+        await self._end_utterance(running_harness)
+        await running_harness.wait_for_timeout(200)
+
+        texts = running_harness.get_dictation_texts()
+        combined = " ".join(texts)
+        for expected in ("come", "on", "over"):
+            assert expected in combined, (
+                f"'come on over' must dictate '{expected}'. Got: {texts}"
+            )
+        assert not any(t.strip() == "," for t in texts), (
+            f"No ',' should be inserted for 'come on over'. Got: {texts}"
+        )
+
+
+# ============================================================================
 # MULTI-WORD PATTERN PROTECTION TESTS
 # ============================================================================
 

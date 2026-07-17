@@ -85,10 +85,27 @@ include passwords and medical text. The short version:
 |----------|--------------|
 | [INSTALL.md](./INSTALL.md) | Installation in detail, optional engines, troubleshooting, uninstall |
 | [User help](./services/wheelhouse/knowledge/wheelhouse_help.md) | Every voice command and feature, for daily use |
+| [llm/README.md](./llm/README.md) | Load the user help into your own AI chat (ChatGPT, Gemini, Claude, Perplexity) |
 | [PRIVACY.md](./PRIVACY.md) | Data flow, logging, and the capability disclosure |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Process model, IPC, and the speech pipeline |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Development setup, tests, and the contribution workflow |
 | [SECURITY.md](./SECURITY.md) | Reporting vulnerabilities |
+
+## WheelHouse help in your AI chat
+
+The user help is written so an AI chat service can answer questions from
+it. If you already use ChatGPT, Gemini, Claude, or Perplexity, you can
+turn the help document into a personal WheelHouse support assistant: you
+need only two files — the
+[help document](./services/wheelhouse/knowledge/wheelhouse_help.md) to
+upload and the short
+[instruction text](./llm/assistant-instructions.txt) to paste. The
+[llm/ folder](./llm/README.md) explains the two files, and the setup
+steps for each service live on the project site:
+[ChatGPT](https://wheelhouse-project.github.io/WheelHouse/#llm-chatgpt) ·
+[Gemini](https://wheelhouse-project.github.io/WheelHouse/#llm-gemini) ·
+[Claude](https://wheelhouse-project.github.io/WheelHouse/#llm-claude) ·
+[Perplexity](https://wheelhouse-project.github.io/WheelHouse/#llm-perplexity).
 
 ## Project status
 

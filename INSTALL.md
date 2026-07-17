@@ -188,6 +188,7 @@ shortcuts are removed.
 | "Downloading ... failed twice" | Network trouble. Run the installer again — downloads resume where they left off. |
 | "An incomplete speech model was found" | A previous model unpacking was interrupted. This is informational: the installer removes the incomplete files and unpacks the model again from the already-downloaded archive. The 650 MB download does not repeat unless the downloaded file itself is missing or damaged. |
 | The speech engine will not start after install | Open a NEW PowerShell window and run `uv --version`. If that fails, uv's folder did not reach your PATH — re-run the installer, which checks and repairs this. |
+| No WheelHouse entry in the Start menu | First check Start > All apps, under W — new entries are not pinned to the front page. If it is truly absent, the desktop shortcut works the same, and the setup log (`%TEMP%\Setup Log <date>.txt` for the graphical installer, the console output for the PowerShell script) records a "Shortcut created:" or "Could not create" line with the exact path — paste that line into an issue. |
 
 Anything else: please file an issue at
 https://github.com/wheelhouse-project/WheelHouse/issues and paste the installer's

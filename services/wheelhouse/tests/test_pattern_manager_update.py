@@ -174,6 +174,99 @@ class TestUpdatePattern:
             block = tomllib.load(fh)["pattern"][0]
         assert "position" not in block
 
+    def test_whole_utterance_flag_survives_update(
+        self, system_file, user_file,
+    ):
+        # A user block overriding a shipped punctuation alias carries
+        # ``whole_utterance_only = true`` (wh-int8-punctuation-mishears).
+        # The editor has no field for it, and update_pattern rebuilds the
+        # block from create-shaped data -- without carrying the key forward
+        # an edit would silently turn the whole-utterance alias into an
+        # eager command (review finding wh-int8-punctuation-mishears.1.1).
+        _write_user(
+            user_file,
+            "[[pattern]]\n"
+            "pattern = '''^colin$'''\n"
+            "whole_utterance_only = true\n"
+            'source = "pattern_manager"\n'
+            'actions = [{ function = "text", params = [":"] }]\n',
+        )
+        pm = PatternManager(system_file, user_file)
+        result = pm.update_pattern(
+            PatternManager.pattern_id("^colin$"),
+            {
+                "pattern_type": "command",
+                "expression": "^colin$",
+                "actions": [{"function": "text", "params": ["::"]}],
+            },
+        )
+        assert result["success"] is True, result
+        with open(user_file, "rb") as fh:
+            block = tomllib.load(fh)["pattern"][0]
+        assert block["whole_utterance_only"] is True
+        assert block["actions"] == [
+            {"function": "text", "params": ["::"]},
+        ]
+
+    def test_flag_dropped_when_update_makes_replacement(
+        self, system_file, user_file,
+    ):
+        # Editing a flagged alias into an unanchored replacement must drop
+        # the flag: it is supported only on ^-anchored command patterns,
+        # and preserving it would write a block the catalog disables with
+        # a startup warning on every launch
+        # (wh-int8-punctuation-mishears.1.5).
+        _write_user(
+            user_file,
+            "[[pattern]]\n"
+            "pattern = '''^colin$'''\n"
+            "whole_utterance_only = true\n"
+            'source = "pattern_manager"\n'
+            'actions = [{ function = "text", params = [":"] }]\n',
+        )
+        pm = PatternManager(system_file, user_file)
+        result = pm.update_pattern(
+            PatternManager.pattern_id("^colin$"),
+            {
+                "pattern_type": "replacement",
+                "expression": "colin",
+                "actions": [{"function": "text", "params": [":"]}],
+            },
+        )
+        assert result["success"] is True, result
+        with open(user_file, "rb") as fh:
+            block = tomllib.load(fh)["pattern"][0]
+        assert block["pattern"] == "colin"
+        assert "whole_utterance_only" not in block
+
+    def test_non_bool_whole_utterance_flag_dropped_on_update(
+        self, system_file, user_file,
+    ):
+        # Hand-edited garbage (a truthy string) is dropped on rewrite, same
+        # skip-and-degrade rule as position; the catalog would refuse it
+        # anyway, so re-writing it would just preserve a broken line.
+        _write_user(
+            user_file,
+            "[[pattern]]\n"
+            "pattern = '''^colin$'''\n"
+            'whole_utterance_only = "true"\n'
+            'source = "pattern_manager"\n'
+            'actions = [{ function = "text", params = [":"] }]\n',
+        )
+        pm = PatternManager(system_file, user_file)
+        result = pm.update_pattern(
+            PatternManager.pattern_id("^colin$"),
+            {
+                "pattern_type": "command",
+                "expression": "^colin$",
+                "actions": [{"function": "text", "params": ["::"]}],
+            },
+        )
+        assert result["success"] is True, result
+        with open(user_file, "rb") as fh:
+            block = tomllib.load(fh)["pattern"][0]
+        assert "whole_utterance_only" not in block
+
     def test_stale_id_wins_over_duplicate_when_edited_outside(
         self, system_file, user_file,
     ):

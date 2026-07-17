@@ -89,7 +89,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.1"
+$AppVersion = "1.0.2"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/WheelHouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -1617,17 +1617,33 @@ function Invoke-MainInstall {
     }
 
     Write-InstallProgress 95 "Finishing up"
-    # Shortcuts + the auto-start question.
-    New-AppShortcut -LnkPath (Join-Path ([Environment]::GetFolderPath("Programs")) $ShortcutName)
-    New-AppShortcut -LnkPath (Join-Path ([Environment]::GetFolderPath("Desktop")) $ShortcutName)
-    Write-Status "Start-menu and desktop shortcuts created."
+    # Shortcuts + the auto-start question. A failed shortcut must not abort an
+    # otherwise complete install, but it must be loud and name the exact path:
+    # the first physical-machine install ended with a desktop shortcut and no
+    # Start-menu entry, and nothing recorded where the Start-menu attempt went
+    # (wh-startmenu-shortcut-check). Logging the resolved path per location
+    # makes the next field failure diagnosable from the setup log.
+    foreach ($shortcutFolder in @("Programs", "Desktop")) {
+        $lnkPath = Join-Path ([Environment]::GetFolderPath($shortcutFolder)) $ShortcutName
+        try {
+            New-AppShortcut -LnkPath $lnkPath
+            Write-Status "Shortcut created: $lnkPath"
+        } catch {
+            Write-Warn "Could not create the $shortcutFolder shortcut at ${lnkPath}: $($_.Exception.Message)"
+        }
+    }
 
     Write-Host ""
     $autoStart = Resolve-YesNoChoice -Specified ($AutoStart -ne "") -Value ($AutoStart -eq "yes") `
         -Prompt "Start WheelHouse automatically when you log in? For hands-free use this is strongly recommended. Type yes or no (default: no)"
     if ($autoStart) {
-        New-AppShortcut -LnkPath (Join-Path ([Environment]::GetFolderPath("Startup")) $ShortcutName)
-        Write-Status "WheelHouse will start automatically at login."
+        $startupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) $ShortcutName
+        try {
+            New-AppShortcut -LnkPath $startupLnk
+            Write-Status "WheelHouse will start automatically at login ($startupLnk)."
+        } catch {
+            Write-Warn "Could not create the Startup shortcut at ${startupLnk}: $($_.Exception.Message)"
+        }
     }
 
     Write-Host ""

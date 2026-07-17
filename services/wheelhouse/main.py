@@ -5919,6 +5919,9 @@ class LogicController:
                     expression=data.get("expression"),
                     actions=data.get("actions"),
                     position=data.get("position"),
+                    whole_utterance_only=(
+                        data.get("whole_utterance_only") is True
+                    ),
                 )
                 if result["success"] and not _reload_and_refresh():
                     result["warning"] = _stale_warning("Saved")

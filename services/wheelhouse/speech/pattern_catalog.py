@@ -532,6 +532,39 @@ class PatternCatalog:
                         "requires_hotword": requires_hotword
                     }
 
+                    # Whole-utterance-only patterns (sound-alike punctuation
+                    # aliases, wh-int8-punctuation-mishears) may fire only
+                    # when they match the ENTIRE utterance: the router skips
+                    # every early-execute path for them and they resolve at
+                    # utterance end (end marker or timeout). Only a real TOML
+                    # boolean counts: a truthy non-bool ("true", 1) is
+                    # hand-edit garbage and degrades to disabled so the two
+                    # rebuilt representations below can never disagree.
+                    raw_whole_utterance = rule.get("whole_utterance_only", False)
+                    if not isinstance(raw_whole_utterance, bool):
+                        logger.warning(
+                            "Non-boolean whole_utterance_only=%r for pattern "
+                            "%r in %s; treating as disabled",
+                            raw_whole_utterance, pattern_str, source_file,
+                        )
+                        raw_whole_utterance = False
+                    elif raw_whole_utterance and not is_command:
+                        # The router's whole-utterance gates exist only on
+                        # the command paths; a replacement executes without
+                        # consulting the flag, so honoring it here would
+                        # promise safety the runtime does not deliver
+                        # (wh-int8-punctuation-mishears.1.4).
+                        logger.warning(
+                            "whole_utterance_only is only supported on "
+                            "^-anchored command patterns; ignoring it for "
+                            "replacement pattern %r in %s",
+                            pattern_str, source_file,
+                        )
+                        raw_whole_utterance = False
+                    whole_utterance_only = raw_whole_utterance
+                    if whole_utterance_only:
+                        data_dict["whole_utterance_only"] = True
+
                     # Add auto-detected validation metadata
                     if auto_metadata.get("validation_group"):
                         data_dict["validation_group"] = auto_metadata["validation_group"]
@@ -570,6 +603,7 @@ class PatternCatalog:
                         'is_greedy': auto_metadata.get("is_greedy", False),
                         'raw_pattern': pattern_str,
                         'is_user': source_file == self._user_patterns_file,
+                        'whole_utterance_only': whole_utterance_only,
                     })
 
                     pattern_count += 1

@@ -57,6 +57,22 @@ def hermetic_launcher_logging(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def hermetic_transcript_env(monkeypatch):
+    """Keep _run_supervisor's transcript-flag export from leaking into the
+    rest of the suite (wh-launcher-test-env-leak).
+
+    The integration tests here run the real _run_supervisor preamble, which
+    reads the REAL config.toml and writes WHEELHOUSE_LOG_TRANSCRIPTS into
+    os.environ for the whole pytest process. On a dev machine with
+    LOG_TRANSCRIPTS = true that flipped utils.redact off suite-wide and
+    failed the redaction assertions in later test files (the clipboard
+    verified_paste privacy test). setenv records the pre-test state, so
+    teardown restores it no matter what the launcher wrote in between.
+    """
+    monkeypatch.setenv("WHEELHOUSE_LOG_TRANSCRIPTS", "0")
+
+
 def _fake_time_ns(time_values):
     """Create a SimpleNamespace that replaces launcher.time without affecting logging.
 

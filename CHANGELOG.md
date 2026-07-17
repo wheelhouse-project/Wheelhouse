@@ -5,6 +5,38 @@ All notable changes to WheelHouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-07-17
+
+### Added
+
+- Use WheelHouse help with your own AI assistant: the release now ships an
+  `llm/` folder containing the full help document and a ready-to-paste
+  assistant instruction file, with step-by-step setup walkthroughs on the
+  project site for Custom GPTs, Gemini Gems, Claude Projects, and
+  Perplexity Spaces.
+
+### Fixed
+
+- On the default speech engine, saying "comma" or "colon" sometimes typed a
+  sound-alike word instead of the punctuation mark. The common mishears are
+  now recognized as punctuation.
+- The Pattern Manager no longer writes an internal whole-utterance flag
+  into saved replacement patterns, which could stop an edited replacement
+  from matching during dictation.
+- Custom command patterns created in the Pattern Manager's advanced mode
+  now carry the whole-utterance-only setting through save and edit
+  correctly.
+- The installer now logs Start-menu and desktop shortcut creation loudly
+  and always writes its setup log, so a failed shortcut is visible instead
+  of silent.
+
+### Changed
+
+- The help document was regenerated against the current release, and the
+  unused `api_key` line was removed from the shipped configuration template
+  (the AI server credential is read only from the `WHEELHOUSE_AI_API_KEY`
+  environment variable).
+
 ## [1.0.1] - 2026-07-16
 
 ### Added

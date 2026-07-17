@@ -2236,6 +2236,22 @@ class TestPositionCarryOnCreate:
         dialog = _make_dialog(entry=entry)
         assert "position" not in dialog.get_pattern_data()
 
+    def test_entry_position_included_in_advanced_payload(self):
+        # A shipped trailing pattern has no phrases metadata, so Customize
+        # opens it in ADVANCED mode -- the carry must hold on that exit of
+        # get_pattern_data too, not just the simple one
+        # (wh-int8-punctuation-mishears.1.3, same gap pattern as the
+        # whole_utterance_only flag).
+        entry = _simple_entry(
+            phrases=None,
+            raw_pattern="submit",
+            raw_actions=[{"function": "press", "params": ["enter"]}],
+        )
+        entry["position"] = "trailing"
+        dialog = _make_dialog(entry=entry)
+        assert dialog._mode == "advanced"
+        assert dialog.get_pattern_data().get("position") == "trailing"
+
     async def test_create_handler_writes_position(self, tmp_path):
         system_file = tmp_path / "patterns.toml"
         system_file.write_text(SYSTEM_CONTENT, encoding="utf-8")
@@ -2263,6 +2279,84 @@ class TestPositionCarryOnCreate:
         with open(user_file, "rb") as fh:
             written = tomllib.load(fh)["pattern"][0]
         assert written["position"] == "trailing"
+
+
+class TestWholeUtteranceCarryOnCreate:
+    """Customize/Duplicate of a shipped punctuation alias must not silently
+    drop ``whole_utterance_only`` -- same carry-forward as position
+    (review finding wh-int8-punctuation-mishears.1.1)."""
+
+    def test_entry_flag_included_in_create_payload(self):
+        entry = _simple_entry()
+        entry["whole_utterance_only"] = True
+        # No pattern_id: this is the Customize/Duplicate create flow.
+        dialog = _make_dialog(entry=entry)
+        assert dialog.get_pattern_data().get("whole_utterance_only") is True
+
+    def test_no_flag_key_when_absent(self):
+        dialog = _make_dialog(entry=_simple_entry())
+        assert "whole_utterance_only" not in dialog.get_pattern_data()
+
+    def test_non_bool_flag_not_carried(self):
+        entry = _simple_entry()
+        entry["whole_utterance_only"] = "true"
+        dialog = _make_dialog(entry=entry)
+        assert "whole_utterance_only" not in dialog.get_pattern_data()
+
+    def test_entry_flag_included_in_advanced_payload(self):
+        # The shipped alias entries (^colin$, ^(?:come|kama|commer|come on)$)
+        # carry NO phrases metadata, so Customize opens them in ADVANCED
+        # mode. The advanced exit of get_pattern_data must attach the flag
+        # too -- the simple-mode test alone would stay green if the
+        # advanced attach were deleted (wh-int8-punctuation-mishears.1.3).
+        entry = _simple_entry(
+            phrases=None,
+            raw_pattern="^colin$",
+            raw_actions=[{"function": "text", "params": [":"]}],
+        )
+        entry["whole_utterance_only"] = True
+        dialog = _make_dialog(entry=entry)
+        assert dialog._mode == "advanced"
+        data = dialog.get_pattern_data()
+        assert data.get("expression") == "^colin$"
+        assert data.get("whole_utterance_only") is True
+
+    def test_flag_survives_simple_to_advanced_switch(self):
+        # Switching modes mid-edit must not lose the hidden carry.
+        entry = _simple_entry()
+        entry["whole_utterance_only"] = True
+        dialog = _make_dialog(entry=entry)
+        assert dialog._mode == "simple"
+        dialog._advanced_toggle.setChecked(True)
+        assert dialog._mode == "advanced"
+        assert dialog.get_pattern_data().get("whole_utterance_only") is True
+
+    async def test_create_handler_writes_flag(self, tmp_path):
+        system_file = tmp_path / "patterns.toml"
+        system_file.write_text(SYSTEM_CONTENT, encoding="utf-8")
+        user_file = tmp_path / "user_patterns.toml"
+        controller, handler = _make_controller(str(system_file), str(user_file))
+
+        await controller._handle_pattern_manager_action(
+            "pm_create_pattern",
+            {"data": {
+                # Exactly what a Customize of the shipped "^colin$" alias
+                # sends: an anchored command expression plus the flag.
+                "pattern_type": "command",
+                "expression": "^colin$",
+                "actions": [{"function": "text", "params": [":"]}],
+                "requires_hotword": False,
+                "whole_utterance_only": True,
+            }},
+        )
+        results = [
+            m for m in controller.state_manager.state_to_gui_queue.items
+            if m.get("action") == "pm_create_result"
+        ]
+        assert results[0]["data"]["success"] is True, results[0]["data"]
+        with open(user_file, "rb") as fh:
+            written = tomllib.load(fh)["pattern"][0]
+        assert written["whole_utterance_only"] is True
 
 
 class TestSaveResultCorrelation:

@@ -281,6 +281,18 @@ class PatternManager:
             value = pat_data.get(key)
             if isinstance(value, str) and value:
                 entry[key] = value
+        # Carry whole_utterance_only so Customize/edit round-trips keep the
+        # whole-utterance safety on punctuation aliases
+        # (wh-int8-punctuation-mishears.1.1). Only a real boolean true on a
+        # ^-anchored command pattern qualifies -- the runtime honors the
+        # flag nowhere else, so carrying it on a replacement would keep a
+        # dead flag alive across edits (wh-int8-punctuation-mishears.1.5).
+        # Garbage is omitted, matching the catalog's strict validation.
+        if (
+            pat_data.get("whole_utterance_only") is True
+            and raw_pattern.startswith("^")
+        ):
+            entry["whole_utterance_only"] = True
         return entry
 
     def get_all_patterns_structured(self) -> dict[str, Any]:
@@ -899,6 +911,7 @@ class PatternManager:
         phrases: list[str] | None,
         explicit_type: str | None = None,
         position: str | None = None,
+        whole_utterance_only: bool = False,
     ) -> list[str]:
         """Render one ``[[pattern]]`` block as a list of lines.
 
@@ -912,7 +925,10 @@ class PatternManager:
         runtime key the editor has no field for (trailing commands,
         wh-2vz); update_pattern passes the original block's value through
         so an edit does not silently turn a trailing command into a
-        regular one (wh-pattern-editor-r3.1).
+        regular one (wh-pattern-editor-r3.1). ``whole_utterance_only``
+        is the punctuation-alias safety flag, carried the same way so a
+        Customize/edit does not turn an alias into an eager command
+        (wh-int8-punctuation-mishears.1.1).
         """
         lines = [
             "[[pattern]]",
@@ -926,6 +942,8 @@ class PatternManager:
             lines.append("requires_hotword = true")
         if position is not None:
             lines.append(f"position = {cls._format_toml_value(position)}")
+        if whole_utterance_only:
+            lines.append("whole_utterance_only = true")
         lines.append('source = "pattern_manager"')
         lines.append(cls._format_actions_toml(actions))
         return lines
@@ -941,6 +959,7 @@ class PatternManager:
         expression: str | None = None,
         actions: list[dict] | None = None,
         position: str | None = None,
+        whole_utterance_only: bool = False,
     ) -> dict[str, Any]:
         """Create a new pattern in the writable user file.
 
@@ -1018,11 +1037,20 @@ class PatternManager:
 
             # Build the new [[pattern]] block. A Customize of a shipped
             # positional pattern carries its position key through so the
-            # user copy binds the same way (wh-pattern-editor-r8.5).
+            # user copy binds the same way (wh-pattern-editor-r8.5); same
+            # for the whole_utterance_only alias flag
+            # (wh-int8-punctuation-mishears.1.1). The flag is written only
+            # when the resolved regex is a ^-anchored command -- on a
+            # replacement it is meaningless and the catalog would disable
+            # it with a startup warning on every launch
+            # (wh-int8-punctuation-mishears.1.5).
             block_lines = self._build_block_lines(
                 regex, action_steps, requires_hotword, stored_phrases,
                 explicit_type,
                 position=position if isinstance(position, str) else None,
+                whole_utterance_only=(
+                    whole_utterance_only is True and regex.startswith("^")
+                ),
             )
             block = "\n" + "\n".join(block_lines) + "\n"
 
@@ -1334,16 +1362,28 @@ class PatternManager:
 
             # Build the replacement block in create_pattern's format,
             # carrying forward the original block's hand-edited
-            # ``position`` key (wh-pattern-editor-r3.1). A non-string
-            # value is hand-edited garbage the runtime ignores anyway;
-            # it is dropped, not re-written.
+            # ``position`` key (wh-pattern-editor-r3.1) and the
+            # ``whole_utterance_only`` alias flag
+            # (wh-int8-punctuation-mishears.1.1). A wrong-typed value is
+            # hand-edited garbage the runtime ignores anyway; it is
+            # dropped, not re-written. The flag is also dropped when the
+            # edit turns the pattern into an unanchored replacement -- the
+            # runtime honors the flag only on ^-anchored commands
+            # (wh-int8-punctuation-mishears.1.5).
             original_position = toml_patterns[target_index].get("position")
+            original_whole_utterance = toml_patterns[target_index].get(
+                "whole_utterance_only"
+            )
             block_lines = self._build_block_lines(
                 regex, action_steps, data.get("requires_hotword", False),
                 stored_phrases, explicit_type,
                 position=(
                     original_position
                     if isinstance(original_position, str) else None
+                ),
+                whole_utterance_only=(
+                    original_whole_utterance is True
+                    and regex.startswith("^")
                 ),
             )
             block = "\n".join(block_lines) + "\n"
