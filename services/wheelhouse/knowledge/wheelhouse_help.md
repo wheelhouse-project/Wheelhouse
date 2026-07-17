@@ -56,7 +56,7 @@ That is the whole list. The installer brings everything else WheelHouse needs, c
    ```
    irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/install-wheelhouse.ps1 | iex
    ```
-   The installer downloads the speech model, so give it time. When it asks a question, pressing Enter accepts the default.
+   The installer downloads the speech model, so give it time. When it asks a question, pressing Enter accepts the default -- except the start-at-login question: its default is no, and answering yes is recommended for hands-free use.
 2. Start WheelHouse from the Start menu or the desktop shortcut (the installer creates both).
 3. Open Notepad.
 4. Say **"hello world"** -- the words "hello world" appear.
@@ -124,10 +124,17 @@ Every failure message the installer prints is designed to be understandable and 
 - **"Not enough free disk space"**: free up 10 GB on the Windows drive and run the installer again.
 - **"tar.exe was not found"**: only affects Windows 10 versions from before 2018, which lack the tool that unpacks the speech model. Install tar yourself, or choose the Google Cloud engine (which needs no model download).
 - **"Could not install uv"**: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.
-- **"... failed its integrity check"**: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; add an exception or try a different network.
+- **"... failed its integrity check"**: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; a changed release asset is the other. Add an exception or try a different network, and if it keeps failing, file an issue on the GitHub page.
 - **"Downloading ... failed twice"**: network trouble. Run the installer again -- downloads resume where they left off.
+- **"Setting up services/... failed"**: a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again (it picks up where it left off). If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again, and check whether antivirus is removing files.
+- **"An incomplete speech model was found"**: informational, not an error. A previous unpacking was interrupted; the installer removes the incomplete files and unpacks again from the archive it already has. The 650 MB download does not repeat unless the downloaded file itself is damaged.
+- **No WheelHouse entry in the Start menu**: check Start > All apps under W first -- new entries are not pinned to the front page. If it is truly absent, the desktop shortcut works the same, and the installer's log records a "Shortcut created" or "Could not create" line you can paste into a help request.
 
-**Re-running the installer is always safe.** It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your settings, your personal voice patterns, and the downloaded speech model. You cannot make things worse by running it again -- when in doubt, re-run it.
+**Re-running the installer is always safe.** It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your settings, your personal voice patterns, your approved dictation targets, your saved speech hints, and the downloaded speech model. You cannot make things worse by running it again -- when in doubt, re-run it.
+
+### Uninstalling
+
+The installer is also the uninstaller. Download the same install-wheelhouse.ps1 file from the releases page, then run it in PowerShell with the -Uninstall option (the one-line install command cannot pass options, so uninstalling needs the downloaded file). It asks you to confirm before removing anything, and asks separately whether to keep or remove your personal settings and voice patterns.
 
 If none of that helps, ask for help at https://github.com/wheelhouse-project/WheelHouse -- paste the installer's output into your report.
 
@@ -492,7 +499,7 @@ If the speech recognizer routinely mishears any other word -- for example a name
 
 | Say this | What happens | Notes |
 |---|---|---|
-| x-ray activate [app name] | Brings the named application forward, starting it if needed | e.g. "x-ray activate outlook", "x-ray activate code" |
+| x-ray activate [app name] | Brings the named application's window forward if the app is already running; a spoken name does not start an app that is closed (only .exe targets used in custom patterns are launched when not found) | e.g. "x-ray activate outlook", "x-ray activate code" |
 | x-ray browser | Brings your default web browser to the front | WheelHouse looks up which browser is your Windows default at the moment you speak |
 | x-ray notepad | Brings Notepad to the front | |
 
@@ -568,7 +575,7 @@ Things worth knowing about the overlay:
 A successful click shows no notice -- the control is simply clicked. The other outcomes show a brief advisory notice near the tray so you know why nothing happened:
 
 - **Not found**: "No match for [name]" -- nothing on screen matched the name you said. Try the numbered overlay.
-- **Ambiguous**: "Found [A] and [B] -- be more specific" -- and the numbered overlay opens on the finalists so you can pick by number.
+- **Ambiguous**: the numbered overlay opens on the finalists so you can pick by number. The "Found [A] and [B] -- be more specific" notice appears instead only when the overlay cannot open.
 - **Could not complete the click**: the wording names the reason, for example that the control is disabled, that the click timed out, or that the numbered overlay went stale and needs to be reapplied.
 
 These notices are rate-limited, so a burst of failed attempts will not bury your screen in messages.
@@ -579,9 +586,9 @@ Commands that steer WheelHouse itself: listening modes, help, personal patterns,
 
 | Say this | What happens | Notes |
 |---|---|---|
-| push to talk mode | Switches to press-and-hold listening: WheelHouse listens only while you hold the floating button or tray icon | A notification confirms the switch |
+| push to talk mode | Switches to press-and-hold listening: WheelHouse listens only while you hold the floating button | A notification confirms the switch |
 | click to talk mode | Switches back to toggle listening (click to start, click to stop) -- the default | |
-| x-ray wheelhouse help online | Opens the hosted WheelHouse help page in your browser | Requires the online help URL to be configured (the gem_url setting under [ai.help]); if it is not set, the command does nothing |
+| x-ray wheelhouse help online | Opens the hosted WheelHouse help page in your browser | Requires the online help URL to be configured (the gem_url setting under [ai.help]); if it is not set, WheelHouse says out loud that online help is not configured |
 | x-ray patterns | Opens the Pattern Manager | "x-ray pattern manager" also works; see "Special Commands" below |
 | x-ray fix | Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version | Requires the AI server to be configured and reachable; WheelHouse speaks its progress ("Correcting", "Done") and always preserves your original text on any failure |
 | x-ray cancel fix | Cancels an in-progress fix | |
@@ -634,7 +641,7 @@ Your personal patterns are stored in a separate per-machine file, so they surviv
 
 **"x-ray wheelhouse help online"**
 
-Opens the hosted WheelHouse help page in your default browser, where you can ask questions in plain language. It requires the online help URL (the gem_url setting in the [ai.help] section of the configuration) to be set; with no URL configured, the command quietly does nothing. This is the supported help path -- the in-app help chat window is currently disabled.
+Opens the hosted WheelHouse help page in your default browser, where you can ask questions in plain language. It requires the online help URL (the gem_url setting in the [ai.help] section of the configuration) to be set; with no URL configured, WheelHouse answers out loud that online help is not configured. This is the supported help path -- the in-app help chat window is currently disabled.
 
 ## Speech Modes
 
@@ -741,13 +748,13 @@ A few practical notes before the reference:
 
 **SHOW_SPEECH_PULSE** -- Whether the tray icon pulses while WheelHouse hears you speaking. Default: true. It is a useful "yes, I can hear you" signal; turn it off only if you find the animation distracting.
 
-**SPATIAL_SOUND_EXEC** and **SPATIAL_SOUND_FORMAT** -- Support for switching Dolby Atmos spatial sound by voice, using a small free helper tool from NirSoft. Default: empty, which leaves the feature off. Only fill these in if you use Dolby Atmos and have that tool installed; everyone else can ignore them.
+**SPATIAL_SOUND_EXEC** and **SPATIAL_SOUND_FORMAT** -- Support for switching Dolby Atmos spatial sound by voice, using a small free helper tool from NirSoft. Default: SPATIAL_SOUND_EXEC is empty, which leaves the feature off (SPATIAL_SOUND_FORMAT ships preset to "Dolby Atmos for home theater"). Only fill in the tool path if you use Dolby Atmos and have that tool installed; everyone else can ignore them.
 
 ### Brightness Coordinator ([brightness_coordinator])
 
 WheelHouse changes screen brightness in layers: real hardware brightness first (a supported TV or the laptop panel), then a software dimming effect once the hardware is as low as it goes. These settings tune that handoff. Most people never touch this section.
 
-**software_dimmer** -- Which software dimming method to use when hardware brightness runs out. Default: gamma_dimmer, which darkens the screen through the graphics card. The alternative is a translucent overlay window, or the default "flux" style that works through a companion dimming app's hotkeys. Change it only if dimming misbehaves with your particular monitor setup.
+**software_dimmer** -- Which software dimming method to use when hardware brightness runs out. Default: gamma_dimmer, which darkens the screen through the graphics card. The alternatives are "overlay" (a translucent overlay window) and "flux" (works through a companion dimming app's hotkeys). Change it only if dimming misbehaves with your particular monitor setup.
 
 **unwinding_threshold** -- The brightness level (default 10) at which WheelHouse starts undoing software dimming and handing control back to the hardware as you brighten the screen.
 
@@ -768,7 +775,7 @@ After an idle pause, you can wake WheelHouse by saying its wake word out loud --
 
 - **enabled** -- On/off. Default: true.
 - **keyword** -- The wake word. Default: "computer".
-- **sensitivity** -- How easily the wake word triggers, from 0 to 1. Default: 0.5. Raise it if saying "computer" often fails to wake WheelHouse; lower it if ordinary conversation keeps waking it by accident.
+- **sensitivity** -- The confidence score a detection must reach before it counts, from 0 to 1. Default: 0.5. Lower it if saying "computer" often fails to wake WheelHouse; raise it if ordinary conversation keeps waking it by accident.
 - **mode** -- What the wake word is used for. Default: "idle_recovery", meaning it wakes WheelHouse from an idle pause.
 - **model_dir** -- Where the wake-word listening model lives on disk. Set by the installer; do not change it.
 
@@ -799,7 +806,7 @@ Before typing anywhere, WheelHouse checks that the spot your cursor is in really
 
 ### Speech Interaction ([speech])
 
-- **interaction_mode** -- "toggle" (default) means the microphone stays on until you turn it off: click once to start, click again to stop. "push_to_talk" means WheelHouse listens only while you hold down the tray icon or floating button, and mutes system audio while you hold. You can also switch by voice ("push to talk mode", "click to talk mode") without editing anything.
+- **interaction_mode** -- "toggle" (default) means the microphone stays on until you turn it off: click once to start, click again to stop. "push_to_talk" means WheelHouse listens only while you hold down the floating button (a single click on the tray icon deliberately does nothing in this mode), and mutes system audio while you hold. You can also switch by voice ("push to talk mode", "click to talk mode") without editing anything.
 - **ptt_safety_timeout_seconds** -- In push-to-talk mode, a safety net that automatically releases the microphone if a hold gets stuck (for example, if the button was held when a window stole focus). Default: 30 seconds. Raise it if you routinely dictate longer than 30 seconds in one hold.
 - **notify_on_revision** -- Whether to show a small notice when the speech engine revises its guess at what you said. Default: false.
 
@@ -823,21 +830,17 @@ WheelHouse's AI features are optional and off unless you point them at an AI ser
 
 **[ai.server] model** -- The name of the AI model to request from that server. Default: "gemma3:12b". Change it to whatever model your server has installed.
 
-**[ai.server] kind** -- "local" or "remote". Default: "local". This is how you tell WheelHouse whether the server is on your own machine or out on the internet -- and it frames the privacy tradeoff: with a local server, the text being corrected never leaves your computer; with a remote one, it is sent to that service.
+**[ai.server] kind** -- "local" or "cloud". Default: "local". This is how you tell WheelHouse whether the server is on your own machine or out on the internet -- and it frames the privacy tradeoff: with a local server, the text being corrected never leaves your computer; with a cloud one, it is sent to that service. Spell "cloud" exactly: any other value is treated as local.
 
 **API credential** -- There is deliberately no key stored in the config file. If your server needs a credential (a cloud service usually does; a local Ollama does not), set it in the WHEELHOUSE_AI_API_KEY environment variable in Windows instead. That way the secret never sits in a settings file that could be copied or shared. To set it: Windows Settings, search for "environment variables", choose "Edit environment variables for your account", add a new variable named WHEELHOUSE_AI_API_KEY with your key as the value, then restart WheelHouse.
 
 **[ai.server] timeout_s** -- How many seconds WheelHouse waits for the AI server to answer before giving up on that request. Default: 30. Raise it if a slow local model keeps timing out.
 
-**[ai.help] gem_url** -- The web address that the voice command "wheelhouse help online" opens in your browser. This hosted help page is the help surface of the current release, since the in-app help chat is currently disabled. Default: empty (the command does nothing until a page is configured).
+**[ai.help] gem_url** -- The web address that the voice command "wheelhouse help online" opens in your browser. This hosted help page is the help surface of the current release, since the in-app help chat is currently disabled. Default: empty (until a page is configured, the command answers out loud that online help is not configured).
 
 **[ai.help] max_response_tokens** -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today. Default: 800.
 
 **If the AI server is unreachable**, nothing breaks: the AI features quietly turn themselves off, and dictation, voice commands, and everything else keep working exactly as before. AI is a convenience layered on top of WheelHouse, never a requirement.
-
-### Terminal Dictation ([terminal])
-
-**submit_delay_ms** -- When you dictate into a terminal window through WheelHouse's terminal editor, this is the brief pause (default 100 milliseconds) between delivering the text and pressing Enter. Raise it if a slow terminal occasionally drops the end of a line.
 
 ### Voice Clicking ([click])
 
@@ -989,13 +992,13 @@ If all five pass, WheelHouse is working -- any remaining trouble is specific to 
 
 - *What you see:* You start WheelHouse and nothing appears, or the tray icon never shows up.
 - *What is likely wrong:* One of WheelHouse's background processes failed during startup -- most often because a speech model is missing or an earlier install was interrupted.
-- *What to try:* Re-run the one-line install command. Re-running the installer is always safe: it repairs a broken install and keeps your settings, your personal voice patterns, and the downloaded speech model. If it still will not start, restart the computer and try once more before reaching out for help.
+- *What to try:* Re-run the one-line install command. Re-running the installer is always safe: it repairs a broken install and keeps your settings, your personal voice patterns, your approved dictation targets, your saved speech hints, and the downloaded speech model. If it still will not start, restart the computer and try once more before reaching out for help.
 
 **Speech engine not connecting**
 
 - *What you see:* The tray icon shows the speech engine as disconnected, or WheelHouse seems to be waiting forever for speech to start working.
 - *What is likely wrong:* The speech engine failed to start. Common reasons: its model was never downloaded, the Google Cloud engine has no credentials, or the computer is low on memory.
-- *What to try:* Switch engines from the tray menu -- Parakeet is the built-in offline engine and needs no account. If the engine you want was never fully set up, re-run the installer and choose it at the engine question; the installer downloads whatever that engine needs. For the Google Cloud engine, check that the GOOGLE_APPLICATION_CREDENTIALS environment variable points at your credentials file (see the speech engine section of this document).
+- *What to try:* Switch engines from the tray menu -- Parakeet is the built-in offline engine and needs no account. If the engine you want was never fully set up, re-run the installer and choose it at the engine question; the installer downloads whatever that engine needs. For the Google Cloud engine, check that the GOOGLE_APPLICATION_CREDENTIALS environment variable points at your credentials file (see the speech engine section of this document). If the engine will not start right after an install or update, open a NEW PowerShell window and run "uv --version" -- if that command is not found, the installer's tooling never made it onto your PATH; re-run the installer, which checks and repairs this.
 
 **Commands not recognized**
 
@@ -1046,7 +1049,7 @@ If all five pass, WheelHouse is working -- any remaining trouble is specific to 
 
 **Installer failures**
 
-Every failure message the installer prints -- low memory, low disk space, a blocked uv download, an integrity-check failure, an interrupted download, or WheelHouse still running during an update -- is explained one by one in the "What failure looks like" part of the Getting Started section, along with what to do about each. The short version: re-running the installer is always safe, downloads resume where they left off, and every message is safe to paste into a help request.
+The installer's failure messages -- low memory, low disk space, a blocked uv download, an integrity-check failure, an interrupted download, a failed services setup, an incomplete speech model, or WheelHouse still running during an update -- are explained in the "What failure looks like" part of the Getting Started section, along with what to do about each. The short version: re-running the installer is always safe, downloads resume where they left off, and every message is safe to paste into a help request.
 
 ---
 
