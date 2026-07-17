@@ -26,6 +26,15 @@ from speech.safe_regex import RegexTimeout, match_bounded
 PATHOLOGICAL = r"^(\w+\s*)+$"
 PATHOLOGICAL_TEXT = "a" * 30 + "!"
 
+# Generous budget for matches that must SUCCEED. These tests verify pool
+# lifecycle and result contents, not the production latency budget: on a
+# loaded shared CI runner a healthy worker round-trip can exceed the
+# 0.25 s production default (public CI run 29591822010 failed exactly
+# this way), and a spurious RegexTimeout turns a lifecycle test into a
+# flake. Timeout behavior itself is covered by TestTimeout, whose
+# pathological matches keep the tight default on purpose.
+HEALTHY_TIMEOUT = 5.0
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _shutdown_pool_after_module():
@@ -35,33 +44,51 @@ def _shutdown_pool_after_module():
 
 class TestMatchBounded:
     def test_match_round_trips_groups_and_groupdict(self):
-        result = match_bounded(r"^(\w+) (?P<rest>.+)$", "hello there world")
+        result = match_bounded(
+            r"^(\w+) (?P<rest>.+)$", "hello there world",
+            timeout=HEALTHY_TIMEOUT,
+        )
         assert result is not None
         assert result["groups"] == ("hello", "there world")
         assert result["groupdict"] == {"rest": "there world"}
 
     def test_no_match_returns_none(self):
-        assert match_bounded(r"^save$", "deploy") is None
+        assert match_bounded(r"^save$", "deploy", timeout=HEALTHY_TIMEOUT) is None
 
     def test_flags_are_applied(self):
-        assert match_bounded(r"^save$", "SAVE") is None
-        assert match_bounded(r"^save$", "SAVE", flags=re.IGNORECASE) is not None
+        assert match_bounded(r"^save$", "SAVE", timeout=HEALTHY_TIMEOUT) is None
+        assert match_bounded(
+            r"^save$", "SAVE", flags=re.IGNORECASE,
+            timeout=HEALTHY_TIMEOUT,
+        ) is not None
 
     def test_fullmatch_mode(self):
         # search finds the embedded word; fullmatch requires the whole text.
-        assert match_bounded(r"save", "please save it") is not None
-        assert match_bounded(r"save", "please save it", mode="fullmatch") is None
-        assert match_bounded(r"save", "save", mode="fullmatch") is not None
+        assert match_bounded(
+            r"save", "please save it", timeout=HEALTHY_TIMEOUT,
+        ) is not None
+        assert match_bounded(
+            r"save", "please save it", mode="fullmatch",
+            timeout=HEALTHY_TIMEOUT,
+        ) is None
+        assert match_bounded(
+            r"save", "save", mode="fullmatch", timeout=HEALTHY_TIMEOUT,
+        ) is not None
 
     def test_unfilled_group_round_trips_as_none(self):
-        result = match_bounded(r"^undo\s*(\d+)?$", "undo", mode="fullmatch")
+        result = match_bounded(
+            r"^undo\s*(\d+)?$", "undo", mode="fullmatch",
+            timeout=HEALTHY_TIMEOUT,
+        )
         assert result is not None
         assert result["groups"] == (None,)
 
 
 class TestTimeout:
     def test_pathological_pattern_raises_regex_timeout_quickly(self):
-        match_bounded(r"^warm$", "warm")  # pool spawn paid outside the timing
+        match_bounded(  # pool spawn paid outside the timing
+            r"^warm$", "warm", timeout=HEALTHY_TIMEOUT,
+        )
         start = time.monotonic()
         with pytest.raises(RegexTimeout):
             match_bounded(PATHOLOGICAL, PATHOLOGICAL_TEXT, mode="fullmatch")
@@ -71,7 +98,10 @@ class TestTimeout:
         with pytest.raises(RegexTimeout):
             match_bounded(PATHOLOGICAL, PATHOLOGICAL_TEXT, mode="fullmatch")
         # The terminated pool was discarded; the next call recreates it.
-        result = match_bounded(r"^(\w+)$", "recovered", mode="fullmatch")
+        result = match_bounded(
+            r"^(\w+)$", "recovered", mode="fullmatch",
+            timeout=HEALTHY_TIMEOUT,
+        )
         assert result is not None
         assert result["groups"] == ("recovered",)
 
@@ -134,7 +164,10 @@ class TestFailureRecovery:
         with pytest.raises(re.error):
             match_bounded(r"(", "text")
         assert safe_regex._pool is None
-        result = match_bounded(r"^(\w+)$", "healed", mode="fullmatch")
+        result = match_bounded(
+            r"^(\w+)$", "healed", mode="fullmatch",
+            timeout=HEALTHY_TIMEOUT,
+        )
         assert result is not None
         assert result["groups"] == ("healed",)
 
@@ -146,7 +179,10 @@ class TestFailureRecovery:
         safe_regex.shutdown()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(
-                lambda text: match_bounded(r"^(\w+)$", text, mode="fullmatch"),
+                lambda text: match_bounded(
+                    r"^(\w+)$", text, mode="fullmatch",
+                    timeout=HEALTHY_TIMEOUT,
+                ),
                 ["alpha", "beta"],
             ))
         assert all(r is not None for r in results)
