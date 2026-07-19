@@ -31,11 +31,29 @@
 # and fails every compile (wh-build-exe-review.1). A bare /D value is never
 # numeric-collapsed; only a numeric literal written in .iss source is.
 #
-# v1 ships UNSIGNED by decision (installer spec section 12): users see the
-# SmartScreen "Windows protected your PC" warning. The signing step slots in where
-# the marked placeholder is, before the .exe is uploaded. Because the build is
-# unsigned, every action is pinned to a full commit SHA (wh-build-exe-review.6):
-# signing a tampered binary would just sign the tamper.
+# CODE SIGNING (Azure Artifact Signing; wh-installer-signing-decision)
+# --------------------------------------------------------------------
+# The exe is signed with Azure Artifact Signing (account wheelhouse-signing,
+# certificate profile wheelhouse-public, East US). Auth is GitHub OIDC through
+# this repo's "signing" environment: azure/login exchanges the job's OIDC token
+# for an Azure session -- no stored credential anywhere. Signing happens AT ISCC
+# COMPILE TIME via Inno's SignTool directive, NOT on the built exe afterward:
+# the embedded uninstaller (unins000.exe) can only be signed during compilation
+# (SignedUninstaller defaults to yes once SignTool is set), and an unsigned
+# uninstaller would re-create the exact Defender false-positive problem signing
+# exists to fix (wh-setup-defender-fp: unsigned zero-reputation builds get
+# ML-flagged as Trojan:Win32/Bearfoos.B!ml).
+#
+# Because this workflow checks out the RELEASE TAG, the committed .iss at an
+# older tag cannot be assumed to carry a SignTool directive. So the prepare
+# step PATCHES the checked-out .iss (inserts SignTool=artifactsign under
+# [Setup]) instead of relying on the script -- one mechanism that works
+# identically for every tag, past and future. Forks build unsigned (their
+# "signing" environment has no secrets); in the canonical repo a missing
+# signing configuration FAILS the build rather than silently shipping an
+# unsigned exe. Every action is pinned to a full commit SHA
+# (wh-build-exe-review.6): signing a tampered action's output would just sign
+# the tamper.
 
 name: Build installer
 
@@ -50,6 +68,7 @@ on:
 
 permissions:
   contents: write        # download the stamped engine + upload the exe asset
+  id-token: write        # OIDC token for azure/login (code signing)
 
 concurrency:
   group: build-installer-${{ github.event.release.tag_name || inputs.tag }}
@@ -59,8 +78,15 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 20
+    # The "signing" environment holds AZURE_CLIENT_ID / AZURE_TENANT_ID /
+    # AZURE_SUBSCRIPTION_ID and scopes the OIDC subject the Entra federated
+    # credential trusts (repo:...:environment:signing). Referencing it from a
+    # fork is harmless: the fork's environment has no secrets, SIGNING_ENABLED
+    # resolves false, and the build proceeds unsigned.
+    environment: signing
     env:
       GH_TOKEN: ${{ github.token }}
+      SIGNING_ENABLED: ${{ secrets.AZURE_CLIENT_ID != '' && github.repository == 'wheelhouse-project/WheelHouse' }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -97,6 +123,20 @@ jobs:
           "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Building installer for $tag (version $version)"
+
+      - name: Require signing configuration in the canonical repo
+        shell: pwsh
+        run: |
+          # In wheelhouse-project/WheelHouse an unsigned build must never reach
+          # the release: Defender's ML heuristics delete unsigned zero-reputation
+          # installers on end-user machines (wh-setup-defender-fp), so a silently
+          # unsigned upload is worse than a failed build. Fail fast if the
+          # signing environment lost its secrets. Forks are exempt and build
+          # unsigned.
+          if ('${{ github.repository }}' -eq 'wheelhouse-project/WheelHouse' -and $env:SIGNING_ENABLED -ne 'true') {
+            throw 'Code signing is not configured (the "signing" environment is missing AZURE_CLIENT_ID); refusing to build an unsigned installer in the canonical repo. See wh-installer-signing-decision.'
+          }
+          Write-Host "Signing enabled: $env:SIGNING_ENABLED"
 
       - name: Install Inno Setup 6
         shell: pwsh
@@ -175,8 +215,73 @@ jobs:
           }
           Write-Host "App archive verified against the stamped engine ($expected)."
 
+      - name: Azure sign-in for code signing (OIDC, no stored secret)
+        if: env.SIGNING_ENABLED == 'true'
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43  # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Prepare code signing
+        if: env.SIGNING_ENABLED == 'true'
+        id: signprep
+        shell: pwsh
+        run: |
+          # Signing runs INSIDE the ISCC compile (Inno SignTool directive) so the
+          # embedded uninstaller is signed too -- see the header note. This step
+          # stages everything the compile's sign command needs:
+          #   1. the Azure signing dlib (signtool plug-in) from the pinned
+          #      Microsoft.Trusted.Signing.Client NuGet package,
+          #   2. the newest Windows SDK signtool.exe on the runner (dlib support
+          #      needs 10.0.2261.755+; current runner SDKs are far newer),
+          #   3. a metadata.json naming the signing account + certificate profile
+          #      (not secrets -- auth is the azure/login OIDC session, which the
+          #      dlib reaches through DefaultAzureCredential -> AzureCliCredential;
+          #      ManagedIdentityCredential is excluded so the credential probe
+          #      does not stall on the runner's absent IMDS endpoint),
+          #   4. the .iss patch: insert SignTool=artifactsign under [Setup] in the
+          #      TAG-checked-out script (older tags predate signing, so the
+          #      committed script cannot be relied on -- the patch works for every
+          #      tag uniformly). SignedUninstaller defaults to yes once SignTool
+          #      is set, which is exactly what we want.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          nuget install Microsoft.Trusted.Signing.Client -Version 1.0.95 -x -OutputDirectory signing-client -NonInteractive
+          if ($LASTEXITCODE -ne 0) { throw "nuget install Microsoft.Trusted.Signing.Client failed (exit $LASTEXITCODE)." }
+          $dlib = Join-Path $env:GITHUB_WORKSPACE 'signing-client\Microsoft.Trusted.Signing.Client\bin\x64\Azure.CodeSigning.Dlib.dll'
+          if (-not (Test-Path $dlib)) { throw "Azure.CodeSigning.Dlib.dll not found at $dlib; the NuGet package layout changed." }
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe' -ErrorAction SilentlyContinue |
+            Sort-Object { [version]$_.Directory.Parent.Name } | Select-Object -Last 1
+          if (-not $signtool) { throw 'No Windows SDK signtool.exe found on the runner.' }
+          Write-Host "Using signtool: $($signtool.FullName)"
+          $metadata = Join-Path $env:GITHUB_WORKSPACE 'signing-client\metadata.json'
+          @'
+          {
+            "Endpoint": "https://eus.codesigning.azure.net",
+            "CodeSigningAccountName": "wheelhouse-signing",
+            "CertificateProfileName": "wheelhouse-public",
+            "ExcludeCredentials": ["ManagedIdentityCredential"]
+          }
+          '@ | Set-Content -Path $metadata -Encoding utf8
+          $iss = 'installer\WheelHouse-Setup.iss'
+          $content = Get-Content $iss -Raw
+          $setupHeaders = [regex]::Matches($content, '(?m)^\[Setup\]')
+          if ($setupHeaders.Count -ne 1) { throw "Expected exactly one [Setup] section in $iss; found $($setupHeaders.Count). Refusing to patch." }
+          if ($content -match '(?mi)^\s*SignTool\s*=') { throw "$iss already carries a SignTool directive; the build-time patch would double it. Update this workflow to match the script." }
+          $content = $content -replace '(?m)^\[Setup\]', "[Setup]`r`nSignTool=artifactsign"
+          Set-Content -Path $iss -Value $content -Encoding utf8 -NoNewline
+          Write-Host 'Patched SignTool=artifactsign into the [Setup] section.'
+          # The sign command ISCC will run for Setup.exe and the uninstaller.
+          # $q is Inno's escape for a double quote inside a sign tool command;
+          # $f is the file being signed. Both must reach ISCC literally.
+          $cmd = '$q' + $signtool.FullName + '$q sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $q' + $dlib + '$q /dmdf $q' + $metadata + '$q $f'
+          "signcmd=$cmd" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Compile installer
         shell: pwsh
+        env:
+          SIGN_CMD: ${{ steps.signprep.outputs.signcmd }}
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
@@ -184,20 +289,36 @@ jobs:
           $args = @(
             "/O$dist",
             "/FWheelHouse-Setup",
-            "/DAppVer=${{ steps.rel.outputs.version }}",
-            "installer\WheelHouse-Setup.iss"
+            "/DAppVer=${{ steps.rel.outputs.version }}"
           )
+          if ($env:SIGNING_ENABLED -eq 'true') {
+            if (-not $env:SIGN_CMD) { throw 'Signing is enabled but the prepare step produced no sign command.' }
+            # One argument: /Sartifactsign=<command>. pwsh quotes the whole
+            # argument for ISCC; Inno expands $q/$f inside the command itself.
+            $args += "/Sartifactsign=$($env:SIGN_CMD)"
+          }
+          $args += "installer\WheelHouse-Setup.iss"
           & $iscc @args
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
-      # ----------------------------------------------------------------------
-      # Code signing (deferred -- v1 ships unsigned by decision).
-      # Add the signing step HERE, before the exe is uploaded, so the SIGNED
-      # exe is the one attached to the release. Planned path: Azure Trusted
-      # Signing via azure/login (OIDC, no stored secret) then
-      # azure/trusted-signing-action pointed at dist\WheelHouse-Setup.exe.
-      # See installer spec section 12.
-      # ----------------------------------------------------------------------
+      - name: Verify the signature
+        if: env.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        run: |
+          # Prove the exe that is about to be uploaded really is signed, chains
+          # to a trusted root, is timestamped (mandatory: Artifact Signing certs
+          # live ~72 hours, so an untimestamped signature dies with the cert),
+          # and names the expected subject. A signing misconfiguration must fail
+          # HERE, not on an end-user machine.
+          $ErrorActionPreference = 'Stop'
+          $exe = 'dist\WheelHouse-Setup.exe'
+          $sig = Get-AuthenticodeSignature -FilePath $exe
+          if ($sig.Status -ne 'Valid') { throw "Signature status on $exe is '$($sig.Status)' ($($sig.StatusMessage)); expected Valid." }
+          if (-not $sig.TimeStamperCertificate) { throw "The signature on $exe carries no timestamp; it would expire with the short-lived certificate." }
+          if ($sig.SignerCertificate.Subject -notmatch 'David Chesley Hite III') { throw "Unexpected signer subject: $($sig.SignerCertificate.Subject)" }
+          Write-Host "Signed by: $($sig.SignerCertificate.Subject)"
+          Write-Host "Thumbprint: $($sig.SignerCertificate.Thumbprint)"
+          Write-Host "Timestamped by: $($sig.TimeStamperCertificate.Subject)"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
