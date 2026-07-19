@@ -1,6 +1,6 @@
-# Contributing to WheelHouse
+# Contributing to Wheelhouse
 
-Thank you for considering a contribution. WheelHouse enables full
+Thank you for considering a contribution. Wheelhouse enables full
 hands-free computer use for people who may not be able to fall back to a
 mouse or keyboard, so the bar for reliability is deliberately high — this
 document explains the workflow that keeps it that way.
@@ -19,7 +19,7 @@ document explains the workflow that keeps it that way.
 
 ## Development setup
 
-WheelHouse is a uv-managed monorepo of independent Python services, each
+Wheelhouse is a uv-managed monorepo of independent Python services, each
 with its own virtual environment. You need:
 
 - Windows 10 or 11 (64-bit) — this is a Windows application; most of the
@@ -29,7 +29,7 @@ with its own virtual environment. You need:
 
 ```powershell
 git clone https://github.com/wheelhouse-project/WheelHouse
-cd WheelHouse/services/wheelhouse
+cd Wheelhouse/services/wheelhouse
 uv sync
 copy config.toml.example config.toml
 uv run python launcher.py

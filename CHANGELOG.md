@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to WheelHouse are documented in this file.
+All notable changes to Wheelhouse are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The project website now carries a full documentation page rendered
   directly from the shipped help document, so the site and the in-app
   help can never disagree.
-- The `llm/` folder now ships the official WheelHouse Helper GPT files
+- The `llm/` folder now ships the official Wheelhouse Helper GPT files
   (`gpt-instructions.txt` and `gpt-action-openapi.json`), so you can
   build a ChatGPT GPT that always answers from the latest released help
   document.
@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The help document is now the single source of truth for using and
-  installing WheelHouse: `INSTALL.md` is generated from its
+  installing Wheelhouse: `INSTALL.md` is generated from its
   installation sections (and gained a Speech Engines and Accounts
   overview), and the assistant instructions that previously shipped as
   a separate `llm/assistant-instructions.txt` are now embedded in the
@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Use WheelHouse help with your own AI assistant: the release now ships an
+- Use Wheelhouse help with your own AI assistant: the release now ships an
   `llm/` folder containing the full help document and a ready-to-paste
   assistant instruction file, with step-by-step setup walkthroughs on the
   project site for Custom GPTs, Gemini Gems, Claude Projects, and
@@ -110,7 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-07-12
 
-First public release. WheelHouse was developed privately as its author's
+First public release. Wheelhouse was developed privately as its author's
 daily driver before this release; 1.0.0 opens the source and makes it
 installable by anyone.
 

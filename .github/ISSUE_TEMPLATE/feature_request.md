@@ -16,7 +16,7 @@ say so in the first line.
 
 **The problem**
 
-What are you trying to do that WheelHouse can't do today, or makes
+What are you trying to do that Wheelhouse can't do today, or makes
 harder than it should be?
 
 **Proposed solution**

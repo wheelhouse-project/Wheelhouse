@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "WheelHouse Help Document",
-    "description": "Fetches the current WheelHouse user guide from the project's GitHub repository so the assistant always answers from the latest published documentation.",
+    "title": "Wheelhouse Help Document",
+    "description": "Fetches the current Wheelhouse user guide from the project's GitHub repository so the assistant always answers from the latest published documentation.",
     "version": "1.0.0"
   },
   "servers": [
@@ -14,10 +14,10 @@
     "/wheelhouse-project/WheelHouse/main/services/wheelhouse/knowledge/wheelhouse_help.md": {
       "get": {
         "operationId": "getHelpDocument",
-        "summary": "Fetch the current WheelHouse user guide as markdown text.",
+        "summary": "Fetch the current Wheelhouse user guide as markdown text.",
         "responses": {
           "200": {
-            "description": "The complete WheelHouse user guide (markdown).",
+            "description": "The complete Wheelhouse user guide (markdown).",
             "content": {
               "text/plain": {
                 "schema": {

@@ -1,6 +1,6 @@
 # Security Policy
 
-WheelHouse is a voice-control application whose users may depend on it
+Wheelhouse is a voice-control application whose users may depend on it
 for all computer input, and whose dictation can include passwords and
 medical text. Security and privacy reports are treated as high priority.
 
@@ -33,7 +33,7 @@ Reports especially welcome:
 - Dictated or clipboard content leaking anywhere it shouldn't (logs,
   files, network) — the redaction default (PRIVACY.md) failing is a
   vulnerability, not a bug.
-- WheelHouse's IPC channels (WebSocket, shared memory, queues) being
+- Wheelhouse's IPC channels (WebSocket, shared memory, queues) being
   usable by another local process to inject synthetic input or read
   transcripts.
 - The installer or model download executing or trusting something it
@@ -43,12 +43,12 @@ Reports especially welcome:
 
 Known boundaries, documented rather than reportable:
 
-- WheelHouse cannot type into or click elevated windows or UAC prompts
+- Wheelhouse cannot type into or click elevated windows or UAC prompts
   (Windows blocks synthetic input across integrity levels). This is a
-  platform boundary, not a WheelHouse control.
+  platform boundary, not a Wheelhouse control.
 - Anyone who can speak within range of the microphone can issue voice
   commands. There is no speaker authentication in v1; do not point
-  WheelHouse at a machine whose compromise-by-voice would be a security
+  Wheelhouse at a machine whose compromise-by-voice would be a security
   boundary violation for you.
 - Release installers are digitally signed (publisher: David Chesley
   Hite III). SmartScreen may still warn shortly after each new release

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something WheelHouse did wrong, or failed to do
+about: Something Wheelhouse did wrong, or failed to do
 title: ""
 labels: bug
 assignees: ""
@@ -35,7 +35,7 @@ Parakeet (default) / Distil-Whisper / Google Cloud STT
 **Environment**
 
 - Windows version (e.g. Windows 11 23H2):
-- WheelHouse version (`VERSION` file in the install directory, or the release tag):
+- Wheelhouse version (`VERSION` file in the install directory, or the release tag):
 - The application you were dictating into or controlling, if relevant:
 
 **Log excerpt**

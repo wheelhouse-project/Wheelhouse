@@ -7,7 +7,7 @@ read it first; this file only adds agent-workflow expectations.
 ## Mission
 
 - Prioritize reliability, accessibility, and safety over delivery speed.
-- WheelHouse enables full voice control for users who may not use a mouse or
+- Wheelhouse enables full voice control for users who may not use a mouse or
   keyboard; regressions are high impact.
 
 ## Working defaults

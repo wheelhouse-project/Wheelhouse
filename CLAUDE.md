@@ -1,4 +1,4 @@
-# WheelHouse
+# Wheelhouse
 
 > **Voice-controlled desktop automation system** - A multi-process Python application for anyone who wants to control their Windows PC by voice — for hands-free convenience, and equally as serious assistive technology. Built for the open-source community across diverse hardware. **Reliability is non-negotiable**: this project enables full hands-free computer use for people who may not be able to fall back to a mouse or keyboard, so regressions are high impact.
 

@@ -1,14 +1,14 @@
-# WheelHouse
+# Wheelhouse
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
 **Hands-free control of your Windows PC by voice.**
 
-WheelHouse is free, open-source voice control for everyone — dictation into
+Wheelhouse is free, open-source voice control for everyone — dictation into
 any application, voice commands, and clicking things by name, often faster
 and more comfortable than reaching for the keyboard and mouse. It is
 equally serious assistive technology: if using a keyboard and mouse is
-painful, difficult, or impossible, WheelHouse aims to give you the whole
+painful, difficult, or impossible, Wheelhouse aims to give you the whole
 computer by voice. It runs entirely on your machine by default: no cloud
 account, no subscription, no telemetry.
 
@@ -22,12 +22,12 @@ account, no subscription, no telemetry.
   by a pattern catalog you can extend with your own commands through the
   built-in Pattern Manager.
 - **Click by voice.** Say `click cancel` or `click the submit button` and
-  WheelHouse finds the control in the focused window and clicks it. When
+  Wheelhouse finds the control in the focused window and clicks it. When
   names are ambiguous or unlabeled, say `apply numbers` to badge every
   clickable control with a number and `click 5` to pick one.
 - **Offline by default.** The default speech engine (NVIDIA Parakeet,
   running locally on your CPU) never sends audio or text anywhere.
-- **Careful about where text goes.** Before typing a word, WheelHouse
+- **Careful about where text goes.** Before typing a word, Wheelhouse
   checks that the focused control actually accepts text, so dictation
   does not spray keystrokes into the wrong place.
 
@@ -40,7 +40,7 @@ irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/in
 ```
 
 The installer checks your hardware, installs its own Python environment
-(nothing global), downloads the offline speech model, and puts WheelHouse
+(nothing global), downloads the offline speech model, and puts Wheelhouse
 in your Start menu. Details, prerequisites for the optional speech engines,
 troubleshooting, and uninstall instructions are in [INSTALL.md](./INSTALL.md).
 
@@ -48,7 +48,7 @@ troubleshooting, and uninstall instructions are in [INSTALL.md](./INSTALL.md).
 disk space for the speech model. See INSTALL.md for the exact hardware
 guidance.
 
-**A note on security warnings:** WheelHouse releases are digitally signed;
+**A note on security warnings:** Wheelhouse releases are digitally signed;
 the installer's publisher shows as **David Chesley Hite III**, the project
 author. Windows SmartScreen may still warn for a while after each new
 release, until it has seen that exact file often enough — click **More
@@ -94,10 +94,10 @@ include passwords and medical text. The short version:
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Development setup, tests, and the contribution workflow |
 | [SECURITY.md](./SECURITY.md) | Reporting vulnerabilities |
 
-## WheelHouse help in your AI chat
+## Wheelhouse help in your AI chat
 
 The fastest path is the official
-[WheelHouse Assistant on ChatGPT](https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse),
+[Wheelhouse Assistant on ChatGPT](https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse),
 which always answers from the latest help document. A free ChatGPT account
 is enough — if ChatGPT says you "do not have access to GPT interactions",
 click **Sign up for free** in the upper right corner (no credit card
@@ -106,7 +106,7 @@ required).
 Prefer your own AI service? The user help is written so any AI chat
 service can answer questions from it. If you already use ChatGPT, Gemini,
 Claude, or Perplexity, you can turn the help document into a personal
-WheelHouse support assistant: you need only one file — the
+Wheelhouse support assistant: you need only one file — the
 [help document](./services/wheelhouse/knowledge/wheelhouse_help.md) to
 upload. Its assistant rules are embedded at the top, so there is nothing
 to paste. The [llm/ folder](./llm/README.md) explains the setup, and the
@@ -118,12 +118,12 @@ steps for each service live on the project site:
 
 ## Project status
 
-WheelHouse is a young open-source project with a single primary author. It
+Wheelhouse is a young open-source project with a single primary author. It
 has been the author's daily driver for years and reliability is the
 project's first value — but it has so far been validated on a small set of
 machines, so expect rough edges on hardware and applications it has not
 met yet. Bug reports are genuinely welcome, especially from users who
-depend on hands-free input: if WheelHouse fails you, that is exactly the
+depend on hands-free input: if Wheelhouse fails you, that is exactly the
 report the project needs.
 
 Questions, or stuck on something? Email

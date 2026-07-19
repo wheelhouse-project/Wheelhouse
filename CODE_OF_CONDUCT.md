@@ -12,7 +12,7 @@ caste, color, religion, or sexual identity and orientation.
 We pledge to act and interact in ways that contribute to an open,
 welcoming, diverse, inclusive, and healthy community.
 
-WheelHouse exists first for people with disabilities. Accessibility
+Wheelhouse exists first for people with disabilities. Accessibility
 feedback is never a burden here, and no one will be asked to justify
 needing the software.
 

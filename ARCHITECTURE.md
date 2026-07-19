@@ -1,11 +1,11 @@
-# WheelHouse Architecture
+# Wheelhouse Architecture
 
 > A summary of system structure, process boundaries, and how the processes
 > talk to each other. Deeper design documents live in `docs/design/`.
 
 ## Process architecture
 
-WheelHouse runs as several cooperating OS processes. A supervisor spawns
+Wheelhouse runs as several cooperating OS processes. A supervisor spawns
 three application processes and restarts them after a crash; the selected
 speech provider runs as its own process on top.
 
@@ -112,7 +112,7 @@ Words arrive one at a time and are routed by a state machine: command
 words execute patterns, dictation flows to the focused application, and
 replacement words (spoken punctuation like "comma") become their symbols.
 When the focused window is a terminal at a shell prompt, dictation is
-redirected into WheelHouse's own dictation editor; pressing Enter there
+redirected into Wheelhouse's own dictation editor; pressing Enter there
 sends the finished text to the terminal.
 
 ## Input process
