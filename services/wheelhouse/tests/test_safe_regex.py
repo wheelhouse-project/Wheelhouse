@@ -161,8 +161,13 @@ class TestFailureRecovery:
         # must discard the pool instead of leaving _pool referencing a
         # possibly broken one; the next call recreates it and works.
         safe_regex.shutdown()
+        # HEALTHY_TIMEOUT, not the 0.25 s production default: the pool was
+        # just shut down, so this call pays a real worker spawn, and on a
+        # slow CI runner the default deadline can expire during the spawn --
+        # RegexTimeout then preempts the expected re.error (public CI run
+        # 29706037567 failed exactly that way).
         with pytest.raises(re.error):
-            match_bounded(r"(", "text")
+            match_bounded(r"(", "text", timeout=HEALTHY_TIMEOUT)
         assert safe_regex._pool is None
         result = match_bounded(
             r"^(\w+)$", "healed", mode="fullmatch",
