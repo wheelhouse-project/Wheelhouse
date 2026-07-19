@@ -79,13 +79,13 @@ An update replaces the application but keeps everything that is yours:
 
 ### Security warnings you may see
 
-WheelHouse is currently unsigned -- there is no code-signing certificate yet -- so Windows may warn you when you download or run it. These warnings are about the missing signature, not about anything the software does. The complete source code is public at https://github.com/wheelhouse-project/WheelHouse, so anyone can inspect exactly what it does.
+The WheelHouse installer is digitally signed by the project's author, David Chesley Hite III, so Windows can verify the download came from the project unaltered. Windows may still warn you for a while after each new release, until it has seen the new file often enough. The complete source code is public at https://github.com/wheelhouse-project/WheelHouse, so anyone can inspect exactly what it does.
 
-- **SmartScreen ("Windows protected your PC")**: appears when you run the downloaded WheelHouse-Setup.exe. Click "More info", then "Run anyway". This is the standard Windows notice for any downloaded program that is not signed. If the setup wizard later runs into trouble, it always writes a log file at `%TEMP%\Setup Log <date> #<number>.txt` -- paste that into a help request.
+- **SmartScreen ("Windows protected your PC")**: can appear when you run a freshly released WheelHouse-Setup.exe. Click "More info", check that the publisher reads David Chesley Hite III, then click "Run anyway". If the setup wizard later runs into trouble, it always writes a log file at `%TEMP%\Setup Log <date> #<number>.txt` -- paste that into a help request.
 - **Antivirus flags or rewrites the download**: some antivirus products quarantine downloads or alter them as they arrive. The installer checks every file it downloads against a published fingerprint and refuses anything that does not match, so a changed file cannot be installed -- instead you see a message saying a download "failed its integrity check". An antivirus or proxy altering the file is the most common cause. Add an exception for WheelHouse, or install on a different network, then run the installer again.
 - **A downloaded script will not run**: if you saved install-wheelhouse.ps1 as a file (for example, to uninstall) instead of using the one-line command, Windows marks the file as coming from the internet and PowerShell may refuse to run it. Two equally good fixes: remove the mark once with `Unblock-File .\install-wheelhouse.ps1`, or start it with `powershell -ExecutionPolicy Bypass -File .\install-wheelhouse.ps1`.
 
-If you would rather not click through security warnings at all, there is an alternative: read the code and install from source. The CONTRIBUTING.md file in the GitHub repository has the development setup steps.
+If you would rather not click through security warnings, read the code and install from source: CONTRIBUTING.md in the GitHub repository has the development setup steps.
 
 ### Uninstalling WheelHouse
 
