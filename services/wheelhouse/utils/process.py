@@ -102,7 +102,7 @@ def manage_process_instance():
             return
 
         if psutil.pid_exists(old_pid):
-            logger.warning(f"Found existing WheelHouse instance from PID file: {old_pid}. Terminating process group...")
+            logger.warning(f"Found existing Wheelhouse instance from PID file: {old_pid}. Terminating process group...")
             try:
                 parent = psutil.Process(old_pid)
                 children = parent.children(recursive=True)

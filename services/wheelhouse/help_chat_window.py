@@ -33,7 +33,7 @@ class HelpChatWindow(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("WheelHouse Help")
+        self.setWindowTitle("Wheelhouse Help")
         self.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.WindowMinMaxButtonsHint
@@ -189,7 +189,7 @@ class HelpChatWindow(QDialog):
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(60, 60, 180))
         fmt.setFontWeight(QFont.Weight.Bold)
-        cursor.insertText("WheelHouse: ", fmt)
+        cursor.insertText("Wheelhouse: ", fmt)
         # Render markdown as HTML for formatted responses.
         # `tables` enables pipe-table rendering; `fenced_code` handles ``` blocks.
         html = markdown.markdown(text, extensions=["tables", "fenced_code"])

@@ -90,7 +90,7 @@ def _show_notification(code_path: str, context: Optional[Dict[str, Any]]) -> Non
         notification.notify(
             title="Code Path Executed",
             message=f"Path: {code_path}{context_str}",
-            app_name="WheelHouse Telemetry",
+            app_name="Wheelhouse Telemetry",
             timeout=10
         )
     except Exception as e:

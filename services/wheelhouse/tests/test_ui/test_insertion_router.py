@@ -607,3 +607,152 @@ class TestUIContextProcessId:
             process_name="test.exe", class_name="",
         )
         assert ctx.process_id == 0
+
+
+# --- TestElevationRouting (wh-elevated-target-notice) ----------------------
+
+
+class TestElevationRouting:
+    """The elevation check runs at the top of the predicate step,
+    BEFORE evaluate and before the soft-allow silent-paste tier: an
+    approved control relaunched as administrator must not take the
+    silent path, and the check must not depend on UI Automation
+    visibility (which is unreliable for elevated windows).
+
+    Contract: checker returns "elevated" -> RejectedInsertionStrategy
+    with a synthesized verdict (reason "elevated_process_window");
+    "not_elevated"/"unknown"/raise -> the existing pipeline runs
+    unchanged (fail open).
+    """
+
+    def _router(self, strategies, *, checker, predicate=None,
+                clipboard_only=None):
+        return InsertionRouter(
+            standard_strategy=strategies["standard"],
+            flutter_strategy=strategies["flutter"],
+            simple_paste_strategy=strategies["simple_paste"],
+            rejected_strategy=strategies["rejected"],
+            text_target_predicate=predicate or _accept_predicate(),
+            verified_unicode_strategy=strategies["verified_unicode"],
+            verified_unicode_max_chars=50,
+            clipboard_only_strategy=clipboard_only,
+            elevation_checker=checker,
+        )
+
+    def test_elevated_routes_to_rejected(self, strategies):
+        predicate = _accept_predicate()
+        router = self._router(
+            strategies, checker=lambda ctrl: "elevated",
+            predicate=predicate,
+        )
+        ctx = _focusable_ctx(process="regedit.exe",
+                             class_name="RegEdit_RegEdit")
+        assert router.get_strategy(ctx, "hello") is strategies["rejected"]
+        # The predicate is never consulted: UIA visibility into the
+        # elevated window is unreliable, and its answer could not
+        # change the routing anyway.
+        predicate.evaluate.assert_not_called()
+
+    def test_elevated_verdict_carries_reason_and_context_identity(
+        self, strategies,
+    ):
+        router = self._router(strategies, checker=lambda ctrl: "elevated")
+        ctx = _focusable_ctx(process="regedit.exe",
+                             class_name="RegEdit_RegEdit")
+        router.get_strategy(ctx, "hello")
+        strategies["rejected"].set_pending_verdict.assert_called_once()
+        verdict = strategies["rejected"].set_pending_verdict.call_args[0][0]
+        assert verdict.verdict is False
+        assert verdict.reason == "elevated_process_window"
+        assert verdict.process_name == "regedit.exe"
+        assert verdict.class_name == "RegEdit_RegEdit"
+
+    def test_elevated_beats_soft_allow_silent_paste(self, strategies):
+        # An approved (process, class, control_type) tuple whose app
+        # was relaunched as administrator must NOT silently paste --
+        # the paste would be discarded by Windows and recorded as a
+        # false success. Elevation wins over the soft-allow tier.
+        soft_allow_predicate = _stub_predicate(TextTargetVerdict(
+            verdict=True, reason="accept_soft_allow_tuple",
+            control_type="Pane", class_name="Zed::Workspace",
+            process_name="zed.exe",
+        ))
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, checker=lambda ctrl: "elevated",
+            predicate=soft_allow_predicate, clipboard_only=clipboard_only,
+        )
+        ctx = _focusable_ctx(process="zed.exe", class_name="Zed::Workspace")
+        assert router.get_strategy(ctx, "hello") is strategies["rejected"]
+
+    def test_elevated_beats_flutter_early_return(self, strategies):
+        # wh-elevated-target-notice.1.1 (deepseek round 1): the Flutter
+        # early return must not bypass the elevation check. UIPI
+        # discards input by process integrity, not UI framework, so an
+        # elevated Flutter app fails exactly like an elevated native
+        # app and deserves the same notice.
+        predicate = _accept_predicate()
+        router = self._router(
+            strategies, checker=lambda ctrl: "elevated",
+            predicate=predicate,
+        )
+        ctx = _focusable_ctx(is_flutter=True)
+        assert router.get_strategy(ctx, "hello") is strategies["rejected"]
+        verdict = strategies["rejected"].set_pending_verdict.call_args[0][0]
+        assert verdict.reason == "elevated_process_window"
+        predicate.evaluate.assert_not_called()
+
+    def test_not_elevated_flutter_keeps_flutter_strategy(self, strategies):
+        router = self._router(strategies, checker=lambda ctrl: "not_elevated")
+        ctx = _focusable_ctx(is_flutter=True)
+        assert router.get_strategy(ctx, "hello") is strategies["flutter"]
+
+    def test_unknown_flutter_keeps_flutter_strategy(self, strategies):
+        router = self._router(strategies, checker=lambda ctrl: "unknown")
+        ctx = _focusable_ctx(is_flutter=True)
+        assert router.get_strategy(ctx, "hello") is strategies["flutter"]
+
+    def test_not_elevated_takes_normal_path(self, strategies):
+        router = self._router(strategies, checker=lambda ctrl: "not_elevated")
+        ctx = _focusable_ctx()
+        assert router.get_strategy(ctx, "hello") is strategies["verified_unicode"]
+
+    def test_unknown_fails_open_to_normal_path(self, strategies):
+        router = self._router(strategies, checker=lambda ctrl: "unknown")
+        ctx = _focusable_ctx()
+        assert router.get_strategy(ctx, "hello") is strategies["verified_unicode"]
+
+    def test_checker_exception_fails_open(self, strategies):
+        def _boom(ctrl):
+            raise RuntimeError("win32 blew up")
+
+        router = self._router(strategies, checker=_boom)
+        ctx = _focusable_ctx()
+        assert router.get_strategy(ctx, "hello") is strategies["verified_unicode"]
+
+    def test_no_checker_wired_keeps_existing_behavior(self, strategies):
+        # Legacy construction without the elevation_checker argument
+        # must keep working (default None -> the check is skipped).
+        router = InsertionRouter(
+            standard_strategy=strategies["standard"],
+            flutter_strategy=strategies["flutter"],
+            simple_paste_strategy=strategies["simple_paste"],
+            rejected_strategy=strategies["rejected"],
+            text_target_predicate=_accept_predicate(),
+            verified_unicode_strategy=strategies["verified_unicode"],
+            verified_unicode_max_chars=50,
+        )
+        ctx = _focusable_ctx()
+        assert router.get_strategy(ctx, "hello") is strategies["verified_unicode"]
+
+    def test_checker_receives_the_focused_control(self, strategies):
+        seen = []
+
+        def _checker(ctrl):
+            seen.append(ctrl)
+            return "not_elevated"
+
+        router = self._router(strategies, checker=_checker)
+        ctx = _focusable_ctx()
+        router.get_strategy(ctx, "hello")
+        assert seen == [ctx.focused_control]

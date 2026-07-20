@@ -467,12 +467,12 @@ def explain_pattern(pattern, hotword):
         if len(steps) == 1 and steps[0].get("function") == "text":
             special = _describe_text_step(steps[0].get("params"))
             if special == "Types nothing (the matched words are discarded).":
-                lines.append(f"{stem}, WheelHouse discards it (types nothing).")
+                lines.append(f"{stem}, Wheelhouse discards it (types nothing).")
                 folded = True
             elif special is not None:
                 text_value = steps[0]["params"][0]
                 lines.append(
-                    f"{stem}, WheelHouse types '{text_value}' instead."
+                    f"{stem}, Wheelhouse types '{text_value}' instead."
                 )
                 folded = True
         if not folded:

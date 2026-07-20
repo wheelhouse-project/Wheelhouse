@@ -158,11 +158,11 @@ CREATE_DATA = {
 
 SAVED_WARNING = (
     "Saved, but the running patterns could not be refreshed. "
-    "Restart WheelHouse or try saving again."
+    "Restart Wheelhouse or try saving again."
 )
 DELETED_WARNING = (
     "Deleted, but the running patterns could not be refreshed. "
-    "Restart WheelHouse or try saving again."
+    "Restart Wheelhouse or try saving again."
 )
 
 

@@ -38,6 +38,7 @@ import pyperclip
 import win32con
 import win32gui
 
+from ui.elevation_check import ELEVATED, elevation_state_of_hwnd
 from utils.win_input_sender import _send_modifier_keyups, verified_press_keys
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,14 @@ class PasteOutcome(enum.Enum):
     events than the chord required, so the user-visible result of the
     Ctrl+V or Enter is undefined. Enter is NOT sent after a partial
     Ctrl+V and a partial Enter is NOT reported as SUCCESS.
+
+    wh-elevated-target-notice.1.2 adds ``ELEVATED_TARGET``: the
+    terminal window runs at a higher integrity level than WheelHouse.
+    UIPI would silently discard the Ctrl+V and Enter while every
+    verification step here still passed (SendInput reports acceptance,
+    the clipboard check reads the clipboard, the foreground checks
+    match), so the helper refuses up front, before any clipboard or
+    foreground work. An "unknown" elevation state proceeds (fail open).
     """
 
     SUCCESS = "success"
@@ -76,6 +85,7 @@ class PasteOutcome(enum.Enum):
     PRE_PASTE_FOREGROUND_DRIFT = "pre_paste_foreground_drift"
     POST_PASTE_FOREGROUND_DRIFT = "post_paste_foreground_drift"
     SENDINPUT_PARTIAL = "sendinput_partial"
+    ELEVATED_TARGET = "elevated_target"
     EXCEPTION = "exception"
 
 
@@ -138,6 +148,28 @@ def paste_into_terminal(text: str, terminal_hwnd: int) -> PasteOutcome:
             terminal_hwnd, exc,
         )
         return PasteOutcome.INVALID_HWND
+
+    # wh-elevated-target-notice.1.2: refuse an elevated terminal before
+    # any clipboard or foreground work. UIPI discards synthesized input
+    # sent to a higher-integrity window while SendInput still reports
+    # full acceptance and the clipboard/foreground checks below all
+    # pass -- the one delivery failure this verification sequence
+    # cannot see. Fail open: "unknown" (or a broken check) proceeds.
+    try:
+        elevation_state = elevation_state_of_hwnd(terminal_hwnd)
+    except Exception as exc:
+        logger.debug(
+            "paste_into_terminal: elevation check raised for hwnd=%d: "
+            "%s -- proceeding", terminal_hwnd, exc,
+        )
+        elevation_state = None
+    if elevation_state == ELEVATED:
+        logger.error(
+            "paste_into_terminal: terminal hwnd=%d runs elevated -- "
+            "refusing paste (UIPI would silently discard it)",
+            terminal_hwnd,
+        )
+        return PasteOutcome.ELEVATED_TARGET
 
     saved_clipboard: str | None = None
     try:

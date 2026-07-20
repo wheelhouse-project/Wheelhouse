@@ -87,3 +87,16 @@ license = "Apache-2.0 (project license)"
 path = "docs/wheelhouse_plaque.jpg"
 origin = "AI-generated for WheelHouse at the maintainer's direction"
 license = "Apache-2.0 (project license)"
+
+# Website browser-tab icon: a copy of the app's own icon above.
+[[asset]]
+path = "docs/favicon.ico"
+origin = "Copy of services/wheelhouse/WheelHouse.ico (AI-generated for WheelHouse at the maintainer's direction)"
+license = "Apache-2.0 (project license)"
+
+# Screenshot of the Windows SmartScreen dialog, captured by the
+# maintainer for the landing page's install section.
+[[asset]]
+path = "docs/smartscreen-warning.png"
+origin = "Screenshot of the Windows SmartScreen dialog, captured for this project"
+license = "Apache-2.0 (project license)"

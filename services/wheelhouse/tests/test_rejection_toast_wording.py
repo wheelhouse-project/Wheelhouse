@@ -14,6 +14,7 @@ import pytest
 from rejection_toast_wording import (
     CATEGORY_BROWSER_TRAP,
     CATEGORY_DEFINITELY_NOT_TEXT,
+    CATEGORY_ELEVATED,
     CATEGORY_OTHER,
     CATEGORY_UNCERTAIN,
     compose_rejection_wording,
@@ -30,7 +31,7 @@ class TestBrowserTrap:
             class_name="",
         )
         assert wording.category == CATEGORY_BROWSER_TRAP
-        assert wording.title == "WheelHouse couldn't type into your browser"
+        assert wording.title == "Wheelhouse couldn't type into your browser"
         assert "search box" in wording.body
         assert "comment field" in wording.body
 
@@ -78,6 +79,77 @@ class TestBrowserTrap:
         assert wording.category != CATEGORY_BROWSER_TRAP
 
 
+class TestElevated:
+    """wh-elevated-target-notice: the focused window belongs to an
+    administrator (higher-integrity) process, so Windows discards
+    WheelHouse's input. The wording must say what happened and how to
+    fix it: run WheelHouse itself as administrator (some Windows apps
+    only run elevated, so advising the user to de-elevate the target
+    app would be misleading -- David's 2026-07-19 correction), or use
+    the physical keyboard."""
+
+    def test_category_and_title(self):
+        wording = compose_rejection_wording(
+            reason="elevated_process_window",
+            control_type="",
+            process_name="regedit.exe",
+            class_name="RegEdit_RegEdit",
+        )
+        assert wording.category == CATEGORY_ELEVATED
+        assert "administrator" in wording.title.lower()
+
+    def test_body_with_friendly_name(self):
+        wording = compose_rejection_wording(
+            reason="elevated_process_window",
+            control_type="",
+            process_name="regedit.exe",
+            class_name="RegEdit_RegEdit",
+            app_friendly_name="Registry Editor",
+        )
+        assert "Registry Editor" in wording.body
+        assert "running as administrator" in wording.body
+        # The fix is to elevate WheelHouse, not de-elevate the target.
+        assert "Run as administrator" in wording.body
+        assert "Wheelhouse" in wording.body
+        assert "keyboard" in wording.body
+
+    def test_body_without_friendly_name_still_reads(self):
+        wording = compose_rejection_wording(
+            reason="elevated_process_window",
+            control_type="",
+            process_name="",
+            class_name="",
+        )
+        assert "running as administrator" in wording.body
+        assert "Run as administrator" in wording.body
+
+    def test_never_advises_de_elevating_the_target(self):
+        # Some Windows apps only run as administrator; telling the
+        # user to start the app without elevation is advice they may
+        # be unable to follow. The body must not contain it.
+        wording = compose_rejection_wording(
+            reason="elevated_process_window",
+            control_type="",
+            process_name="regedit.exe",
+            class_name="RegEdit_RegEdit",
+            app_friendly_name="Registry Editor",
+        )
+        assert "without administrator" not in wording.body.lower()
+        assert "without run as administrator" not in wording.body.lower()
+
+    def test_elevated_wins_over_uncertain_shape(self):
+        # elevated_process_window with a paste-capable-looking class
+        # must not fall into the uncertain branch (which would show a
+        # Try-it-anyway button that can never succeed).
+        wording = compose_rejection_wording(
+            reason="elevated_process_window",
+            control_type="Pane",
+            process_name="devenv.exe",
+            class_name="HwndWrapper[DefaultDomain;;]",
+        )
+        assert wording.category == CATEGORY_ELEVATED
+
+
 class TestUncertain:
     def test_default_reject_paste_capable_uses_uncertain(self):
         wording = compose_rejection_wording(
@@ -87,7 +159,7 @@ class TestUncertain:
             class_name="Zed::Window",
         )
         assert wording.category == CATEGORY_UNCERTAIN
-        assert wording.title == "WheelHouse couldn't type that"
+        assert wording.title == "Wheelhouse couldn't type that"
         assert "isn't sure" in wording.body
 
     def test_uncertain_includes_app_name_when_provided(self):
@@ -109,7 +181,7 @@ class TestUncertain:
             app_friendly_name="",
         )
         assert wording.category == CATEGORY_UNCERTAIN
-        assert wording.body.startswith("WheelHouse isn't sure")
+        assert wording.body.startswith("Wheelhouse isn't sure")
 
 
 class TestDefinitelyNotText:

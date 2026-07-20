@@ -39,6 +39,12 @@ findings (wh-xiazj.1.1 through wh-xiazj.1.5):
     with editor_lifecycle_error (wh-xiazj.1.2).
   * Concurrent same-key calls -> first runs the detector, the second
     returns prompt_detector_in_flight (wh-xiazj.1.3).
+  * Elevated terminal -> no redirect; reason elevated_terminal; the
+    detector is not called; NOT_ELEVATED / UNKNOWN / a raising check
+    all keep the redirect (fail open); non-terminals never run the
+    elevation check; the constructor default resolves to the
+    module-level elevation_state_of_hwnd
+    (wh-elevated-target-notice.1.2).
 """
 
 from __future__ import annotations
@@ -99,17 +105,32 @@ def _patch_resolution(
     )
     monkeypatch.setattr(mod, "win32process", fake_win32process)
 
+    # Neutralize the module-default elevation check so pre-existing
+    # tests never call the real Win32 path against the fake HWND
+    # (raising=False keeps this a no-op if the attribute is absent).
+    monkeypatch.setattr(
+        mod,
+        "elevation_state_of_hwnd",
+        lambda _hwnd: "not_elevated",
+        raising=False,
+    )
+
 
 def _make_policy(
     *,
     detector_call,
     detector_timeout_s: float = 0.1,
     mirror: LogicMirror | None = None,
+    elevation_check=None,
 ) -> FocusRedirectPolicy:
+    kwargs = {}
+    if elevation_check is not None:
+        kwargs["elevation_check"] = elevation_check
     return FocusRedirectPolicy(
         mirror=mirror or LogicMirror(),
         prompt_detector_call=detector_call,
         detector_timeout_s=detector_timeout_s,
+        **kwargs,
     )
 
 
@@ -1405,3 +1426,109 @@ async def test_prewarm_detector_error_is_logged_at_warning(
         )
     finally:
         policy.close()
+
+
+# ---------------------------------------------------------------------------
+# Elevated-terminal gate (wh-elevated-target-notice.1.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_redirect_when_terminal_elevated(monkeypatch):
+    """An elevated terminal declines the redirect BEFORE the detector.
+
+    Declining routes dictation to the normal Input-process insertion
+    path, where the router's elevation gate shows the explanatory
+    notice on the first word -- instead of collecting a whole line in
+    the editor and losing it to UIPI at Enter.
+    """
+    _patch_resolution(monkeypatch)
+
+    detector = Mock(return_value=True)
+    elevation = Mock(return_value="elevated")
+    policy = _make_policy(detector_call=detector, elevation_check=elevation)
+
+    decision = await policy.should_redirect(_FOCUSED_HWND)
+
+    assert decision == RedirectDecision(
+        open_editor=False,
+        target_terminal_hwnd=0,
+        reason="elevated_terminal",
+    )
+    elevation.assert_called_once_with(_FOCUSED_HWND)
+    assert detector.call_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["not_elevated", "unknown"])
+async def test_redirect_kept_when_not_elevated_or_unknown(
+    monkeypatch, state
+):
+    """NOT_ELEVATED and UNKNOWN both keep the redirect (fail open)."""
+    _patch_resolution(monkeypatch)
+
+    detector = Mock(return_value=True)
+    elevation = Mock(return_value=state)
+    policy = _make_policy(detector_call=detector, elevation_check=elevation)
+
+    decision = await policy.should_redirect(_FOCUSED_HWND)
+
+    assert decision.open_editor is True
+    assert decision.reason == "terminal_at_prompt"
+    elevation.assert_called_once_with(_FOCUSED_HWND)
+    assert detector.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_redirect_kept_when_elevation_check_raises(monkeypatch):
+    """A broken elevation check fails open: the redirect proceeds."""
+    _patch_resolution(monkeypatch)
+
+    detector = Mock(return_value=True)
+    elevation = Mock(side_effect=RuntimeError("boom"))
+    policy = _make_policy(detector_call=detector, elevation_check=elevation)
+
+    decision = await policy.should_redirect(_FOCUSED_HWND)
+
+    assert decision.open_editor is True
+    assert decision.reason == "terminal_at_prompt"
+
+
+@pytest.mark.asyncio
+async def test_elevation_check_not_called_for_non_terminal(monkeypatch):
+    """Non-terminal targets never pay for the elevation check."""
+    _patch_resolution(monkeypatch, process_name=_NON_TERMINAL_PROCESS)
+
+    detector = Mock(return_value=True)
+    elevation = Mock(return_value="elevated")
+    policy = _make_policy(detector_call=detector, elevation_check=elevation)
+
+    decision = await policy.should_redirect(_FOCUSED_HWND)
+
+    assert decision.reason == "not_a_terminal"
+    elevation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_elevation_default_uses_module_function(monkeypatch):
+    """Without an injected check, the module-level function is used."""
+    _patch_resolution(monkeypatch)
+
+    from services.wheelhouse.speech import focus_redirect_policy as mod
+
+    calls: list[int] = []
+
+    def fake_elevation(hwnd: int) -> str:
+        calls.append(hwnd)
+        return "elevated"
+
+    monkeypatch.setattr(
+        mod, "elevation_state_of_hwnd", fake_elevation, raising=False,
+    )
+
+    policy = _make_policy(detector_call=Mock(return_value=True))
+
+    decision = await policy.should_redirect(_FOCUSED_HWND)
+
+    assert decision.reason == "elevated_terminal"
+    assert calls == [_FOCUSED_HWND]

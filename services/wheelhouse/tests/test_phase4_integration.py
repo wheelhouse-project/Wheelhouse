@@ -71,7 +71,7 @@ from ui.text_target import TextTargetVerdict
 
 
 EXPECTED_CLICK_TOO_LATE_WORDING = (
-    "WheelHouse couldn't try again. Say the words again, "
+    "Wheelhouse couldn't try again. Say the words again, "
     "then click Try it anyway."
 )
 

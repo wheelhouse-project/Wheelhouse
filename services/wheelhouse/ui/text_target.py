@@ -264,6 +264,13 @@ class TextTargetVerdict:
                 (empty ClassName outside the browser process list) or
                 matches the wh-zndq browser-empty-ClassName trap. No
                 soft fallback applies.
+          - elevated_process_window
+                Synthesized by the InsertionRouter, not by this
+                predicate (wh-elevated-target-notice): the focused
+                window belongs to a higher-integrity (administrator)
+                process, so Windows UIPI would silently discard the
+                input. Routed to RejectedInsertionStrategy; the notice
+                explains the boundary, with no Try-it-anyway button.
 
     supported_patterns: tuple of pattern names actually present on the
         control at decision time. Empty if probing failed or the

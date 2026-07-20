@@ -293,8 +293,8 @@ def main(argv=None, *, clear_setter=None, delete_hints_fn=None):
             ok = delete_hint_record(default_hint_path())
         if ok:
             print(
-                "Reset the first-use discovery hints. Run this while WheelHouse "
-                "is not running; if WheelHouse is live, a concurrent write may "
+                "Reset the first-use discovery hints. Run this while Wheelhouse "
+                "is not running; if Wheelhouse is live, a concurrent write may "
                 "re-create the record -- re-run once it is stopped."
             )
             raise SystemExit(0)

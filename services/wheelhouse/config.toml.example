@@ -200,7 +200,7 @@ timeout_s = 30
 kind = "local"
 
 [ai.help]
-gem_url = ""
+gem_url = "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
 max_response_tokens = 800
 
 [terminal]

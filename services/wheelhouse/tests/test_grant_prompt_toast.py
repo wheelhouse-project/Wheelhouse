@@ -53,7 +53,7 @@ class TestShowPrompt:
     def test_show_prompt_sets_title_and_body(self, toast):
         toast.show_prompt(
             title="Always type into Zed when you do this?",
-            body="You have tried this 3 times in Zed. WheelHouse can stop "
+            body="You have tried this 3 times in Zed. Wheelhouse can stop "
                  "asking and just do it from now on.",
         )
         assert toast.isVisible()

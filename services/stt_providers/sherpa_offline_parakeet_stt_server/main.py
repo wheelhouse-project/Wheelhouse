@@ -396,11 +396,11 @@ class ParakeetServer:
             self._wake_word_listening = False
 
     def _handle_disconnect_timeout(self):
-        logger.info(f"WheelHouse disconnected for {self.DISCONNECT_TIMEOUT_S}s - exiting cleanly")
+        logger.info(f"Wheelhouse disconnected for {self.DISCONNECT_TIMEOUT_S}s - exiting cleanly")
         self.stop()
 
     def _handle_wheelhouse_disconnect(self):
-        logger.info("WheelHouse disconnected - pausing, will exit in 5s if no reconnect")
+        logger.info("Wheelhouse disconnected - pausing, will exit in 5s if no reconnect")
         self.transcription_enabled.clear()
         if self._disconnect_timer:
             self._disconnect_timer.cancel()
@@ -409,7 +409,7 @@ class ParakeetServer:
         self._disconnect_timer.start()
 
     def _handle_wheelhouse_reconnect(self):
-        logger.info("WheelHouse reconnected - resuming transcription")
+        logger.info("Wheelhouse reconnected - resuming transcription")
         if self._disconnect_timer:
             self._disconnect_timer.cancel()
             self._disconnect_timer = None
@@ -442,7 +442,7 @@ class ParakeetServer:
     def _send_startup_notification(self):
         def send_ready():
             time.sleep(3.0)
-            logger.info("Sending 'ready' notification to WheelHouse...")
+            logger.info("Sending 'ready' notification to Wheelhouse...")
             self.forwarder.send_notification(self.display_name, "Transcription service ready")
         threading.Thread(target=send_ready, daemon=True).start()
 

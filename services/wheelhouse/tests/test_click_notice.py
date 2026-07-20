@@ -412,7 +412,7 @@ def test_wording_execution_failed_bounds_invalid():
     )
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse couldn't click 'Submit' -- it may have moved."
+        == "Wheelhouse couldn't click 'Submit' -- it may have moved."
     )
 
 
@@ -422,7 +422,7 @@ def test_wording_execution_failed_foreground_changed():
     )
     assert (
         compose_click_notice_wording(event)
-        == "Window changed before WheelHouse could click 'Submit'."
+        == "Window changed before Wheelhouse could click 'Submit'."
     )
 
 
@@ -433,7 +433,7 @@ def test_wording_execution_failed_foreground_verification_failed():
         matched_name="Submit",
     )
     assert compose_click_notice_wording(event) == (
-        "WheelHouse couldn't verify the active window -- if you didn't "
+        "Wheelhouse couldn't verify the active window -- if you didn't "
         "switch apps, try clicking again."
     )
 
@@ -444,7 +444,7 @@ def test_wording_execution_failed_invoke_com_error():
     )
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse couldn't click 'Submit' -- the control did not respond."
+        == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
     )
 
 
@@ -457,7 +457,7 @@ def test_wording_execution_failed_invoke_then_sendinput_failed():
     )
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse couldn't click 'Submit' -- the control did not respond."
+        == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
     )
 
 
@@ -468,7 +468,7 @@ def test_wording_execution_failed_sendinput_short():
     )
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse couldn't click 'Submit' -- the control did not respond."
+        == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
     )
 
 
@@ -512,7 +512,7 @@ def test_wording_execution_failed_dda_no_default_action_failed():
     )
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse couldn't click 'Submit' -- the control did not respond."
+        == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
     )
 
 
@@ -527,7 +527,7 @@ def test_wording_execution_failed_dda_no_side_effect_then_sendinput_failed():
     )
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse couldn't click 'Submit' -- the control did not respond."
+        == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
     )
 
 
@@ -541,7 +541,7 @@ def test_wording_invoke_pattern_unavailable_now_neutral():
         reason="invoke_pattern_unavailable",
         matched_name="Submit",
     )
-    assert compose_click_notice_wording(event) == "WheelHouse couldn't click 'Submit'."
+    assert compose_click_notice_wording(event) == "Wheelhouse couldn't click 'Submit'."
 
 
 def test_wording_execution_failed_target_moved_offscreen():
@@ -557,7 +557,7 @@ def test_wording_execution_failed_timeout():
     event = _event(outcome="execution_failed", reason="timeout", matched_name=None)
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse timed out while clicking."
+        == "Wheelhouse timed out while clicking."
     )
 
 
@@ -570,7 +570,7 @@ def test_wording_execution_failed_popup_closed_with_name():
     )
     assert (
         compose_click_notice_wording(event)
-        == "The menu closed before WheelHouse could click 'Copy'."
+        == "The menu closed before Wheelhouse could click 'Copy'."
     )
 
 
@@ -584,7 +584,7 @@ def test_wording_execution_failed_popup_closed_without_name():
     )
     assert (
         compose_click_notice_wording(event)
-        == "The menu closed before WheelHouse could click it."
+        == "The menu closed before Wheelhouse could click it."
     )
 
 
@@ -642,7 +642,7 @@ def test_wording_execution_failed_automation_unavailable(matched_name):
         ),
         (
             "send_request_failed",
-            "WheelHouse couldn't send the click request.",
+            "Wheelhouse couldn't send the click request.",
         ),
     ],
 )
@@ -691,7 +691,7 @@ def test_wording_unknown_execution_failed_reason_is_neutral_with_name():
         matched_name="Submit",
     )
     result = compose_click_notice_wording(event)
-    assert result == "WheelHouse couldn't click 'Submit'."
+    assert result == "Wheelhouse couldn't click 'Submit'."
     assert "did not respond" not in result
 
 
@@ -706,7 +706,7 @@ def test_wording_unknown_execution_failed_reason_neutral_without_name():
         matched_name=None,
     )
     result = compose_click_notice_wording(event)
-    assert result == "WheelHouse couldn't complete the click."
+    assert result == "Wheelhouse couldn't complete the click."
     assert "did not respond" not in result
 
 
@@ -721,7 +721,7 @@ def test_wording_none_execution_failed_reason_is_neutral():
     )
     assert (
         compose_click_notice_wording(event)
-        == "WheelHouse couldn't click 'Submit'."
+        == "Wheelhouse couldn't click 'Submit'."
     )
 
 
@@ -758,7 +758,7 @@ def test_wording_empty_matched_name_with_name_using_reason_is_generic(reason: st
         matched_name="",
     )
     result = compose_click_notice_wording(event)
-    assert result == "WheelHouse couldn't complete the click."
+    assert result == "Wheelhouse couldn't complete the click."
     assert "''" not in result
 
 
@@ -767,10 +767,10 @@ def test_wording_empty_matched_name_with_name_using_reason_is_generic(reason: st
     [
         (
             "foreground_verification_failed",
-            "WheelHouse couldn't verify the active window -- if you didn't "
+            "Wheelhouse couldn't verify the active window -- if you didn't "
             "switch apps, try clicking again.",
         ),
-        ("timeout", "WheelHouse timed out while clicking."),
+        ("timeout", "Wheelhouse timed out while clicking."),
     ],
 )
 def test_wording_empty_matched_name_keeps_name_independent_wording(
@@ -827,7 +827,7 @@ def test_wording_unknown_outcome_fallback_no_crash():
     event = _event(outcome="some_future_outcome", reason=None, matched_name=None)
     result = compose_click_notice_wording(event)
     assert isinstance(result, str)
-    assert result == "WheelHouse couldn't complete the click."
+    assert result == "Wheelhouse couldn't complete the click."
 
 
 def test_wording_overlay_numbers_changed_is_exact():
@@ -857,7 +857,7 @@ def test_wording_execution_failed_dda_unavailable_then_sendinput_failed():
         matched_name="Documents (pinned)",
     )
     assert compose_click_notice_wording(event) == (
-        "WheelHouse couldn't click 'Documents (pinned)' -- the control did "
+        "Wheelhouse couldn't click 'Documents (pinned)' -- the control did "
         "not respond."
     )
 
@@ -871,7 +871,7 @@ def test_wording_execution_failed_dda_no_default_action_then_sendinput_failed():
         matched_name="Documents (pinned)",
     )
     assert compose_click_notice_wording(event) == (
-        "WheelHouse couldn't click 'Documents (pinned)' -- the control did "
+        "Wheelhouse couldn't click 'Documents (pinned)' -- the control did "
         "not respond."
     )
 
@@ -887,6 +887,6 @@ def test_wording_execution_failed_click_point_obstructed():
         matched_name="Documents (pinned)",
     )
     assert compose_click_notice_wording(event) == (
-        "WheelHouse couldn't click 'Documents (pinned)' -- another window "
+        "Wheelhouse couldn't click 'Documents (pinned)' -- another window "
         "may be covering it."
     )

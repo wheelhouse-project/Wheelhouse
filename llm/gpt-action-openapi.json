@@ -11,7 +11,7 @@
     }
   ],
   "paths": {
-    "/wheelhouse-project/WheelHouse/main/services/wheelhouse/knowledge/wheelhouse_help.md": {
+    "/wheelhouse-project/Wheelhouse/main/services/wheelhouse/knowledge/wheelhouse_help.md": {
       "get": {
         "operationId": "getHelpDocument",
         "summary": "Fetch the current Wheelhouse user guide as markdown text.",

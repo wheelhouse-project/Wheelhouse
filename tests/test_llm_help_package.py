@@ -32,7 +32,7 @@ _PUBLIC_README = _REPO_ROOT / "scripts" / "release" / "public" / "README.md"
 
 _HEADING = "## Instructions for AI Assistant"
 _RAW_DOC_URL = (
-    "https://raw.githubusercontent.com/wheelhouse-project/WheelHouse/main/"
+    "https://raw.githubusercontent.com/wheelhouse-project/Wheelhouse/main/"
     "services/wheelhouse/knowledge/wheelhouse_help.md"
 )
 
@@ -108,7 +108,7 @@ def test_embedded_instruction_section_present_and_wellformed():
         "Generated line) is missing from the embedded instructions"
     )
     assert (
-        'Ignore the footer\'s "WheelHouse version" line; it is an internal'
+        'Ignore the footer\'s "Wheelhouse version" line; it is an internal'
         " build identifier." in norm
     ), (
         "the rule to ignore the internal build-identifier footer line is "
@@ -135,7 +135,7 @@ def test_gpt_instructions_contract():
     norm = " ".join(text.split())
     # Fetch-first, on every question, via the named Action operation.
     assert (
-        "FETCH FIRST, EVERY TIME: before answering any WheelHouse question,"
+        "FETCH FIRST, EVERY TIME: before answering any Wheelhouse question,"
         " call the getHelpDocument action" in norm
     ), "the fetch-before-every-answer directive is missing or weakened"
     # Grounding: only the just-fetched document, never memory.
@@ -151,16 +151,16 @@ def test_gpt_instructions_contract():
     # answer from memory, in the same directive.
     assert (
         "IF THE FETCH FAILS: tell the user plainly that you cannot reach the"
-        " current WheelHouse guide right now, and do NOT answer"
-        " WheelHouse-specific questions from memory." in norm
+        " current Wheelhouse guide right now, and do NOT answer"
+        " Wheelhouse-specific questions from memory." in norm
     ), "the fetch-failure refusal directive is missing or weakened"
-    assert "https://wheelhouse-project.github.io/WheelHouse/" in text
-    assert "https://github.com/wheelhouse-project/WheelHouse" in text
+    assert "https://wheelhouse-project.org/" in text
+    assert "https://github.com/wheelhouse-project/Wheelhouse" in text
     # Version disclosure: the Generated footer line names the release; the
     # build-identifier line is explicitly ignored, not the other way around.
     assert (
         'The "Generated" line in the guide\'s footer names that release;'
-        ' ignore the separate "WheelHouse version" line, which is an internal'
+        " ignore the guide's final line, which is an internal"
         " build identifier." in norm
     ), "the version-disclosure directive is missing or inverted"
     # The paste target is ChatGPT's instructions field: keep it plain ASCII
@@ -286,12 +286,12 @@ def test_llm_readme_canonical_links_resolve():
 # still contain the repo-relative path, so this is matched against parsed
 # href values.
 _CANONICAL_HELP_URL = (
-    "https://github.com/wheelhouse-project/WheelHouse/blob/main/"
+    "https://github.com/wheelhouse-project/Wheelhouse/blob/main/"
     "services/wheelhouse/knowledge/wheelhouse_help.md"
 )
 
 _SITE_ANCHOR_URLS = tuple(
-    f"https://wheelhouse-project.github.io/WheelHouse/#llm-{provider}"
+    f"https://wheelhouse-project.org/#llm-{provider}"
     for provider in ("chatgpt", "gemini", "claude", "perplexity")
 )
 

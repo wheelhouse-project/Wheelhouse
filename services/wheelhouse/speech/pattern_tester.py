@@ -78,7 +78,7 @@ from .safe_regex import RegexTimeout, match_bounded
 # Pinned user-facing text for a draft that exceeds the match budget
 # (wh-pattern-editor-r0.4).
 _DRAFT_TIMEOUT_ERROR = (
-    "This pattern takes too long to match. It could freeze WheelHouse. "
+    "This pattern takes too long to match. It could freeze Wheelhouse. "
     "Simplify the expression (avoid nested repeats like (\\w+\\s*)+)."
 )
 
@@ -200,7 +200,7 @@ def _saved_pattern_timeout_error(entry: Dict[str, Any]) -> Dict[str, Any]:
         "success": False,
         "error": (
             f"Test aborted: the saved pattern '{name}' takes too long to "
-            f"match and could freeze WheelHouse. Edit or delete that "
+            f"match and could freeze Wheelhouse. Edit or delete that "
             f"pattern."
         ),
     }

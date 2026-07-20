@@ -1,8 +1,8 @@
-# Build the graphical installer (WheelHouse-Setup.exe) and attach it to a release.
+# Build the graphical installer (Wheelhouse-Setup.exe) and attach it to a release.
 #
 # This runs in the PUBLIC repo. It compiles the Inno Setup wizard
-# (installer/WheelHouse-Setup.iss) into WheelHouse-Setup.exe and uploads it to an
-# already-published GitHub release, so releases/latest/download/WheelHouse-Setup.exe
+# (installer/Wheelhouse-Setup.iss) into Wheelhouse-Setup.exe and uploads it to an
+# already-published GitHub release, so releases/latest/download/Wheelhouse-Setup.exe
 # serves the newest build (whichever release the author marked "latest").
 #
 # WHY IT TRIGGERS ON A PUBLISHED RELEASE, NOT A TAG PUSH
@@ -160,7 +160,7 @@ jobs:
           $tag = '${{ steps.rel.outputs.tag }}'
           $version = '${{ steps.rel.outputs.version }}'
           # Download the STAMPED engine (release asset) beside the wizard. installer/
-          # already holds WheelHouse-Setup.iss (shipped by the manifest); the engine
+          # already holds Wheelhouse-Setup.iss (shipped by the manifest); the engine
           # lands next to it so the wizard's bare-sibling Source path resolves.
           gh release download $tag --repo '${{ github.repository }}' --pattern 'install-wheelhouse.ps1' --dir installer --clobber
           # A failed native command does NOT fail a pwsh step on its own; check
@@ -266,7 +266,7 @@ jobs:
             "ExcludeCredentials": ["ManagedIdentityCredential"]
           }
           '@ | Set-Content -Path $metadata -Encoding utf8
-          $iss = 'installer\WheelHouse-Setup.iss'
+          $iss = 'installer\Wheelhouse-Setup.iss'
           $content = Get-Content $iss -Raw
           $setupHeaders = [regex]::Matches($content, '(?m)^\[Setup\]')
           if ($setupHeaders.Count -ne 1) { throw "Expected exactly one [Setup] section in $iss; found $($setupHeaders.Count). Refusing to patch." }
@@ -290,7 +290,7 @@ jobs:
           # BARE /DAppVer define (see the header note on wh-build-exe-review.1).
           $args = @(
             "/O$dist",
-            "/FWheelHouse-Setup",
+            "/FWheelhouse-Setup",
             "/DAppVer=${{ steps.rel.outputs.version }}"
           )
           if ($env:SIGNING_ENABLED -eq 'true') {
@@ -299,7 +299,7 @@ jobs:
             # argument for ISCC; Inno expands $q/$f inside the command itself.
             $args += "/Sartifactsign=$($env:SIGN_CMD)"
           }
-          $args += "installer\WheelHouse-Setup.iss"
+          $args += "installer\Wheelhouse-Setup.iss"
           & $iscc @args
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
@@ -313,7 +313,7 @@ jobs:
           # and names the expected subject. A signing misconfiguration must fail
           # HERE, not on an end-user machine.
           $ErrorActionPreference = 'Stop'
-          $exe = 'dist\WheelHouse-Setup.exe'
+          $exe = 'dist\Wheelhouse-Setup.exe'
           $sig = Get-AuthenticodeSignature -FilePath $exe
           if ($sig.Status -ne 'Valid') { throw "Signature status on $exe is '$($sig.Status)' ($($sig.StatusMessage)); expected Valid." }
           if (-not $sig.TimeStamperCertificate) { throw "The signature on $exe carries no timestamp; it would expire with the short-lived certificate." }
@@ -325,8 +325,8 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: WheelHouse-Setup-exe
-          path: dist/WheelHouse-Setup.exe
+          name: Wheelhouse-Setup-exe
+          path: dist/Wheelhouse-Setup.exe
           if-no-files-found: error
 
       - name: Attach the installer to the release
@@ -346,7 +346,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           $tag = '${{ steps.rel.outputs.tag }}'
           $repo = '${{ github.repository }}'
-          $asset = 'WheelHouse-Setup.exe'
+          $asset = 'Wheelhouse-Setup.exe'
           $new = "dist/$asset"
           # Only ADD the asset to the release the author already published; never
           # create or publish a release here, so the workflow cannot move the

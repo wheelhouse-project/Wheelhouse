@@ -261,7 +261,7 @@ class RemoteSTTLauncher:
                 f"and subprocess is not alive."
             )
             self._hide_working()
-            self._notify(display_name, "Failed to start - try restarting WheelHouse")
+            self._notify(display_name, "Failed to start - try restarting Wheelhouse")
 
     def discover_providers(self) -> list[dict]:
         """Scan services directory for STT providers.
@@ -586,7 +586,7 @@ class RemoteSTTLauncher:
         except Exception as e:
             logger.error(f"Failed to start provider {provider_name}: {e}")
             self._hide_working()
-            self._notify(display_name, "Failed to start - try restarting WheelHouse")
+            self._notify(display_name, "Failed to start - try restarting Wheelhouse")
             return False
 
     def _resolve_wake_word_model_dir(self, model_dir_value: str, service_dir: Path) -> Path:

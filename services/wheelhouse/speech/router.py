@@ -10,6 +10,24 @@ from .pattern_transform import extract_literal_prefix
 
 logger = logging.getLogger(__name__)
 
+
+def _word_matches_hotword(word: str, hotword: str) -> bool:
+    """Case- and hyphen-insensitive wake-word equality.
+
+    STT engines disagree on the hyphen in a hyphenated wake word:
+    Parakeet usually emits "X-ray" but can fuse it, and a user hotword
+    override may be written with or without the hyphen. Stripping
+    hyphens from both sides makes "xray" match wake word "x-ray" and
+    "x-ray" match wake word "xray" (wh-parakeet-xray-hotword).
+    Lowercases both arguments itself so a caller that skips the usual
+    ``hotword.lower()`` storage step cannot get a silent false negative
+    (deepseek review, wh-parakeet-xray-hotword.1.2).
+    """
+    w = word.lower()
+    h = hotword.lower()
+    return w == h or w.replace("-", "") == h.replace("-", "")
+
+
 class SpeechRouter:
     """Decision engine for speech processing.
     
@@ -86,7 +104,7 @@ class SpeechRouter:
         
         # 2. Hotword Detection (Fresh Utterance)
         if mode == ProcessingMode.IDLE and word_event.start_of_utterance:
-            if word.lower() == self.hotword:
+            if _word_matches_hotword(word, self.hotword):
                 # Snapshot the wake word that started this buffer. If the live
                 # wake word is swapped mid-utterance (apply_hotword), the
                 # dictation fallback must still reconstruct the prefix the user

@@ -86,7 +86,7 @@ class TestFallback:
 
             with patch.object(speech, "_toast") as mock_toast:
                 await speech.speak("fallback message")
-                mock_toast.assert_called_once_with("WheelHouse", "fallback message")
+                mock_toast.assert_called_once_with("Wheelhouse", "fallback message")
 
 
 class TestSpeakBrief:

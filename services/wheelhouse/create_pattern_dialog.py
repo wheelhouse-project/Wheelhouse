@@ -168,7 +168,7 @@ _GOAL_TEMPLATES = [
         "text_label": "Text to type:",
         "text_placeholder": "e.g., yourname@example.com",
         "text_tooltip": (
-            "The exact text WheelHouse types when you say the phrase."
+            "The exact text Wheelhouse types when you say the phrase."
         ),
     },
     {
@@ -184,7 +184,7 @@ _GOAL_TEMPLATES = [
         "text_label": "What should it type instead?",
         "text_placeholder": "e.g., JSON",
         "text_tooltip": (
-            "Whenever dictation produces the misheard word, WheelHouse "
+            "Whenever dictation produces the misheard word, Wheelhouse "
             "types this instead."
         ),
     },
@@ -306,7 +306,7 @@ def qt_key_to_wheelhouse(key, modifiers):
     elif int(Qt.Key.Key_F1) <= key <= int(Qt.Key.Key_F12):
         base = f"f{key - int(Qt.Key.Key_F1) + 1}"
     elif int(Qt.Key.Key_F13) <= key <= int(Qt.Key.Key_F35):
-        return None, "WheelHouse can only press F1 through F12"
+        return None, "Wheelhouse can only press F1 through F12"
     elif key == int(Qt.Key.Key_Plus) and (
         mods & _qt_enum_value(Qt.KeyboardModifier.ShiftModifier)
     ):
@@ -318,7 +318,7 @@ def qt_key_to_wheelhouse(key, modifiers):
         base = _QT_KEY_NAMES.get(key)
     if base is None:
         return None, (
-            f"WheelHouse cannot press the {_qt_key_display(key)} key"
+            f"Wheelhouse cannot press the {_qt_key_display(key)} key"
         )
     parts = [
         name for mod, name in _QT_MODIFIER_NAMES
@@ -1751,7 +1751,7 @@ class CreatePatternDialog(QDialog):
         self._text_output.setPlaceholderText(_DEFAULT_TEXT_PLACEHOLDER)
         self._text_output.setAccessibleName("Output text")
         self._text_output.setAccessibleDescription(
-            "The text WheelHouse types when you say the phrase"
+            "The text Wheelhouse types when you say the phrase"
         )
         self._text_output.textChanged.connect(self._on_fields_changed)
         # Stored so goal templates can reword it (snippet vs correction).
@@ -1857,7 +1857,7 @@ class CreatePatternDialog(QDialog):
         )
         self._regex_link_label.setToolTip(
             "Opens an online checker preset to the Python flavor "
-            "WheelHouse matches with"
+            "Wheelhouse matches with"
         )
         # Keyboard-first: the link must be Tab-focusable and Enter/Space
         # activatable, not click-only (spec section 13).
@@ -2445,12 +2445,12 @@ class CreatePatternDialog(QDialog):
         expr = self._expression_edit.text()
         if self._adv_command_radio.isChecked() and not expr.startswith("^"):
             return (
-                "A command must start with '^' -- WheelHouse treats "
+                "A command must start with '^' -- Wheelhouse treats "
                 "unanchored expressions as replacements"
             )
         if self._adv_replacement_radio.isChecked() and expr.startswith("^"):
             return (
-                "A replacement must not start with '^' -- WheelHouse "
+                "A replacement must not start with '^' -- Wheelhouse "
                 "treats '^'-anchored expressions as commands"
             )
         return None
@@ -2604,7 +2604,7 @@ class CreatePatternDialog(QDialog):
         self._save_in_flight = False
         self._save_timed_out = True
         self._save_error_label.setText(
-            "WheelHouse did not respond. Try again."
+            "Wheelhouse did not respond. Try again."
         )
         self._save_error_label.setVisible(True)
         self._validate()

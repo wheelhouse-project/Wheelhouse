@@ -38,6 +38,10 @@ import win32process
 
 from services.wheelhouse.plugins.base import BasePlugin, PluginState
 from services.wheelhouse.events import WindowFocusChangedEvent, WindowRepositionCommand
+from services.wheelhouse.ui.elevation_check import (
+    ELEVATED,
+    elevation_state_of_hwnd,
+)
 
 if TYPE_CHECKING:
     from services.wheelhouse.config_service import ConfigService
@@ -625,6 +629,16 @@ class WindowPositioningPlugin(BasePlugin):
                 self._target_window_rect = new_rect
                 self._last_move_time = current_time
                 self._last_move_position = target_pos
+            elif self._target_runs_elevated():
+                # wh-winpos-silent-failure: SetWindowPos against a
+                # higher-integrity window can fail without raising --
+                # the window just does not move. Expected boundary,
+                # not a defect; stay out of the WARNING stream.
+                logger.debug(
+                    "Keyboard window did not move: it runs as "
+                    "administrator and Wheelhouse does not. Run "
+                    "Wheelhouse as administrator to control it."
+                )
             else:
                 logger.warning(
                     f"Window move verification failed: target=({target_x}, {target_y}), "
@@ -632,4 +646,26 @@ class WindowPositioningPlugin(BasePlugin):
                 )
 
         except Exception as e:
-            logger.error(f"Failed to reposition window: {e}", exc_info=True)
+            if self._target_runs_elevated():
+                # Same boundary as above, surfaced as an exception on
+                # some Windows builds. Quiet by design (David's
+                # 2026-07-19 direction): the refusal is expected
+                # whenever the on-screen keyboard runs elevated.
+                logger.debug(
+                    "Keyboard window move refused: it runs as "
+                    "administrator and Wheelhouse does not. Run "
+                    "Wheelhouse as administrator to control it. (%s)", e,
+                )
+            else:
+                logger.error(f"Failed to reposition window: {e}", exc_info=True)
+
+    def _target_runs_elevated(self) -> bool:
+        """True when the target window's process outranks ours.
+
+        Fail open: an UNKNOWN elevation state returns False so the
+        existing ERROR/WARNING diagnostics are never suppressed on an
+        unproven claim.
+        """
+        return (
+            elevation_state_of_hwnd(self._target_window_hwnd) == ELEVATED
+        )

@@ -270,7 +270,7 @@ class TestCheckQueuesAndEvents:
         # wording through the OS info-notice path.
         msg = {
             'action': 'click_first_use_hint',
-            'message': 'WheelHouse can speed up clicks in this app...',
+            'message': 'Wheelhouse can speed up clicks in this app...',
             'trace_id': 'trace-x',
         }
         manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
@@ -305,7 +305,7 @@ class TestShowFirstUseHint:
                 'trace_id': 'trace-y',
             })
             mock_notification.notify.assert_called_once_with(
-                title='WheelHouse',
+                title='Wheelhouse',
                 message='hint body text',
                 timeout=8,
             )

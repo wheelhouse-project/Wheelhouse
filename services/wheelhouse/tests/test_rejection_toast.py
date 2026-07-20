@@ -44,7 +44,7 @@ from shared.text_target_rejection import (
 
 def _wording(category: str = CATEGORY_UNCERTAIN) -> ToastWording:
     return ToastWording(
-        title="WheelHouse couldn't type that",
+        title="Wheelhouse couldn't type that",
         body="body",
         category=category,
     )

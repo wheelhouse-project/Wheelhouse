@@ -1183,6 +1183,32 @@ class TestSilencesNonUncertainCategories:
         strategy.insert("hello", _make_context())
         assert queue.qsize() == 0
 
+    def test_elevated_emits_notice_event(self):
+        # wh-elevated-target-notice: the elevated category is the
+        # second category (after uncertain) that sends the rejection
+        # event. The GUI shows the administrator notice WITHOUT the
+        # Try-it-anyway button (button visibility stays gated on
+        # should_show_try_anyway, which is False for elevated).
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        verdict = TextTargetVerdict(
+            verdict=False,
+            reason="elevated_process_window",
+            supported_patterns=(),
+            control_type="",
+            class_name="RegEdit_RegEdit",
+            process_name="regedit.exe",
+        )
+        strategy.set_pending_verdict(verdict)
+        strategy.insert("hello", _make_context())
+        assert queue.qsize() == 1
+        msg = queue.get_nowait()
+        assert msg["type"] == "text_target_rejected"
+        assert msg["reason"] == "elevated_process_window"
+
     def test_uncertain_still_emits(self):
         # Sanity guard: the silencing is category-scoped. The uncertain
         # case (default_reject_paste_capable_class) must keep firing the

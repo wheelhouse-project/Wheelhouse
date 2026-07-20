@@ -8,6 +8,15 @@ mapping; the GUI widget consumes it.
 
 Branches (per wh-9weum Phase 2 spec):
 
+  * elevated (``elevated_process_window``, wh-elevated-target-notice):
+      The focused window belongs to a higher-integrity (administrator)
+      process; Windows discards WheelHouse's input. The toast explains
+      the boundary and the fix: run WheelHouse itself as
+      administrator, or use the physical keyboard. It must NOT advise
+      de-elevating the target app -- some Windows apps only run as
+      administrator (David's 2026-07-19 correction). No Try-it-anyway
+      button: a retry can never succeed.
+
   * uncertain (``default_reject_paste_capable_class``):
       The focused control has a non-empty ClassName but no positive
       identity signal. The toast offers no specific reason -- a typing
@@ -40,6 +49,7 @@ from dataclasses import dataclass
 from shared.rejection_category import (
     CATEGORY_BROWSER_TRAP,
     CATEGORY_DEFINITELY_NOT_TEXT,
+    CATEGORY_ELEVATED,
     CATEGORY_OTHER,
     CATEGORY_UNCERTAIN,
     categorize_rejection,
@@ -124,9 +134,27 @@ def compose_rejection_wording(
         reason=reason, process_name=process_name, class_name=class_name,
     )
 
+    if category == CATEGORY_ELEVATED:
+        # wh-elevated-target-notice. The fix is to elevate WheelHouse,
+        # never to de-elevate the target: some Windows apps only run
+        # as administrator, so "start the app without administrator"
+        # would be advice the user may be unable to follow.
+        app = app_friendly_name or "This app"
+        return ToastWording(
+            title="Wheelhouse can't type into administrator apps",
+            body=(
+                f"{app} is running as administrator, and Windows does "
+                "not let Wheelhouse type into it. To dictate into "
+                "administrator programs, close Wheelhouse and start it "
+                "again with right-click, Run as administrator. Or use "
+                "the physical keyboard for this app."
+            ),
+            category=CATEGORY_ELEVATED,
+        )
+
     if category == CATEGORY_BROWSER_TRAP:
         return ToastWording(
-            title="WheelHouse couldn't type into your browser",
+            title="Wheelhouse couldn't type into your browser",
             body=(
                 "You don't have a text box on the page selected. "
                 "Click into a search box, comment field, or other typing "
@@ -137,16 +165,16 @@ def compose_rejection_wording(
 
     if category == CATEGORY_UNCERTAIN:
         body = (
-            "WheelHouse isn't sure it can type here. Click into the "
+            "Wheelhouse isn't sure it can type here. Click into the "
             "place where you want text, then try again."
         )
         if app_friendly_name:
             body = (
-                f"WheelHouse isn't sure it can type into {app_friendly_name}. "
+                f"Wheelhouse isn't sure it can type into {app_friendly_name}. "
                 "Click into the place where you want text, then try again."
             )
         return ToastWording(
-            title="WheelHouse couldn't type that",
+            title="Wheelhouse couldn't type that",
             body=body,
             category=CATEGORY_UNCERTAIN,
         )
@@ -155,16 +183,16 @@ def compose_rejection_wording(
         noun = _CONTROL_TYPE_NOUNS.get(control_type or "", "")
         if noun:
             body = (
-                f"WheelHouse can't type into this. You have a {noun} "
+                f"Wheelhouse can't type into this. You have a {noun} "
                 "selected. Click into a text box first, then try again."
             )
         else:
             body = (
-                "WheelHouse can't type into this kind of control. "
+                "Wheelhouse can't type into this kind of control. "
                 "Click into a text box first, then try again."
             )
         return ToastWording(
-            title="WheelHouse couldn't type that",
+            title="Wheelhouse couldn't type that",
             body=body,
             category=CATEGORY_DEFINITELY_NOT_TEXT,
         )
@@ -174,9 +202,9 @@ def compose_rejection_wording(
     # the GUI, but the helper stays defensive so a future caller does
     # not crash the GUI if it somehow does fire.
     return ToastWording(
-        title="WheelHouse couldn't type that",
+        title="Wheelhouse couldn't type that",
         body=(
-            "WheelHouse couldn't find a place to type. Click into a "
+            "Wheelhouse couldn't find a place to type. Click into a "
             "text box, then try again."
         ),
         category=CATEGORY_OTHER,

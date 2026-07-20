@@ -38,6 +38,8 @@ WIN32_FAMILY_MODULES = (
     "win32con",
     "win32gui",
     "win32process",
+    # reached by ui/elevation_check.py (wh-elevated-target-notice)
+    "win32security",
     "winreg",
 )
 

@@ -425,3 +425,156 @@ class TestWindowPositioningStop:
         await plugin.stop()
         assert plugin.state == PluginState.STOPPED
         assert plugin._running is False
+
+
+# ---------------------------------------------------------------------------
+# Elevated keyboard target (wh-winpos-silent-failure /
+# wh-elevated-target-notice)
+# ---------------------------------------------------------------------------
+
+_PLUGIN_MODULE = "services.wheelhouse.plugins.window_positioning_plugin"
+_PLUGIN_LOGGER = _PLUGIN_MODULE
+
+
+class TestRepositionElevatedTarget:
+    """The on-screen keyboard often runs at a higher integrity level
+    than WheelHouse (uiAccess / administrator), and Windows then
+    refuses SetWindowPos from a non-elevated process. That refusal is
+    an expected boundary, not a defect -- it must NOT produce an
+    ERROR or WARNING log (David's 2026-07-19 direction). Any other
+    failure keeps its existing diagnostics."""
+
+    def _prepared_plugin(self, plugin):
+        plugin._target_window_hwnd = 999
+        plugin._target_window_rect = (10, 20, 300, 100)
+        plugin._last_move_time = 0.0
+        plugin._last_move_position = None
+        return plugin
+
+    @pytest.mark.asyncio
+    async def test_elevated_move_failure_logs_no_error(self, plugin, caplog):
+        import logging as logging_mod
+
+        plugin = self._prepared_plugin(plugin)
+        with patch(f"{_PLUGIN_MODULE}.win32gui") as mock_gui, \
+                patch(
+                    f"{_PLUGIN_MODULE}.elevation_state_of_hwnd",
+                    return_value="elevated",
+                ):
+            mock_gui.IsIconic.return_value = False
+            mock_gui.SetWindowPos.side_effect = OSError("access denied")
+            with caplog.at_level(logging_mod.DEBUG, logger=_PLUGIN_LOGGER):
+                await plugin._reposition_window(50, 60, "test")
+        loud = [
+            r for r in caplog.records
+            if r.levelno >= logging_mod.WARNING
+        ]
+        assert loud == [], (
+            f"elevated refusal must stay quiet, got: "
+            f"{[(r.levelname, r.message) for r in loud]}"
+        )
+        debug_mentions = [
+            r for r in caplog.records
+            if r.levelno == logging_mod.DEBUG
+            and "administrator" in r.getMessage()
+        ]
+        assert debug_mentions, (
+            "expected a DEBUG line naming the administrator boundary"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_elevated_move_failure_still_logs_error(
+        self, plugin, caplog,
+    ):
+        import logging as logging_mod
+
+        plugin = self._prepared_plugin(plugin)
+        with patch(f"{_PLUGIN_MODULE}.win32gui") as mock_gui, \
+                patch(
+                    f"{_PLUGIN_MODULE}.elevation_state_of_hwnd",
+                    return_value="not_elevated",
+                ):
+            mock_gui.IsIconic.return_value = False
+            mock_gui.SetWindowPos.side_effect = OSError("some real bug")
+            with caplog.at_level(logging_mod.DEBUG, logger=_PLUGIN_LOGGER):
+                await plugin._reposition_window(50, 60, "test")
+        errors = [
+            r for r in caplog.records
+            if r.levelno == logging_mod.ERROR
+        ]
+        assert len(errors) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_elevation_keeps_error(self, plugin, caplog):
+        # Fail open: when the elevation state cannot be determined,
+        # the existing diagnostics must not be suppressed.
+        import logging as logging_mod
+
+        plugin = self._prepared_plugin(plugin)
+        with patch(f"{_PLUGIN_MODULE}.win32gui") as mock_gui, \
+                patch(
+                    f"{_PLUGIN_MODULE}.elevation_state_of_hwnd",
+                    return_value="unknown",
+                ):
+            mock_gui.IsIconic.return_value = False
+            mock_gui.SetWindowPos.side_effect = OSError("mystery failure")
+            with caplog.at_level(logging_mod.DEBUG, logger=_PLUGIN_LOGGER):
+                await plugin._reposition_window(50, 60, "test")
+        errors = [
+            r for r in caplog.records
+            if r.levelno == logging_mod.ERROR
+        ]
+        assert len(errors) == 1
+
+    @pytest.mark.asyncio
+    async def test_elevated_verification_failure_logs_no_warning(
+        self, plugin, caplog,
+    ):
+        # SetWindowPos can also fail QUIETLY (no exception, window
+        # just does not move); the move-verification branch must take
+        # the same demotion.
+        import logging as logging_mod
+
+        plugin = self._prepared_plugin(plugin)
+        with patch(f"{_PLUGIN_MODULE}.win32gui") as mock_gui, \
+                patch(
+                    f"{_PLUGIN_MODULE}.elevation_state_of_hwnd",
+                    return_value="elevated",
+                ), patch.object(
+                    plugin, "_get_window_rect",
+                    return_value=(500, 500, 300, 100),
+                ):
+            mock_gui.IsIconic.return_value = False
+            mock_gui.SetWindowPos.return_value = 1
+            with caplog.at_level(logging_mod.DEBUG, logger=_PLUGIN_LOGGER):
+                await plugin._reposition_window(50, 60, "test")
+        loud = [
+            r for r in caplog.records
+            if r.levelno >= logging_mod.WARNING
+        ]
+        assert loud == []
+
+    @pytest.mark.asyncio
+    async def test_non_elevated_verification_failure_still_warns(
+        self, plugin, caplog,
+    ):
+        import logging as logging_mod
+
+        plugin = self._prepared_plugin(plugin)
+        with patch(f"{_PLUGIN_MODULE}.win32gui") as mock_gui, \
+                patch(
+                    f"{_PLUGIN_MODULE}.elevation_state_of_hwnd",
+                    return_value="not_elevated",
+                ), patch.object(
+                    plugin, "_get_window_rect",
+                    return_value=(500, 500, 300, 100),
+                ):
+            mock_gui.IsIconic.return_value = False
+            mock_gui.SetWindowPos.return_value = 1
+            with caplog.at_level(logging_mod.DEBUG, logger=_PLUGIN_LOGGER):
+                await plugin._reposition_window(50, 60, "test")
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging_mod.WARNING
+        ]
+        assert len(warnings) == 1

@@ -41,4 +41,4 @@ class TestHelpSystemTemplate:
         assert "{knowledge_base}" not in result
 
     def test_mentions_wheelhouse(self):
-        assert "WheelHouse" in HELP_SYSTEM_TEMPLATE
+        assert "Wheelhouse" in HELP_SYSTEM_TEMPLATE

@@ -334,7 +334,7 @@ def apply_screen_reader_flag(
     # OFF path: ownership-gated clear (wh-l4h.1.13).
     if not _marker_exists(marker_path):
         logger.debug(
-            "screen_reader_flag: OFF-path startup clear skipped -- WheelHouse "
+            "screen_reader_flag: OFF-path startup clear skipped -- Wheelhouse "
             "does not own the screen-reader setting (no ownership marker)",
         )
         return True

@@ -835,7 +835,7 @@ class GuiManager(QObject):
             post_notification=self._post_editor_rebuilt_notification,
         )
 
-        self.icon = pystray.Icon("wheelhouse", title="WheelHouse")
+        self.icon = pystray.Icon("wheelhouse", title="Wheelhouse")
 
         self.button.press_started.connect(self._on_button_press)
         self.button.press_ended.connect(self._on_button_release)
@@ -1123,7 +1123,7 @@ class GuiManager(QObject):
                 elif action == "show_notification":
                     if notification.notify:
                         notification.notify(
-                            title=message.get("title", "WheelHouse"),
+                            title=message.get("title", "Wheelhouse"),
                             message=message.get("message", ""),
                             timeout=message.get("timeout", 5)
                         )
@@ -1269,7 +1269,7 @@ class GuiManager(QObject):
                 return
             if notification.notify:
                 notification.notify(
-                    title="WheelHouse",
+                    title="Wheelhouse",
                     message=text,
                     timeout=8,
                 )
@@ -1649,7 +1649,7 @@ class GuiManager(QObject):
             )
             body = (
                 f"You have tried this {event.count} times in "
-                f"{event.app_friendly_name}. WheelHouse can stop "
+                f"{event.app_friendly_name}. Wheelhouse can stop "
                 "asking and just do it from now on."
             )
             self._grant_prompt_toast.show_prompt(title=title, body=body)
@@ -1900,7 +1900,7 @@ class GuiManager(QObject):
                 )
 
             self._soft_allow_write_failed_toast.show_message(
-                title="WheelHouse couldn't save your choice",
+                title="Wheelhouse couldn't save your choice",
                 body=(
                     "Try saying the words again later, "
                     "then click Yes again."
@@ -1963,7 +1963,7 @@ class GuiManager(QObject):
                 )
 
             self._soft_allow_write_failed_toast.show_message(
-                title="WheelHouse couldn't save your choice",
+                title="Wheelhouse couldn't save your choice",
                 body=(
                     "Try saying the words again later, "
                     "then click No again."
@@ -2229,11 +2229,11 @@ class GuiManager(QObject):
         try:
             self.commands_to_logic_queue.put_nowait({'action': 'restart_program'})
             if notification.notify:
-                notification.notify(title="WheelHouse", message="Restarting application...")
+                notification.notify(title="Wheelhouse", message="Restarting application...")
         except Exception as e:
             logger.error(f"Failed to send restart command: {e}")
             if notification.notify:
-                notification.notify(title="WheelHouse", message="Could not restart: Logic process is unresponsive.")
+                notification.notify(title="Wheelhouse", message="Could not restart: Logic process is unresponsive.")
 
     def request_stt_restart(self):
         """
@@ -2252,7 +2252,7 @@ class GuiManager(QObject):
         except Exception as e:
             logger.error(f"Failed to send STT restart command: {e}")
             if notification.notify:
-                notification.notify(title="WheelHouse", message="Could not restart STT: Logic process is unresponsive.")
+                notification.notify(title="Wheelhouse", message="Could not restart STT: Logic process is unresponsive.")
 
     def _open_help_chat(self, question: str = ""):
         """Open or show the help chat window."""
@@ -2534,7 +2534,7 @@ class GuiManager(QObject):
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Restart Transcription Service", self.request_stt_restart, enabled=is_ready),
-                pystray.MenuItem("Restart WheelHouse", self.request_restart, enabled=is_ready),
+                pystray.MenuItem("Restart Wheelhouse", self.request_restart, enabled=is_ready),
                 pystray.MenuItem("Exit", self.exit_app, enabled=is_ready)
             ])
             
@@ -2642,7 +2642,7 @@ class GuiManager(QObject):
             restart_stt_action.triggered.connect(self.request_stt_restart)
             menu.addAction(restart_stt_action)
 
-            restart_action = QAction("Restart WheelHouse", self)
+            restart_action = QAction("Restart Wheelhouse", self)
             restart_action.setEnabled(is_ready)
             restart_action.triggered.connect(self.request_restart)
             menu.addAction(restart_action)

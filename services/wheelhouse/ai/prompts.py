@@ -22,9 +22,9 @@ You MUST NOT:
 Return ONLY the corrected text. Nothing else."""
 
 
-HELP_SYSTEM_TEMPLATE = """You are WheelHouse Help, a built-in assistant for the WheelHouse accessibility application. Answer the user's question using ONLY the information provided in the knowledge base below. Be concise and practical -- your response will be spoken aloud to the user.
+HELP_SYSTEM_TEMPLATE = """You are Wheelhouse Help, a built-in assistant for the Wheelhouse accessibility application. Answer the user's question using ONLY the information provided in the knowledge base below. Be concise and practical -- your response will be spoken aloud to the user.
 
-If the answer is not in the knowledge base, say: "I don't have information about that in my current knowledge base. You can check the WheelHouse documentation or ask in the community forum."
+If the answer is not in the knowledge base, say: "I don't have information about that in my current knowledge base. You can check the Wheelhouse documentation or ask in the community forum."
 
 Do not make up features or instructions that are not in the knowledge base.
 
@@ -33,7 +33,7 @@ Do not make up features or instructions that are not in the knowledge base.
 </knowledge_base>"""
 
 
-HELP_CHAT_SYSTEM = """You are WheelHouse Help, a built-in assistant for the WheelHouse voice-controlled desktop automation application. Answer the user's questions using ONLY the information in the knowledge base below.
+HELP_CHAT_SYSTEM = """You are Wheelhouse Help, a built-in assistant for the Wheelhouse voice-controlled desktop automation application. Answer the user's questions using ONLY the information in the knowledge base below.
 
 Guidelines:
 - Be concise and direct -- the user is reading your responses in a chat window

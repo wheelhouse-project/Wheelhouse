@@ -200,3 +200,77 @@ class TestRecognizeStripsLeadingAndTrailingWhitespace:
         engine = engine_factory(recognizer_text="  hello  ")
         audio = np.zeros(16000, dtype=np.float32)
         assert engine._recognize(audio) == "hello"
+
+
+# ---------------------------------------------------------------------------
+# wh-parakeet-xray-hotword: rejoin a split "x ray" into "x-ray"
+# ---------------------------------------------------------------------------
+
+class TestNormalizeTextXrayJoin:
+    """A deliberate pause between the syllables of "x-ray" makes Parakeet
+    emit two words (measured 2026-07-18 on TTS audio with a 250 ms pause:
+    raw='X, Ray Boost'). The Logic-side wake-word match needs the wake
+    word to arrive as ONE word, so the engine rejoins letter-x + "ray"
+    into the standard English spelling."""
+
+    def test_split_comma_form_rejoined(self):
+        # The exact raw form measured from the model.
+        assert (
+            SherpaOfflineEngine._normalize_text("X, Ray Boost")
+            == "x-ray Boost"
+        )
+
+    def test_split_form_with_trailing_period(self):
+        assert (
+            SherpaOfflineEngine._normalize_text("X, Ray patterns.")
+            == "x-ray patterns"
+        )
+
+    def test_plain_split_form_rejoined(self):
+        assert (
+            SherpaOfflineEngine._normalize_text("X Ray close window")
+            == "x-ray close window"
+        )
+
+    def test_mid_sentence_lowercase_split_rejoined(self):
+        assert (
+            SherpaOfflineEngine._normalize_text("Take an x ray tomorrow")
+            == "take an x-ray tomorrow"
+        )
+
+    def test_mid_sentence_preserves_leading_capital(self):
+        # The join keeps the X's case; only "Ray" is normalized.
+        assert (
+            SherpaOfflineEngine._normalize_text("see the X Ray result")
+            == "see the X-ray result"
+        )
+
+    def test_hyphenated_form_unchanged(self):
+        # The model's dominant output form must pass through untouched.
+        assert (
+            SherpaOfflineEngine._normalize_text("X-ray boost")
+            == "x-ray boost"
+        )
+
+    def test_regex_does_not_match_already_hyphenated_form(self):
+        # deepseek review, wh-parakeet-xray-hotword.1.3: rejoining "X-ray"
+        # is idempotent, so the output-level test above cannot detect a
+        # regex widened to also match the hyphen (e.g. [-\s]+ instead of
+        # \s+). Pin the non-match directly on the regex object.
+        from sherpa_engine import _XRAY_JOIN
+        assert _XRAY_JOIN.search("X-ray") is None
+        assert _XRAY_JOIN.search("see the x-ray boost") is None
+
+    def test_word_ending_in_x_not_joined(self):
+        # "Max ray" -- the x inside a longer word must not trigger.
+        assert (
+            SherpaOfflineEngine._normalize_text("Max ray gun")
+            == "max ray gun"
+        )
+
+    def test_ray_prefix_word_not_joined(self):
+        # "raymond" is not the word "ray".
+        assert (
+            SherpaOfflineEngine._normalize_text("x raymond called")
+            == "x raymond called"
+        )

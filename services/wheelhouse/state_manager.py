@@ -230,7 +230,7 @@ class StateManager:
         try:
             notification = {
                 'action': 'show_notification',
-                'title': f'WheelHouse: {event.service_name} Configuration Error',
+                'title': f'Wheelhouse: {event.service_name} Configuration Error',
                 'message': f'{event.error_message}\n\n{event.user_action}',
                 'timeout': 10
             }

@@ -162,7 +162,7 @@ class NotifierWorker:
                 notification.notify(
                     title=payload.title,
                     message=payload.message,
-                    app_name="WheelHouse",
+                    app_name="Wheelhouse",
                     timeout=10,
                 )
                 self._delivered += 1

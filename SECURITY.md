@@ -10,7 +10,7 @@ medical text. Security and privacy reports are treated as high priority.
 
 Report it privately through GitHub's vulnerability reporting on this
 repository: **Security → Report a vulnerability** (or
-`https://github.com/wheelhouse-project/WheelHouse/security/advisories/new`),
+`https://github.com/wheelhouse-project/Wheelhouse/security/advisories/new`),
 or by email to <security@wheelhouse-project.org>. You will
 get a response from the maintainer, normally within a week.
 

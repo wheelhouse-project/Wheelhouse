@@ -28,7 +28,7 @@ with its own virtual environment. You need:
 - A microphone, for end-to-end testing.
 
 ```powershell
-git clone https://github.com/wheelhouse-project/WheelHouse
+git clone https://github.com/wheelhouse-project/Wheelhouse
 cd Wheelhouse/services/wheelhouse
 uv sync
 copy config.toml.example config.toml

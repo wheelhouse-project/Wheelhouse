@@ -117,7 +117,7 @@ class ErrorNotificationHandler(logging.Handler):
             if record.name and record.name != "root"
             else ""
         )
-        return f"{indicator} {source}" if source else f"{indicator} WheelHouse"
+        return f"{indicator} {source}" if source else f"{indicator} Wheelhouse"
 
     def _format_message(self, record: logging.LogRecord) -> str:
         message = record.getMessage()
@@ -142,7 +142,7 @@ class ErrorNotificationHandler(logging.Handler):
                 notification.notify(
                     title=title,
                     message=message,
-                    app_name="WheelHouse",
+                    app_name="Wheelhouse",
                     timeout=10,
                 )
         except Exception:

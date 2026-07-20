@@ -64,7 +64,7 @@ UNRESOLVED_PLACEHOLDERS = (
 # and the real GitHub project URL (org resolved to wheelhouse-project).
 REQUIRED_CURRENT_CONTENT = (
     "install-wheelhouse.ps1",
-    "https://github.com/wheelhouse-project/WheelHouse",
+    "https://github.com/wheelhouse-project/Wheelhouse",
 )
 
 # Config claims the doc must never make (codex review, help-kit epic,

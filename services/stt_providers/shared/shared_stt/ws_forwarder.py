@@ -327,7 +327,7 @@ class WSForwarder:
                 if not self._stop_evt.is_set() and was_connected:
                     was_connected = False
                     was_disconnected = True  # Track for reconnect callback
-                    self._log("[ws] WheelHouse connection closed")
+                    self._log("[ws] Wheelhouse connection closed")
 
                     if self.on_disconnect_callback:
                         try:
@@ -345,7 +345,7 @@ class WSForwarder:
                 if was_connected:
                     was_connected = False  # Reset for next connection cycle
                     was_disconnected = True  # Track for reconnect callback
-                    self._log("[ws] WheelHouse connection lost")
+                    self._log("[ws] Wheelhouse connection lost")
 
                     if self.on_disconnect_callback:
                         try:

@@ -154,7 +154,7 @@ def compose_click_notice_wording(event: ClickNoticeEvent) -> str:
     # Defensive: an outcome outside the closed set should never reach
     # here (the schema rejects it), but return a usable string rather
     # than raise so the GUI never crashes on a future outcome value.
-    return "WheelHouse couldn't complete the click."
+    return "Wheelhouse couldn't complete the click."
 
 
 def _compose_ambiguous(matched_names: tuple[str, ...]) -> str:
@@ -214,7 +214,7 @@ def _compose_execution_failed(reason: str | None, matched_name: str | None) -> s
     if reason == "disabled" and name:
         return f"'{name}' is disabled."
     if reason == "bounds_invalid" and name:
-        return f"WheelHouse couldn't click '{name}' -- it may have moved."
+        return f"Wheelhouse couldn't click '{name}' -- it may have moved."
     if reason == "click_point_obstructed" and name:
         # wh-explorer-navpane-click.1.1: the pre-send hit-test found a
         # different top-level window under the click point (an always-on-top
@@ -222,24 +222,24 @@ def _compose_execution_failed(reason: str | None, matched_name: str | None) -> s
         # honest for the seam-failure case while naming the likely cause a
         # hands-free user can act on.
         return (
-            f"WheelHouse couldn't click '{name}' -- another window may be "
+            f"Wheelhouse couldn't click '{name}' -- another window may be "
             "covering it."
         )
     if reason == "foreground_changed" and name:
-        return f"Window changed before WheelHouse could click '{name}'."
+        return f"Window changed before Wheelhouse could click '{name}'."
     if reason == "foreground_verification_failed":
         return (
-            "WheelHouse couldn't verify the active window -- if you didn't "
+            "Wheelhouse couldn't verify the active window -- if you didn't "
             "switch apps, try clicking again."
         )
     if reason in _DDA_PERMANENT_REASONS and name:
         return f"'{name}' can't be clicked by voice."
     if reason in _INVOKE_COM_ERROR_ALIASES and name:
-        return f"WheelHouse couldn't click '{name}' -- the control did not respond."
+        return f"Wheelhouse couldn't click '{name}' -- the control did not respond."
     if reason == "target_moved_offscreen" and name:
         return f"'{name}' moved off screen."
     if reason == "timeout":
-        return "WheelHouse timed out while clicking."
+        return "Wheelhouse timed out while clicking."
     if reason == "popup_closed":
         # wh-n29v.71: an owned #32768 / UIA-Menu popup that closed between the
         # walk and the click. Unlike the name-using branches above, this branch
@@ -249,8 +249,8 @@ def _compose_execution_failed(reason: str | None, matched_name: str | None) -> s
         # generic neutral string. Name the item when we have one; otherwise use
         # "it".
         if name:
-            return f"The menu closed before WheelHouse could click '{name}'."
-        return "The menu closed before WheelHouse could click it."
+            return f"The menu closed before Wheelhouse could click '{name}'."
+        return "The menu closed before Wheelhouse could click it."
 
     # Logic-synthesised reasons (wh-g4oma). None of these embed the matched
     # name, so they need no ``and name`` guard and keep their specific copy
@@ -276,7 +276,7 @@ def _compose_execution_failed(reason: str | None, matched_name: str | None) -> s
             "for details and try again."
         )
     if reason == "send_request_failed":
-        return "WheelHouse couldn't send the click request."
+        return "Wheelhouse couldn't send the click request."
 
     # Unrecognized reason tag (including a None reason on an
     # execution_failed event) -- the schema deliberately leaves the tag
@@ -288,5 +288,5 @@ def _compose_execution_failed(reason: str | None, matched_name: str | None) -> s
     # the helper does not actually understand. Name the control when we
     # have it; otherwise stay fully generic.
     if name:
-        return f"WheelHouse couldn't click '{name}'."
-    return "WheelHouse couldn't complete the click."
+        return f"Wheelhouse couldn't click '{name}'."
+    return "Wheelhouse couldn't complete the click."

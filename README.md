@@ -36,7 +36,7 @@ account, no subscription, no telemetry.
 One command, in any PowerShell window:
 
 ```powershell
-irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/install-wheelhouse.ps1 | iex
+irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
 ```
 
 The installer checks your hardware, installs its own Python environment

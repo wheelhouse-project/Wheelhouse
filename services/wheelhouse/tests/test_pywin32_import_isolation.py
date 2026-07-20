@@ -71,6 +71,8 @@ def test_default_list_covers_the_observed_import_graph():
         "win32con",
         "win32gui",
         "win32process",
+        # reached by ui/elevation_check.py (wh-elevated-target-notice)
+        "win32security",
         # stdlib Windows-only, reached by speech/actions.py
         # _default_browser_exe and patched by TestDefaultBrowserExe
         # (reviewer_0 finding wh-user-patterns-split.12.3)

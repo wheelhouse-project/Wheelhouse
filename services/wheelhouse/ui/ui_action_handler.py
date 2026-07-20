@@ -52,6 +52,7 @@ from .hwnd_utils import (
 
 # New Router/Strategy Components
 from .context import capture_context
+from .elevation_check import target_elevation_state
 from .router import InsertionRouter
 from .strategies.base import InsertionMode, InsertionOptions
 from .strategies.specific import (
@@ -573,6 +574,9 @@ class UIActionHandler:
             verified_unicode_strategy=self.unicode_first_strategy,
             verified_unicode_max_chars=verified_unicode_max_chars,
             clipboard_only_strategy=self.clipboard_only_strategy,
+            # wh-elevated-target-notice: refuse administrator targets
+            # before any delivery path runs; fail open on any doubt.
+            elevation_checker=target_elevation_state,
         )
 
         # Letter buffer for auto-compression of spelled letters
@@ -3910,7 +3914,7 @@ class UIActionHandler:
                     notification.notify(
                         title=title,
                         message=message,
-                        app_name='WheelHouse',
+                        app_name='Wheelhouse',
                         timeout=timeout
                     )
             except Exception as e:

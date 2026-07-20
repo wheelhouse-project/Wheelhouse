@@ -458,7 +458,7 @@ launcher = "launcher.py"
             # Loading now goes through working dialog, not notify callback.
             # Only failure notification should come through notify callback.
             assert len(notifications) == 1
-            assert notifications[0] == ("Google Cloud STT", "Failed to start - try restarting WheelHouse")
+            assert notifications[0] == ("Google Cloud STT", "Failed to start - try restarting Wheelhouse")
 
     def test_no_failure_notification_if_provider_sends_ready(self, services_dir, app_data_dir):
         """No failure notification if provider sends ready signal within timeout."""
@@ -511,7 +511,7 @@ launcher = "launcher.py"
             # Loading now goes through working dialog, not notify callback.
             # Only failure notification should come through notify callback.
             assert len(notifications) == 1
-            assert notifications[0] == ("Google Cloud STT", "Failed to start - try restarting WheelHouse")
+            assert notifications[0] == ("Google Cloud STT", "Failed to start - try restarting Wheelhouse")
 
     def test_removes_stale_pid_file_before_starting(self, services_dir, app_data_dir):
         """start_provider() removes stale PID file to ensure fresh startup monitoring."""
@@ -985,7 +985,7 @@ startup_timeout_seconds = 180
         launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=0.1)
 
         assert len(notifications) == 1
-        assert notifications[0] == ("Google Cloud STT", "Failed to start - try restarting WheelHouse")
+        assert notifications[0] == ("Google Cloud STT", "Failed to start - try restarting Wheelhouse")
 
     def test_failure_message_includes_restart_guidance(self, services_dir, app_data_dir):
         """Failure notification should suggest restarting WheelHouse."""

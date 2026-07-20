@@ -1604,7 +1604,7 @@ class TestShowNotification:
             mock_notification.notify.assert_called_once_with(
                 title="Test",
                 message="Message",
-                app_name="WheelHouse",
+                app_name="Wheelhouse",
                 timeout=3
             )
         finally:

@@ -55,7 +55,7 @@ def record_path(tmp_path: Path) -> Path:
 class TestHintWording:
     def test_exact_v5_wording_is_used_verbatim(self):
         assert HINT_TEXT == (
-            "WheelHouse can speed up clicks in this app by setting the Windows "
+            "Wheelhouse can speed up clicks in this app by setting the Windows "
             "screen-reader flag. Tradeoff: PSReadLine will warn in every "
             "PowerShell session. See config.toml `[click] "
             "enable_screen_reader_flag` to opt in. Tap to dismiss."

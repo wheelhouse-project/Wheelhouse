@@ -930,7 +930,7 @@ class ActionFunctions:
                 display_name = "Push to talk mode" if mode == "push_to_talk" else "Click to talk mode"
                 self._send_gui_action({
                     "action": "show_notification",
-                    "title": "WheelHouse",
+                    "title": "Wheelhouse",
                     "message": display_name,
                     "timeout": 3,
                 })

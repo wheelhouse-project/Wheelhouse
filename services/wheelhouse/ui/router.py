@@ -2,10 +2,23 @@
 
 Decision tree (in order):
 
-    1. context.is_flutter True?
+    1. Elevation check (wh-elevated-target-notice): when the optional
+       elevation checker is wired, targets owned by a higher-integrity
+       (administrator) process are refused before EVERY other branch,
+       including the Flutter early return -- Windows UIPI discards
+       input by process integrity, not UI framework, so an elevated
+       Flutter app fails exactly like an elevated native app
+       (wh-elevated-target-notice.1.1). The router synthesizes a
+       verdict with reason 'elevated_process_window' and routes to
+       RejectedInsertionStrategy -- ahead of the soft-allow
+       silent-paste tier, and without consulting the predicate.
+       "not_elevated"/"unknown"/exception all fail open into the
+       branches below.
+
+    2. context.is_flutter True?
          -> FlutterStrategy
 
-    2. Text-target predicate (wh-zndq, wh-fc1x, wh-9weum Phase 1,
+    3. Text-target predicate (wh-zndq, wh-fc1x, wh-9weum Phase 1,
        wh-soft-allow-verdict-tier):
          The shared TextTargetPredicate decides whether the focused
          control accepts text input. The verdict's reason field
@@ -76,7 +89,7 @@ subject to the generic UIA TextPattern check (resolved during wh-ix1z
 round 1).
 """
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from .context import UIContext
 from .strategies.base import InsertionStrategy
@@ -119,6 +132,7 @@ class InsertionRouter:
         verified_unicode_strategy: Optional[InsertionStrategy] = None,
         verified_unicode_max_chars: int = 50,
         clipboard_only_strategy: Optional[InsertionStrategy] = None,
+        elevation_checker: Optional[Callable[[object], str]] = None,
     ):
         """Wire the available strategies and the Unicode threshold.
 
@@ -159,6 +173,19 @@ class InsertionRouter:
                 'default_reject_paste_capable_class') always route to
                 rejected_strategy regardless of this argument so the
                 Try-it-anyway override flow can run.
+            elevation_checker: Optional callable taking the focused
+                control and returning one of "elevated",
+                "not_elevated", or "unknown"
+                (wh-elevated-target-notice; production wiring passes
+                ``ui.elevation_check.target_elevation_state``). When it
+                returns "elevated" the router refuses BEFORE the
+                text-target predicate and before the soft-allow silent
+                paste tier, synthesizing a verdict with reason
+                'elevated_process_window' -- Windows UIPI would
+                silently discard the input and both delivery paths
+                would record a false verified success. Any other
+                return value, an exception, or None (not wired) leaves
+                routing unchanged (fail open).
         """
         self.standard = standard_strategy
         self.flutter = flutter_strategy
@@ -168,6 +195,7 @@ class InsertionRouter:
         self.verified_unicode = verified_unicode_strategy
         self.verified_unicode_max_chars = verified_unicode_max_chars
         self.clipboard_only = clipboard_only_strategy
+        self.elevation_checker = elevation_checker
 
     def get_strategy(
         self,
@@ -189,7 +217,49 @@ class InsertionRouter:
             The selected InsertionStrategy. See the module docstring for
             the full decision tree.
         """
-        # 1. Flutter? -> Flutter Strategy. Runs before the text-target
+        # 1. Elevation check (wh-elevated-target-notice): refuse
+        #    elevated targets before EVERY other branch, including the
+        #    Flutter early return (wh-elevated-target-notice.1.1) and
+        #    the soft-allow silent-paste tier. Windows UIPI silently
+        #    discards input sent to a higher-integrity window while
+        #    SendInput reports success, so an approved control
+        #    relaunched as administrator must not take the silent-paste
+        #    path, and an elevated Flutter app must not take the
+        #    Flutter path -- UIPI filters on process integrity, not UI
+        #    framework. The check does not consult the predicate: UIA
+        #    visibility into elevated windows is unreliable, and its
+        #    answer could not change the routing. Anything other than
+        #    "elevated" (including an exception) fails open into the
+        #    existing pipeline.
+        if self.elevation_checker is not None and self.rejected is not None:
+            try:
+                elevation_state = self.elevation_checker(
+                    context.focused_control,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Router: elevation check raised (%s); "
+                    "failing open", e,
+                )
+                elevation_state = "unknown"
+            if elevation_state == "elevated":
+                verdict = TextTargetVerdict(
+                    verdict=False,
+                    reason="elevated_process_window",
+                    class_name=getattr(context, "class_name", "") or "",
+                    process_name=(
+                        getattr(context, "process_name", "") or ""
+                    ),
+                )
+                self._log_rejection(verdict)
+                set_pending = getattr(
+                    self.rejected, "set_pending_verdict", None,
+                )
+                if callable(set_pending):
+                    set_pending(verdict)
+                return self.rejected
+
+        # 2. Flutter? -> Flutter Strategy. Runs before the text-target
         #    predicate because Flutter's text controls do not always
         #    expose UIA TextPattern, so the per-framework
         #    FlutterStrategy must keep priority over the predicate.
@@ -197,7 +267,7 @@ class InsertionRouter:
             logger.debug("Router: Flutter detected -> FlutterStrategy")
             return self.flutter
 
-        # 2. Text-target predicate (wh-zndq, wh-fc1x, wh-9weum Phase 1,
+        # 3. Text-target predicate (wh-zndq, wh-fc1x, wh-9weum Phase 1,
         #    wh-soft-allow-verdict-tier). When configured, the
         #    predicate is the single source of truth for "is this a
         #    text-input target". The verdict's reason field decides

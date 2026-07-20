@@ -88,6 +88,10 @@ from typing import Callable, Optional
 import win32process
 
 from services.wheelhouse.shared.editor_lifecycle import EditorState, LogicMirror
+from services.wheelhouse.ui.elevation_check import (
+    ELEVATED,
+    elevation_state_of_hwnd,
+)
 from services.wheelhouse.ui.hwnd_utils import process_name_for_hwnd
 
 logger = logging.getLogger(__name__)
@@ -159,7 +163,7 @@ class RedirectDecision:
         ``editor_already_open``, ``editor_lifecycle_error``,
         ``prompt_detector_timeout``, ``prompt_detector_error``,
         ``prompt_detector_in_flight``,
-        ``cannot_resolve_focused_process``.
+        ``cannot_resolve_focused_process``, ``elevated_terminal``.
     """
 
     open_editor: bool
@@ -185,6 +189,11 @@ class FocusRedirectPolicy:
       * ``loop`` -- optional event loop for ``run_in_executor``. When
         ``None``, ``should_redirect`` uses
         ``asyncio.get_running_loop()`` (the loop that is calling it).
+      * ``elevation_check`` -- optional callable taking the focused
+        HWND and returning one of the ``ui.elevation_check`` states
+        ("elevated" / "not_elevated" / "unknown"). ``None`` (the
+        default) uses the production ``elevation_state_of_hwnd``.
+        Injectable for tests (wh-elevated-target-notice.1.2).
 
     The cache is normally invalidated by :meth:`on_utterance_end`.
     As a defensive fallback, individual cache entries also expire
@@ -211,11 +220,13 @@ class FocusRedirectPolicy:
         prompt_detector_call: Callable[[str, int], bool],
         detector_timeout_s: float = _DEFAULT_DETECTOR_TIMEOUT_S,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        elevation_check: Optional[Callable[[int], str]] = None,
     ) -> None:
         self._mirror = mirror
         self._prompt_detector_call = prompt_detector_call
         self._detector_timeout_s = detector_timeout_s
         self._loop = loop
+        self._elevation_check = elevation_check
         # Per-utterance cache. Keyed on (focused_hwnd, pid); value is
         # ``(at_prompt, monotonic_set_time)``. Invalidated by
         # ``on_utterance_end()`` and bounded by ``_CACHE_MAX_AGE_S``.
@@ -599,6 +610,41 @@ class FocusRedirectPolicy:
                 open_editor=False,
                 target_terminal_hwnd=0,
                 reason="not_a_terminal",
+            )
+
+        # 3b. Elevated-terminal gate (wh-elevated-target-notice.1.2).
+        # The GUI-process submit helper delivers the editor's text with
+        # Ctrl+V / Enter, and UIPI silently discards synthesized input
+        # sent to a higher-integrity window while every verification
+        # step still reports success. Declining the redirect here sends
+        # dictation down the normal Input-process insertion path, where
+        # the router's elevation gate shows the explanatory notice on
+        # the first word -- before the user types a whole line into the
+        # editor and loses it at Enter. Fail open: "unknown" or a
+        # broken check keeps the redirect.
+        check = self._elevation_check
+        if check is None:
+            check = elevation_state_of_hwnd
+        try:
+            elevation_state = check(focused_hwnd)
+        except Exception as exc:
+            logger.debug(
+                "focus_redirect_policy: elevation check raised %s for "
+                "hwnd=%s -- failing open",
+                type(exc).__name__, focused_hwnd,
+            )
+            elevation_state = None
+        if elevation_state == ELEVATED:
+            logger.info(
+                "focus_redirect_policy: focused terminal hwnd=%s "
+                "process=%s runs elevated -- declining redirect so the "
+                "elevated-target notice fires on the normal insertion "
+                "path", focused_hwnd, process_name,
+            )
+            return RedirectDecision(
+                open_editor=False,
+                target_terminal_hwnd=0,
+                reason="elevated_terminal",
             )
 
         cache_key = (focused_hwnd, int(pid))

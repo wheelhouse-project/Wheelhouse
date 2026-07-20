@@ -600,7 +600,7 @@ class TestBoundedMatching:
         assert result["success"] is True
         assert result["draft_error"] == (
             "This pattern takes too long to match. It could freeze "
-            "WheelHouse. Simplify the expression (avoid nested repeats "
+            "Wheelhouse. Simplify the expression (avoid nested repeats "
             "like (\\w+\\s*)+)."
         )
         assert result["winner"] == "none"

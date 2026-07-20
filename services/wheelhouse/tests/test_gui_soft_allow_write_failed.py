@@ -115,7 +115,7 @@ class TestRender:
         if not kwargs:
             args = mock_instance.show_message.call_args.args
             kwargs = {"title": args[0], "body": args[1]} if len(args) >= 2 else {}
-        assert kwargs.get("title") == "WheelHouse couldn't save your choice"
+        assert kwargs.get("title") == "Wheelhouse couldn't save your choice"
         assert kwargs.get("body") == (
             "Try saying the words again later, then click Yes again."
         )

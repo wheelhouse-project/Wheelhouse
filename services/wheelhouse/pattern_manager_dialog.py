@@ -115,7 +115,7 @@ class PatternManagerDialog(QDialog):
         """No pattern data within the timeout: explain the blank tree."""
         if self._tree.topLevelItemCount() == 0:
             self._show_load_error(
-                "Could not load patterns from WheelHouse. Close and "
+                "Could not load patterns from Wheelhouse. Close and "
                 "reopen this window to retry."
             )
 
@@ -794,7 +794,7 @@ class PatternManagerDialog(QDialog):
             data = message.get("data", {})
             if not data.get("success", True):
                 self._show_load_error(
-                    "Could not load patterns from WheelHouse: "
+                    "Could not load patterns from Wheelhouse: "
                     f"{data.get('error', 'Unknown error')}. "
                     "Close and reopen this window to retry."
                 )

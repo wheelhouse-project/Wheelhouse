@@ -154,7 +154,7 @@ class TestErrorNotificationHandler:
         handler.emit(record)
 
         call_kwargs = mock_notif.notify.call_args[1]
-        assert "WheelHouse" in call_kwargs["title"]
+        assert "Wheelhouse" in call_kwargs["title"]
 
     # --- Cleanup ---
 

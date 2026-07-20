@@ -28,7 +28,7 @@ class SpeechOutput:
             await loop.run_in_executor(self._executor, self._speak_sync, text)
         except Exception as e:
             log.warning("pyttsx3 speak failed, falling back to toast: %s", e)
-            self._toast("WheelHouse", text)
+            self._toast("Wheelhouse", text)
 
     async def speak_brief(self, text: str) -> None:
         """Speak a short status message. Non-blocking -- fire and forget."""

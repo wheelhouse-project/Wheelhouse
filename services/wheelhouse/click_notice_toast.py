@@ -83,7 +83,7 @@ class ClickNoticeToast(QDialog):
             "}"
         )
 
-        title_label = QLabel("WheelHouse")
+        title_label = QLabel("Wheelhouse")
         title_label.setObjectName("click_notice_title")
         title_font = QFont("Segoe UI", 12)
         title_font.setBold(True)

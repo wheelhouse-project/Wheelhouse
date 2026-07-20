@@ -233,4 +233,4 @@ class TestSpeechNotifier:
             notifier.notify_dictation_drop("dictation submit timed out")
 
         payload = worker.submit.call_args[0][0]
-        assert payload.title == "WheelHouse: Dictation"
+        assert payload.title == "Wheelhouse: Dictation"

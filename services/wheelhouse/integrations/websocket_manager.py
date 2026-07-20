@@ -574,7 +574,7 @@ class WebSocketManager:
 
                     # Handle notification messages
                     if msg_type == "notification":
-                        title = data.get("title", "WheelHouse Notification")
+                        title = data.get("title", "Wheelhouse Notification")
                         notification_message = data.get("message", "")
                         logger.info(f"Received notification: {title} - {redact_transcript(notification_message)}")
 

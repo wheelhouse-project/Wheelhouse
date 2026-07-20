@@ -68,6 +68,15 @@ _AMPM_UPPERCASE = re.compile(r'(\d{1,2}:\d{2}\s+)(am|pm)\b', re.IGNORECASE)
 # pronounce them in smaller groups.
 _HYPHENATE_PHONE = re.compile(r'\b(\d{3})(\d{3})(\d{4})\b')
 
+# wh-parakeet-xray-hotword: a deliberate pause between the syllables of
+# "x-ray" makes Parakeet emit two words (measured raw form: "X, Ray
+# Boost"), which breaks the Logic-side wake-word match -- the wake word
+# must arrive as ONE word. Rejoin the single letter x + the word "ray"
+# into the standard English spelling, keeping the x's case. Runs after
+# the punctuation pass, which has already collapsed "X, Ray" to "X Ray".
+# The \b on both ends keeps longer words out ("Max ray", "x raymond").
+_XRAY_JOIN = re.compile(r'\b([Xx])\s+[Rr]ay\b')
+
 
 def _time_replace(match: re.Match) -> str:
     # wh-251rh.3.1: only values that read as a real 12-hour clock time may
@@ -371,6 +380,8 @@ class SherpaOfflineEngine:
 
         - Convert spelled-out letter sequences (V-O-X -> vox)
         - Remove punctuation (except periods between digits and colons in times)
+        - Rejoin a split "x ray" / "X, Ray" into "x-ray" (wake word arrives
+          as one word -- wh-parakeet-xray-hotword)
         - Dotted-period time form: '8.17 p.m.' -> '8:17 PM'
         - AM/PM uppercase beside an HH:MM time
         - Phone-number hyphenation: '7035551234' -> '703-555-1234'
@@ -393,6 +404,9 @@ class SherpaOfflineEngine:
         # time form) and colons between digits (preserves HH:MM that a
         # time rule already produced).
         text = re.sub(r'(?<!\d)\.|\.(?!\d)|(?<!\d):|:(?!\d)|[,!?;]', '', text)
+
+        # Rejoin a split "x ray" into "x-ray" (wh-parakeet-xray-hotword).
+        text = _XRAY_JOIN.sub(lambda m: m.group(1) + '-ray', text)
 
         # Time-reformat rule: operates on text with dotted AM/PM already
         # collapsed to bare am/pm by the punctuation pass.

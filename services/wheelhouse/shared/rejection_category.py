@@ -6,6 +6,13 @@ sending the rejection event to the GUI. Categories are:
   * uncertain               -- the rejected control might be a text
                                field. The GUI shows the rejection
                                notice with the Try-it-anyway button.
+  * elevated                -- the focused window belongs to a
+                               higher-integrity (administrator)
+                               process; Windows discards WheelHouse's
+                               input (wh-elevated-target-notice). The
+                               GUI shows an explanatory notice WITHOUT
+                               the Try-it-anyway button -- a retry can
+                               never succeed.
   * browser_trap            -- the focused control is the browser page
                                body. Cannot accept text.
   * definitely_not_text     -- the focused control is a button, menu
@@ -15,10 +22,10 @@ sending the rejection event to the GUI. Categories are:
                                no_focused_control, and any future
                                reason without a positive category.
 
-Only the uncertain category should produce a rejection notice in
-production. The other three are dropped silently: the user has no
-useful action on them, the rejection notice without a Try-it-anyway
-button is noise.
+Only the uncertain and elevated categories should produce a rejection
+notice in production (``should_emit_notice``). The other three are
+dropped silently: the user has no useful action on them, the rejection
+notice without an explanation or a Try-it-anyway button is noise.
 
 Before this module the categorization lived inside
 ``services/wheelhouse/rejection_toast_wording.py`` (a GUI-process
@@ -35,6 +42,7 @@ from typing import Iterable, Optional
 
 
 CATEGORY_UNCERTAIN = "uncertain"
+CATEGORY_ELEVATED = "elevated"
 CATEGORY_BROWSER_TRAP = "browser_trap"
 CATEGORY_DEFINITELY_NOT_TEXT = "definitely_not_text"
 CATEGORY_OTHER = "other"
@@ -100,9 +108,17 @@ def categorize_rejection(
             DEFAULT_BROWSER_PROCESS_NAMES only.
 
     Returns:
-        One of CATEGORY_UNCERTAIN, CATEGORY_BROWSER_TRAP,
-        CATEGORY_DEFINITELY_NOT_TEXT, CATEGORY_OTHER. Never raises.
+        One of CATEGORY_UNCERTAIN, CATEGORY_ELEVATED,
+        CATEGORY_BROWSER_TRAP, CATEGORY_DEFINITELY_NOT_TEXT,
+        CATEGORY_OTHER. Never raises.
     """
+
+    # wh-elevated-target-notice: the elevated reason is definitive --
+    # the router synthesized it from an integrity-level comparison, so
+    # process and class names (which may be empty when UIA cannot see
+    # into the elevated window) must not re-route it.
+    if reason == "elevated_process_window":
+        return CATEGORY_ELEVATED
 
     process_lower = (process_name or "").lower()
     if browser_process_names is None:
@@ -130,7 +146,24 @@ def should_show_try_anyway(category: str) -> bool:
     accept text. For browser_trap, definitely_not_text, and other
     categories the user cannot do anything useful with the override,
     so the button (and after wh-1r2b3 the entire rejection notice) is
-    hidden.
+    hidden. The elevated category shows a notice but never the button:
+    Windows would discard the retried input exactly as it discarded
+    the original.
     """
 
     return category == CATEGORY_UNCERTAIN
+
+
+def should_emit_notice(category: str) -> bool:
+    """Return True for the categories whose rejection event is sent.
+
+    The Input process consults this before putting the
+    text_target_rejected event on the response queue
+    (wh-elevated-target-notice). Uncertain rejections produce the
+    notice with the Try-it-anyway button; elevated rejections produce
+    a notice explaining the administrator boundary and how to fix it
+    (no button). Every other category stays silenced per the wh-1r2b3
+    contract.
+    """
+
+    return category in (CATEGORY_UNCERTAIN, CATEGORY_ELEVATED)

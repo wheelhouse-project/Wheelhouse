@@ -79,7 +79,7 @@ class HintDecision(enum.Enum):
 # identical to the spec. Keep this string in sync with the v5 doc -- it is the
 # single source of truth for the notice text.
 HINT_TEXT = (
-    "WheelHouse can speed up clicks in this app by setting the Windows "
+    "Wheelhouse can speed up clicks in this app by setting the Windows "
     "screen-reader flag. Tradeoff: PSReadLine will warn in every PowerShell "
     "session. See config.toml `[click] enable_screen_reader_flag` to opt in. "
     "Tap to dismiss."

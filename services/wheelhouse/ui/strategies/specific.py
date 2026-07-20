@@ -82,7 +82,7 @@ from .base import InsertionMode, InsertionOptions, InsertionResult, InsertionStr
 from ..context import UIContext
 from shared.rejection_category import (
     categorize_rejection,
-    should_show_try_anyway,
+    should_emit_notice,
 )
 from ui.uia_text_reader import read_context_via_text_pattern
 from ui.hwnd_utils import (
@@ -1804,10 +1804,13 @@ class RejectedInsertionStrategy(InsertionStrategy):
             and self._response_queue is not None
             and self._text_cache is not None
         ):
-            # wh-1r2b3: only send the rejection event for the uncertain
-            # category. For browser_trap, definitely_not_text, and other
-            # categories the user has no useful action (no Try-it-anyway
-            # button would appear) so showing the notice is pure noise.
+            # wh-1r2b3: only send the rejection event for the
+            # categories with a useful notice -- uncertain (notice +
+            # Try-it-anyway button) and, since
+            # wh-elevated-target-notice, elevated (notice explaining
+            # the administrator boundary, no button). For browser_trap,
+            # definitely_not_text, and other categories the user has
+            # no useful action so showing the notice is pure noise.
             # The DEBUG drop log and the FirstRejectionLogMap INFO log
             # already fired above; the diagnostic stream is preserved.
             # The verdict's process_name and class_name are populated by
@@ -1819,7 +1822,7 @@ class RejectedInsertionStrategy(InsertionStrategy):
                 class_name=getattr(verdict, "class_name", "") or "",
                 browser_process_names=self._browser_process_names,
             )
-            if should_show_try_anyway(category):
+            if should_emit_notice(category):
                 self._emit_rejection_event(insertion_string, context, verdict)
         return InsertionResult(
             success=True,

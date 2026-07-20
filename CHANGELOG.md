@@ -5,6 +5,44 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-07-20
+
+### Added
+
+- When the window you are dictating into belongs to a program running
+  as administrator, Wheelhouse now shows a notice explaining that
+  Windows blocks typing into administrator programs -- and how to fix
+  it (restart Wheelhouse with right-click, Run as administrator) --
+  instead of silently doing nothing. The terminal dictation editor
+  performs the same check before pasting.
+- "Wheelhouse help online" now opens the official Wheelhouse Assistant
+  by default -- a ChatGPT assistant that always answers from the latest
+  released help document.
+
+### Fixed
+
+- The "x-ray" commands are now recognized when the Parakeet speech
+  engine splits or fuses the word (for example "x ray" or "xray").
+- Help-document corrections: the mouse scroll commands now lead with
+  the thumb-wheel behavior, the guidance on mishears and on volume
+  commands was corrected, and a five-domain accuracy audit against the
+  current code corrected twelve more inaccuracies covering voice
+  commands, configuration, installation, speech engines, and plugins.
+
+### Changed
+
+- The product name is now spelled Wheelhouse -- one word, capital W
+  only. The installer is now `Wheelhouse-Setup.exe`, new installs go to
+  a `Wheelhouse` folder with matching shortcuts and Add/Remove entry,
+  and every notice, window title, document, and the website use the new
+  spelling. The GitHub repository is now
+  `github.com/wheelhouse-project/Wheelhouse` (old links redirect).
+  Existing installs keep the old folder spelling until reinstalled;
+  behavior is unaffected.
+- Installation guidance now leads with the graphical installer
+  (`Wheelhouse-Setup.exe`); the PowerShell one-liner remains available
+  as an alternative.
+
 ## [1.0.3] - 2026-07-18
 
 > Update (2026-07-18): the `WheelHouse-Setup.exe` asset on this release

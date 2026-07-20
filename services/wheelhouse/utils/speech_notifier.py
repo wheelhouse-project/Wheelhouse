@@ -24,7 +24,7 @@ class SpeechNotifier:
         if not self.enabled:
             return
             
-        title = "WheelHouse: Speech Disabled"
+        title = "Wheelhouse: Speech Disabled"
         message = f"Reason: {reason}"
         if details:
             message += f"\n{details}"
@@ -36,7 +36,7 @@ class SpeechNotifier:
         if not self.enabled:
             return
             
-        title = "WheelHouse: Speech Enabled"
+        title = "Wheelhouse: Speech Enabled"
         message = f"Reason: {reason}"
         if details:
             message += f"\n{details}"
@@ -49,7 +49,7 @@ class SpeechNotifier:
             return
             
         action = "Suppressed" if is_suppressed else "Un-suppressed"
-        title = f"WheelHouse: Speech {action}"
+        title = f"Wheelhouse: Speech {action}"
         message = f"Cause: {suppression_type}"
         if details:
             message += f"\n{details}"
@@ -63,7 +63,7 @@ class SpeechNotifier:
                 notification.notify(
                     title=title,
                     message=message,
-                    app_name='WheelHouse',
+                    app_name='Wheelhouse',
                     timeout=3
                 )
                 logger.debug(
@@ -84,7 +84,7 @@ class SpeechNotifier:
         """Send debug notification for testing."""
         if not self.enabled:
             return
-        self._send_notification("WheelHouse: Debug", message)
+        self._send_notification("Wheelhouse: Debug", message)
 
     def notify_dictation_drop(self, message: str):
         """Send notification when the focus-redirect path drops dictation.
@@ -118,7 +118,7 @@ class SpeechNotifier:
              says "timed out" or "failed". The message body carries
              the specific failure verb.
         """
-        title = "WheelHouse: Dictation"
+        title = "Wheelhouse: Dictation"
         try:
             from utils.logging_setup import get_notifier_worker
             from utils.notifier_worker import NotifierPayload

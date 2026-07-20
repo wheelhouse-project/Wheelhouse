@@ -1250,7 +1250,7 @@ class TestBacktrackingProbe:
 
     PATHOLOGICAL = r"^(\w+\s*)+$"
     REJECT_MESSAGE = (
-        "This pattern takes too long to match and could freeze WheelHouse, "
+        "This pattern takes too long to match and could freeze Wheelhouse, "
         "so it was not saved. Simplify the expression."
     )
 

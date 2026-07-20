@@ -789,13 +789,13 @@ def main(argv=None):
     def handle_disconnect_timeout():
         """Called when disconnect timeout expires - exit cleanly."""
         nonlocal stop
-        logger.info(f"[ws] WheelHouse disconnected for {DISCONNECT_TIMEOUT_S}s - exiting cleanly")
+        logger.info(f"[ws] Wheelhouse disconnected for {DISCONNECT_TIMEOUT_S}s - exiting cleanly")
         stop = True
 
     def handle_wheelhouse_disconnect():
         """Handle WheelHouse disconnect - pause transcription and start exit timer."""
         nonlocal disconnect_timer
-        logger.info("[ws] WheelHouse disconnected - pausing transcription, will exit in 5s if no reconnect")
+        logger.info("[ws] Wheelhouse disconnected - pausing transcription, will exit in 5s if no reconnect")
         transcription_enabled_event.clear()
 
         # Start disconnect timeout timer
@@ -808,7 +808,7 @@ def main(argv=None):
     def handle_wheelhouse_reconnect():
         """Handle WheelHouse reconnect - cancel exit timer and resume transcription."""
         nonlocal disconnect_timer
-        logger.info("[ws] WheelHouse reconnected - resuming transcription")
+        logger.info("[ws] Wheelhouse reconnected - resuming transcription")
 
         # Cancel disconnect timeout timer
         if disconnect_timer:
@@ -957,7 +957,7 @@ def main(argv=None):
         def send_ready_notification():
             time.sleep(3.0)  # Wait for WebSocket to connect and service to be ready
 
-            logger.info("[startup] Sending 'ready' notification to WheelHouse...")
+            logger.info("[startup] Sending 'ready' notification to Wheelhouse...")
             forwarder.send_notification(
                 "Google STT",
                 "Transcription service ready"
@@ -983,7 +983,7 @@ def main(argv=None):
                     # Send notification about failure
                     if forwarder and cfg.forward_ws:
                         forwarder.send_notification(
-                            "WheelHouse: STT Service Error",
+                            "Wheelhouse: STT Service Error",
                             f"Audio overflow persists after {max_restarts} restart attempts. Service stopped."
                         )
                     stop = True
@@ -994,7 +994,7 @@ def main(argv=None):
                 # Send notification about restart
                 if forwarder and cfg.forward_ws:
                     forwarder.send_notification(
-                        "WheelHouse: STT Restarting",
+                        "Wheelhouse: STT Restarting",
                         f"Restarting service (attempt {restart_count}/{max_restarts})..."
                     )
                 

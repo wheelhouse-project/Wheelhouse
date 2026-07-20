@@ -50,7 +50,7 @@ _TOKEN = "11111111-1111-4111-8111-111111111111"
 
 # Canonical follow-up wording per the bead spec.
 EXPECTED_WORDING = (
-    "WheelHouse couldn't try again. Say the words again, "
+    "Wheelhouse couldn't try again. Say the words again, "
     "then click Try it anyway."
 )
 

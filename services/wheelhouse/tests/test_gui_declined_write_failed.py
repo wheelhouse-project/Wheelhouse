@@ -98,7 +98,7 @@ class TestRender:
                 {"title": args[0], "body": args[1]}
                 if len(args) >= 2 else {}
             )
-        assert kwargs.get("title") == "WheelHouse couldn't save your choice"
+        assert kwargs.get("title") == "Wheelhouse couldn't save your choice"
         body = kwargs.get("body") or ""
         # The body must steer the user to re-attempt the No click.
         assert "No" in body, (

@@ -1,4 +1,4 @@
-; WheelHouse-Setup.iss -- graphical installer wizard for WheelHouse.
+; Wheelhouse-Setup.iss -- graphical installer wizard for Wheelhouse.
 ;
 ; This is a thin front end over scripts/release/public/install-wheelhouse.ps1
 ; (the engine). The wizard collects the user's choices with radio buttons and
@@ -8,7 +8,7 @@
 ; and the speech model still download at install time, so the .exe stays small.
 ;
 ; Per-user, no administrator prompt: PrivilegesRequired=lowest and the engine
-; installs entirely under the user profile (%LOCALAPPDATA%\WheelHouse).
+; installs entirely under the user profile (%LOCALAPPDATA%\Wheelhouse).
 ;
 ; Design: docs/superpowers/specs/2026-07-13-graphical-installer-wizard-design.md
 ; Work:   wh-installer-inno-wizard (Phase 2) and its child tasks.
@@ -27,27 +27,27 @@
 
 [Setup]
 AppId={{A7D3F1E2-4B6C-4E8A-9F1D-2C3B4A5D6E7F}
-AppName=WheelHouse
+AppName=Wheelhouse
 AppVersion={#AppVer}
-AppPublisher=WheelHouse Project
+AppPublisher=Wheelhouse Project
 AppPublisherURL=https://wheelhouse-project.org/
 ; The engine owns the real install location. This directory holds only the
 ; engine script and the uninstaller, and is deliberately SEPARATE from the
-; engine's own %LOCALAPPDATA%\WheelHouse tree so a full uninstall (which removes
+; engine's own %LOCALAPPDATA%\Wheelhouse tree so a full uninstall (which removes
 ; that tree) does not delete this uninstaller out from under itself.
-DefaultDirName={localappdata}\WheelHouseSetup
+DefaultDirName={localappdata}\WheelhouseSetup
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableWelcomePage=no
 PrivilegesRequired=lowest
 OutputDir=build
-OutputBaseFilename=WheelHouse-Setup
+OutputBaseFilename=Wheelhouse-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayName=WheelHouse
+UninstallDisplayName=Wheelhouse
 VersionInfoVersion={#AppVer}
-VersionInfoProductName=WheelHouse
+VersionInfoProductName=Wheelhouse
 ; Always write a setup log (%TEMP%\Setup Log YYYY-MM-DD #NNN.txt). The engine's
 ; console output -- including any shortcut-creation error -- is captured via
 ; EngineLog into this log; without it a field failure leaves no evidence
@@ -59,7 +59,7 @@ SetupLogging=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-WelcomeLabel2=This will install WheelHouse, voice control for your PC.%n%nThis takes about 10 to 20 minutes and needs an internet connection. Click Next to begin.
+WelcomeLabel2=This will install Wheelhouse, voice control for your PC.%n%nThis takes about 10 to 20 minutes and needs an internet connection. Click Next to begin.
 
 [Files]
 ; Bundled into the .exe and copied to {app} so the uninstaller can call it.
@@ -91,9 +91,9 @@ function SetEnvironmentVariable(lpName: string; lpValue: string): Boolean;
 
 function InstalledConfigPath: string;
 begin
-  // The engine installs under %LOCALAPPDATA%\WheelHouse\app; its config.toml
+  // The engine installs under %LOCALAPPDATA%\Wheelhouse\app; its config.toml
   // records the user's prior choices. Mirrors $AppDir in install-wheelhouse.ps1.
-  Result := ExpandConstant('{localappdata}\WheelHouse\app\services\wheelhouse\config.toml');
+  Result := ExpandConstant('{localappdata}\Wheelhouse\app\services\wheelhouse\config.toml');
 end;
 
 function ExistingInstall: Boolean;
@@ -159,7 +159,7 @@ begin
   if MicrophoneAllowed then
     MicStatusLabel.Caption := 'Microphone access for desktop apps is ON. You are all set.'
   else
-    MicStatusLabel.Caption := 'Microphone access for desktop apps is OFF right now. WheelHouse will hear nothing until you turn it on.';
+    MicStatusLabel.Caption := 'Microphone access for desktop apps is OFF right now. Wheelhouse will hear nothing until you turn it on.';
 end;
 
 procedure RecheckMicClick(Sender: TObject);
@@ -277,7 +277,7 @@ begin
     SetEnvironmentVariable('WHEELHOUSE_AI_API_KEY_INPUT', Trim(AiKeyEdit.Text));
 
   WizardForm.ProgressGauge.Style := npbstMarquee;
-  WizardForm.StatusLabel.Caption := 'Setting up WheelHouse. This can take 10 to 20 minutes...';
+  WizardForm.StatusLabel.Caption := 'Setting up Wheelhouse. This can take 10 to 20 minutes...';
   WizardForm.Refresh;
 
   try
@@ -291,8 +291,8 @@ begin
 
   if (not ok) or (ResultCode <> 0) then
     RaiseException(
-      'WheelHouse setup could not finish. Details are in the setup log. Please try '
-      + 'again; if it keeps failing, visit the WheelHouse issues page for help.');
+      'Wheelhouse setup could not finish. Details are in the setup log. Please try '
+      + 'again; if it keeps failing, visit the Wheelhouse issues page for help.');
 end;
 
 // ---------- wizard events ----------
@@ -302,7 +302,7 @@ begin
   { Speech engine (radio buttons) }
   SpeechPage := CreateInputOptionPage(wpWelcome,
     'Speech engine',
-    'How should WheelHouse turn what you say into text?',
+    'How should Wheelhouse turn what you say into text?',
     'Choose one. Parakeet works offline and is recommended for almost everyone.',
     True, False);
   SpeechPage.Add('Parakeet - works offline, recommended for almost everyone');
@@ -371,15 +371,15 @@ begin
     'Two last choices. Both are recommended.',
     '',
     False, False);
-  OptionsPage.Add('Start WheelHouse automatically when I log in');
-  OptionsPage.Add('Start WheelHouse now, when setup finishes');
+  OptionsPage.Add('Start Wheelhouse automatically when I log in');
+  OptionsPage.Add('Start Wheelhouse now, when setup finishes');
   OptionsPage.Values[0] := True;
   OptionsPage.Values[1] := True;
 
   { Microphone permission }
   MicPage := CreateCustomPage(OptionsPage.ID,
     'Microphone',
-    'WheelHouse must be allowed to use your microphone, or it will hear nothing.');
+    'Wheelhouse must be allowed to use your microphone, or it will hear nothing.');
 
   MicStatusLabel := TNewStaticText.Create(WizardForm);
   MicStatusLabel.Parent := MicPage.Surface;
@@ -427,7 +427,7 @@ begin
     WizardForm.FinishedLabel.Caption :=
       'You''re all set. To see everything you can say and how it works:' + #13#10 + #13#10 +
       '  - Say "x-ray pattern manager," then click the "? Help" button, or' + #13#10 +
-      '  - Right-click the WheelHouse icon near the clock (it shows as a red dot when' + #13#10 +
+      '  - Right-click the Wheelhouse icon near the clock (it shows as a red dot when' + #13#10 +
       '    listening; if you don''t see it, click the small up-arrow), and click' + #13#10 +
       '    "Pattern Manager."' + #13#10 + #13#10 +
       'Say each command as its own short phrase, not inside a longer sentence. Most ' +
@@ -463,20 +463,20 @@ begin
       // The removal helper is gone (a user hand-deleted it, or an antivirus
       // removed it). Inno will still delete {app} and the Add/Remove Programs
       // entry after this returns, but the engine's tree under
-      // %LOCALAPPDATA%\WheelHouse (model, config, downloads) would be left
+      // %LOCALAPPDATA%\Wheelhouse (model, config, downloads) would be left
       // behind with no uninstaller. We cannot run the engine's clean removal,
       // so at least tell the user which folder to delete by hand.
       MsgBox(
-        'The WheelHouse removal helper is missing, so the WheelHouse files in' + #13#10 +
-        ExpandConstant('{localappdata}\WheelHouse') + #13#10 +
+        'The Wheelhouse removal helper is missing, so the Wheelhouse files in' + #13#10 +
+        ExpandConstant('{localappdata}\Wheelhouse') + #13#10 +
         'cannot be removed automatically. After this finishes, delete that folder' + #13#10 +
-        'by hand to fully remove WheelHouse.',
+        'by hand to fully remove Wheelhouse.',
         mbInformation, MB_OK);
     end else begin
       answer := MsgBox(
-        'Keep your personal WheelHouse settings and voice patterns?' + #13#10 + #13#10 +
+        'Keep your personal Wheelhouse settings and voice patterns?' + #13#10 + #13#10 +
         'Yes = keep them (choose this if you might reinstall).' + #13#10 +
-        'No = remove everything WheelHouse created.',
+        'No = remove everything Wheelhouse created.',
         mbConfirmation, MB_YESNO);
       // -Force skips the engine's interactive confirmation; the wizard cannot
       // answer it. -KeepData preserves personal data when the user asked.
@@ -485,19 +485,19 @@ begin
         Params := Params + ' -KeepData';
       execOk := Exec(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
         Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      // If the engine could not finish (commonly: WheelHouse is still running, so
+      // If the engine could not finish (commonly: Wheelhouse is still running, so
       // its verified-stopped check throws and it exits non-zero), abort the
       // uninstall. usUninstall runs BEFORE Inno deletes the files and the Add/Remove
       // Programs entry, so raising here preserves the uninstaller for a retry
       // instead of orphaning the app tree with no way left to remove it.
       if (not execOk) or (ResultCode <> 0) then begin
         MsgBox(
-          'WheelHouse could not be fully removed. This usually means it is still' + #13#10 +
-          'running. Please close it first -- right-click the WheelHouse icon near' + #13#10 +
+          'Wheelhouse could not be fully removed. This usually means it is still' + #13#10 +
+          'running. Please close it first -- right-click the Wheelhouse icon near' + #13#10 +
           'the clock and choose Quit -- then run the uninstall again.',
           mbError, MB_OK);
-        RaiseException('WheelHouse could not be removed (it may still be running). '
-          + 'Close WheelHouse and try the uninstall again.');
+        RaiseException('Wheelhouse could not be removed (it may still be running). '
+          + 'Close Wheelhouse and try the uninstall again.');
       end;
     end;
   end;

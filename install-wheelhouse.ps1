@@ -1,7 +1,7 @@
-# install-wheelhouse.ps1 -- one-command WheelHouse installer for end users.
+# install-wheelhouse.ps1 -- one-command Wheelhouse installer for end users.
 #
 # Primary invocation (from the README):
-#   irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/install-wheelhouse.ps1 | iex
+#   irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
 #
 # Secondary invocation (downloaded file):
 #   powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1
@@ -89,8 +89,8 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.3"
-$DefaultArchiveUrl = "https://github.com/wheelhouse-project/WheelHouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
+$AppVersion = "1.0.4"
+$DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
 # Parakeet TDT 0.6b v3 int8 -- the default offline STT model. URL + SHA256
@@ -127,11 +127,11 @@ $DefaultAiModel = "gemini-2.5-flash-lite"
 
 # --- Paths ------------------------------------------------------------------
 
-$LocalRoot = Join-Path $env:LOCALAPPDATA "WheelHouse"
+$LocalRoot = Join-Path $env:LOCALAPPDATA "Wheelhouse"
 $AppDir = Join-Path $LocalRoot "app"
 $ModelsDir = Join-Path $LocalRoot "models"
 $DownloadsDir = Join-Path $LocalRoot "downloads"
-$RoamingRoot = Join-Path $env:APPDATA "WheelHouse"
+$RoamingRoot = Join-Path $env:APPDATA "Wheelhouse"
 $OverrideFile = Join-Path $LocalRoot "stt_model_overrides.toml"
 
 # Files preserved across updates (relative to the app directory). This is a
@@ -148,8 +148,8 @@ $PreservePaths = @(
     "services\stt_providers\shared\hints.txt"
 )
 
-$ShortcutName = "WheelHouse.lnk"
-$IssuesUrl = "https://github.com/wheelhouse-project/WheelHouse/issues"
+$ShortcutName = "Wheelhouse.lnk"
+$IssuesUrl = "https://github.com/wheelhouse-project/Wheelhouse/issues"
 
 # --- Output helpers ----------------------------------------------------------
 
@@ -250,12 +250,12 @@ function Test-Preflights {
     Write-Status "Checking this computer meets the requirements..."
 
     if (-not [Environment]::Is64BitOperatingSystem) {
-        Stop-Install "WheelHouse needs 64-bit Windows; this system is 32-bit."
+        Stop-Install "Wheelhouse needs 64-bit Windows; this system is 32-bit."
     }
     $os = Get-CimInstance Win32_OperatingSystem
     $osVersion = [Version]$os.Version
     if ($osVersion.Major -lt 10) {
-        Stop-Install "WheelHouse needs Windows 10 or 11; this system reports Windows version $($os.Version)."
+        Stop-Install "Wheelhouse needs Windows 10 or 11; this system reports Windows version $($os.Version)."
     }
 
     # Disk space on the drive that will hold the install.
@@ -275,10 +275,10 @@ function Test-Preflights {
     if ($ram -lt $RamFloorBytes) {
         $ramGb = [math]::Round($ram / 1GB, 1)
         Stop-Install "This computer has $ramGb GB of memory. The built-in offline speech engine needs about 8 GB to run well." `
-            "Use the Google Cloud speech engine instead -- it runs in the cloud and needs far less memory, but requires a Google Cloud account (see INSTALL.md in the WheelHouse repository). Or add memory to this computer."
+            "Use the Google Cloud speech engine instead -- it runs in the cloud and needs far less memory, but requires a Google Cloud account (see INSTALL.md in the Wheelhouse repository). Or add memory to this computer."
     }
     if ($ram -lt $RamRecommendedBytes) {
-        Write-Warn "This computer has $([math]::Round($ram / 1GB, 1)) GB of memory. WheelHouse will run, but 16 GB is recommended."
+        Write-Warn "This computer has $([math]::Round($ram / 1GB, 1)) GB of memory. Wheelhouse will run, but 16 GB is recommended."
     }
 
     # CPU floor: warn and continue (see the note on the constant above).
@@ -299,7 +299,7 @@ function Test-Preflights {
         }
     } catch { $micCount = -1 }
     if ($micCount -eq 0) {
-        Write-Warn "No active microphone was found. WheelHouse needs one to hear you -- plug one in before the first run."
+        Write-Warn "No active microphone was found. Wheelhouse needs one to hear you -- plug one in before the first run."
     }
 
     # tar.exe ships with Windows 10 1803+ but is absent on some older/LTSC
@@ -320,7 +320,7 @@ function Test-CommandLineInAppDir {
     # Path-boundary match: the app directory must be followed by a path
     # separator, a closing quote, whitespace, or the end of the command
     # line. A bare substring test would also match sibling directories
-    # that merely start with the same text (e.g. WheelHouse\app_backup)
+    # that merely start with the same text (e.g. Wheelhouse\app_backup)
     # and falsely refuse an install.
     if (-not $CommandLine) { return $false }
     $pattern = [regex]::Escape($AppDir.ToLower()) + '($|[\\/"''\s])'
@@ -329,7 +329,7 @@ function Test-CommandLineInAppDir {
 
 function Test-RunningWheelHouse {
     param([switch]$RequireVerified)
-    # All four WheelHouse processes are python.exe inside venvs, so detection
+    # All four Wheelhouse processes are python.exe inside venvs, so detection
     # matches each process's command line against the install directory.
     # Name-based matching would either miss them or hit innocent Python
     # processes.
@@ -349,15 +349,15 @@ function Test-RunningWheelHouse {
         }
     } catch {
         if ($RequireVerified) {
-            Stop-Install "Could not check whether WheelHouse is currently running ($($_.Exception.Message))." `
-                "Close WheelHouse if it is running (right-click the WheelHouse tray icon and choose Exit), or restart this computer, then run the installer again."
+            Stop-Install "Could not check whether Wheelhouse is currently running ($($_.Exception.Message))." `
+                "Close Wheelhouse if it is running (right-click the Wheelhouse tray icon and choose Exit), or restart this computer, then run the installer again."
         }
-        Write-Warn "Could not check for a running WheelHouse: $($_.Exception.Message)"
+        Write-Warn "Could not check for a running Wheelhouse: $($_.Exception.Message)"
         return
     }
     if ($running.Count -gt 0) {
-        Stop-Install "WheelHouse appears to be running ($($running.Count) process(es) found)." `
-            "Close WheelHouse first: right-click the WheelHouse tray icon and choose Exit, or say the exit voice command. Then run this installer again."
+        Stop-Install "Wheelhouse appears to be running ($($running.Count) process(es) found)." `
+            "Close Wheelhouse first: right-click the Wheelhouse tray icon and choose Exit, or say the exit voice command. Then run this installer again."
     }
 }
 
@@ -426,7 +426,7 @@ public static extern IntPtr SendMessageTimeout(
             [IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment",
             2, 5000, [ref]$result) | Out-Null
     } catch {
-        Write-Warn "Could not tell running programs about the PATH change. If WheelHouse cannot find uv when it starts, sign out and back in once."
+        Write-Warn "Could not tell running programs about the PATH change. If Wheelhouse cannot find uv when it starts, sign out and back in once."
     }
 }
 
@@ -510,7 +510,7 @@ function Resolve-AiApiKey {
 function Install-Uv {
     $uv = Find-UvExe
     if (-not $uv) {
-        Write-Status "Installing uv (the Python environment manager WheelHouse uses)..."
+        Write-Status "Installing uv (the Python environment manager Wheelhouse uses)..."
         $wingetOk = $false
         if (Get-Command winget -ErrorAction SilentlyContinue) {
             $winget = Invoke-Native -Exe "winget" -Arguments @(
@@ -544,7 +544,7 @@ function Install-Uv {
     # Persist uv's directory on the user PATH if the installer above did not.
     $uvDir = Split-Path $uv -Parent
     if (-not (Test-DirOnPersistedPath $uvDir)) {
-        Write-Status "Adding uv to your PATH so WheelHouse can start its speech engines..."
+        Write-Status "Adding uv to your PATH so Wheelhouse can start its speech engines..."
         Add-DirToUserPath -Directory $uvDir
         if (-not (Test-DirOnPersistedPath $uvDir)) {
             Stop-Install "Could not add uv's directory to the saved PATH ($uvDir)." `
@@ -859,7 +859,7 @@ function Install-AppArchive {
 
     New-Item -ItemType Directory -Force -Path $DownloadsDir | Out-Null
     $zipPath = Join-Path $DownloadsDir "wheelhouse-$AppVersion.zip"
-    Invoke-VerifiedDownload -Url $Url -Destination $zipPath -ExpectedSha256 $Sha256 -Description "the WheelHouse application"
+    Invoke-VerifiedDownload -Url $Url -Destination $zipPath -ExpectedSha256 $Sha256 -Description "the Wheelhouse application"
 
     $staging = Join-Path $LocalRoot "update-preserve"
     # The marker lives NEXT TO staging, not inside it, so the restore
@@ -899,8 +899,8 @@ function Install-AppArchive {
         }
     }
     if (-not (Test-Path (Join-Path $AppDir "VERSION"))) {
-        Stop-Install "The unpacked application archive does not look like WheelHouse (no VERSION file)." `
-            "If you overrode the archive URL, check it points at a WheelHouse release archive."
+        Stop-Install "The unpacked application archive does not look like Wheelhouse (no VERSION file)." `
+            "If you overrode the archive URL, check it points at a Wheelhouse release archive."
     }
 
     # Restore runs off staging CONTENTS so a leftover staging dir from a
@@ -1354,12 +1354,12 @@ function New-AppShortcut {
     # working directory is invisible in a process's command line, and the
     # uv.exe parent stays alive for the app's whole lifetime -- without
     # the app path in its arguments, the running-app check cannot see a
-    # just-launched WheelHouse until the Python child exists.
+    # just-launched Wheelhouse until the Python child exists.
     $shortcut.Arguments = "run --directory `"$workDir`" --locked --no-sync python launcher.py"
     $shortcut.WorkingDirectory = $workDir
     $icon = Join-Path $AppDir "services\wheelhouse\WheelHouse.ico"
     if (Test-Path $icon) { $shortcut.IconLocation = $icon }
-    $shortcut.Description = "WheelHouse voice control"
+    $shortcut.Description = "Wheelhouse voice control"
     $shortcut.Save()
 }
 
@@ -1373,9 +1373,9 @@ function Remove-AllShortcuts {
 # --- Uninstall -------------------------------------------------------------------------------
 
 function Invoke-Uninstall {
-    Write-Host "WheelHouse uninstaller" -ForegroundColor Cyan
+    Write-Host "Wheelhouse uninstaller" -ForegroundColor Cyan
     if (-not (Test-Path $LocalRoot) -and -not (Test-Path $RoamingRoot)) {
-        Write-Status "WheelHouse does not appear to be installed for this user. Removing any leftover shortcuts."
+        Write-Status "Wheelhouse does not appear to be installed for this user. Removing any leftover shortcuts."
         Remove-AllShortcuts
         return
     }
@@ -1384,7 +1384,7 @@ function Invoke-Uninstall {
     # -Force skips this confirmation. -Force:$false (or omitting -Force) still
     # asks, so an accidental switch value cannot silently green-light removal.
     $confirm = Resolve-YesNoChoice -Specified $Force.IsPresent -Value $true `
-        -Prompt "Remove WheelHouse from this computer? Type yes to continue"
+        -Prompt "Remove Wheelhouse from this computer? Type yes to continue"
     if (-not $confirm) {
         Write-Status "Nothing was removed."
         return
@@ -1441,7 +1441,7 @@ function Invoke-Uninstall {
     # innocent process that now owns the recycled PID.
     if (Test-Path $RoamingRoot) { Remove-Item $RoamingRoot -Recurse -Force }
     Remove-AllShortcuts
-    Write-Status "WheelHouse has been removed."
+    Write-Status "Wheelhouse has been removed."
     Write-Host "    If anything is left behind, the folders to check are:"
     Write-Host "      $LocalRoot"
     Write-Host "      $RoamingRoot"
@@ -1451,7 +1451,7 @@ function Invoke-Uninstall {
 
 function Invoke-MainInstall {
     Write-Host ""
-    Write-Host "WheelHouse $AppVersion installer" -ForegroundColor Cyan
+    Write-Host "Wheelhouse $AppVersion installer" -ForegroundColor Cyan
     Write-Host "Voice control for your Windows PC. This takes about 10-20 minutes,"
     Write-Host "most of it downloading. You can re-run this installer any time to"
     Write-Host "repair or update an install; your settings are preserved."
@@ -1465,14 +1465,14 @@ function Invoke-MainInstall {
     Write-InstallProgress 5 "Installing the package manager"
     Write-InstallHeartbeat "Installing the package manager (uv)"
     $uv = Install-Uv
-    Write-InstallProgress 15 "Downloading WheelHouse"
-    Write-InstallHeartbeat "Downloading and unpacking WheelHouse (this can take a few minutes)"
+    Write-InstallProgress 15 "Downloading Wheelhouse"
+    Write-InstallHeartbeat "Downloading and unpacking Wheelhouse (this can take a few minutes)"
     Install-AppArchive -Url $ArchiveUrl -Sha256 $ArchiveSha256
 
     # Core app first (fatal), then detection, then the providers the user
     # needs.
-    Write-InstallProgress 35 "Setting up WheelHouse"
-    Write-InstallHeartbeat "Setting up the WheelHouse application (this can take a few minutes)"
+    Write-InstallProgress 35 "Setting up Wheelhouse"
+    Write-InstallHeartbeat "Setting up the Wheelhouse application (this can take a few minutes)"
     Invoke-UvSync -Uv $uv -ServiceRelPath "services\wheelhouse" -Fatal | Out-Null
     $syscheckOk = Invoke-UvSync -Uv $uv -ServiceRelPath "services\syscheck"
 
@@ -1606,7 +1606,7 @@ function Invoke-MainInstall {
             Write-Status "AI helper left off. You can set one up later in config.toml."
         }
     } catch {
-        Write-Warn "Could not configure the AI helper: $($_.Exception.Message). WheelHouse is installed; you can set up AI later in config.toml."
+        Write-Warn "Could not configure the AI helper: $($_.Exception.Message). Wheelhouse is installed; you can set up AI later in config.toml."
     }
 
     if ($provider -eq "google_stt") {
@@ -1635,33 +1635,33 @@ function Invoke-MainInstall {
 
     Write-Host ""
     $autoStart = Resolve-YesNoChoice -Specified ($AutoStart -ne "") -Value ($AutoStart -eq "yes") `
-        -Prompt "Start WheelHouse automatically when you log in? For hands-free use this is strongly recommended. Type yes or no (default: no)"
+        -Prompt "Start Wheelhouse automatically when you log in? For hands-free use this is strongly recommended. Type yes or no (default: no)"
     if ($autoStart) {
         $startupLnk = Join-Path ([Environment]::GetFolderPath("Startup")) $ShortcutName
         try {
             New-AppShortcut -LnkPath $startupLnk
-            Write-Status "WheelHouse will start automatically at login ($startupLnk)."
+            Write-Status "Wheelhouse will start automatically at login ($startupLnk)."
         } catch {
             Write-Warn "Could not create the Startup shortcut at ${startupLnk}: $($_.Exception.Message)"
         }
     }
 
     Write-Host ""
-    Write-Status "WheelHouse $AppVersion is installed."
-    Write-InstallProgress 100 "WheelHouse is installed"
+    Write-Status "Wheelhouse $AppVersion is installed."
+    Write-InstallProgress 100 "Wheelhouse is installed"
     Write-Host "    Before the first run: check Windows microphone permission is on"
     Write-Host "    (Settings > Privacy and security > Microphone > Let desktop apps access your microphone)."
     Write-Host ""
 
     $startNow = Resolve-YesNoChoice -Specified ($StartNow -ne "") -Value ($StartNow -eq "yes") `
-        -Prompt "Start WheelHouse now? Type yes or no (default: no)"
+        -Prompt "Start Wheelhouse now? Type yes or no (default: no)"
     if ($startNow) {
         # --directory mirrors the shortcut arguments: the app path must be in
         # the uv command line (not only the working directory) so the
-        # running-app check can see a just-launched WheelHouse.
+        # running-app check can see a just-launched Wheelhouse.
         $runDir = Join-Path $AppDir "services\wheelhouse"
         Start-Process -FilePath $uv -ArgumentList "run", "--directory", "`"$runDir`"", "--locked", "--no-sync", "python", "launcher.py" -WorkingDirectory $runDir
-        Write-Status "WheelHouse is starting -- look for the tray icon."
+        Write-Status "Wheelhouse is starting -- look for the tray icon."
     }
 }
 

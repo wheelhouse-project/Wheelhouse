@@ -362,13 +362,13 @@ class UtteranceClipboardManager:
         if self._last_wheelhouse_seq is None:
             baseline_seq = current_seq
             logger.debug(
-                f"[UTT-{self._utterance_id}] No WheelHouse write seq tracked; "
+                f"[UTT-{self._utterance_id}] No Wheelhouse write seq tracked; "
                 f"using current seq {current_seq} as PendingRestore baseline"
             )
         elif current_seq != self._last_wheelhouse_seq:
             logger.info(
                 f"[UTT-{self._utterance_id}] External clipboard write between "
-                f"last WheelHouse write and end_utterance "
+                f"last Wheelhouse write and end_utterance "
                 f"(wheelhouse_seq={self._last_wheelhouse_seq}, "
                 f"current_seq={current_seq}); preserving user's clipboard, "
                 f"NOT scheduling restore"

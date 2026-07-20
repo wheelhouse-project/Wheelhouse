@@ -538,7 +538,7 @@ class TestUpdateBacktrackingProbe:
         assert result["success"] is False
         assert result["error"] == (
             "This pattern takes too long to match and could freeze "
-            "WheelHouse, so it was not saved. Simplify the expression."
+            "Wheelhouse, so it was not saved. Simplify the expression."
         )
         assert open(user_file, "rb").read() == before
         assert not os.path.exists(user_file + ".bak")

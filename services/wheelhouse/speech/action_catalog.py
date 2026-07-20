@@ -614,7 +614,7 @@ ACTION_CATALOG = (
         "name": "wheelhouse_help",
         "label": "Open help chat",
         "summary": (
-            "Opens the local WheelHouse help chat window, optionally "
+            "Opens the local Wheelhouse help chat window, optionally "
             "submitting a spoken question immediately."
         ),
         "params": [

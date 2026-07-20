@@ -208,7 +208,7 @@ class TestReplacement:
         )
         assert explain_pattern(pattern, HOTWORD) == (
             "When you say 'period' anywhere while dictating, "
-            "WheelHouse types '.' instead."
+            "Wheelhouse types '.' instead."
         )
 
     def test_empty_text_replacement_reads_as_discard(self):
@@ -220,7 +220,7 @@ class TestReplacement:
         )
         assert explain_pattern(pattern, HOTWORD) == (
             "When you say 'scratch that' anywhere while dictating, "
-            "WheelHouse discards it (types nothing)."
+            "Wheelhouse discards it (types nothing)."
         )
 
     def test_non_text_replacement_lists_steps_after_colon(self):

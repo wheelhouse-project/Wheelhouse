@@ -1420,7 +1420,7 @@ class LogicController:
             try:
                 notification = {
                     'action': 'show_notification',
-                    'title': 'WheelHouse: STT Mode Changed',
+                    'title': 'Wheelhouse: STT Mode Changed',
                     'message': f'Switching to {provider}. Restarting...',
                     'timeout': 3
                 }
@@ -5445,13 +5445,13 @@ class LogicController:
             return
 
         message = (
-            "WheelHouse couldn't try again. Say the words again, "
+            "Wheelhouse couldn't try again. Say the words again, "
             "then click Try it anyway."
         )
         try:
             self.state_manager.state_to_gui_queue.put_nowait({
                 "action": "show_notification",
-                "title": "WheelHouse",
+                "title": "Wheelhouse",
                 "message": message,
                 "timeout": 5,
             })
@@ -5891,7 +5891,7 @@ class LogicController:
                 # (wh-pattern-editor-r0.8).
                 return (
                     f"{verb}, but the running patterns could not be "
-                    "refreshed. Restart WheelHouse or try saving again."
+                    "refreshed. Restart Wheelhouse or try saving again."
                 )
 
             if action == "pm_get_patterns":
@@ -6577,7 +6577,7 @@ class LogicController:
         else:
             logger.info(
                 "Screen-reader flag NOT enabled at startup (opt-in off or "
-                "voice-clicking disabled); any stale WheelHouse-owned flag "
+                "voice-clicking disabled); any stale Wheelhouse-owned flag "
                 "is cleared only if the ownership marker is present."
             )
 
@@ -6876,7 +6876,7 @@ def start_logic_process(shm_name: str, command_ready_event: Event, input_ready_e
     setup_logging(config_service)
     
     # Display startup banner with version info
-    logger.info(f"{get_startup_banner('WheelHouse')} - Starting")
+    logger.info(f"{get_startup_banner('Wheelhouse')} - Starting")
 
     try:
         async def async_main():

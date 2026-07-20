@@ -23,14 +23,14 @@ Behavior rules:
   PowerShell basics): help freely using your general knowledge.
 - If the answer isn't in this document: "I don't have information about that
   feature. You can reach the developer at the Wheelhouse GitHub page:
-  https://github.com/wheelhouse-project/WheelHouse (open an issue or start
+  https://github.com/wheelhouse-project/Wheelhouse (open an issue or start
   a discussion)."
 - This document contains HTML comment lines such as <!-- install-doc:start -->.
   They are structural markers for tooling. Ignore them and never mention them.
 - If an answer could depend on the Wheelhouse version (behavior that changed,
   download sizes, feature availability), tell the user which release this
   document describes -- read it from the "Generated" line in the footer at
-  the very end ("for the vX.Y.Z release"). Ignore the footer's "WheelHouse
+  the very end ("for the vX.Y.Z release"). Ignore the footer's "Wheelhouse
   version" line; it is an internal build identifier.
 - When describing voice commands, always give an example of what to say.
 - When a user seems overwhelmed, direct them to the "Day 1 Quick Start" section
@@ -58,7 +58,7 @@ That is the whole list. The installer brings everything else Wheelhouse needs, c
 
 **How it works, in one paragraph.** You speak into your microphone. Wheelhouse turns your words into text on your own computer, then decides what you meant. If it sounds like a command ("undo", "select all"), Wheelhouse carries it out immediately. Otherwise it treats your words as dictation and types them into whatever window you are working in -- a document, an email, a chat box -- with capitalization and spacing handled automatically. Punctuation is spoken: say "comma" or "period" and the symbol appears. Words show up as you talk, usually starting within about two seconds, and keep flowing while you speak instead of arriving all at once after you stop.
 
-**Fair warning.** Wheelhouse is a young open-source project with a single primary author. Reliability is its first value and it is the author's daily driver, but it has been tested on a limited set of machines, so you may meet rough edges on hardware or applications it has not seen. If something fails for you, that report is wanted: https://github.com/wheelhouse-project/WheelHouse
+**Fair warning.** Wheelhouse is a young open-source project with a single primary author. Reliability is its first value and it is the author's daily driver, but it has been tested on a limited set of machines, so you may meet rough edges on hardware or applications it has not seen. If something fails for you, that report is wanted: https://github.com/wheelhouse-project/Wheelhouse
 
 ---
 
@@ -66,7 +66,7 @@ That is the whole list. The installer brings everything else Wheelhouse needs, c
 
 **Stop here if you are new. Do these steps first, and ignore the rest of this document until they work.**
 
-1. Download the installer and run it: https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/WheelHouse-Setup.exe
+1. Download the installer and run it: https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe
    If Windows shows "Windows protected your PC", click "More info", check that the publisher reads David Chesley Hite III, and click "Run anyway". The setup wizard's pre-selected answers are right for almost everyone. It downloads the speech model, so give it 10 to 20 minutes.
 2. Start Wheelhouse from the Start menu or the desktop shortcut (the installer creates both).
 3. Open Notepad.
@@ -99,12 +99,12 @@ Once the basics work, pick the path that matches what you want to do next.
 
 The installer is a normal Windows setup wizard. Download it and run it -- nothing needs to be installed ahead of time:
 
-https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/WheelHouse-Setup.exe
+https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe
 
 If Windows shows a "Windows protected your PC" screen, see "Security warnings you may see" below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 1 GB in total). In plain language, the wizard:
 
 1. Asks its questions up front: which speech engine you want (the pre-selected answer is right for almost everyone -- see Speech Engines and Accounts below), whether to set up the optional AI helper, whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected and recommended), and whether Windows allows desktop apps to use your microphone.
-2. Checks that your computer meets the requirements (see below) and tells you clearly if something is missing.
+2. Checks that your computer meets the requirements (see below); if something is missing, setup stops and the details go to the setup log.
 3. Installs uv, the environment manager Wheelhouse uses, into your user profile -- nothing system-wide.
 4. Downloads the Wheelhouse application, verifies the download is genuine and undamaged, and sets up Wheelhouse's own private Python environments -- self-contained, they cannot interfere with anything else on your computer.
 5. Downloads the offline speech model if you kept the default engine (about 650 MB -- the longest step).
@@ -112,10 +112,10 @@ If Windows shows a "Windows protected your PC" screen, see "Security warnings yo
 
 Wheelhouse installs for your user account only. No administrator rights are needed, and it does not touch other programs on your computer.
 
-**Prefer a terminal?** The same install runs as one PowerShell line and asks the same questions as text prompts (pressing Enter accepts each default; the start-at-login prompt defaults to no):
+**Prefer a terminal?** The same install runs as one PowerShell line, asking only the speech-engine, start-at-login (defaults to no), and start-now questions as text prompts; the AI-helper question is skipped:
 
 ```
-irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/install-wheelhouse.ps1 | iex
+irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
 ```
 
 ### What you need
@@ -146,17 +146,17 @@ Every failure message the installer prints is designed to be understandable and 
 - **"An incomplete speech model was found"**: informational, not an error. A previous unpacking was interrupted; the installer removes the incomplete files and unpacks again from the archive it already has. The 650 MB download only repeats if the archive itself is damaged.
 - **No Wheelhouse entry in the Start menu**: check Start > All apps under W first -- new entries are not pinned to the front page. If it is truly absent, the desktop shortcut works the same; the installer log records a "Shortcut created" or "Could not create" line for a help request.
 
-**Re-running the installer is always safe.** It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your settings, your personal voice patterns, your approved dictation targets, your saved speech hints, and the downloaded speech model. When in doubt, re-run it.
+**Re-running the installer is always safe.** It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your settings, your personal voice patterns, your approved and declined dictation targets, your saved speech hints, and the downloaded speech model. When in doubt, re-run it.
 
 <!-- install-doc:end -->
 
-If none of that helps, ask for help at https://github.com/wheelhouse-project/WheelHouse -- paste the installer's output into your report.
+If none of that helps, ask for help at https://github.com/wheelhouse-project/Wheelhouse -- paste the installer's output into your report.
 
 <!-- install-doc:start -->
 
 ### Updating Wheelhouse
 
-There is no separate update procedure: **updating IS re-running the installer.** Download and run the newest WheelHouse-Setup.exe (or run the same PowerShell line) from the Installation section. The installer always fetches the newest release, and when it finds Wheelhouse already on your computer, it updates it in place. Exit Wheelhouse first (right-click the Wheelhouse tray icon and choose Exit) -- the installer refuses to replace an app that is running.
+There is no separate update procedure: **updating IS re-running the installer.** Download and run the newest Wheelhouse-Setup.exe (or run the same PowerShell line) from the Installation section. The installer always fetches the newest release, and when it finds Wheelhouse already on your computer, it updates it in place. Exit Wheelhouse first (right-click the Wheelhouse tray icon and choose Exit) -- the installer refuses to replace an app that is running.
 
 An update replaces the application but keeps everything that is yours:
 
@@ -174,9 +174,9 @@ An update replaces the application but keeps everything that is yours:
 
 ### Security warnings you may see
 
-The Wheelhouse installer is digitally signed by the project's author, David Chesley Hite III, so Windows can verify the download came from the project unaltered. Windows may still warn you for a while after each new release, until it has seen the new file often enough. The complete source code is public at https://github.com/wheelhouse-project/WheelHouse, so anyone can inspect exactly what it does.
+The Wheelhouse installer is digitally signed by the project's author, David Chesley Hite III, so Windows can verify the download came from the project unaltered. Windows may still warn you for a while after each new release, until it has seen the new file often enough. The complete source code is public at https://github.com/wheelhouse-project/Wheelhouse, so anyone can inspect exactly what it does.
 
-- **SmartScreen ("Windows protected your PC")**: can appear when you run a freshly released WheelHouse-Setup.exe. Click "More info", check that the publisher reads David Chesley Hite III, then click "Run anyway". If the setup wizard runs into trouble, it writes a log at `%TEMP%\Setup Log <date> #<number>.txt` -- paste that into a help request.
+- **SmartScreen ("Windows protected your PC")**: can appear when you run a freshly released Wheelhouse-Setup.exe. Click "More info", check that the publisher reads David Chesley Hite III, then click "Run anyway". If the setup wizard runs into trouble, it writes a log at `%TEMP%\Setup Log <date> #<number>.txt` -- paste that into a help request.
 - **Antivirus flags or rewrites the download**: some antivirus products quarantine downloads or alter them as they arrive. The installer verifies every download against a published fingerprint and refuses anything altered (the "failed its integrity check" message). Add an exception for Wheelhouse, or install on a different network, then run the installer again.
 - **A downloaded script will not run**: Windows marks a saved install-wheelhouse.ps1 as coming from the internet, and PowerShell may refuse to run it. Remove the mark once with `Unblock-File .\install-wheelhouse.ps1`, or start it with `powershell -ExecutionPolicy Bypass -File .\install-wheelhouse.ps1`.
 
@@ -188,7 +188,7 @@ If you would rather not click through security warnings, read the code and insta
 
 ### Uninstalling Wheelhouse
 
-If you installed with WheelHouse-Setup.exe, uninstall it like any Windows program: Settings > Apps > Installed apps > WheelHouse > Uninstall. If you installed with the PowerShell one-liner instead, you need the script as an actual file: download install-wheelhouse.ps1 from the releases page, open PowerShell in that folder, and run:
+If you installed with Wheelhouse-Setup.exe, uninstall it like any Windows program: Settings > Apps > Installed apps > Wheelhouse > Uninstall. If you installed with the PowerShell one-liner instead, you need the script as an actual file: download install-wheelhouse.ps1 from the releases page, open PowerShell in that folder, and run:
 
 ```
 powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -Uninstall
@@ -201,10 +201,10 @@ The uninstaller will not run while Wheelhouse is running -- exit it first (right
 
 What each answer does:
 
-- **If you keep your personal data:** the application, all its shortcuts, and its technical bookkeeping folder are removed, but your settings, your personal voice patterns, and the speech model stay behind in `%LOCALAPPDATA%\WheelHouse` (the settings and patterns are gathered into a subfolder there named preserved-user-data). If you reinstall later, the installer starts fresh -- copy files back from that folder if you want your old settings and patterns again.
-- **If you keep nothing:** everything is removed -- the entire `%LOCALAPPDATA%\WheelHouse` folder and the `%APPDATA%\WheelHouse` folder, plus all shortcuts (Start menu, desktop, and the start-at-login entry). If you had set up a cloud AI access key, the uninstaller also clears it from your user environment.
+- **If you keep your personal data:** the application, all its shortcuts, and its technical bookkeeping folder are removed, but your settings, your personal voice patterns, and the speech model stay behind in `%LOCALAPPDATA%\Wheelhouse` (the settings and patterns are gathered into a subfolder there named preserved-user-data). If you reinstall later, the installer starts fresh -- copy files back from that folder if you want your old settings and patterns again.
+- **If you keep nothing:** everything is removed -- the entire `%LOCALAPPDATA%\Wheelhouse` folder and the `%APPDATA%\Wheelhouse` folder, plus all shortcuts (Start menu, desktop, and the start-at-login entry). If you had set up a cloud AI access key, the uninstaller also clears it from your user environment.
 
-For the privacy-minded: those two folders are the only places Wheelhouse lives, and `%APPDATA%\WheelHouse` never holds personal data (only technical bookkeeping such as helper-process ID files) -- it is removed either way. When the uninstaller finishes, it prints both folder paths so you can check for leftovers yourself.
+For the privacy-minded: those two folders (plus a small `WheelhouseSetup` folder used by the graphical installer's uninstaller) are the only places Wheelhouse lives, and `%APPDATA%\Wheelhouse` never holds personal data (only technical bookkeeping such as helper-process ID files) -- it is removed either way. When the uninstaller finishes, it prints both folder paths so you can check for leftovers yourself.
 
 <!-- install-doc:end -->
 
@@ -212,21 +212,22 @@ For the privacy-minded: those two folders are the only places Wheelhouse lives, 
 
 ### When Wheelhouse cannot type: administrator windows and UAC prompts
 
-Wheelhouse installs for your user account only and runs without administrator rights. That is deliberate, and it is good for your safety: a program with no administrator power cannot change system files or settings, and nothing it types or clicks on your behalf can go further than your own account is allowed to go.
+Wheelhouse installs for your user account only and runs without administrator rights. That is deliberate and good for your safety: a program with no administrator power cannot change system files or settings, and nothing it types or clicks on your behalf can go further than your own account is allowed to go.
 
-The trade-off is one Windows rule you will occasionally run into. Windows does not allow a normal program to send keystrokes or clicks into a program that is running as administrator. This is a protection built into Windows itself -- it stops any non-administrator software, not just Wheelhouse, from pressing buttons in privileged windows. In practice it means two things:
+The trade-off is one Windows rule you will occasionally run into. Windows does not allow a normal program to send keystrokes or clicks into a program that is running as administrator. Windows enforces this for all non-administrator software, not just Wheelhouse. In practice it means two things:
 
 - **Programs running as administrator.** If you started a program with "Run as administrator" (or it elevated itself, as some system tools do), Wheelhouse cannot type into it, press keys in it, or click its buttons.
 - **UAC prompts.** The dimmed "Do you want to allow this app to make changes to your device?" screen is even more protected: Windows shows it on a separate secure desktop that no ordinary program can reach or even see.
 
-**What it looks like:** for dictation and keystroke commands, nothing -- you speak and the words have no effect in that window, with no error message. Click commands do show a notice: Wheelhouse cannot see inside the protected window, so "click cancel" reports no match. If Wheelhouse suddenly seems to have stopped working, check whether the window you are in is running as administrator. Click into any normal window (Notepad, your browser) and Wheelhouse works there immediately, because Wheelhouse itself never stopped -- only that one window was out of reach.
+**What it looks like:** when you dictate into an administrator window, Wheelhouse detects the protection before typing and shows a notice in the corner of the screen: "Wheelhouse can't type into administrator apps." Nothing is typed. The same notice appears when you dictate into a terminal running as administrator. Click commands show their own notice: Wheelhouse cannot see inside the protected window, so "click cancel" reports no match. Spoken key presses (for example "press enter") stay silent -- Windows discards those with no message.
 
 **What to do:**
 
+- To dictate into administrator programs, start Wheelhouse itself as administrator: close it, right-click its Start menu entry, and choose "Run as administrator".
 - Use your physical keyboard and mouse for the administrator window or the UAC prompt, then go back to voice for everything else.
-- If the program does not actually need administrator rights, start it the normal way (without "Run as administrator"). Wheelhouse can then type into it like any other program. Some tools genuinely require administrator rights and will not run unelevated -- for those, keyboard and mouse are the answer.
+- If the program does not actually need administrator rights, start it the normal way (without "Run as administrator"). Wheelhouse can then type into it like any other program. Some tools genuinely require administrator rights and will not run unelevated -- for those, use the two options above.
 
-No Wheelhouse setting can lift this limit. It is enforced by Windows, not by Wheelhouse, and it protects you against far worse than a missed dictation.
+No Wheelhouse setting lifts this limit -- Windows enforces it, and the UAC screen stays protected no matter what.
 
 <!-- install-doc:end -->
 
@@ -262,7 +263,7 @@ Most users need no account of any kind. Wheelhouse ships with the **Parakeet** e
 
 The one situation where an account comes up: you picked the **Google Cloud** speech engine at the installer's speech-engine question. That engine processes your speech on Google's servers and needs a free Google Cloud account plus a one-time credentials setup (Google charges for heavy use beyond its free tier, but most personal use stays within it). One caveat: on a computer with less than 8 GB of memory, the installer stops before installing anything -- its closing message mentions the cloud engine, but the installer cannot yet set it up on such a machine, so the fix is adding memory or using another computer.
 
-There is also a third option for computers with an NVIDIA graphics card that has at least 4 GB of dedicated memory: **Distil-Whisper**, which runs locally on the graphics card. The installer offers it only when it detects a suitable card. It downloads its own model the first time it starts, so the first launch takes a few minutes.
+There is also a third option for computers with an NVIDIA graphics card that has at least 4 GB of dedicated memory: **Distil-Whisper**, which runs locally on the graphics card. The wizard always lists it; without a suitable card the install quietly sets up Parakeet instead. The PowerShell prompt offers it only when it detects a suitable card. It downloads its own model the first time it starts, so the first launch takes a few minutes.
 
 ### Local versus cloud, compared
 
@@ -299,9 +300,9 @@ That GOOGLE_APPLICATION_CREDENTIALS variable is where Wheelhouse expects to find
 
 To switch between engines that are already set up on this computer, use the system tray: right-click the Wheelhouse icon, open **STT Provider**, and pick the engine you want. Wheelhouse remembers your choice (it is stored as last_provider in the stt section of the settings file) and uses it the next time it starts. If you switch to Google Cloud this way, remember that it cannot hear you until its credentials are set up -- see the Google Cloud section above.
 
-To add an engine that was never set up on this machine, re-run the installer and pick that engine at its speech-engine question; it downloads and sets up whatever the engine needs. For example, if you originally chose Google Cloud and now want Parakeet, the re-run is what downloads Parakeet's speech model -- picking it from the tray menu is not enough on its own. The Distil-Whisper engine is always added this way: the installer sets it up only when you choose it, and offers it only on a computer with a suitable NVIDIA graphics card.
+To add an engine that was never set up on this machine, re-run the installer and pick that engine at its speech-engine question; it downloads and sets up whatever the engine needs. For example, if you originally chose Google Cloud and now want Parakeet, the re-run is what downloads Parakeet's speech model -- picking it from the tray menu is not enough on its own. The Distil-Whisper engine is always added this way: the installer sets it up only when you choose it.
 
-The same re-run is the repair path when the speech model is missing or incomplete -- for example when its download was skipped or interrupted the first time. The installer notices an incomplete model and reinstalls it. Re-running the installer is always safe, and on a re-run the speech-engine question defaults to the engine you already have, so pressing Enter keeps it (if your current engine is no longer available on this computer's hardware, the installer says so before asking).
+The same re-run is the repair path when the speech model is missing or incomplete -- for example when its download was skipped or interrupted the first time. The installer notices an incomplete model and reinstalls it. Re-running the installer is always safe, and on a re-run the speech-engine question defaults to the engine you already have, so pressing Enter keeps it (if your current engine is no longer available on this hardware, the PowerShell prompt says so before asking; the wizard does not warn).
 
 <!-- install-doc:end -->
 
@@ -467,7 +468,7 @@ Wheelhouse also accepts common mishearings of "undo" and "redo" ("undue", "undu"
 
 **Digits**: a digit works only when another key name follows it. Avoid ending the phrase with a digit -- a trailing digit is read as a repeat count, so "press control 2" presses Ctrl twice instead of Ctrl+2.
 
-**Symbols by spoken name**: reliably pressable -- backtick, semicolon, slash (forward slash), backslash (back slash), comma, period (dot), single quote (apostrophe), left/right bracket (open/close bracket), equals (equal), minus (hyphen, dash), right parenthesis (close paren). Other symbol names are unreliable in "press": shifted symbols (colon, tilde, pipe, question mark, double quote, braces, less than, greater than, plus, underscore, left parenthesis) come out as the wrong character, and hash, at, ampersand, asterisk, caret, percent, dollar, and exclamation press nothing. To type any of these characters, dictate them as punctuation words instead (see Punctuation and Symbols below) -- that path handles every symbol correctly.
+**Symbols by spoken name**: reliably pressable -- backtick, semicolon, slash (forward slash), backslash (back slash), comma, period (dot), single quote (apostrophe), left/right bracket (open/close bracket), equals (equal), minus (hyphen, dash), right parenthesis (close paren). Other symbol names are unreliable in "press": shifted symbols (colon, tilde, pipe, question mark, double quote, braces, less than, greater than, plus, underscore) come out as the wrong character, and left parenthesis, hash, at, ampersand, asterisk, caret, percent, dollar, and exclamation press nothing. To type any of these characters, dictate them as punctuation words instead (see Punctuation and Symbols below) -- that path handles every symbol correctly.
 
 **Examples**: "press control shift t", "press f5", "press alt f4", "press windows d", "press left bracket".
 
@@ -567,7 +568,7 @@ If the recognizer routinely mishears another word -- a name heard as a sound-ali
 
 | Say this | What happens | Notes |
 |---|---|---|
-| x-ray activate [app name] | Brings the named application's window forward if it is already running (a spoken name does not start a closed app; only .exe targets in custom patterns are launched when not found) | e.g. "x-ray activate outlook" |
+| x-ray activate [app name] | Brings the named application's window forward; when a pattern's target is a program file (.exe) and it has no window, Wheelhouse starts it -- the built-in "x-ray notepad" and "x-ray browser" work this way | e.g. "x-ray activate outlook" |
 | x-ray browser | Brings your default web browser to the front | Wheelhouse looks up which browser is your Windows default at the moment you speak |
 | x-ray notepad | Brings Notepad to the front | |
 
@@ -631,7 +632,7 @@ Commands that steer Wheelhouse itself: listening modes, help, personal patterns,
 |---|---|---|
 | push to talk mode | Switches to press-and-hold listening: Wheelhouse listens only while you hold the floating button | A notification confirms the switch |
 | click to talk mode | Switches back to toggle listening (click to start, click to stop) -- the default | |
-| x-ray wheelhouse help online | Opens the hosted Wheelhouse help page in your browser | Requires the online help URL to be configured (the gem_url setting under [ai.help]); if it is not set, Wheelhouse says out loud that online help is not configured |
+| x-ray wheelhouse help online | Opens the Wheelhouse Assistant (the official online help) in your browser | Uses the gem_url setting under [ai.help], which points at the official assistant by default; if blanked, Wheelhouse says out loud that online help is not configured |
 | x-ray patterns | Opens the Pattern Manager | "x-ray pattern manager" also works; see "Special Commands" below |
 | x-ray fix | Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version | Requires the AI server to be configured and reachable; Wheelhouse speaks its progress ("Correcting", "Done") and always preserves your original text on any failure |
 | x-ray cancel fix | Cancels an in-progress fix | |
@@ -653,7 +654,7 @@ Say "literal" followed by whatever you want to type, and Wheelhouse inserts thos
 
 When the speech recognizer keeps mishearing a specific word -- usually a name, a product, a place, or a technical term -- select the problem word anywhere on screen (highlight it with the mouse or say "select word") and say **"x-ray boost"**. Wheelhouse copies the selection and sends it to your speech engine as a new recognition hint, saved to a shared hints file on disk so it **persists across restarts** -- you only need to boost each tricky word once. Hints are capped at 100 characters, so boost individual words or short phrases, not whole sentences.
 
-One important distinction: **saving a hint and applying it are two different things.** **Parakeet (the default engine) saves the hint but does NOT apply it out of the box**: hint biasing ships turned off because applying hints slows recognition by roughly 25 percent per utterance in the project's measurements. To make Parakeet actually use your saved hints, set enabled = true under the [hotwords] section of the Parakeet engine's own config file and restart Wheelhouse -- accepting the slower recognition. Until you opt in, do not expect boosting to change what Parakeet hears. **Distil-Whisper** and **Google Cloud Speech-to-Text** both apply saved hints out of the box (as decoder biasing terms and speech adaptation phrases, respectively).
+One important distinction: **saving a hint and applying it are two different things.** **Parakeet (the default engine) saves the hint but does NOT apply it out of the box**: hint biasing ships turned off because applying hints slows recognition by roughly 25 percent per utterance in the project's measurements. To make Parakeet actually use your saved hints, set enabled = true under the [hotwords] section of the Parakeet engine's own config file and restart Wheelhouse -- accepting the slower recognition. Until you opt in, do not expect boosting to change what Parakeet hears. **Google Cloud Speech-to-Text** applies saved hints out of the box (as speech adaptation phrases). **Distil-Whisper** saves hints but never applies them: its hint biasing is disabled because it garbles that engine's recognition.
 
 **"x-ray patterns" (the Pattern Manager)**
 
@@ -665,7 +666,7 @@ Your personal patterns are stored in a separate per-machine file, so they surviv
 
 **"x-ray wheelhouse help online"**
 
-Opens the hosted Wheelhouse help page in your default browser, where you can ask questions in plain language. It requires the online help URL (the gem_url setting in the [ai.help] section of the configuration) to be set; with no URL configured, Wheelhouse answers out loud that online help is not configured. This is the supported help path -- the in-app help chat window is currently disabled.
+Opens the Wheelhouse Assistant -- the official online help -- in your default browser, where you can ask questions in plain language. The address is the gem_url setting in the [ai.help] section; it points at the official assistant by default, and if it is blank, Wheelhouse answers out loud that online help is not configured. This is the supported help path -- the in-app help chat window is currently disabled.
 
 ## Speech Modes
 
@@ -821,9 +822,7 @@ These settings govern the mechanics of how dictated text lands in other programs
 
 ### Speech Recognition Engine ([stt])
 
-**last_provider** (default "parakeet_tdt"): which speech-to-text engine Wheelhouse uses -- "parakeet_tdt" (local, offline, no account), "distil_medium_en" (a more accurate local engine that needs a recent graphics card), or "google_stt" (Google's cloud service; needs a Google Cloud account, sends audio to Google). You normally switch engines from the tray menu rather than editing this -- Wheelhouse writes your choice here for you, which is why it is called "last" provider.
-
-**[stt.google] boost_words** (default empty): words or phrases the Google engine should favor when unsure -- useful for names or uncommon words it keeps getting wrong. Only matters on the Google engine.
+**last_provider** (default "parakeet_tdt"): which speech-to-text engine Wheelhouse uses -- "parakeet_tdt" (local, offline, no account), "distil_medium_en" (a local engine that runs on an NVIDIA graphics card), or "google_stt" (Google's cloud service; needs a Google Cloud account, sends audio to Google). You normally switch engines from the tray menu rather than editing this -- Wheelhouse writes your choice here for you, which is why it is called "last" provider.
 
 **[stt.azure] subscription_key** / **region** (defaults empty / "eastus"): credentials for the Azure cloud speech option. Only matters if you deliberately set up Azure; most people never touch this.
 
@@ -831,11 +830,11 @@ These settings govern the mechanics of how dictated text lands in other programs
 
 Wheelhouse's AI features are optional and off unless you point them at an AI server. In this release, the live AI feature is dictation text correction -- fixing up dictated text on request. The in-app help chat is currently disabled; these settings also gate it, but it will not appear regardless of what you set.
 
-**[ai] enabled** (default true): the master switch for all AI features -- nothing happens unless a server address is also configured below. Today this means dictation text correction; it also gates the in-app help chat, which is currently disabled in this release.
+**[ai] enabled**: the master switch for all AI features. New installs leave it off (false) unless you chose the AI helper during setup. Today this means dictation text correction; it also gates the in-app help chat, which is currently disabled in this release.
 
 **[ai] knowledge_base** (default: the shipped help document): the document the in-app help assistant would consult; because the in-app help chat is currently disabled, this setting has no effect today.
 
-**[ai.server] base_url** (default http://localhost:11434/v1, a local Ollama server): the address of the AI server Wheelhouse talks to, using the standard OpenAI-style interface. Any OpenAI-compatible address works, local or hosted. Leave empty to turn AI off entirely.
+**[ai.server] base_url**: the address of the AI server Wheelhouse talks to, using the standard OpenAI-style interface. New installs leave it empty (AI off) unless you chose the AI helper, which fills in Google's Gemini address. Any OpenAI-compatible address works, local or hosted.
 
 **[ai.server] model** (default "gemma3:12b"): the model name to request from that server. Change it to whatever model your server has installed.
 
@@ -845,7 +844,7 @@ Wheelhouse's AI features are optional and off unless you point them at an AI ser
 
 **[ai.server] timeout_s** (default 30): seconds Wheelhouse waits for the AI server before giving up on a request. Raise it if a slow local model keeps timing out.
 
-**[ai.help] gem_url** (default empty): the web address that "wheelhouse help online" opens in your browser -- the help surface of the current release, since the in-app help chat is currently disabled. Until a page is configured, the command answers out loud that online help is not configured.
+**[ai.help] gem_url** (default: the official Wheelhouse Assistant on ChatGPT): the web address that "wheelhouse help online" opens in your browser. If you blank it out, the command answers out loud that online help is not configured.
 
 **[ai.help] max_response_tokens** (default 800): caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.
 
@@ -873,11 +872,9 @@ If Wheelhouse feels laggy or unreliable on an older computer, these specific cha
 
 **The hallucination filter (Distil-Whisper engine only).** Whisper-family speech engines have a well-known quirk: fed a cough, a throat-clear, or background noise, they sometimes invent polite filler -- a stray "thank you" or "okay" you never said. The Distil-Whisper engine ships with a confidence filter that discards such low-confidence utterances instead of typing them. Its threshold is **hallucination_logprob_threshold** (default -0.55) in the Distil-Whisper provider's own config file, not the main config.toml. That default was calibrated on a single male voice with a studio microphone, so it may be too strict for other voices: if real speech is sometimes silently ignored -- more likely with a strong accent, quiet speech, or a laptop microphone -- lower it to -0.7 or -0.8. More negative means more permissive: fewer real words discarded, the occasional phantom "thank you" let through; a very large negative number turns the filter off entirely. If no threshold feels right for your voice, switch to the Google engine from the tray menu -- it handles noise and varied voices more robustly (a cloud service: needs an account, sends audio to Google). The filter does not apply to the default Parakeet engine, whose design neither produces the confidence signal it relies on nor shares the Whisper family's phantom-phrase quirk to the same degree.
 
-**Boosting words the engine keeps missing.** If you use the Google engine and it consistently mishears a particular name or technical term, add that word to boost_words under [stt.google] to tip recognition in its favor.
-
 ## Plugins
 
-Plugins are optional add-ons that connect Wheelhouse to extra hardware and services: your laptop screen, Sonos speakers, a Sony TV, and a few Windows features. Every plugin has its own `[plugins.*]` section in config.toml with an `enabled` switch, so you can turn each one on or off without deleting anything. You do not need any of them for dictation and voice commands to work, and a plugin whose hardware is missing or offline never breaks Wheelhouse -- it sits quietly and keeps retrying in the background.
+Plugins are optional add-ons that connect Wheelhouse to extra hardware and services: your laptop screen, Sonos speakers, a Sony TV, and a few Windows features. Every plugin has its own `[plugins.*]` section in config.toml with an `enabled` switch, so you can turn each one on or off without deleting anything. You do not need any of them for dictation and voice commands to work, and a plugin whose hardware is missing or offline never breaks Wheelhouse -- it turns itself off for that session (the Sonos plugin keeps watching in the background).
 
 Two of these plugins respond to the mouse thumb wheel -- the small horizontal wheel on the side of the mouse, under your thumb. This is not the main scroll wheel: that one keeps its normal scrolling job. Wheelhouse reads the thumb wheel directly from the device, which currently works only with Logitech MX-series mice. Screen zones pick what the thumb wheel controls: pointer at the left edge of the screen, it adjusts brightness; anywhere else, volume -- no command or click needed. Step size and zone width are adjustable in the configuration reference.
 
@@ -890,7 +887,7 @@ Controls the brightness of a laptop's built-in screen from the brightness scroll
 Adjusts Sonos speaker volume from the volume scroll zone, and pauses Wheelhouse's listening while music is playing so song lyrics are not typed into your documents. Enable with `plugins.sonos.enabled` (default: disabled -- turn it on only if you own Sonos speakers). Settings:
 
 - `polling_interval` -- how often, in seconds, to check whether music is playing (default 2).
-- `speaker_ip` -- optional. Wheelhouse finds Sonos speakers on your network automatically; set this only if discovery fails or you want a specific speaker.
+- `speaker_ip` -- optional. Automatic discovery runs only while sound plays through an external output, and a discovered speaker wins over this setting; set it when discovery finds nothing.
 - `request_connect_timeout` / `request_read_timeout` -- advanced network timeouts (defaults 2.0 and 5.0 seconds); rarely need changing.
 
 It connects to the speaker over your home network directly -- no Sonos account or internet service is involved. Sound coming from your computer or TV through the Sonos does not pause listening; only streamed music does.
@@ -1041,9 +1038,9 @@ The installer's failure messages -- low memory, low disk space, a blocked uv dow
 
 ## Getting Help
 
-If the answer is not in this document, email help@wheelhouse-project.org or reach the developer at the Wheelhouse project page: https://github.com/wheelhouse-project/WheelHouse -- open an issue or start a discussion there. Include what you tried, what you expected, and what happened instead; if the installer printed an error, paste it in full.
+If the answer is not in this document, email help@wheelhouse-project.org or reach the developer at the Wheelhouse project page: https://github.com/wheelhouse-project/Wheelhouse -- open an issue or start a discussion there. Include what you tried, what you expected, and what happened instead; if the installer printed an error, paste it in full.
 
 ---
 
-Generated: 2026-04-07 (regenerated 2026-07-17 from current sources for the v1.0.2 release, wh-help-doc-regen)
-WheelHouse version: 1.0.3
+Generated: 2026-04-07 (verified 2026-07-19 against current sources for the v1.0.4 release)
+Wheelhouse version: 1.0.4

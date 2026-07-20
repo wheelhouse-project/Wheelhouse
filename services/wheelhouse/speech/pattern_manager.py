@@ -42,7 +42,7 @@ class PatternManager:
         "the quick brown fox jumps over the lazy dog!!",
     )
     _BACKTRACK_ERROR = (
-        "This pattern takes too long to match and could freeze WheelHouse, "
+        "This pattern takes too long to match and could freeze Wheelhouse, "
         "so it was not saved. Simplify the expression."
     )
 
@@ -745,13 +745,13 @@ class PatternManager:
             raise ValueError(f"Expression does not compile: {exc}")
         if pattern_type == "command" and not expression.startswith("^"):
             raise ValueError(
-                "A command expression must start with '^' (WheelHouse "
+                "A command expression must start with '^' (Wheelhouse "
                 "treats unanchored expressions as replacements)"
             )
         if pattern_type == "replacement" and expression.startswith("^"):
             raise ValueError(
                 "A replacement expression must not start with '^' "
-                "(WheelHouse treats '^'-anchored expressions as commands)"
+                "(Wheelhouse treats '^'-anchored expressions as commands)"
             )
         return expression
 

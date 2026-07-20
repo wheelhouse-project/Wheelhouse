@@ -13,10 +13,12 @@ from shared.rejection_category import (
     BROWSER_PROCESS_NAMES,
     CATEGORY_BROWSER_TRAP,
     CATEGORY_DEFINITELY_NOT_TEXT,
+    CATEGORY_ELEVATED,
     CATEGORY_OTHER,
     CATEGORY_UNCERTAIN,
     DEFAULT_BROWSER_PROCESS_NAMES,
     categorize_rejection,
+    should_emit_notice,
     should_show_try_anyway,
 )
 
@@ -229,6 +231,76 @@ class TestBrowserProcessNamesOverride:
             browser_process_names=None,
         )
         assert category == CATEGORY_BROWSER_TRAP
+
+
+class TestCategoryElevated:
+    """wh-elevated-target-notice: the router synthesizes reason
+    ``elevated_process_window`` when the focused window belongs to a
+    higher-integrity process. The category must win over every other
+    branch -- the reason is definitive, so process and class names
+    must not re-route it."""
+
+    def test_elevated_process_window(self):
+        category = categorize_rejection(
+            reason="elevated_process_window",
+            process_name="regedit.exe",
+            class_name="RegEdit_RegEdit",
+        )
+        assert category == CATEGORY_ELEVATED
+
+    def test_elevated_wins_over_browser_trap_shape(self):
+        # An elevated browser process with an empty class name must
+        # still categorize as elevated, not browser_trap.
+        category = categorize_rejection(
+            reason="elevated_process_window",
+            process_name="chrome.exe",
+            class_name="",
+        )
+        assert category == CATEGORY_ELEVATED
+
+    def test_elevated_with_empty_identity(self):
+        # UIA visibility into elevated windows is unreliable, so the
+        # synthesized verdict may carry empty process and class names.
+        category = categorize_rejection(
+            reason="elevated_process_window",
+            process_name="",
+            class_name="",
+        )
+        assert category == CATEGORY_ELEVATED
+
+    def test_elevated_never_shows_try_anyway(self):
+        # A retry can never succeed against an elevated window --
+        # Windows discards the input again. No override button.
+        assert should_show_try_anyway(CATEGORY_ELEVATED) is False
+
+
+class TestShouldEmitNotice:
+    """wh-elevated-target-notice: the Input-process emission gate.
+
+    ``should_emit_notice`` decides whether the rejection event is sent
+    to the GUI at all. It must be True for exactly the categories that
+    produce a useful notice: uncertain (notice + Try-it-anyway) and
+    elevated (notice explaining the administrator boundary, no
+    button). The wh-1r2b3 silencing contract for browser_trap,
+    definitely_not_text, and other must remain intact."""
+
+    def test_uncertain_emits(self):
+        assert should_emit_notice(CATEGORY_UNCERTAIN) is True
+
+    def test_elevated_emits(self):
+        assert should_emit_notice(CATEGORY_ELEVATED) is True
+
+    def test_browser_trap_stays_silenced(self):
+        assert should_emit_notice(CATEGORY_BROWSER_TRAP) is False
+
+    def test_definitely_not_text_stays_silenced(self):
+        assert should_emit_notice(CATEGORY_DEFINITELY_NOT_TEXT) is False
+
+    def test_other_stays_silenced(self):
+        assert should_emit_notice(CATEGORY_OTHER) is False
+
+    def test_unknown_category_stays_silenced(self):
+        assert should_emit_notice("not_a_real_category") is False
 
 
 class TestDefensiveInputHandling:

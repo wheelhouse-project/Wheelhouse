@@ -58,12 +58,12 @@ class TestWidgetConstruction:
 class TestShowMessage:
     def test_show_message_sets_title_and_body(self, toast):
         toast.show_message(
-            title="WheelHouse couldn't save your choice",
+            title="Wheelhouse couldn't save your choice",
             body="Try saying the words again later, then click Yes again.",
         )
         assert toast.isVisible()
         assert toast._title_label.text() == (
-            "WheelHouse couldn't save your choice"
+            "Wheelhouse couldn't save your choice"
         )
         assert toast._body_label.text() == (
             "Try saying the words again later, then click Yes again."
