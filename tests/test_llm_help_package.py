@@ -156,13 +156,22 @@ def test_gpt_instructions_contract():
     ), "the fetch-failure refusal directive is missing or weakened"
     assert "https://wheelhouse-project.org/" in text
     assert "https://github.com/wheelhouse-project/Wheelhouse" in text
-    # Version disclosure: the Generated footer line names the release; the
-    # build-identifier line is explicitly ignored, not the other way around.
+    # Version disclosure: the stamped "Wheelhouse version" footer line names
+    # the release the guide describes (the export stamps it at publish time;
+    # only the pre-release private tree carries a build identifier there).
     assert (
-        'The "Generated" line in the guide\'s footer names that release;'
-        " ignore the guide's final line, which is an internal"
-        " build identifier." in norm
+        'The "Wheelhouse version" line at the very end of the guide names'
+        " that release." in norm
     ), "the version-disclosure directive is missing or inverted"
+    # Email drafting: never claim mailbox access; mailto links draft only.
+    assert (
+        "This GPT does not have mailbox access and must never claim that it"
+        " can read, search, send, or modify the user's email." in norm
+    ), "the no-mailbox-access directive is missing or weakened"
+    assert (
+        "a mailto link creates a draft only and never sends automatically"
+        in norm
+    ), "the mailto-never-sends directive is missing or weakened"
     # The paste target is ChatGPT's instructions field: keep it plain ASCII
     # so nothing mangles in transit.
     assert text.isascii(), "gpt-instructions.txt must be plain ASCII"
