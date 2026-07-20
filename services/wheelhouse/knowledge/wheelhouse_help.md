@@ -66,11 +66,8 @@ That is the whole list. The installer brings everything else Wheelhouse needs, c
 
 **Stop here if you are new. Do these steps first, and ignore the rest of this document until they work.**
 
-1. Open PowerShell (press the Windows key, type "powershell", press Enter) and run this one line:
-   ```
-   irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/install-wheelhouse.ps1 | iex
-   ```
-   The installer downloads the speech model, so give it time. When it asks a question, pressing Enter accepts the default -- except the start-at-login question: its default is no, and answering yes is recommended for hands-free use.
+1. Download the installer and run it: https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/WheelHouse-Setup.exe
+   If Windows shows "Windows protected your PC", click "More info", check that the publisher reads David Chesley Hite III, and click "Run anyway". The setup wizard's pre-selected answers are right for almost everyone. It downloads the speech model, so give it 10 to 20 minutes.
 2. Start Wheelhouse from the Start menu or the desktop shortcut (the installer creates both).
 3. Open Notepad.
 4. Say **"hello world"** -- the words "hello world" appear.
@@ -100,23 +97,26 @@ Once the basics work, pick the path that matches what you want to do next.
 
 ### Installation
 
-You do not need to install anything ahead of time -- no programming tools, no separate downloads. One command does the whole job. Open any PowerShell window (press the Windows key, type "powershell", press Enter) and run:
+The installer is a normal Windows setup wizard. Download it and run it -- nothing needs to be installed ahead of time:
+
+https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/WheelHouse-Setup.exe
+
+If Windows shows a "Windows protected your PC" screen, see "Security warnings you may see" below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 1 GB in total). In plain language, the wizard:
+
+1. Asks its questions up front: which speech engine you want (the pre-selected answer is right for almost everyone -- see Speech Engines and Accounts below), whether to set up the optional AI helper, whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected and recommended), and whether Windows allows desktop apps to use your microphone.
+2. Checks that your computer meets the requirements (see below) and tells you clearly if something is missing.
+3. Installs uv, the environment manager Wheelhouse uses, into your user profile -- nothing system-wide.
+4. Downloads the Wheelhouse application, verifies the download is genuine and undamaged, and sets up Wheelhouse's own private Python environments -- self-contained, they cannot interfere with anything else on your computer.
+5. Downloads the offline speech model if you kept the default engine (about 650 MB -- the longest step).
+6. Creates Start-menu and desktop shortcuts.
+
+Wheelhouse installs for your user account only. No administrator rights are needed, and it does not touch other programs on your computer.
+
+**Prefer a terminal?** The same install runs as one PowerShell line and asks the same questions as text prompts (pressing Enter accepts each default; the start-at-login prompt defaults to no):
 
 ```
 irm https://github.com/wheelhouse-project/WheelHouse/releases/latest/download/install-wheelhouse.ps1 | iex
 ```
-
-The whole process takes about 10 to 20 minutes, most of it downloading (roughly 1 GB in total). In plain language, the installer:
-
-1. Checks that your computer meets the requirements (see below) and tells you clearly if something is missing.
-2. Installs uv, the environment manager Wheelhouse uses, into your user profile and adds it to your user PATH -- nothing system-wide. The Python environments uv builds live inside Wheelhouse's own folder.
-3. Downloads the Wheelhouse application and verifies the download is genuine and undamaged.
-4. Sets up Wheelhouse's own private Python environments -- these are self-contained and cannot interfere with anything else on your computer.
-5. Asks which speech engine you want (the default answer is right for almost everyone -- see Speech Engines and Accounts below).
-6. Downloads the offline speech model if you chose the default engine (about 650 MB -- this is the longest step).
-7. Creates Start-menu and desktop shortcuts, then asks two final questions: whether Wheelhouse should start automatically when you log in (for hands-free use, answering yes is strongly recommended), and whether to start Wheelhouse right now.
-
-Wheelhouse installs for your user account only. No administrator rights are needed, and it does not touch other programs on your computer.
 
 ### What you need
 
@@ -129,7 +129,7 @@ Wheelhouse installs for your user account only. No administrator rights are need
 
 ### What successful installation looks like
 
-The installer reports each step as it goes. If it reached the speech-engine question, finished its downloads, created your shortcuts, and asked the two final questions (start at login? start now?) without stopping on an error, you are done. You will find Wheelhouse in the Start menu under W and as a desktop shortcut.
+The wizard shows its progress step by step; the PowerShell installer reports the same steps as text. If it reached the end without stopping on an error, you are done. You will find Wheelhouse in the Start menu under W and as a desktop shortcut.
 
 ### What failure looks like
 
@@ -142,11 +142,11 @@ Every failure message the installer prints is designed to be understandable and 
 - **"Could not install uv"**: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.
 - **"... failed its integrity check"**: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; a changed release asset is the other. Add an exception or try a different network, and if it keeps failing, file an issue on the GitHub page.
 - **"Downloading ... failed twice"**: network trouble. Run the installer again -- downloads resume where they left off.
-- **"Setting up services/... failed"**: a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again (it picks up where it left off). If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.
+- **"Setting up services/... failed"**: a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again. If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.
 - **"An incomplete speech model was found"**: informational, not an error. A previous unpacking was interrupted; the installer removes the incomplete files and unpacks again from the archive it already has. The 650 MB download only repeats if the archive itself is damaged.
 - **No Wheelhouse entry in the Start menu**: check Start > All apps under W first -- new entries are not pinned to the front page. If it is truly absent, the desktop shortcut works the same; the installer log records a "Shortcut created" or "Could not create" line for a help request.
 
-**Re-running the installer is always safe.** It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your settings, your personal voice patterns, your approved dictation targets, your saved speech hints, and the downloaded speech model. You cannot make things worse by running it again -- when in doubt, re-run it.
+**Re-running the installer is always safe.** It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your settings, your personal voice patterns, your approved dictation targets, your saved speech hints, and the downloaded speech model. When in doubt, re-run it.
 
 <!-- install-doc:end -->
 
@@ -156,7 +156,7 @@ If none of that helps, ask for help at https://github.com/wheelhouse-project/Whe
 
 ### Updating Wheelhouse
 
-There is no separate update procedure: **updating IS re-running the installer.** Run the same one-line command from the Installation section. The command always fetches the newest release, and when the installer finds Wheelhouse already on your computer, it updates it in place. Exit Wheelhouse first (right-click the Wheelhouse tray icon and choose Exit) -- the installer refuses to replace an app that is running.
+There is no separate update procedure: **updating IS re-running the installer.** Download and run the newest WheelHouse-Setup.exe (or run the same PowerShell line) from the Installation section. The installer always fetches the newest release, and when it finds Wheelhouse already on your computer, it updates it in place. Exit Wheelhouse first (right-click the Wheelhouse tray icon and choose Exit) -- the installer refuses to replace an app that is running.
 
 An update replaces the application but keeps everything that is yours:
 
@@ -178,7 +178,7 @@ The Wheelhouse installer is digitally signed by the project's author, David Ches
 
 - **SmartScreen ("Windows protected your PC")**: can appear when you run a freshly released WheelHouse-Setup.exe. Click "More info", check that the publisher reads David Chesley Hite III, then click "Run anyway". If the setup wizard runs into trouble, it writes a log at `%TEMP%\Setup Log <date> #<number>.txt` -- paste that into a help request.
 - **Antivirus flags or rewrites the download**: some antivirus products quarantine downloads or alter them as they arrive. The installer verifies every download against a published fingerprint and refuses anything altered (the "failed its integrity check" message). Add an exception for Wheelhouse, or install on a different network, then run the installer again.
-- **A downloaded script will not run**: if you saved install-wheelhouse.ps1 as a file (for example, to uninstall) instead of using the one-line command, Windows marks the file as coming from the internet and PowerShell may refuse to run it. Either remove the mark once with `Unblock-File .\install-wheelhouse.ps1`, or start it with `powershell -ExecutionPolicy Bypass -File .\install-wheelhouse.ps1`.
+- **A downloaded script will not run**: Windows marks a saved install-wheelhouse.ps1 as coming from the internet, and PowerShell may refuse to run it. Remove the mark once with `Unblock-File .\install-wheelhouse.ps1`, or start it with `powershell -ExecutionPolicy Bypass -File .\install-wheelhouse.ps1`.
 
 If you would rather not click through security warnings, read the code and install from source: CONTRIBUTING.md in the GitHub repository has the development setup steps.
 
@@ -188,7 +188,7 @@ If you would rather not click through security warnings, read the code and insta
 
 ### Uninstalling Wheelhouse
 
-The installer is also the uninstaller. The one-line install command cannot pass options, so uninstalling needs the script as an actual file: download the same install-wheelhouse.ps1 from the releases page, open PowerShell in the folder where you saved it, and run:
+If you installed with WheelHouse-Setup.exe, uninstall it like any Windows program: Settings > Apps > Installed apps > WheelHouse > Uninstall. If you installed with the PowerShell one-liner instead, you need the script as an actual file: download install-wheelhouse.ps1 from the releases page, open PowerShell in that folder, and run:
 
 ```
 powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -Uninstall
@@ -196,7 +196,7 @@ powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -Uninstall
 
 The uninstaller will not run while Wheelhouse is running -- exit it first (right-click the Wheelhouse tray icon and choose Exit). It then asks two questions before touching anything:
 
-1. **"Remove Wheelhouse from this computer?"** -- nothing is removed until you type yes.
+1. **"Remove Wheelhouse from this computer?"** -- nothing is removed until you answer yes.
 2. **"Keep your personal data?"** -- meaning your settings, your voice patterns, and the downloaded speech model.
 
 What each answer does:
@@ -988,7 +988,7 @@ If all five pass, Wheelhouse is working -- any remaining trouble is specific to 
 
 - *What you see:* You start Wheelhouse and nothing appears, or the tray icon never shows up.
 - *What is likely wrong:* One of Wheelhouse's background processes failed during startup -- most often because a speech model is missing or an earlier install was interrupted.
-- *What to try:* Re-run the one-line install command -- always safe, repairs a broken install, and keeps your settings and personal data. If it still will not start, restart the computer and try once more before reaching out for help.
+- *What to try:* Re-run the installer -- always safe, repairs a broken install, and keeps your settings and personal data. If it still will not start, restart the computer and try once more before reaching out for help.
 
 **Speech engine not connecting**
 
