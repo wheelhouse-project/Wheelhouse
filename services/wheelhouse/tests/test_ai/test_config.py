@@ -83,12 +83,9 @@ class TestAIConfigParsing:
         assert "timeout_s" in server
         assert "kind" in server
 
-    def test_ai_server_has_no_api_key_slot(self, config_data):
-        # wh-tracked-config-apikey-hygiene: the key comes from the
-        # WHEELHOUSE_AI_API_KEY environment variable; a config slot invites
-        # storing a secret in a git-tracked file (and drifted from the
-        # shipped sanitized config, failing public CI).
-        assert "api_key" not in config_data["ai"]["server"]
+    # The no-api_key-slot guarantee is pinned on config.toml.example in
+    # TestAIConfigExampleTemplate below. The live config.toml is a
+    # per-machine user artifact, so it is not asserted here.
 
     # --- retained help keys ---
 
@@ -96,7 +93,11 @@ class TestAIConfigParsing:
         assert config_data["ai"]["help"]["max_response_tokens"] == 800
 
     def test_ai_help_gem_url(self, config_data):
-        assert config_data["ai"]["help"]["gem_url"] == ""
+        # The live config.toml is a per-machine user artifact: empty (help
+        # online disabled) and any custom URL are both valid, so this test
+        # checks shape only. The shipped default is pinned against
+        # config.toml.example in TestAIConfigExampleTemplate below.
+        assert isinstance(config_data["ai"]["help"]["gem_url"], str)
 
 
 class TestAIConfigExampleTemplate:
@@ -128,6 +129,14 @@ class TestAIConfigExampleTemplate:
             assert key not in example_text, (
                 f"dead template key {key} must be removed (gemini_client.py deleted)"
             )
+
+    def test_gem_url_defaults_to_official_assistant(self, example_data):
+        # Shipped default: "wheelhouse help online" opens the official
+        # Wheelhouse Assistant GPT. Public CI copies config.toml.example to
+        # config.toml before testing, so this pins what new installs get.
+        assert example_data["ai"]["help"]["gem_url"] == (
+            "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
+        )
 
 
 class TestAIConfigViaMockService:
