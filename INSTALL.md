@@ -51,7 +51,7 @@ The wizard shows its progress step by step; the PowerShell installer reports the
 
 ### What failure looks like
 
-Every failure message the installer prints is designed to be understandable and safe to share. The common ones:
+Every failure message the installer prints is written to be understandable and is safe to share. The common ones:
 
 - **"Wheelhouse appears to be running"** (during an update): the installer refuses to replace an app that is running. Exit Wheelhouse first (right-click the tray icon, choose Exit), then run the installer again. If it says it could not even check, restart the computer and try again.
 - **"This computer has N GB of memory"**: your machine is below the 8 GB minimum. This check stops the install for every speech engine, including the cloud one, so adding memory is the only fix.
@@ -125,7 +125,7 @@ The trade-off is one Windows rule you will occasionally run into. Windows does n
 
 - To dictate into administrator programs, start Wheelhouse itself as administrator: close it, right-click its Start menu entry, and choose "Run as administrator".
 - Use your physical keyboard and mouse for the administrator window or the UAC prompt, then go back to voice for everything else.
-- If the program does not actually need administrator rights, start it the normal way (without "Run as administrator"). Wheelhouse can then type into it like any other program. Some tools genuinely require administrator rights and will not run unelevated -- for those, use the two options above.
+- If the program does not actually need administrator rights, start it the normal way (without "Run as administrator"). Wheelhouse can then type into it like any other program. Some tools require administrator rights and will not run unelevated -- for those, use the two options above.
 
 No Wheelhouse setting lifts this limit -- Windows enforces it, and the UAC screen stays protected no matter what.
 
@@ -178,7 +178,7 @@ The same re-run is the repair path when the speech model is missing or incomplet
 
 **Installer failures**
 
-The installer's failure messages -- low memory, low disk space, a blocked uv download, an integrity-check failure, an interrupted download, a failed services setup, an incomplete speech model, or Wheelhouse still running during an update -- are explained in the "What failure looks like" part of the Getting Started section, along with what to do about each. The short version: re-running the installer is always safe, downloads resume where they left off, and every message is safe to paste into a help request.
+The installer's failure messages are explained in the "What failure looks like" part of the Getting Started section, along with what to do about each. The short version: re-running the installer is always safe, downloads resume where they left off, and every message is safe to paste into a help request.
 
 ---
 

@@ -397,6 +397,32 @@ def pattern_kind(pattern):
     return "replacement"
 
 
+def describe_actions(raw_actions):
+    """Return the plain-English "what happens" text for a list of actions.
+
+    This is the action side of :func:`explain_pattern`, exposed on its own so
+    a caller that already knows the trigger -- the helpdoc command generator --
+    can derive a command's description from its actions instead of
+    hand-authoring every one. A single action becomes one sentence; several
+    become a numbered list, exactly as ``explain_pattern`` renders them. Never
+    raises: non-list input and non-dict steps degrade the same way
+    ``explain_pattern`` handles them.
+    """
+    steps = (
+        [a for a in raw_actions if isinstance(a, dict)]
+        if isinstance(raw_actions, list)
+        else []
+    )
+    if not steps:
+        return "This pattern has no action steps."
+    described = [_describe_step(a) for a in steps]
+    if len(described) == 1:
+        return described[0]
+    return "\n".join(
+        f"{index}. {sentence}" for index, sentence in enumerate(described, 1)
+    )
+
+
 def explain_pattern(pattern, hotword):
     """Return a deterministic plain-English description of ``pattern``.
 

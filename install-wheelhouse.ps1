@@ -89,7 +89,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.4"
+$AppVersion = "1.0.5"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 

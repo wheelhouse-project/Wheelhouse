@@ -4,7 +4,7 @@
 
 [provider]
 name = "distil_medium_en"
-display_name = "Distil Medium (GPU)"
+display_name = "Distil-Whisper Medium (GPU)"
 launcher = "launcher.py"
 enabled = true
 

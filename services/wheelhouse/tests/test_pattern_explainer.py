@@ -517,3 +517,52 @@ print("IMPORT_OK")
         )
         assert result.returncode == 0, result.stderr[-3000:]
         assert "IMPORT_OK" in result.stdout
+
+
+class TestDescribeActions:
+    """describe_actions() renders just the 'what happens' side of a pattern.
+
+    The helpdoc command generator reuses this to derive a command's
+    description from its actions instead of hand-authoring every one.
+    """
+
+    def test_single_action_is_one_sentence(self):
+        from speech.pattern_explainer import describe_actions
+
+        out = describe_actions([{"function": "hk", "params": ["ctrl", "s"]}])
+        assert out == "Press a hotkey (ctrl, s)."
+
+    def test_multiple_actions_are_a_numbered_list(self):
+        from speech.pattern_explainer import describe_actions
+
+        out = describe_actions(
+            [
+                {"function": "hk", "params": ["home"]},
+                {"function": "hk", "params": ["shift", "end"]},
+            ]
+        )
+        assert out == (
+            "1. Press a hotkey (home).\n2. Press a hotkey (shift, end)."
+        )
+
+    def test_empty_actions_reports_no_steps(self):
+        from speech.pattern_explainer import describe_actions
+
+        assert describe_actions([]) == "This pattern has no action steps."
+
+    def test_text_replacement_reads_as_types_instead(self):
+        from speech.pattern_explainer import describe_actions
+
+        out = describe_actions([{"function": "text", "params": [","]}])
+        assert out == "Types ',' instead of the matched words."
+
+    def test_non_list_input_never_crashes(self):
+        from speech.pattern_explainer import describe_actions
+
+        assert describe_actions(None) == "This pattern has no action steps."
+
+    def test_non_dict_steps_are_skipped(self):
+        from speech.pattern_explainer import describe_actions
+
+        out = describe_actions([{"function": "hk", "params": ["esc"]}, "garbage"])
+        assert out == "Press a hotkey (esc)."

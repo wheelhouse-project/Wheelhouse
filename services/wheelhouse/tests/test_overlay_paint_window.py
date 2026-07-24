@@ -951,26 +951,87 @@ class TestBadgeSharpnessAndSize:
             "of opaque pixels) -- the outline pen is too heavy for the glyph"
         )
 
-    def test_working_badge_default_logical_size_is_legible(self, overlay_mgr):
-        """The working hourglass default size is large enough to read. The
-        first live check at 36 looked like a shrunken blob. The size is now in
-        LOGICAL px (scaled by the monitor dpr at paint time)."""
+    def test_working_badge_default_logical_size_is_halved_from_64(self, overlay_mgr):
+        """The working hourglass default size was halved from 64 to 32
+        logical px at the user's request. The outline width was retuned in
+        the same change (test_working_glyph_not_swallowed_by_outline) so this
+        smaller size does not reproduce the "36 read as a shrunken blob"
+        finding from wh-dictation-retraction-indicator.11 -- that finding
+        used the same fixed 3px outline this change replaces."""
         _mgr, mod, _ = overlay_mgr
-        assert mod.WORKING_BADGE_LOGICAL_PX >= 56
+        assert mod.WORKING_BADGE_LOGICAL_PX == 32
+
+    def test_working_badge_width_is_about_30_percent_less_than_height(
+        self, overlay_mgr
+    ):
+        """A live check of the halved 32x32 box found it too wide even though
+        the 32px vertical size read fine, so the width was narrowed to ~70%
+        of the height (user request: 'make the horizontal size about 30%
+        less') instead of matching it."""
+        _mgr, mod, _ = overlay_mgr
+        ratio = mod.WORKING_BADGE_WIDTH_LOGICAL_PX / mod.WORKING_BADGE_LOGICAL_PX
+        assert 0.65 <= ratio <= 0.75, (
+            f"width/height ratio {ratio:.2f} is not ~30% narrower than tall"
+        )
+
+    def test_working_glyph_not_swallowed_by_outline(self, overlay_mgr):
+        """The hourglass must render as a legible white shape at the default
+        size, not a near-solid black blob.
+
+        Mirrors test_numeral_not_swallowed_by_outline: the outline is stroked
+        centered on the glyph path edge, so a pen too wide for the shape's
+        stroke thickness eats the white fill. WORKING_BADGE_LOGICAL_PX was
+        halved (64 -> 32); the old fixed 3px outline at 32 is proportionally
+        heavier than the 3px outline already found to read as a blob at 36
+        (wh-dictation-retraction-indicator.11), so this asserts the retuned
+        outline (_HOURGLASS_OUTLINE_PX) keeps the shape legible at the actual
+        shipped box (WORKING_BADGE_WIDTH_LOGICAL_PX x WORKING_BADGE_LOGICAL_PX,
+        narrower than tall).
+        """
+        mgr, mod, _ = overlay_mgr
+        width = mod.WORKING_BADGE_WIDTH_LOGICAL_PX
+        height = mod.WORKING_BADGE_LOGICAL_PX
+        img = mgr._render_working_glyph(width, height)
+
+        opaque = white = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                px = img.pixel(x, y)
+                if ((px >> 24) & 0xFF) < 128:
+                    continue
+                opaque += 1
+                if (
+                    ((px >> 16) & 0xFF) > 200
+                    and ((px >> 8) & 0xFF) > 200
+                    and (px & 0xFF) > 200
+                ):
+                    white += 1
+        ratio = (white / opaque) if opaque else 0.0
+        assert opaque > 0, "hourglass drew nothing"
+        assert ratio >= 0.10, (
+            f"hourglass collapsed to a near-solid blob (white fill {ratio:.2f} "
+            "of opaque pixels) -- the outline pen is too heavy for the shape"
+        )
 
     def test_working_glyph_draws_shape_not_box_at_default_size(self, overlay_mgr):
-        """At the default size the glyph is a recognizable hourglass: the four
-        corners are transparent (not a filled box) and the vertical center line
-        (the waist) has opaque pixels."""
+        """At the default (narrower-than-tall) box the glyph is a recognizable
+        hourglass: the four corners are transparent (not a filled box) and the
+        vertical center line (the waist) has opaque pixels."""
         mgr, mod, _ = overlay_mgr
-        size = mod.WORKING_BADGE_LOGICAL_PX
-        img = mgr._render_working_glyph(size, size)
-        assert img.width() == size and img.height() == size
-        for cx, cy in [(0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1)]:
+        width = mod.WORKING_BADGE_WIDTH_LOGICAL_PX
+        height = mod.WORKING_BADGE_LOGICAL_PX
+        img = mgr._render_working_glyph(width, height)
+        assert img.width() == width and img.height() == height
+        for cx, cy in [
+            (0, 0),
+            (width - 1, 0),
+            (0, height - 1),
+            (width - 1, height - 1),
+        ]:
             assert ((img.pixel(cx, cy) >> 24) & 0xFF) == 0, "corner not transparent"
-        midx = size // 2
+        midx = width // 2
         waist_opaque = any(
-            (img.pixel(midx, y) >> 24) & 0xFF for y in range(size)
+            (img.pixel(midx, y) >> 24) & 0xFF for y in range(height)
         )
         assert waist_opaque, "expected opaque pixels along the glyph waist"
 
@@ -3019,8 +3080,9 @@ class TestWorkingBadge:
         # Exactly one item, its bounds centered on (500, 400).
         assert resolve_mock.call_count == 1
         bounds = resolve_mock.call_args.args[0]
-        half = mod.WORKING_BADGE_LOGICAL_PX // 2
-        assert bounds == (500 - half, 400 - half, 500 + half, 400 + half)
+        half_w = mod.WORKING_BADGE_WIDTH_LOGICAL_PX // 2
+        half_h = mod.WORKING_BADGE_LOGICAL_PX // 2
+        assert bounds == (500 - half_w, 400 - half_h, 500 + half_w, 400 + half_h)
         # The badge carries the working sentinel (renders the glyph).
         assert [n for _, n in captured["badges"]] == [mod.WORKING_BADGE_NUMBER]
         assert result["state"] == "painted"
@@ -3031,18 +3093,19 @@ class TestWorkingBadge:
         """A working-badge center point off EVERY monitor must paint nothing,
         even when the center sits within half a badge of a monitor edge.
 
-        The badge box is ``WORKING_BADGE_LOGICAL_PX * dpr`` wide centered on
-        the point, so a center just past a monitor edge (e.g. x=-10) builds a
-        box that still OVERLAPS that monitor. The real resolver returns a
-        valid rect for an overlapping box, so the old code painted a CLIPPED
-        working glyph and reported a painted monitor for an off-screen / stale
-        point (wh-overlay-4bug-review-r2.1). paint_working_badge must detect
-        that the center is on no monitor and emit the normal no-monitor
-        'painted' event instead of constructing a badge box.
+        The badge box is ``WORKING_BADGE_WIDTH_LOGICAL_PX * dpr`` wide
+        centered on the point, so a center just past a monitor edge (e.g.
+        x=-10) builds a box that still OVERLAPS that monitor. The real
+        resolver returns a valid rect for an overlapping box, so the old code
+        painted a CLIPPED working glyph and reported a painted monitor for an
+        off-screen / stale point (wh-overlay-4bug-review-r2.1).
+        paint_working_badge must detect that the center is on no monitor and
+        emit the normal no-monitor 'painted' event instead of constructing a
+        badge box.
 
         Uses the REAL resolver (not a mock) so the overlap is genuine: with a
-        64-logical badge at dpr 1.0 the box spans x=-42..22, overlapping the
-        monitor's x=0..22.
+        22-logical-px-wide badge at dpr 1.0 the box spans x=-21..1, overlapping
+        the monitor's x=0..1.
         """
         mgr, mod, _ = overlay_mgr
         mon = _NativeMonitor(
@@ -3095,8 +3158,9 @@ class TestWorkingBadge:
         the perceived size is constant across mixed-DPI monitors instead of
         shrinking on hi-DPI (wh-dictation-retraction-indicator.11).
 
-        On a 200% monitor (dpr 2.0) a 64-logical-px badge must build a
-        128-physical-px box centered on the point, NOT a constant 64 physical.
+        On a 200% monitor (dpr 2.0) a WORKING_BADGE_LOGICAL_PX-logical-px badge
+        must build a box TWICE that size in physical px centered on the
+        point, NOT a constant physical size.
         """
         mgr, mod, _ = overlay_mgr
         mon = _NativeMonitor(
@@ -3118,9 +3182,12 @@ class TestWorkingBadge:
             mgr.paint_working_badge(
                 1000, 800, overlay_session_id=1, paint_generation=0
             )
-        # Physical box is logical(64) * dpr(2) = 128 px, centered on the point.
+        # Physical box is logical(WORKING_BADGE_WIDTH_LOGICAL_PX,
+        # WORKING_BADGE_LOGICAL_PX) * dpr(2), centered on the point.
+        half_w = mod.WORKING_BADGE_WIDTH_LOGICAL_PX
+        half_h = mod.WORKING_BADGE_LOGICAL_PX
         bounds = resolve_mock.call_args.args[0]
-        assert bounds == (1000 - 64, 800 - 64, 1000 + 64, 800 + 64)
+        assert bounds == (1000 - half_w, 800 - half_h, 1000 + half_w, 800 + half_h)
 
     def test_working_glyph_strokes_scale_with_dpr(self, overlay_mgr):
         """The working glyph's outline and shadow scale with the device pixel

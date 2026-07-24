@@ -198,6 +198,13 @@ _OUTLINE_PX = 3
 # tolerates 3px; a 16pt numeral does not. 1.25 leaves the digit clearly white
 # with a thin border at every scale (wh-dictation-retraction-indicator.11).
 _NUMERAL_OUTLINE_PX = 1.25
+# Outline pen width dedicated to the working/busy hourglass, in logical
+# pixels. WORKING_BADGE_LOGICAL_PX was halved (64 -> 32); a live check
+# already found this same 3px outline unreadable on a hourglass that small
+# (36 logical px read as a shrunken blob -- wh-dictation-retraction-
+# indicator.11), so the outline is scaled down by the same ratio (3/64) to
+# preserve the outline-to-shape proportion that read cleanly at 64.
+_HOURGLASS_OUTLINE_PX = 1.5
 _SHADOW_OFFSET_PX = 2
 # Transparent breathing room (in LOGICAL pixels) added around the badge
 # bounding box on every side when sizing the per-monitor paint surface, so
@@ -269,15 +276,26 @@ _DEFAULT_BADGE_TRAILING_SPACE = True
 # badge render to the working glyph instead of a numeral. -1 can never collide
 # with a real 1-based overlay number.
 WORKING_BADGE_NUMBER = -1
-# Perceived on-screen size of the working badge, in LOGICAL (device-
-# independent) pixels. paint_working_badge multiplies this by the target
-# monitor's device pixel ratio to build the physical box centered on the
-# point, so the badge keeps the SAME perceived size across mixed-DPI monitors
-# instead of shrinking on hi-DPI displays. On a 200% monitor it is rendered at
-# 128 physical px, which looks the same size as 64 px at 100%. The first live
-# check at 36 read as a shrunken blob, so the default is larger
+# Perceived on-screen HEIGHT (vertical extent) of the working badge, in
+# LOGICAL (device-independent) pixels. paint_working_badge multiplies this by
+# the target monitor's device pixel ratio to build the physical box centered
+# on the point, so the badge keeps the SAME perceived size across mixed-DPI
+# monitors instead of shrinking on hi-DPI displays. On a 200% monitor it is
+# rendered at 64 physical px, which looks the same size as 32 px at 100%.
+# Halved from the original 64 at the user's request; _HOURGLASS_OUTLINE_PX
+# was retuned in the same change so the outline does not swallow the smaller
+# shape the way the original 3px outline did at 36
 # (wh-dictation-retraction-indicator.11).
-WORKING_BADGE_LOGICAL_PX = 64
+WORKING_BADGE_LOGICAL_PX = 32
+# Perceived on-screen WIDTH (horizontal extent), in the same LOGICAL px unit.
+# A live check of the halved 32x32 box found it too wide even though the 32px
+# vertical size read fine, so width is narrowed to ~70% of the height
+# (32 * 0.7 = 22.4, rounded to 22) instead of matching it. Independent from
+# WORKING_BADGE_LOGICAL_PX so the vertical size can stay unchanged.
+# _render_working_glyph insets and sizes the top/bottom cap bars from the
+# HEIGHT only and the left/right span from the WIDTH only, so narrowing the
+# width alone does not change the vertical proportions.
+WORKING_BADGE_WIDTH_LOGICAL_PX = 22
 
 
 @dataclass(frozen=True)
@@ -869,8 +887,8 @@ class OverlayPaintWindowManager:
                 painter.fillPath(shadow, _SHADOW_COLOR)
 
             # Outline stroke under the white fill. Use the thin numeral pen,
-            # NOT the hourglass _OUTLINE_PX -- a heavy pen swallows the glyph
-            # (wh-dictation-retraction-indicator.11).
+            # NOT the hourglass's own outline pen -- a heavy pen swallows the
+            # glyph (wh-dictation-retraction-indicator.11).
             outline_pen = QPen(_OUTLINE_COLOR)
             outline_pen.setWidthF(_NUMERAL_OUTLINE_PX * dpr)
             outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -887,8 +905,9 @@ class OverlayPaintWindowManager:
         """Render the working/busy glyph (a static hourglass) as a
         premultiplied ARGB32 ``QImage`` sized ``width`` x ``height`` (physical
         pixels: ``_render_monitor_surface`` passes ``logical * dpr``, and the
-        working badge box is ``WORKING_BADGE_LOGICAL_PX * dpr`` physical px, so
-        the perceived size is constant across mixed-DPI monitors).
+        working badge box is ``WORKING_BADGE_WIDTH_LOGICAL_PX * dpr`` by
+        ``WORKING_BADGE_LOGICAL_PX * dpr`` physical px, so the perceived size
+        is constant across mixed-DPI monitors).
 
         Same visual treatment as the numeral badge -- white fill, black
         outline, optional drop shadow, transparent background (no box) -- but
@@ -900,11 +919,18 @@ class OverlayPaintWindowManager:
 
         ``dpr`` is the monitor's scaling factor. The hourglass GEOMETRY (insets,
         cap bars, funnels) is proportional to ``width``/``height`` and already
-        scales with the physical image size, but the outline pen width and the
-        shadow offset are absolute, so they are multiplied by ``dpr`` -- exactly
-        as the numeral path does -- to keep the perceived stroke thickness
-        constant at every scale (wh-glm52-proving-round.1). At ``dpr == 1.0`` the
-        render is unchanged.
+        scales with the physical image size, but the outline pen width
+        (``_HOURGLASS_OUTLINE_PX``) and the shadow offset are absolute, so they
+        are multiplied by ``dpr`` -- exactly as the numeral path does -- to keep
+        the perceived stroke thickness constant at every scale
+        (wh-glm52-proving-round.1). At ``dpr == 1.0`` the render is unchanged.
+
+        ``width`` and ``height`` are inset INDEPENDENTLY (horizontal inset
+        derived from ``width`` only, vertical inset from ``height`` only), so
+        a narrower box (``WORKING_BADGE_WIDTH_LOGICAL_PX`` <
+        ``WORKING_BADGE_LOGICAL_PX``) only compresses the shape horizontally;
+        the vertical cap-bar/funnel proportions are unaffected by the box's
+        width.
         """
         w = max(1, int(width))
         h = max(1, int(height))
@@ -913,12 +939,14 @@ class OverlayPaintWindowManager:
 
         # Inset on every side so the outline/shadow are never clipped at the
         # image edge (and a corner pixel stays transparent -- this is a shape,
-        # not a filled box).
-        inset = max(2.0, min(w, h) * 0.18)
-        left = inset
-        right = w - inset
-        top = inset
-        bottom = h - inset
+        # not a filled box). Horizontal and vertical insets are computed from
+        # their own dimension so width and height can be tuned independently.
+        inset_x = max(2.0, w * 0.18)
+        inset_y = max(2.0, h * 0.18)
+        left = inset_x
+        right = w - inset_x
+        top = inset_y
+        bottom = h - inset_y
         cx = w / 2.0
         cy = h / 2.0
         # End-cap bar thickness; what turns a bare bowtie into an hourglass.
@@ -950,7 +978,7 @@ class OverlayPaintWindowManager:
                 painter.fillPath(shadow, _SHADOW_COLOR)
 
             outline_pen = QPen(_OUTLINE_COLOR)
-            outline_pen.setWidthF(_OUTLINE_PX * dpr)
+            outline_pen.setWidthF(_HOURGLASS_OUTLINE_PX * dpr)
             outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(outline_pen)
             painter.setBrush(_NUMERAL_COLOR)
@@ -1043,8 +1071,9 @@ class OverlayPaintWindowManager:
         PHYSICAL point ``(center_x, center_y)``.
 
         Reuses the entire numbered-overlay paint pipeline: it builds a
-        one-item synthetic summary whose bounds are a
-        ``WORKING_BADGE_LOGICAL_PX``-perceived box centered on the point and
+        one-item synthetic summary whose bounds are a box
+        ``WORKING_BADGE_WIDTH_LOGICAL_PX`` wide by ``WORKING_BADGE_LOGICAL_PX``
+        tall (perceived, before the dpr scaling below) centered on the point,
         whose display number is the ``WORKING_BADGE_NUMBER`` sentinel (so
         ``_render_badge`` draws the working glyph, not a numeral), then delegates
         to ``paint``. The resolver places the box on whichever monitor the
@@ -1053,7 +1082,8 @@ class OverlayPaintWindowManager:
         contains the point, delegates an EMPTY summary to ``paint`` (which
         returns a ``painted`` event with no monitors). It must do this itself
         rather than relying on the resolver to drop the badge -- the box is
-        ``WORKING_BADGE_LOGICAL_PX * dpr`` wide and centered on the point, so a
+        ``WORKING_BADGE_WIDTH_LOGICAL_PX * dpr`` by
+        ``WORKING_BADGE_LOGICAL_PX * dpr`` and centered on the point, so a
         point just past a monitor edge still OVERLAPS that monitor, and the
         resolver paints an overlapping box (clipped at the edge). Building the
         box for an off-monitor point would therefore paint a clipped glyph and
@@ -1061,16 +1091,17 @@ class OverlayPaintWindowManager:
         (wh-overlay-4bug-review-r2.1).
 
         The box is sized in LOGICAL pixels: the physical box is
+        ``WORKING_BADGE_WIDTH_LOGICAL_PX * dpr`` by
         ``WORKING_BADGE_LOGICAL_PX * dpr`` where ``dpr`` is the device pixel
         ratio of the monitor the point lands on. The resolver divides the
         physical box back by that monitor's ``dpr`` and
         ``_render_monitor_surface`` multiplies by ``dpr`` again, so the glyph is
-        rendered at ``WORKING_BADGE_LOGICAL_PX * dpr`` physical px -- a CONSTANT
-        PERCEIVED size on every monitor (a fixed physical box would instead
-        shrink on hi-DPI; wh-dictation-retraction-indicator.11). The monitor
-        topology is enumerated here once to find the monitor under the point
-        and read its ``dpr`` (``paint`` enumerates again for the actual
-        placement); a point on NO monitor paints nothing (see above).
+        rendered at that same physical size -- a CONSTANT PERCEIVED size on
+        every monitor (a fixed physical box would instead shrink on hi-DPI;
+        wh-dictation-retraction-indicator.11). The monitor topology is
+        enumerated here once to find the monitor under the point and read its
+        ``dpr`` (``paint`` enumerates again for the actual placement); a point
+        on NO monitor paints nothing (see above).
 
         Bounds use the ``(x, y, width, height)`` convention that
         ``WalkSnapshotSummaryItem.bounds`` documents and that the rest of the
@@ -1107,13 +1138,15 @@ class OverlayPaintWindowManager:
                 overlay_session_id,
                 paint_generation,
             )
-        size_phys = max(1, int(round(WORKING_BADGE_LOGICAL_PX * dpr)))
-        half = size_phys // 2
+        height_phys = max(1, int(round(WORKING_BADGE_LOGICAL_PX * dpr)))
+        width_phys = max(1, int(round(WORKING_BADGE_WIDTH_LOGICAL_PX * dpr)))
+        half_w = width_phys // 2
+        half_h = height_phys // 2
         bounds = (
-            center_x - half,
-            center_y - half,
-            size_phys,
-            size_phys,
+            center_x - half_w,
+            center_y - half_h,
+            width_phys,
+            height_phys,
         )
         summary = _PointBadgeSummary(
             items=[

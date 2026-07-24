@@ -54,6 +54,7 @@ COMMAND_HOTWORD = "x-ray"
 # "literal submit" inserts the word "submit" as text instead of firing Enter.
 [[pattern]]
 pattern = '''literal (.+)$'''
+doc_id = "literal-bypass"
 actions = [
     { function = "insert_text", params = ["g1"] }
 ]
@@ -71,6 +72,7 @@ actions = [
 # Enter without inserting anything.
 [[pattern]]
 pattern = '''submit'''
+doc_id = "submit-enter"
 position = "trailing"
 actions = [
     { function = "press_keys", params = ["enter"] }
@@ -82,18 +84,21 @@ actions = [
 
 [[pattern]]
 pattern = '''^zoom in$'''
+doc_id = "zoom-in"
 actions = [
     { function = "hk", params = ["ctrl", "+"] }
 ]
 
 [[pattern]]
 pattern = '''^zoom out$'''
+doc_id = "zoom-out"
 actions = [
     { function = "hk", params = ["ctrl", "-"] }
 ]
 
 [[pattern]]
 pattern = '''^save$'''
+doc_id = "save"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "s"] }
@@ -101,18 +106,21 @@ actions = [
 
 [[pattern]]
 pattern = '''^create tab$'''
+doc_id = "create-tab"
 actions = [
     { function = "hk", params = ["ctrl", "n"] }
 ]
 
 [[pattern]]
 pattern = '''^create window$'''
+doc_id = "create-window"
 actions = [
     { function = "hk", params = ["shift", "ctrl", "n"] }
 ]
 
 [[pattern]]
 pattern = '''^close window$'''
+doc_id = "close-window"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["alt", "f4"] }
@@ -120,6 +128,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^desktop$'''
+doc_id = "show-desktop"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["win", "d"] }
@@ -127,6 +136,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^maximize$'''
+doc_id = "maximize-window"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["win", "up"] }
@@ -134,6 +144,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^minimize$'''
+doc_id = "minimize-window"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["win", "down"] }
@@ -141,6 +152,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^Windows? settings$'''
+doc_id = "windows-settings"
 actions = [
     { function = "run", params = ["explorer.exe ms-settings:"] }
 ]
@@ -151,6 +163,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^activates? (.+)$'''
+doc_id = "activate-app"
 requires_hotword = true
 actions = [
     { function = "activate", params = ["g1"] }
@@ -161,6 +174,7 @@ actions = [
 # the command is spoken, falling back to msedge.exe if the lookup fails.
 [[pattern]]
 pattern = '''^browser$'''
+doc_id = "activate-browser"
 requires_hotword = true
 actions = [
     { function = "activate", params = ["default_browser"] }
@@ -168,6 +182,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^notepad$'''
+doc_id = "activate-notepad"
 requires_hotword = true
 actions = [
     { function = "activate", params = ["notepad.exe"] }
@@ -181,6 +196,7 @@ actions = [
 # Must begin utterance (^ anchor) to trigger command buffering
 [[pattern]]
 pattern = '''^item (\d+)$'''
+doc_id = "item-number"
 actions = [
     { function = "number_point", params = ["g1"] }
 ]
@@ -188,6 +204,7 @@ actions = [
 # delete word must come BEFORE delete N to avoid "word" being captured as invalid number
 [[pattern]]
 pattern = '''^delete word$'''
+doc_id = "delete-word"
 actions = [
     { function = "hk", params = ["ctrl", "left"], awaits_done = true },
     { function = "hk", params = ["shift", "ctrl", "right"], awaits_done = true },
@@ -196,24 +213,28 @@ actions = [
 
 [[pattern]]
 pattern = '''^delete\s*(\d+)?$'''
+doc_id = "delete"
 actions = [
     { function = "press", params = ["del", "g1"] }
 ]
 
 [[pattern]]
 pattern = '''^back ?space\s*(\d+)?$'''
+doc_id = "backspace"
 actions = [
     { function = "press", params = ["backspace", "g1"] }
 ]
 
 [[pattern]]
 pattern = '''^(tab|indent)\s+(\d+)$'''
+doc_id = "tab-indent"
 actions = [
     { function = "press", params = ["tab", "g2"] }
 ]
 
 [[pattern]]
 pattern = '''^(shift tab|outdent)$'''
+doc_id = "shift-tab-outdent"
 actions = [
     { function = "hk", params = ["shift", "tab"] }
 ]
@@ -223,6 +244,7 @@ actions = [
 # Key order doesn't matter: "press delete control" = "press control delete"
 [[pattern]]
 pattern = '''^press\s*(.+)$'''
+doc_id = "press-keys"
 actions = [
     { function = "press_keys", params = ["g1"] }
 ]
@@ -243,6 +265,7 @@ actions = [
 # the no-awaits_done choice exposed is no longer a concern.
 [[pattern]]
 pattern = '''^insert\s*(.+)$'''
+doc_id = "insert-raw"
 actions = [
     { function = "insert_raw", params = ["g1"] }
 ]
@@ -254,18 +277,21 @@ actions = [
 
 [[pattern]]
 pattern = '''^escape$'''
+doc_id = "escape"
 actions = [
     { function = "press", params = ["esc"] }
 ]
 
 [[pattern]]
 pattern = '''\bnew ?line\b'''
+doc_id = "new-line"
 actions = [
     { function = "hk", params = ["shift", "enter"] }
 ]
 
 [[pattern]]
 pattern = '''\bnew ?paragraph\b'''
+doc_id = "new-paragraph"
 actions = [
     { function = "hk", params = ["shift", "enter", 2] }
 ]
@@ -277,30 +303,35 @@ actions = [
 
 [[pattern]]
 pattern = '''^undo\s*(\d+)?$'''
+doc_id = "undo"
 actions = [
     { function = "hk", params = ["ctrl", "z", "g1"] }
 ]
 
 [[pattern]]
 pattern = '''^undue\s*(\d+)?$'''
+doc_id = "undo-alias-undue"
 actions = [
     { function = "hk", params = ["ctrl", "z", "g1"] }
 ]
 
 [[pattern]]
 pattern = '''^undu\s*(\d+)?$'''
+doc_id = "undo-alias-undu"
 actions = [
     { function = "hk", params = ["ctrl", "z", "g1"] }
 ]
 
 [[pattern]]
 pattern = '''^redo\s*(\d+)?$'''
+doc_id = "redo"
 actions = [
     { function = "hk", params = ["ctrl", "y", "g1"] }
 ] 
 
 [[pattern]]
 pattern = '''^redu\s*(\d+)?$'''
+doc_id = "redo-alias-redu"
 actions = [
     { function = "hk", params = ["ctrl", "y", "g1"] }
 ]
@@ -312,6 +343,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^copy all$'''
+doc_id = "copy-all"
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
     { function = "hk", params = ["ctrl", "a"], awaits_done = true },
@@ -320,6 +352,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^copy line$'''
+doc_id = "copy-line"
 requires_hotword = false
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
@@ -331,12 +364,14 @@ actions = [
 
 [[pattern]]
 pattern = '''^copy screen$'''
+doc_id = "copy-screen"
 actions = [
     { function = "hk", params = ["win", "shift", "s"] }
 ]
 
 [[pattern]]
 pattern = '''^copy$'''
+doc_id = "copy"
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
     { function = "hk", params = ["ctrl", "c"], awaits_done = true }
@@ -344,6 +379,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^cut$'''
+doc_id = "cut"
 requires_hotword = true
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
@@ -352,12 +388,14 @@ actions = [
 
 [[pattern]]
 pattern = '''^paste$'''
+doc_id = "paste"
 actions = [
     { function = "hk", params = ["ctrl", "v"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^replace all$'''
+doc_id = "replace-all"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "a"], awaits_done = true },
@@ -370,12 +408,14 @@ actions = [
 
 [[pattern]]
 pattern = '''^select all$'''
+doc_id = "select-all"
 actions = [
     { function = "hk", params = ["ctrl", "a"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^select word$'''
+doc_id = "select-word"
 actions = [
     { function = "hk", params = ["ctrl", "left"], awaits_done = true },
     { function = "hk", params = ["shift", "ctrl", "right"], awaits_done = true }
@@ -383,6 +423,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^select line$'''
+doc_id = "select-line"
 actions = [
     { function = "hk", params = ["home"], awaits_done = true },
     { function = "hk", params = ["shift", "end"], awaits_done = true }
@@ -390,6 +431,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^select paragraph$'''
+doc_id = "select-paragraph"
 actions = [
     { function = "hk", params = ["ctrl", "down"], awaits_done = true },
     { function = "hk", params = ["ctrl", "up"], awaits_done = true },
@@ -405,6 +447,7 @@ actions = [
 # Invalid input falls through to dictation (inserted as text)
 [[pattern]]
 pattern = '''^go (.+)'''
+doc_id = "cursor-navigate"
 actions = [{ function = "cursor_navigate", params = ["go g1"] }]
 
 
@@ -414,6 +457,7 @@ actions = [{ function = "cursor_navigate", params = ["go g1"] }]
 
 [[pattern]]
 pattern = '''^find\s*(.*)$'''
+doc_id = "find"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "f"], awaits_done = true },
@@ -422,6 +466,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^replace$'''
+doc_id = "replace"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "h"] }
@@ -429,6 +474,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^search$'''
+doc_id = "search-selection"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "c"], awaits_done = true },
@@ -442,6 +488,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^bold text$'''
+doc_id = "bold"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "b"] }
@@ -449,6 +496,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^italics$'''
+doc_id = "italics"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "i"] }
@@ -456,6 +504,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^underline$'''
+doc_id = "underline"
 requires_hotword = true
 actions = [
     { function = "hk", params = ["ctrl", "u"] }
@@ -469,54 +518,63 @@ actions = [
 
 [[pattern]]
 pattern = '''^upper ?case$'''
+doc_id = "uppercase"
 actions = [
     { function = "transform_selection", params = ["uppercase"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^lower ?case$'''
+doc_id = "lowercase"
 actions = [
     { function = "transform_selection", params = ["lowercase"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^capitalize$'''
+doc_id = "capitalize"
 actions = [
     { function = "transform_selection", params = ["capitalize"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^title case$'''
+doc_id = "title-case"
 actions = [
     { function = "transform_selection", params = ["title_case"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^snake case$'''
+doc_id = "snake-case"
 actions = [
     { function = "transform_selection", params = ["snake_case"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^camel case$'''
+doc_id = "camel-case"
 actions = [
     { function = "transform_selection", params = ["camel_case"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^pascal case$'''
+doc_id = "pascal-case"
 actions = [
     { function = "transform_selection", params = ["pascal_case"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^kebab case$'''
+doc_id = "kebab-case"
 actions = [
     { function = "transform_selection", params = ["kebab_case"], awaits_done = true }
 ]
 
 [[pattern]]
 pattern = '''^compress$'''
+doc_id = "compress"
 actions = [
     { function = "transform_selection", params = ["compress"], awaits_done = true }
 ]
@@ -525,6 +583,7 @@ actions = [
 # Select text, speak "x-ray boost", and the text will be added to the STT server's hints
 [[pattern]]
 pattern = '''^boost$'''
+doc_id = "boost"
 requires_hotword = true
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
@@ -538,12 +597,14 @@ actions = [
 
 [[pattern]]
 pattern = '''^fix'''
+doc_id = "fix-text"
 requires_hotword = true
 actions = [
     { function = "fix_text_ai" }
 ]
 [[pattern]]
 pattern = '''^cancel fix$'''
+doc_id = "cancel-fix"
 requires_hotword = true
 actions = [
     { function = "cancel_fix" }
@@ -576,6 +637,7 @@ actions = [
 # Online help -- opens the configured help URL in a browser. No local model.
 [[pattern]]
 pattern = '''^wheelhouse help online$'''
+doc_id = "help-online"
 requires_hotword = true
 actions = [
     { function = "wheelhouse_help_online" }
@@ -587,6 +649,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^(?:patterns?|pattern manager)$'''
+doc_id = "pattern-manager"
 requires_hotword = true
 actions = [
     { function = "open_pattern_manager" }
@@ -598,12 +661,14 @@ actions = [
 
 [[pattern]]
 pattern = '''^push to talk mode$'''
+doc_id = "push-to-talk-mode"
 actions = [
     { function = "set_speech_interaction_mode", params = ["push_to_talk"] }
 ]
 
 [[pattern]]
 pattern = '''^click to talk mode$'''
+doc_id = "click-to-talk-mode"
 actions = [
     { function = "set_speech_interaction_mode", params = ["toggle"] }
 ]
@@ -616,6 +681,7 @@ actions = [
 # parses g1 into an ElementQuery.
 [[pattern]]
 pattern = '''^click\s+(.+)$'''
+doc_id = "click-element"
 actions = [
     { function = "click_element", params = ["g1"], awaits_done = true }
 ]
@@ -629,6 +695,7 @@ actions = [
 # the returned effects to the integration stub seam (wh-h9a8v2).
 [[pattern]]
 pattern = '''^apply numbers$'''
+doc_id = "apply-numbers"
 requires_hotword = false
 actions = [
     { function = "show_overlay_command", awaits_done = true }
@@ -636,6 +703,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^dismiss numbers$'''
+doc_id = "dismiss-numbers"
 requires_hotword = false
 actions = [
     { function = "hide_overlay_command", awaits_done = true }
@@ -662,6 +730,7 @@ actions = [
 
 [[pattern]]
 pattern = '''\bparentheses(.*)$'''
+doc_id = "wrap-parentheses"
 requires_hotword = false
 actions = [
     { function = "wrap_or_insert", params = ["(", ")", "g1"] }
@@ -673,6 +742,7 @@ actions = [
 
 [[pattern]]
 pattern = '''\bangle brackets(.*)$'''
+doc_id = "wrap-angle-brackets"
 requires_hotword = false
 actions = [
     { function = "wrap_or_insert", params = ["<", ">", "g1"] }
@@ -684,6 +754,7 @@ actions = [
 
 [[pattern]]
 pattern = '''\bbrackets(.*)$'''
+doc_id = "wrap-square-brackets"
 requires_hotword = false
 actions = [
     { function = "wrap_or_insert", params = ["[", "]", "g1"] }
@@ -695,6 +766,7 @@ actions = [
 
 [[pattern]]
 pattern = '''\bbraces(.*)$'''
+doc_id = "wrap-braces"
 requires_hotword = false
 actions = [
     { function = "wrap_or_insert", params = ["{", "}", "g1"] }
@@ -706,6 +778,7 @@ actions = [
 
 [[pattern]]
 pattern = '''\bsingle quotes?(.*)$'''
+doc_id = "wrap-single-quotes"
 requires_hotword = false
 actions = [
     { function = "wrap_or_insert", params = ["'", "'", "g1"] }
@@ -713,6 +786,7 @@ actions = [
 
 [[pattern]]
 pattern = '''\bquotes?(.*)$'''
+doc_id = "wrap-double-quotes"
 requires_hotword = false
 actions = [
     { function = "wrap_or_insert", params = ['"', '"', "g1"] }
@@ -737,18 +811,21 @@ actions = [
 
 [[pattern]]
 pattern = '''^okay Google.*$'''
+doc_id = "filter-okay-google"
 actions = [
     { function = "text", params = [""] }
 ]
 
 [[pattern]]
 pattern = '''^ok Google.*$'''
+doc_id = "filter-ok-google"
 actions = [
     { function = "text", params = [""] }
 ]
 
 [[pattern]]
 pattern = '''^hey Google.*$'''
+doc_id = "filter-hey-google"
 actions = [
     { function = "text", params = [""] }
 ]
@@ -758,138 +835,161 @@ actions = [
 
 [[pattern]]
 pattern = '''\bperiod\b'''
+doc_id = "punct-period"
 actions = [
     { function = "text", params = ["."] }
 ]
 
 [[pattern]]
 pattern = '''\bslash\b'''
+doc_id = "punct-slash"
 actions = [
     { function = "text", params = ["/"] }
 ]
 
 [[pattern]]
 pattern = '''\bbackslash\b'''
+doc_id = "punct-backslash"
 actions = [
     { function = "text", params = ["\\"] }
 ]
 
 [[pattern]]
 pattern = '''\bcomma\b'''
+doc_id = "punct-comma"
 actions = [
     { function = "text", params = [","] }
 ]
 
 [[pattern]]
 pattern = '''\bcolon\b'''
+doc_id = "punct-colon"
 actions = [
     { function = "text", params = [":"] }
 ]
 
 [[pattern]]
 pattern = '''\bsemicolon\b'''
+doc_id = "punct-semicolon"
 actions = [
     { function = "text", params = [";"] }
 ]
 
 [[pattern]]
 pattern = '''\bquestion mark\b'''
+doc_id = "punct-question-mark"
 actions = [
     { function = "text", params = ["?"] }
 ]
 
 [[pattern]]
 pattern = '''\bexclamation (?:point|mark)\b'''
+doc_id = "punct-exclamation"
 actions = [
     { function = "text", params = ["!"] }
 ]
 
 [[pattern]]
 pattern = '''\bapostrophe\b'''
+doc_id = "punct-apostrophe"
 actions = [
     { function = "text", params = ["'"] }
 ]
 
 [[pattern]]
 pattern = '''\bback ?tick\b'''
+doc_id = "punct-backtick"
 actions = [
     { function = "text", params = ["`"] }
 ]
 
 [[pattern]]
 pattern = '''\bat sign\b'''
+doc_id = "punct-at-sign"
 actions = [
     { function = "text", params = ["@"] }
 ]
 
 [[pattern]]
 pattern = '''\bhashtag\b'''
+doc_id = "punct-hashtag"
 actions = [
     { function = "text", params = ["#"] }
 ]
 
 [[pattern]]
 pattern = '''\bdollar sign\b'''
+doc_id = "punct-dollar-sign"
 actions = [
     { function = "text", params = ["$"] }
 ]
 
 [[pattern]]
 pattern = '''\bpercent\b'''
+doc_id = "punct-percent"
 actions = [
     { function = "text", params = ["%"] }
 ]
 
 [[pattern]]
 pattern = '''\b(?:caret|carrot) sign\b'''
+doc_id = "punct-caret"
 actions = [
     { function = "text", params = ["^"] }
 ]
 
 [[pattern]]
 pattern = '''\b(?:ampersand|and sign(?:ed)?)\b'''
+doc_id = "punct-ampersand"
 actions = [
     { function = "text", params = ["&"] }
 ]
 
 [[pattern]]
 pattern = '''\basterisk\b'''
+doc_id = "punct-asterisk"
 actions = [
     { function = "text", params = ["*"] }
 ]
 
 [[pattern]]
 pattern = '''\bunderscore\b'''
+doc_id = "punct-underscore"
 actions = [
     { function = "text", params = ["_"] }
 ]
 
 [[pattern]]
 pattern = '''\bplus sign\b'''
+doc_id = "punct-plus-sign"
 actions = [
     { function = "text", params = ["+"] }
 ]
 
 [[pattern]]
 pattern = '''\bequal sign\b'''
+doc_id = "punct-equal-sign"
 actions = [
     { function = "text", params = ["="] }
 ]
 
 [[pattern]]
 pattern = '''\b(?:tilde|tilda)\b'''
+doc_id = "punct-tilde"
 actions = [
     { function = "text", params = ["~"] }
 ]
 
 [[pattern]]
 pattern = '''\bvertical bar\b'''
+doc_id = "punct-vertical-bar"
 actions = [
     { function = "text", params = ["|"] }
 ]
 
 [[pattern]]
 pattern = '''\bellipsis\b'''
+doc_id = "punct-ellipsis"
 actions = [
     { function = "text", params = ["..."] }
 ]
@@ -900,18 +1000,21 @@ actions = [
 
 [[pattern]]
 pattern = '''\bhyphen\b'''
+doc_id = "punct-hyphen"
 actions = [
     { function = "text", params = ["-"] }
 ]
 
 [[pattern]]
 pattern = '''\bdash\b'''
+doc_id = "punct-dash"
 actions = [
     { function = "text", params = ["—"] }
 ]
 
 [[pattern]]
 pattern = '''\bspace ?bar\b'''
+doc_id = "punct-space-bar"
 actions = [
     { function = "text", params = [" "] }
 ]
@@ -949,6 +1052,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^colin$'''
+doc_id = "mishear-colon-colin"
 whole_utterance_only = true
 actions = [
     { function = "text", params = [":"] }
@@ -956,6 +1060,7 @@ actions = [
 
 [[pattern]]
 pattern = '''^(?:come|kama|commer|come on)$'''
+doc_id = "mishear-comma-come"
 whole_utterance_only = true
 actions = [
     { function = "text", params = [","] }

@@ -13,17 +13,20 @@ already use — ChatGPT, Gemini, Claude, or Perplexity — and you get a
 personal Wheelhouse support assistant that explains commands and settings
 in plain language.
 
-## The one file you need
+## The files you need
 
 | File | What it is | What you do with it |
 |------|------------|---------------------|
 | [`wheelhouse_help.md`](../services/wheelhouse/knowledge/wheelhouse_help.md) | The complete Wheelhouse user guide | Upload it to your AI service as a knowledge file |
+| [`wheelhouse_reference.md`](../services/wheelhouse/knowledge/wheelhouse_reference.md) | The full voice-command and configuration reference | Upload it alongside the guide so the assistant can answer detailed command and setting questions |
 
-The assistant behavior rules are embedded at the top of the guide (its
-"Instructions for AI Assistant" section), so the uploaded file is all a
-service needs — there is nothing to paste. If a service refuses a `.md`
-upload, rename the file to `wheelhouse_help.txt` — the content is plain
-text.
+The guide covers what Wheelhouse is, getting started, and how each feature
+works; the reference is the exhaustive list of every voice command and
+configuration setting. Upload both so your assistant can answer both kinds
+of question. The assistant behavior rules are embedded at the top of the
+guide (its "Instructions for AI Assistant" section), so there is nothing to
+paste. If a service refuses a `.md` upload, rename the file to `.txt` — the
+content is plain text.
 
 ## Setup steps for each service
 
@@ -41,14 +44,16 @@ documents file uploads inside a project only for its paid plans.
 ## For builders: the official GPT's files
 
 This folder also ships the two files behind the official Wheelhouse
-ChatGPT GPT, which fetches the current guide live at answer time instead
-of using an uploaded copy:
+ChatGPT GPT, which fetches the current documentation live at answer time
+instead of using an uploaded copy:
 
 - [`gpt-instructions.txt`](./gpt-instructions.txt) — the GPT's
-  instructions: fetch the guide before answering, and refuse to answer
-  from memory when the fetch fails.
+  instructions: fetch before answering (the command reference for
+  command and configuration questions, the guide otherwise), and refuse
+  to answer from memory when the fetch fails.
 - [`gpt-action-openapi.json`](./gpt-action-openapi.json) — the GPT Action
-  schema: a single GET of the guide's raw GitHub URL.
+  schema: two GETs of raw GitHub URLs, `getHelpDocument` for the guide and
+  `getCommandReference` for the command-and-configuration reference.
 
 You can reuse both to build your own live-fetching assistant on any
 platform that can fetch a URL while answering.

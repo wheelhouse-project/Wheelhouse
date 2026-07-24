@@ -5,6 +5,29 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] - 2026-07-24
+
+### Added
+
+- The online help and the website now include a separate
+  command-and-configuration reference: a full list of every voice command
+  and every configuration setting, linked from the main guide. The main
+  guide is shorter as a result, and the official Wheelhouse Assistant
+  fetches this reference when you ask about a specific command or setting.
+
+### Changed
+
+- The Distil-Whisper speech engine is now labeled "Distil-Whisper Medium"
+  everywhere it appears (previously "Distil Medium").
+
+### Fixed
+
+- The graphical installer (`Wheelhouse-Setup.exe`) could stop partway
+  through with an "untrusted mount point" error on some Windows machines
+  and leave Wheelhouse not installed. It now completes on those machines.
+- The working/busy indicator (the small hourglass shown on screen) is
+  smaller, and its outline was retuned to match, so it is less obtrusive.
+
 ## [1.0.4] - 2026-07-20
 
 ### Added

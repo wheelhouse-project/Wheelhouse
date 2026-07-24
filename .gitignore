@@ -176,3 +176,9 @@ nul
 # E2E test scaffold drafted by generate_smoke_tests.py --e2e; the real suite
 # (test_e2e_all_patterns.py) is hand-maintained (wh-smoke-generator-crash)
 services/wheelhouse/tests/e2e/e2e_all_patterns_scaffold.py
+
+# Helpdoc build: generation manifest and build lock (build-generated,
+# never committed -- wh-helpdoc-atomic-publish)
+services/wheelhouse/knowledge/helpdoc-generation-manifest.json
+services/wheelhouse/knowledge/.helpdoc-build.lock
+services/wheelhouse/knowledge/helpdoc-generation-manifest.json.*.tmp

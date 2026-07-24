@@ -54,6 +54,17 @@ VersionInfoProductName=Wheelhouse
 ; (wh-startmenu-shortcut-check: first physical install lost the Start-menu
 ; shortcut and nothing recorded why).
 SetupLogging=yes
+; Inno 6.7.0+ turns on the Windows Redirection Guard mitigation by default,
+; and children of Setup inherit it (verified empirically on Windows 10.0.26200;
+; the Inno docs' claim that children do not inherit is wrong there). Under that
+; mitigation the engine's uv.exe cannot traverse uv's own managed-Python
+; minor-version junction (%APPDATA%\uv\python\cpython-X.Y-...), because a
+; non-elevated user created it: `uv sync` fails with "untrusted mount point"
+; (os error 448) and the install dies. Field failure: Setup Log 2026-07-21 #003.
+; The guard exists to protect ELEVATED installers from unprivileged users'
+; junctions; this installer is per-user and never elevated, so it loses no
+; protection that applies to it.
+RedirectionGuard=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

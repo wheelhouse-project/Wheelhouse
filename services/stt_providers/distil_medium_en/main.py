@@ -86,7 +86,7 @@ class DistilMediumServer:
     """STT server using distil-whisper medium.en on GPU."""
 
     DISCONNECT_TIMEOUT_S = 5.0
-    DISPLAY_NAME = "Distil Medium (GPU)"
+    DISPLAY_NAME = "Distil-Whisper Medium (GPU)"
 
     def __init__(
         self,

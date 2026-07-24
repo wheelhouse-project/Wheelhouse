@@ -1,16 +1,20 @@
-"""Package guards for the one-file LLM help kit and the official GPT files.
+"""Package guards for the LLM help kit and the official GPT files.
 
-The kit ships ONE user-facing file: the canonical help payload
+The kit ships the canonical help payload
 `services/wheelhouse/knowledge/wheelhouse_help.md`, whose embedded
 "## Instructions for AI Assistant" section carries the assistant behavior
-rules. The 2026-07-17 source-of-truth design
-(docs/plans/2026-07-17-help-doc-source-of-truth-design.md) retired the
+rules, plus the separate command and configuration reference
+`services/wheelhouse/knowledge/wheelhouse_reference.md`. The two-file build
+(wh-helpdoc-migration.3.1) moved the exhaustive command and setting tables
+out of the size-limited help document into that reference, so the embedded
+rules ground the assistant in both documents. The 2026-07-17 source-of-truth
+design (docs/plans/2026-07-17-help-doc-source-of-truth-design.md) retired the
 generated companion `llm/assistant-instructions.txt` and its extractor,
 superseding decisions 8 and 9 of the 2026-07-15 packaging design. The llm/
-folder instead ships the two files behind the official WheelHouse ChatGPT
-GPT -- `gpt-instructions.txt` and `gpt-action-openapi.json` (one GET of the
-help doc's raw GitHub URL) -- so anyone can also build their own
-live-fetching assistant from them.
+folder instead ships the two files behind the official Wheelhouse ChatGPT
+GPT -- `gpt-instructions.txt` and `gpt-action-openapi.json` (two GETs: the
+help document and the command reference, each from its raw GitHub URL) -- so
+anyone can also build their own live-fetching assistant from them.
 
 Pure stdlib (pathlib + json + re only); no service imports, no fixtures.
 """
@@ -35,6 +39,17 @@ _RAW_DOC_URL = (
     "https://raw.githubusercontent.com/wheelhouse-project/Wheelhouse/main/"
     "services/wheelhouse/knowledge/wheelhouse_help.md"
 )
+# Two-file build (wh-helpdoc-migration.3.1): the command-and-configuration
+# reference ships as a separate document, fetched by the second Action.
+_RAW_REFERENCE_URL = (
+    "https://raw.githubusercontent.com/wheelhouse-project/Wheelhouse/main/"
+    "services/wheelhouse/knowledge/wheelhouse_reference.md"
+)
+# operationId -> the raw URL its single GET must reassemble to.
+_EXPECTED_OPERATIONS = {
+    "getHelpDocument": _RAW_DOC_URL,
+    "getCommandReference": _RAW_REFERENCE_URL,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -91,9 +106,25 @@ def test_embedded_instruction_section_present_and_wellformed():
     # update this test in the same commit.
     norm = " ".join(body.split())
     assert (
-        "answer ONLY from this document. Never invent features, commands, or"
-        " settings not documented here." in norm
-    ), "the grounding rule is missing or weakened in the embedded instructions"
+        "answer only from the Wheelhouse documents provided to you" in norm
+    ), (
+        "the grounding rule no longer grounds answers in the provided "
+        "Wheelhouse documents"
+    )
+    assert (
+        "the separate Wheelhouse command and configuration reference" in norm
+    ), (
+        "the embedded instructions no longer point the assistant at the "
+        "separate command and configuration reference; the two-file upload "
+        "setup would refuse detailed command and setting questions"
+    )
+    assert (
+        "use the command and configuration reference when it is available"
+        in norm
+    ), (
+        "the rule routing command and configuration lookups to the reference "
+        "is missing from the embedded instructions"
+    )
     assert (
         "such as <!-- install-doc:start -->. They are structural markers for"
         " tooling. Ignore them and never mention them." in norm
@@ -133,36 +164,47 @@ def test_gpt_instructions_contract():
     # deleted, version rule inverted). Editing one of these sentences is a
     # conscious contract change and must update this test in the same commit.
     norm = " ".join(text.split())
-    # Fetch-first, on every question, via the named Action operation.
+    # Fetch-first, on every question, answering only from what was fetched
+    # (Design B, two-file build: the source is chosen by the question).
     assert (
         "FETCH FIRST, EVERY TIME: before answering any Wheelhouse question,"
-        " call the getHelpDocument action" in norm
-    ), "the fetch-before-every-answer directive is missing or weakened"
-    # Grounding: only the just-fetched document, never memory.
+        " fetch the current documentation and answer ONLY from what you just"
+        " fetched, never from memory" in norm
+    ), "the fetch-before-every-answer grounding directive is missing or weakened"
+    # Routing: command/config questions go to the reference Action; every
+    # other Wheelhouse question goes to the guide Action.
     assert (
-        "ONLY from the document you just fetched, never from memory" in norm
-    ), "the never-answer-from-memory grounding rule is missing or weakened"
+        "call the getCommandReference action to fetch the full"
+        " command-and-configuration reference" in norm
+    ), "the route-command/config-questions-to-the-reference directive is missing"
+    assert (
+        "call the getHelpDocument action to fetch the user guide" in norm
+    ), "the route-other-questions-to-the-guide directive is missing"
     # Ignore the structural markers visible in the raw markdown.
     assert (
         "such as <!-- install-doc:start -->; they are structural markers for"
         " tooling. Ignore them and never mention them to the user." in norm
     ), "the ignore-HTML-comments directive is missing or weakened"
-    # Fetch-failure rule: admit the guide is unreachable AND refuse to
-    # answer from memory, in the same directive.
+    # Fetch-failure rule: admit the documentation is unreachable AND refuse
+    # to answer from memory, in the same directive.
     assert (
         "IF THE FETCH FAILS: tell the user plainly that you cannot reach the"
-        " current Wheelhouse guide right now, and do NOT answer"
+        " current Wheelhouse documentation right now, and do NOT answer"
         " Wheelhouse-specific questions from memory." in norm
     ), "the fetch-failure refusal directive is missing or weakened"
     assert "https://wheelhouse-project.org/" in text
     assert "https://github.com/wheelhouse-project/Wheelhouse" in text
-    # Version disclosure: the stamped "Wheelhouse version" footer line names
-    # the release the guide describes (the export stamps it at publish time;
-    # only the pre-release private tree carries a build identifier there).
+    # Version disclosure: each document names the release it describes -- the
+    # guide in its "Wheelhouse version" footer line, the reference in its
+    # "Generated ... for the ... release" footer line.
     assert (
         'The "Wheelhouse version" line at the very end of the guide names'
         " that release." in norm
-    ), "the version-disclosure directive is missing or inverted"
+    ), "the guide version-disclosure directive is missing or inverted"
+    assert (
+        'The command reference names its release in its own "Generated"'
+        " footer line." in norm
+    ), "the reference version-disclosure directive is missing"
     # Email drafting: never claim mailbox access; mailto links draft only.
     assert (
         "This GPT does not have mailbox access and must never claim that it"
@@ -177,7 +219,12 @@ def test_gpt_instructions_contract():
     assert text.isascii(), "gpt-instructions.txt must be plain ASCII"
 
 
-def test_gpt_action_schema_is_one_get_of_the_raw_doc():
+def test_gpt_action_schema_gets_both_raw_docs():
+    # Two-file build (wh-helpdoc-migration.3.1): the single Action schema
+    # now defines TWO GETs -- getHelpDocument (the guide) and
+    # getCommandReference (the separate command-and-config reference) -- so
+    # the GPT can route command/config questions to the reference and every
+    # other question to the guide (Design B).
     schema = json.loads(_GPT_ACTION_SCHEMA.read_text(encoding="utf-8"))
     assert str(schema.get("openapi", "")) == "3.1.0", (
         "gpt-action-openapi.json must declare OpenAPI 3.1.0 exactly: the"
@@ -187,31 +234,39 @@ def test_gpt_action_schema_is_one_get_of_the_raw_doc():
     servers = [s["url"] for s in schema.get("servers", [])]
     assert len(servers) == 1, f"expected exactly one server, got {servers}"
     paths = schema.get("paths", {})
-    assert len(paths) == 1, f"expected exactly one path, got {list(paths)}"
-    ((path, item),) = paths.items()
-    assert list(item.keys()) == ["get"], (
-        f"the single path must define exactly one GET, got {list(item.keys())}"
+    assert len(paths) == 2, f"expected exactly two paths, got {list(paths)}"
+    by_operation = {}
+    for path, item in paths.items():
+        assert list(item.keys()) == ["get"], (
+            f"each path must define exactly one GET, got {list(item.keys())}"
+        )
+        get = item["get"]
+        by_operation[get.get("operationId")] = (path, get)
+    assert set(by_operation) == set(_EXPECTED_OPERATIONS), (
+        f"expected operations {set(_EXPECTED_OPERATIONS)}, got {set(by_operation)}"
     )
-    assert item["get"].get("operationId") == "getHelpDocument"
-    assert servers[0].rstrip("/") + path == _RAW_DOC_URL, (
-        "server url + path must reassemble to the canonical raw help-doc URL"
-    )
-    # The response contract: exactly one 200 response returning the raw
-    # markdown as a text/plain string. Without these checks, deleting the
-    # responses object or swapping the media type would leave the Action
-    # declaring a contract ChatGPT no longer receives.
-    responses = item["get"].get("responses", {})
-    assert list(responses.keys()) == ["200"], (
-        f"expected exactly one 200 response, got {list(responses)}"
-    )
-    content = responses["200"].get("content", {})
-    assert list(content.keys()) == ["text/plain"], (
-        f"the 200 response must declare exactly text/plain, got {list(content)}"
-    )
-    assert content["text/plain"].get("schema", {}).get("type") == "string", (
-        "the text/plain schema type must be 'string' so the Action hands"
-        " ChatGPT the raw markdown document"
-    )
+    for operation, expected_url in _EXPECTED_OPERATIONS.items():
+        path, get = by_operation[operation]
+        assert servers[0].rstrip("/") + path == expected_url, (
+            f"{operation}: server url + path must reassemble to {expected_url}"
+        )
+        # The response contract: exactly one 200 response returning the raw
+        # markdown as a text/plain string. Without these checks, deleting the
+        # responses object or swapping the media type would leave the Action
+        # declaring a contract ChatGPT no longer receives.
+        responses = get.get("responses", {})
+        assert list(responses.keys()) == ["200"], (
+            f"{operation}: expected exactly one 200 response, got {list(responses)}"
+        )
+        content = responses["200"].get("content", {})
+        assert list(content.keys()) == ["text/plain"], (
+            f"{operation}: the 200 response must declare exactly text/plain,"
+            f" got {list(content)}"
+        )
+        assert content["text/plain"].get("schema", {}).get("type") == "string", (
+            f"{operation}: the text/plain schema type must be 'string' so the"
+            " Action hands ChatGPT the raw markdown document"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +343,25 @@ def test_llm_readme_canonical_links_resolve():
     for anchor in ("#llm-chatgpt", "#llm-gemini", "#llm-claude", "#llm-perplexity"):
         assert anchor in content, f"llm/README.md dropped the {anchor} link"
         assert f'id="{anchor[1:]}"' in html, f"page lost the {anchor} target"
+
+
+def test_llm_readme_documents_reference_and_second_action():
+    """Two-file build (wh-helpdoc-migration.3.1): the command and config
+    tables moved out of the guide into wheelhouse_reference.md, so the
+    upload-based setup now needs both files and the builder section must
+    document the second Action (getCommandReference)."""
+    content = _LLM_README.read_text(encoding="utf-8")
+    # The reference file is linked at its public-repo path (llm/.. ->
+    # services/wheelhouse/knowledge/), like the help doc.
+    assert "(../services/wheelhouse/knowledge/wheelhouse_reference.md)" in content, (
+        "llm/README.md does not link the separate reference document; "
+        "upload-based setups need it now that the tables left the guide"
+    )
+    assert (_REPO_ROOT / "services/wheelhouse/knowledge/wheelhouse_reference.md").is_file()
+    # The builder section names the second Action operation.
+    assert "getCommandReference" in content, (
+        "llm/README.md does not document the second GPT Action"
+    )
 
 
 # The exact public-repo blob URL the landing page must link. Substring
