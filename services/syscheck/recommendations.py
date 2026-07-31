@@ -292,72 +292,154 @@ def get_tts_recommendation(syscheck: dict) -> dict:
     }
 
 
+# ========================= Local AI Placement =========================
+
+# The model Wheelhouse ships. The name is the component registry key in
+# services/installer/components/registry.py.
+LOCAL_AI_MODEL = "gemma4_e4b_qat"
+
+# Both thresholds come from the measurements behind
+# docs/superpowers/specs/2026-07-26-local-ai-runtime-design.md.
+#
+# Video memory: the model's weights are 5.15 GB. A card has to hold enough of
+# them for the transfer to be worth making; below 4 GB llama.cpp spills back to
+# system memory on every layer it cannot place, and the request ends up slower
+# than running on the processor outright.
+#
+# System memory: E4B needs about 5.3 GB of working set with no graphics card.
+# 16 GB is the floor at which that leaves room for Windows, the browser the
+# user is dictating into, and Wheelhouse itself.
+LOCAL_AI_MIN_VRAM = VRAM_4GB
+LOCAL_AI_MIN_RAM = RAM_16GB
+
+
+def get_local_ai_decision(syscheck: dict) -> dict:
+    """Decide where -- or whether -- the local AI model runs on this machine.
+
+    One function so the installer and syscheck cannot give a user two
+    different answers (design section 6).
+
+    Returns a dict with four keys, always the same four:
+
+    - ``install``     -- whether to download and configure the local model.
+    - ``model``       -- the component registry key, or None.
+    - ``gpu_layers``  -- 99 (all layers on the graphics card), 0 (processor
+      only), or None when nothing is installed. This is written straight into
+      ``[ai.runtime] gpu_layers``.
+    - ``reason``      -- one plain sentence the installer prints.
+
+    Never raises. syscheck degrades to empty sections when a probe fails, and
+    an exception here would abort an install over a hardware question that
+    should only turn the AI features off.
+    """
+    try:
+        gpus = syscheck.get("gpu") or []
+        best_vram = 0
+        for gpu in gpus:
+            if not isinstance(gpu, dict) or gpu.get("software", False):
+                continue
+            # Any vendor: the shipped build is Vulkan, which covers NVIDIA,
+            # AMD, and Intel alike. A CUDA-only check would refuse every AMD
+            # machine for no reason.
+            vram = int(gpu.get("dedicated_vram_bytes", 0) or 0)
+            if vram > best_vram:
+                best_vram = vram
+
+        total_ram = int((syscheck.get("memory") or {}).get("total_bytes", 0) or 0)
+    # int() rather than using the values as they arrive: a byte count that
+    # comes through as a string compares fine against another string and
+    # raises against an integer, so the comparison below would throw outside
+    # this block. Coercing here keeps every failure on one path.
+    except (AttributeError, TypeError, ValueError):
+        return {
+            "install": False,
+            "model": None,
+            "gpu_layers": None,
+            "reason": (
+                "The hardware check could not read this machine, so the local "
+                "AI model was not installed."
+            ),
+        }
+
+    if best_vram >= LOCAL_AI_MIN_VRAM:
+        return {
+            "install": True,
+            "model": LOCAL_AI_MODEL,
+            "gpu_layers": 99,
+            "reason": (
+                "This machine has a graphics card with enough video memory to "
+                "hold the model, so it will run there."
+            ),
+        }
+
+    if total_ram >= LOCAL_AI_MIN_RAM:
+        return {
+            "install": True,
+            "model": LOCAL_AI_MODEL,
+            "gpu_layers": 0,
+            "reason": (
+                "This machine has no graphics card with 4 GB of video memory, "
+                "so the model will run on the processor. That works, but it is "
+                "slow: about 3 seconds for a short correction and about 12 "
+                "seconds for a long one."
+            ),
+        }
+
+    return {
+        "install": False,
+        "model": None,
+        "gpu_layers": None,
+        "reason": (
+            "The local AI model needs either a graphics card with 4 GB of "
+            "video memory or 16 GB of system memory, and this machine has "
+            "neither. The correcting and rewriting commands will still work "
+            "if you configure your own AI server later."
+        ),
+    }
+
+
 # ========================= AI/LLM Recommendations =========================
 
 def get_ai_recommendation(syscheck: dict) -> dict:
-    """
-    Get AI/LLM recommendations based on hardware.
+    """Say which AI option this machine should use, and why.
+
+    Presentation only: the hardware question is settled by
+    ``get_local_ai_decision`` above, and this reads that answer. It used to
+    run a ladder of its own over ``classify_gpu_tier``, offering Llama 3 70B,
+    Phi-3 Medium and others -- none of which Wheelhouse ships or the installer
+    can put on a machine. Two ladders over the same hardware also disagreed:
+    one could tell a user their machine ran a model locally while the other
+    installed nothing (wh-syscheck-ai-recommendation).
 
     Returns:
-        dict with 'recommended' (str) and 'options' (list of option dicts)
+        dict with 'recommended' (str), 'options' (list of option dicts) and
+        'reason' (the ladder's own sentence, so the caller shows the same
+        wording the installer prints).
     """
-    tier = classify_gpu_tier(syscheck)
-    cpu_flags = syscheck.get("cpu", {}).get("flags", {})
-    has_avx512 = cpu_flags.get("avx512", False)
+    decision = get_local_ai_decision(syscheck)
 
     options = []
-
-    if tier == "ultra":
+    if decision["install"]:
+        on_the_card = decision["gpu_layers"] != 0
         options.append({
-            "id": "llama_70b_q4",
-            "name": "Llama 3 70B (Q4)",
-            "pros": ["Most capable", "Near-GPT-4 quality"],
-            "cons": ["~40GB download", "Requires 24GB+ VRAM"],
-            "size_mb": 40000,
+            "id": decision["model"],
+            "name": "Gemma 4 E4B, on this machine",
+            "variant": "local",
+            "pros": [
+                "Nothing leaves the machine",
+                "No account and no key",
+                "Runs on the graphics card" if on_the_card
+                else "Runs without a graphics card",
+            ],
+            "cons": [
+                "5.2 GB download",
+                "About 1 second for a short correction" if on_the_card
+                else "About 3 seconds for a short correction, 12 for a long one",
+            ],
+            "size_mb": 5150,
             "suitable": True,
         })
 
-    if tier in ("ultra", "high"):
-        options.append({
-            "id": "llama_8b",
-            "name": "Llama 3 8B",
-            "pros": ["Very capable", "Good speed"],
-            "cons": ["~5GB download"],
-            "size_mb": 5000,
-            "suitable": True,
-        })
-
-    if tier in ("ultra", "high", "mid"):
-        options.append({
-            "id": "phi3_medium",
-            "name": "Phi-3 Medium",
-            "pros": ["Efficient", "Good reasoning"],
-            "cons": ["~2GB download"],
-            "size_mb": 2000,
-            "suitable": True,
-        })
-
-    if tier == "intel" or has_avx512:
-        options.append({
-            "id": "phi3_openvino",
-            "name": "Phi-3 (OpenVINO)",
-            "pros": ["Optimized for Intel", "Fast inference"],
-            "cons": ["Intel-specific"],
-            "size_mb": 2500,
-            "suitable": has_avx512,
-        })
-
-    if tier in ("budget", "low"):
-        options.append({
-            "id": "phi3_mini",
-            "name": "Phi-3 Mini",
-            "pros": ["Small footprint", "Reasonable quality"],
-            "cons": ["Less capable than larger models"],
-            "size_mb": 1500,
-            "suitable": True,
-        })
-
-    # Cloud options
     options.append({
         "id": "gemini",
         "name": "Gemini (Cloud)",
@@ -368,13 +450,10 @@ def get_ai_recommendation(syscheck: dict) -> dict:
         "suitable": True,
     })
 
-    # Filter suitable and pick recommended
-    suitable = [o for o in options if o.get("suitable", True)]
-    recommended = suitable[0]["id"] if suitable else "gemini"
-
     return {
-        "recommended": recommended,
-        "options": suitable,
+        "recommended": options[0]["id"],
+        "options": options,
+        "reason": decision["reason"],
     }
 
 

@@ -20,6 +20,8 @@ from recommendations import (
     get_ai_recommendation,
     get_disk_recommendation,
     get_full_recommendation,
+    get_local_ai_decision,
+    LOCAL_AI_MODEL,
     TIER_ORDER,
 )
 
@@ -320,15 +322,77 @@ class TestTtsRecommendation:
 # ========================= AI Recommendation Tests =========================
 
 class TestAiRecommendation:
-    def test_high_tier_recommends_local_llm(self, high_end_syscheck):
-        """High tier should recommend local LLM."""
+    """The advice a user is shown must be the model the installer will
+    actually put on the machine (wh-syscheck-ai-recommendation).
+
+    This used to run a second hardware ladder of its own, naming models
+    Wheelhouse has never shipped -- Llama 3 70B, Phi-3. A user was told to
+    expect one thing and given another, and the two ladders could disagree
+    outright about whether a machine could run a model at all.
+    """
+
+    def test_a_machine_that_can_run_the_model_is_offered_it(
+        self, high_end_syscheck
+    ):
         recs = get_ai_recommendation(high_end_syscheck)
-        assert recs["recommended"] in ("llama_8b", "phi3_medium")
+        assert recs["recommended"] == LOCAL_AI_MODEL
 
     def test_minimum_tier_recommends_cloud(self, minimum_syscheck):
         """Minimum tier should recommend cloud AI."""
         recs = get_ai_recommendation(minimum_syscheck)
         assert recs["recommended"] == "gemini"
+
+    def test_no_model_wheelhouse_does_not_ship_is_offered(
+        self, high_end_syscheck, low_end_syscheck, minimum_syscheck
+    ):
+        """The defect itself, stated as a property rather than a list: the
+        only local model that may be named is the one the installer downloads.
+        """
+        for machine in (high_end_syscheck, low_end_syscheck, minimum_syscheck):
+            for option in get_ai_recommendation(machine)["options"]:
+                assert option["id"] in (LOCAL_AI_MODEL, "gemini"), (
+                    f"offered {option['id']}, which nothing installs"
+                )
+
+    def test_it_says_the_same_thing_as_the_ladder_the_installer_reads(
+        self, high_end_syscheck, low_end_syscheck, minimum_syscheck
+    ):
+        """One ladder, consulted twice, cannot contradict itself. Two ladders
+        can, and the user meets that as advice to install a model the
+        installer then refuses to install.
+        """
+        for machine in (high_end_syscheck, low_end_syscheck, minimum_syscheck):
+            decision = get_local_ai_decision(machine)
+            recs = get_ai_recommendation(machine)
+            expected = decision["model"] if decision["install"] else "gemini"
+            assert recs["recommended"] == expected
+
+    def test_a_machine_with_no_card_is_not_told_it_will_use_one(self):
+        """The offer is the same model either way, but not the same promise.
+        A user told the model runs on their graphics card, whose machine then
+        takes twelve seconds over a long correction, has been misled about the
+        one thing they would have used to choose.
+        """
+        machine = {
+            "gpu": [],
+            "memory": {"total_bytes": 32 * 1024**3},
+            "cpu": {"flags": {}},
+        }
+
+        option = get_ai_recommendation(machine)["options"][0]
+
+        assert option["id"] == LOCAL_AI_MODEL
+        said = " ".join(option["pros"] + option["cons"])
+        assert "graphics card" not in said or "without a graphics card" in said
+
+    def test_the_reason_the_ladder_gave_is_carried_through(
+        self, low_end_syscheck
+    ):
+        """A machine sent to the cloud option is owed the sentence explaining
+        why, and that sentence is written once, in the ladder.
+        """
+        recs = get_ai_recommendation(low_end_syscheck)
+        assert recs["reason"] == get_local_ai_decision(low_end_syscheck)["reason"]
 
 
 # ========================= Disk Recommendation Tests =========================

@@ -131,6 +131,40 @@ class TestSet:
         assert config_svc.get("plugins.bravia.device_name") == "Living Room TV"
 
 
+class TestUnset:
+    """Taking a setting back out, for a change that has to be undone.
+
+    Putting None back in its place is not the same thing. A read would treat
+    it as missing, so it looks right, but the next write has to turn every
+    setting into a line of the settings file and there is no way to write
+    None -- so that write fails, and every later one with it.
+    """
+
+    def test_unset_removes_a_simple_key(self, config_svc):
+        config_svc.unset("LOG_LEVEL")
+        assert config_svc.get("LOG_LEVEL", "absent") == "absent"
+        assert "LOG_LEVEL" not in config_svc.get_config()
+
+    def test_unset_removes_a_nested_key(self, config_svc):
+        config_svc.unset("speech.timeout_ms")
+        assert "timeout_ms" not in config_svc.get_config()["speech"]
+
+    def test_unset_leaves_its_neighbours_alone(self, config_svc):
+        config_svc.unset("speech.timeout_ms")
+        assert config_svc.get("speech.model") == "default"
+
+    def test_unset_of_a_key_that_is_not_there_does_nothing(self, config_svc):
+        config_svc.unset("speech.never_set")
+        config_svc.unset("no_such_section.key")
+        assert config_svc.get("speech.model") == "default"
+
+    @pytest.mark.asyncio
+    async def test_a_write_after_unset_still_succeeds(self, config_svc):
+        """The reason unset exists rather than setting None."""
+        config_svc.unset("LOG_LEVEL")
+        assert await config_svc.save() is True
+
+
 # -----------------------------------------------------------------------
 # save()
 # -----------------------------------------------------------------------

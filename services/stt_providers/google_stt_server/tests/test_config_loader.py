@@ -773,3 +773,70 @@ class TestDebugOverflowDiagnosticsFlag:
     def test_log_overflow_diagnostics_defaults_false(self):
         config = self._load_with_debug({})
         assert config.debug.log_overflow_diagnostics is False
+
+
+# ---------------------------------------------------------------------------
+# --credentials-file (wh-google-creds-file-picker)
+# ---------------------------------------------------------------------------
+
+class TestCredentialsFileArg:
+    """The service-account key file path arrives via --credentials-file
+    (passed by the WheelHouse remote STT launcher) or via the optional
+    [server] credentials_file key, CLI winning."""
+
+    def _args_mock(self, **overrides):
+        base = dict(
+            list_devices=False, ws_host=None, ws_port=None,
+            wake_word_enabled=False, wake_word_keyword=None,
+            wake_word_sensitivity=None, wake_word_mode=None,
+            wake_word_model_dir=None, credentials_file=None,
+        )
+        base.update(overrides)
+        return MagicMock(**base)
+
+    def test_parser_accepts_credentials_file(self):
+        parser = build_parser()
+        args = parser.parse_args(["--credentials-file", "C:/keys/sa.json"])
+        assert args.credentials_file == "C:/keys/sa.json"
+
+    def test_parser_credentials_file_default_none(self):
+        parser = build_parser()
+        args = parser.parse_args([])
+        assert args.credentials_file is None
+
+    def _load(self, args_mock, data):
+        with patch(
+            "config_loader.argparse.ArgumentParser.parse_args",
+            return_value=args_mock,
+        ):
+            with patch("config_loader.load_config_or_exit") as mock_load:
+                with patch("config_loader.validate_config_or_exit"):
+                    with patch("config_loader._load_hints", return_value=[]):
+                        mock_load.return_value = data
+                        args, config = load_config()
+        return config
+
+    def test_cli_credentials_file_reaches_appconfig(self):
+        config = self._load(
+            self._args_mock(credentials_file="C:/keys/sa.json"),
+            _minimal_toml_dict(),
+        )
+        assert config.credentials_file == "C:/keys/sa.json"
+
+    def test_server_section_fallback(self):
+        data = _minimal_toml_dict()
+        data["server"]["credentials_file"] = "C:/keys/from_config.json"
+        config = self._load(self._args_mock(), data)
+        assert config.credentials_file == "C:/keys/from_config.json"
+
+    def test_cli_wins_over_server_section(self):
+        data = _minimal_toml_dict()
+        data["server"]["credentials_file"] = "C:/keys/from_config.json"
+        config = self._load(
+            self._args_mock(credentials_file="C:/keys/from_cli.json"), data
+        )
+        assert config.credentials_file == "C:/keys/from_cli.json"
+
+    def test_defaults_to_empty_string(self):
+        config = self._load(self._args_mock(), _minimal_toml_dict())
+        assert config.credentials_file == ""

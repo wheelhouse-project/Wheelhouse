@@ -55,6 +55,7 @@ except Exception:
 from google.cloud.speech_v1.types import StreamingRecognizeResponse
 
 from config_loader import load_config
+from direct_streamer import GoogleDirectStreamer
 from shared_stt.redact import redact_transcript
 
 # Add stt_providers/ to sys.path for cross-provider imports
@@ -82,6 +83,342 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("GoogleSTT")
+
+
+def build_streamer(cfg, transcription_enabled_event, client=None):
+    """Build the Google streaming client from the loaded config.
+
+    cfg.credentials_file carries the service-account key file configured in
+    WheelHouse (wh-google-creds-file-picker); empty means Application
+    Default Credentials, exactly the pre-feature behavior.
+
+    client is the SpeechClient built once at startup; passing it stops
+    every utterance from constructing a fresh client, which re-reads the
+    key file from disk on the latency-critical speech-start path
+    (wh-google-creds-file-picker.1.7). None keeps the pre-feature
+    build-from-config behavior for abnormal recovery paths.
+    """
+    return GoogleDirectStreamer(
+        language=cfg.language, model=cfg.model, sample_rate=cfg.rate,
+        enable_auto_punct=cfg.auto_punct, debug_cfg=cfg.debug,
+        single_utterance=cfg.single_utterance, phrase_hints=cfg.phrase_hints,
+        phrase_hints_boost=cfg.hints_boost, class_tokens=cfg.class_tokens,
+        credentials_file=cfg.credentials_file,
+        client=client,
+        transcription_enabled_event=transcription_enabled_event,
+    )
+
+
+def build_speech_client(cfg):
+    """Build the SpeechClient the streamers will share. Raises when the
+    credentials are bad; the caller decides how to report that. An empty
+    cfg.credentials_file means Application Default Credentials, so a
+    missing GOOGLE_APPLICATION_CREDENTIALS environment variable also
+    fails here."""
+    import importlib
+    _mod = importlib.import_module('google.cloud.speech_v1')
+    _SpeechClient = getattr(_mod, 'SpeechClient')
+    if cfg.credentials_file:
+        return _SpeechClient.from_service_account_file(cfg.credentials_file)
+    return _SpeechClient()
+
+
+# Bound on the client build: from_service_account_file reads the key
+# file synchronously, and a file on a disconnected network drive can
+# block on I/O for minutes. 30s is far above a healthy local read and
+# matches the picker's validation bound in WheelHouse
+# (wh-google-creds-file-picker.1.17).
+_CREDENTIALS_PREFLIGHT_TIMEOUT_S = 30.0
+
+
+def credentials_preflight(cfg, timeout_s=_CREDENTIALS_PREFLIGHT_TIMEOUT_S):
+    """Build the Google client once at startup so a bad, missing, or
+    stale key file fails before the startup notification instead of
+    silently at the first utterance (wh-google-creds-file-picker.1.4).
+
+    Returns (client, None) when the client builds, or (None, error)
+    with a one-line error description when it does not.
+
+    The build runs on a daemon worker thread with a join bound
+    (wh-google-creds-file-picker.1.17): a hung key-file read (network
+    drive gone) must produce a startup-failed notification, not block
+    the provider's main loop forever. On timeout the worker thread is
+    abandoned -- daemon threads cannot be cancelled -- which mirrors
+    the picker's accepted validation-thread residual in WheelHouse.
+    """
+    result = {}
+
+    def _build():
+        try:
+            result["client"] = build_speech_client(cfg)
+        except Exception as e:
+            result["error"] = f"{type(e).__name__}: {e}"
+
+    worker = threading.Thread(
+        target=_build, daemon=True, name="credentials-preflight"
+    )
+    worker.start()
+    worker.join(timeout_s)
+    if worker.is_alive():
+        return None, (
+            f"TimeoutError: reading the credentials file did not finish "
+            f"within {timeout_s:.0f}s (is the key file on a disconnected "
+            "network drive?)"
+        )
+    if "error" in result:
+        return None, result["error"]
+    return result.get("client"), None
+
+
+def rebuild_speech_client(cfg, timeout_s=_CREDENTIALS_PREFLIGHT_TIMEOUT_S):
+    """Bounded client rebuild for the recovery path
+    (wh-google-creds-file-picker.1.18): after a failure dropped the
+    cached client, the audio loop used to call build_speech_client
+    directly, bypassing the preflight bound -- a key path that became an
+    unresponsive network share then hung the loop forever, with no
+    error notice and no way to process a queued soft restart. This
+    wrapper reuses the bounded preflight and RAISES on failure or
+    timeout so the existing streamer-failure handling applies: the
+    kind="error" notice, the retry cooldown, and the VAD-gate close.
+    """
+    client, error = credentials_preflight(cfg, timeout_s=timeout_s)
+    if client is None:
+        raise RuntimeError(error)
+    return client
+
+
+def startup_notification(error):
+    """The (title, message, kind) triple for the post-connect startup
+    notification, from the preflight's error: "ready" only when the
+    credentials preflight passed, otherwise what is wrong and that
+    transcription will not work. kind="startup_failed" tells WheelHouse
+    to treat the provider start as failed rather than suppress the
+    notice as startup noise (wh-google-creds-file-picker.1.5)."""
+    if error is None:
+        return ("Google STT", "Transcription service ready", "ready")
+    return (
+        "Google STT",
+        "Google credentials problem - transcription will not work: "
+        + error,
+        "startup_failed",
+    )
+
+
+def restart_completion_notification(error):
+    """The (title, message, kind) triple for the soft-restart completion
+    notification. The restart reloads the config, which may name a
+    different (or now-missing) credentials file; saying "ready" and then
+    dropping the first utterance would hide that failure, so "ready" is
+    sent only when the reloaded credentials actually built a client
+    (wh-google-creds-file-picker.1.12)."""
+    if error is None:
+        return ("STT Service", "Service restart completed. Ready.", "ready")
+    return startup_notification(error)
+
+
+def report_streamer_start_failure(forwarder, exc, already_notified):
+    """Log a streamer construction failure and tell the user, once per
+    run. An info-level log line used to be the only trace while every
+    utterance was dropped (wh-google-creds-file-picker.1.4). Returns
+    whether a notification has now been sent. kind="error" exempts the
+    notice from WheelHouse's is_starting suppression
+    (wh-google-creds-file-picker.1.5)."""
+    logger.error(f"Failed to start streamer: {type(exc).__name__}: {exc!r}")
+    if forwarder is None or already_notified:
+        return already_notified
+    forwarder.send_notification(
+        "Google STT",
+        "Speech engine error - transcription is not working: "
+        f"{type(exc).__name__}: {exc}",
+        kind="error",
+    )
+    return True
+
+
+# How long the main loop waits after a streamer construction failure
+# before trying again. Without this it would rebuild and fail the
+# streamer on every audio frame, tens of times per second
+# (wh-google-creds-file-picker.1.6).
+_STREAMER_RETRY_COOLDOWN_S = 5.0
+
+
+def streamer_retry_allowed(now, last_failure_time):
+    """Whether enough time has passed since the last streamer
+    construction failure to try again."""
+    return (now - last_failure_time) >= _STREAMER_RETRY_COOLDOWN_S
+
+
+def vad_gate_may_open(streaming, now, last_failure_time):
+    """Whether detected speech may open the VAD gate right now.
+
+    During the streamer retry cooldown there is nothing to send audio
+    to. If the gate opened anyway, the lead-in buffer would be flushed
+    into chunks that section 3 then throws away, and the eventual retry
+    would start mid-utterance -- losing the first seconds of the
+    command. Keeping the gate closed keeps the rolling lead-in buffer
+    alive instead (wh-google-creds-file-picker.1.11).
+    """
+    return streaming is not None or streamer_retry_allowed(
+        now, last_failure_time
+    )
+
+
+# Floor on the consecutive-silence requirement that ends a contaminated
+# speech run. The requirement normally equals the lead-in buffer's
+# capacity, but a configuration with vad_lead_in_ms <= chunk_ms gives
+# the buffer a capacity of 0 or 1, and a 1-frame requirement would turn
+# a single 30ms VAD miss back into an utterance boundary
+# (wh-google-creds-file-picker.1.25). Ten frames is 300ms at the
+# shipped 30ms chunk size -- the same window the shipped lead-in
+# configuration produces.
+_CONTAMINATED_SILENCE_MIN_FRAMES = 10
+
+
+def gate_frame(raw_is_speech, agc_audio, audio_frame, streaming, now,
+               last_failure_time, vad_gate_open, lead_in_buffer,
+               contaminated_silence_left):
+    """Decide what one audio frame contributes to the stream.
+
+    Returns (valid_chunks, vad_gate_open, contaminated_silence_left).
+
+    The lead-in buffer holds only vad_lead_in_ms of audio, but frames
+    keep rolling through it for the whole streamer retry cooldown. If
+    the gate opened at cooldown expiry purely because the timer ran
+    out, the utterance would start from the last few hundred
+    milliseconds of a command begun seconds earlier, and the surviving
+    tail can parse as a DIFFERENT command. Speech observed while the
+    gate cannot open therefore marks the current speech run as
+    contaminated (wh-google-creds-file-picker.1.23). A command spoken
+    entirely while the engine was down is dropped whole -- the user
+    already saw the engine-failure notice -- rather than sent as a
+    fragment.
+
+    contaminated_silence_left counts the consecutive silence frames
+    still required before the contaminated run counts as ended. It is
+    set to the lead-in buffer's capacity on every contaminated speech
+    frame, because that is exactly how many silence appends evict
+    every contaminated frame from the buffer. A single false VAD frame
+    mid-command (a breath, a plosive gap, one Silero miss) therefore
+    cannot reopen the gate while contaminated audio is still buffered
+    (wh-google-creds-file-picker.1.24). Zero means clean.
+    """
+    if vad_gate_open:
+        # Gate open: pass audio directly through.
+        return [agc_audio], True, contaminated_silence_left
+
+    if not raw_is_speech:
+        # Silence rolls through the lead-in buffer; a contaminated run
+        # only ends once enough consecutive silence frames have evicted
+        # every contaminated frame.
+        lead_in_buffer.append(audio_frame)
+        return [], False, max(0, contaminated_silence_left - 1)
+
+    if not vad_gate_may_open(streaming, now, last_failure_time):
+        # Speech during the cooldown with nothing to send to: keep the
+        # gate closed and mark the run
+        # (wh-google-creds-file-picker.1.11).
+        lead_in_buffer.append(audio_frame)
+        return [], False, max(
+            lead_in_buffer.maxlen or 0, _CONTAMINATED_SILENCE_MIN_FRAMES
+        )
+
+    if contaminated_silence_left:
+        # The cooldown expired mid-command; opening now would send
+        # only the tail of it. This speech frame rejoins the
+        # contaminated run, so the silence requirement resets.
+        lead_in_buffer.append(audio_frame)
+        return [], False, max(
+            lead_in_buffer.maxlen or 0, _CONTAMINATED_SILENCE_MIN_FRAMES
+        )
+
+    # Fresh speech onset: open the gate, send lead-in + current frame.
+    valid_chunks = list(lead_in_buffer)
+    valid_chunks.append(agc_audio)
+    lead_in_buffer.clear()
+    return valid_chunks, True, 0
+
+
+def audio_discontinuity(lead_in_buffer):
+    """Reset the VAD gate across a deliberate audio gap.
+
+    The soft-restart block and the transcription-disabled branch both
+    discard audio while the microphone keeps running. A speech run can
+    span that gap, and the frames after it are then only the TAIL of
+    the user's command; treating the first of them as a fresh onset
+    would send a suffix to Google that can parse as a DIFFERENT
+    command (wh-google-creds-file-picker.1.26). Close the gate, drop
+    any buffered lead-in from before the gap, and require the full
+    contamination silence boundary -- the same requirement gate_frame
+    uses, including the fixed floor -- before speech may reopen.
+
+    Returns (vad_gate_open, contaminated_silence_left).
+    """
+    lead_in_buffer.clear()
+    return False, max(
+        lead_in_buffer.maxlen or 0, _CONTAMINATED_SILENCE_MIN_FRAMES
+    )
+
+
+# How many consecutive mic.read timeouts count as a real capture gap.
+# One None read usually means the capture thread delivered a frame
+# late -- the audio still arrives complete on the next read, and
+# closing the gate for it would clip ordinary commands. Two or more
+# (>= 100ms with nothing delivered from a 30ms-cadence capture thread)
+# mean capture stopped, and the audio from that interval never entered
+# the queue (wh-google-creds-file-picker.1.27).
+_CAPTURE_GAP_NONE_READS = 2
+
+
+def capture_lost_audio(consecutive_none_reads, drops_now, drops_last_seen):
+    """Decide whether audio was lost since the last processed frame.
+
+    Two loss signals exist on the ordinary capture path
+    (wh-google-creds-file-picker.1.27): a run of consecutive None
+    reads (capture stopped; see _CAPTURE_GAP_NONE_READS), and an
+    advance of the backend's queue-overflow drop counter (frames were
+    discarded on queue.Full -- both the sounddevice and WinRT backends
+    count these in the 'drops' field of the AudioProvider adapter's
+    get_stats(); see read_drop_count). Either
+    means the frame in hand may be the tail of a command begun during
+    the gap, so the caller must apply audio_discontinuity before
+    processing it.
+    """
+    return (
+        consecutive_none_reads >= _CAPTURE_GAP_NONE_READS
+        or drops_now != drops_last_seen
+    )
+
+
+def read_drop_count(mic):
+    """Read the backend's queue-overflow drop counter.
+
+    mic is the AudioProvider adapter from get_audio_provider(), whose
+    public statistics method is get_stats() -- get_stats_snapshot()
+    exists only on the private stream inside the sounddevice adapter,
+    and calling it on the adapter crashes the provider at startup on
+    every backend (wh-google-creds-file-picker.1.28). A provider whose
+    stats lack the 'drops' field degrades to no-drop-detection rather
+    than killing the audio loop.
+    """
+    return mic.get_stats().get('drops', 0)
+
+
+def recover_from_streamer_failure(utterance_mgr, vad, lead_in_buffer):
+    """Reset the utterance state machine and VAD after a streamer
+    construction failure, and return the new vad_gate_open value.
+
+    start_new_utterance moves the state machine to ACTIVE before the
+    streamer is built; when the build fails there is no stream, so none
+    of the normal exits fire: silence finalization needs a Google
+    response timestamp that never comes, the no-text timeout is gated on
+    a live stream, and close_stream returns early with no stream. The
+    state machine would sit in ACTIVE forever and no later utterance
+    could start (wh-google-creds-file-picker.1.6).
+    """
+    utterance_mgr.state = UtteranceState.IDLE
+    lead_in_buffer.clear()
+    vad.reset()
+    return False
 
 
 class UtteranceState(Enum):
@@ -864,6 +1201,15 @@ def main(argv=None):
         except Exception as e:
             logger.warning(f"[ws] Could not start WebSocket forwarder: {e}")
 
+    # Build the Google client once, up front: the preflight catches a
+    # bad key before the startup notification
+    # (wh-google-creds-file-picker.1.4), and sharing one client keeps
+    # the key-file read off the per-utterance speech-start path
+    # (wh-google-creds-file-picker.1.7).
+    speech_client, startup_error = credentials_preflight(cfg)
+    if startup_error is not None:
+        logger.error(f"[startup] Credentials preflight failed: {startup_error}")
+
     # Initialize stability-based processing and usage metrics
     usage_metrics = UsageMetrics()
     stability_processor = StabilityProcessor(cfg, forwarder)
@@ -945,6 +1291,24 @@ def main(argv=None):
     vad_gate_open = False  # True when streaming audio to Google
     last_is_speech = False  # Track last VAD result for silence timeouts
     mic_none_count = 0  # Track consecutive mic.read() -> None for stall detection
+    # Last-seen queue-overflow drop count from the capture backend; an
+    # advance means frames were discarded, so the next frame is not
+    # contiguous with the previous one
+    # (wh-google-creds-file-picker.1.27).
+    mic_drops_seen = read_drop_count(mic)
+    # Nonzero while the current speech run began during the streamer
+    # retry cooldown: the count of consecutive silence frames still
+    # required before the run counts as ended. Keeps the gate closed
+    # past expiry so a fragment of the command is never sent
+    # (wh-google-creds-file-picker.1.23, .1.24).
+    contaminated_silence_left = 0
+    # True once a streamer-construction failure has been reported to the
+    # user this run; the notice fires once, not per utterance.
+    streamer_failure_notified = False
+    # When the last streamer construction failure happened; gates the
+    # retry cooldown (wh-google-creds-file-picker.1.6). 0.0 means no
+    # failure yet, so the first attempt is always allowed.
+    last_streamer_failure_time = 0.0
     # --------------------------
 
     # Display startup banner with version info
@@ -957,11 +1321,13 @@ def main(argv=None):
         def send_ready_notification():
             time.sleep(3.0)  # Wait for WebSocket to connect and service to be ready
 
-            logger.info("[startup] Sending 'ready' notification to Wheelhouse...")
-            forwarder.send_notification(
-                "Google STT",
-                "Transcription service ready"
-            )
+            # "ready" only when the startup credentials preflight passed
+            # (wh-google-creds-file-picker.1.4); the kind lets WheelHouse
+            # route the failure case instead of suppressing it
+            # (wh-google-creds-file-picker.1.5).
+            title, message, kind = startup_notification(startup_error)
+            logger.info(f"[startup] Sending startup notification to Wheelhouse: {message}")
+            forwarder.send_notification(title, message, kind=kind)
             logger.info("[startup] Startup notification sent")
         threading.Thread(target=send_ready_notification, daemon=True).start()
 
@@ -1015,6 +1381,13 @@ def main(argv=None):
                 _, new_cfg = load_config()
                 old_hints_count = len(cfg.phrase_hints)
                 cfg = new_cfg  # Update the config reference
+
+                # The reloaded config may name a different credentials
+                # file; rebuild the client from it now so the completion
+                # notice below can report a credentials problem instead
+                # of announcing ready and dropping the first utterance
+                # (wh-google-creds-file-picker.1.12).
+                speech_client, restart_cred_error = credentials_preflight(cfg)
                 
                 # Update StabilityProcessor with new config
                 stability_processor.stability_threshold = cfg.latency.stability_commit_threshold
@@ -1030,7 +1403,12 @@ def main(argv=None):
                 lead_in_buffer.clear()
                 # Recreate buffer with new maxlen if lead_in_ms changed
                 lead_in_buffer = collections.deque(maxlen=lead_in_frames)
-                vad_gate_open = False
+                # The restart discarded seconds of audio; a command
+                # still in progress must not resume as a fresh onset
+                # (wh-google-creds-file-picker.1.26).
+                vad_gate_open, contaminated_silence_left = (
+                    audio_discontinuity(lead_in_buffer)
+                )
                 
                 logger.info(f"[restart] Config reloaded: hints={len(cfg.phrase_hints)} (was {old_hints_count})")
                 
@@ -1044,12 +1422,14 @@ def main(argv=None):
                 # This allows future hint additions to work without hitting the max limit
                 restart_count = 0
 
-                # Send completion notification
+                # Send completion notification -- "ready" only if the
+                # reloaded credentials actually built a client
+                # (wh-google-creds-file-picker.1.12).
                 if forwarder and cfg.forward_ws:
-                    forwarder.send_notification(
-                        "STT Service",
-                        "Service restart completed. Ready."
+                    title, message, kind = restart_completion_notification(
+                        restart_cred_error
                     )
+                    forwarder.send_notification(title, message, kind=kind)
 
                 # The restart block pauses this loop for seconds on purpose;
                 # don't count that pause as a scheduling stall.
@@ -1059,6 +1439,13 @@ def main(argv=None):
             # Skip all audio processing if transcription is disabled (audio suppression active)
             # This prevents VAD triggering, utterance starts, and API billing during suppression
             if not transcription_enabled_event.is_set():
+                # Every suppressed frame is a discarded piece of audio;
+                # speech spanning the suppression window must not
+                # resume as a fresh onset when transcription re-enables
+                # (wh-google-creds-file-picker.1.26).
+                vad_gate_open, contaminated_silence_left = (
+                    audio_discontinuity(lead_in_buffer)
+                )
                 audio_frame = mic.read(timeout=0.05)
                 if audio_frame and wake_word_detector and wake_word_listening:
                     result = wake_word_detector.process(audio_frame)
@@ -1109,6 +1496,16 @@ def main(argv=None):
                 elif mic_none_count > 0 and mic_none_count % 600 == 0:
                     logger.info(f"[mic] WARNING: still no audio frames ({mic_none_count * 0.05:.0f}s stalled)")
                 continue
+            mic_drops_now = read_drop_count(mic)
+            if capture_lost_audio(mic_none_count, mic_drops_now,
+                                  mic_drops_seen):
+                # Audio was lost since the last processed frame; the
+                # frame in hand may be only the tail of a command begun
+                # during the gap (wh-google-creds-file-picker.1.27).
+                vad_gate_open, contaminated_silence_left = (
+                    audio_discontinuity(lead_in_buffer)
+                )
+            mic_drops_seen = mic_drops_now
             if mic_none_count >= 40:
                 logger.info(f"[mic] Audio resumed after {mic_none_count * 0.05:.1f}s stall ({mic_none_count} None reads)")
             mic_none_count = 0
@@ -1142,22 +1539,23 @@ def main(argv=None):
                 vad_times_ms.append((t1 - t0) * 1000)
                 agc_times_ms.append((t2 - t1) * 1000)
             
-            # --- Inline Lead-in Buffer Logic (replaces VadDeflector) ---
-            valid_chunks = []
-            if vad_gate_open:
-                # Gate open: pass audio directly through
-                valid_chunks.append(agc_audio)
-            else:
-                # Gate closed: check if speech started
-                if raw_is_speech:
-                    # Speech detected! Open gate and send lead-in + current frame
-                    vad_gate_open = True
-                    valid_chunks.extend(lead_in_buffer)  # Send buffered audio first
-                    valid_chunks.append(agc_audio)
-                    lead_in_buffer.clear()
-                else:
-                    # Silence: add to rolling lead-in buffer
-                    lead_in_buffer.append(audio_frame)
+            # --- Lead-in Buffer / VAD gate logic (gate_frame) ---
+            # During the streamer retry cooldown the gate stays closed
+            # even on speech (wh-google-creds-file-picker.1.11), and a
+            # speech run that began during the cooldown keeps it closed
+            # past expiry so a mid-command reopen cannot send a
+            # fragment (wh-google-creds-file-picker.1.23, .1.24).
+            valid_chunks, vad_gate_open, contaminated_silence_left = gate_frame(
+                raw_is_speech,
+                agc_audio,
+                audio_frame,
+                streaming,
+                current_time,
+                last_streamer_failure_time,
+                vad_gate_open,
+                lead_in_buffer,
+                contaminated_silence_left,
+            )
             # --------------------------
             
             # Periodic AGC diagnostics logging
@@ -1199,24 +1597,46 @@ def main(argv=None):
             if valid_chunks:
                 # If valid_chunks is not empty, it means we have Confirmed Speech
                 
-                # Start new stream if needed
-                if streaming is None:
+                # Start new stream if needed. The cooldown check runs
+                # before start_new_utterance so a persistent failure
+                # does not spin the state machine (and vad_start
+                # notifications) on every audio frame
+                # (wh-google-creds-file-picker.1.6).
+                if streaming is None and streamer_retry_allowed(
+                    current_time, last_streamer_failure_time
+                ):
                     if utterance_mgr.state in (UtteranceState.IDLE, UtteranceState.FINALIZED):
                         utterance_mgr.start_new_utterance()
-                        
+
                         try:
-                            # (Your existing Streamer init code here...)
-                            streaming = GoogleDirectStreamer(
-                                language=cfg.language, model=cfg.model, sample_rate=cfg.rate,
-                                enable_auto_punct=cfg.auto_punct, debug_cfg=cfg.debug,
-                                single_utterance=cfg.single_utterance, phrase_hints=cfg.phrase_hints,
-                                phrase_hints_boost=cfg.hints_boost, class_tokens=cfg.class_tokens,
-                                transcription_enabled_event=transcription_enabled_event
+                            # Rebuild the shared client only after a
+                            # failure dropped it; the normal path reuses
+                            # the one built at startup
+                            # (wh-google-creds-file-picker.1.7). The
+                            # rebuild is bounded so a hung key-file read
+                            # raises into this handler instead of
+                            # blocking the audio loop forever
+                            # (wh-google-creds-file-picker.1.18).
+                            if speech_client is None:
+                                speech_client = rebuild_speech_client(cfg)
+                            streaming = build_streamer(
+                                cfg, transcription_enabled_event,
+                                client=speech_client,
                             )
                             streaming.start()
                         except Exception as e:
-                            logger.info(f"Failed to start streamer: {type(e).__name__}: {e!r}")
+                            streamer_failure_notified = report_streamer_start_failure(
+                                forwarder, e, streamer_failure_notified
+                            )
                             streaming = None
+                            # The client may be the stale part (key file
+                            # deleted or replaced); drop it so the next
+                            # attempt rebuilds from config.
+                            speech_client = None
+                            last_streamer_failure_time = current_time
+                            vad_gate_open = recover_from_streamer_failure(
+                                utterance_mgr, vad, lead_in_buffer
+                            )
 
                 # Send audio to Google
                 if streaming and utterance_mgr.state == UtteranceState.ACTIVE:

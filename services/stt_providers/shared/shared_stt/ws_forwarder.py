@@ -255,11 +255,16 @@ class WSForwarder:
 
                             # Build payload based on message type
                             if msg_type == "notification":
-                                # Notification messages have title and message fields
+                                # Notification messages have title and message
+                                # fields, plus the machine-readable kind that
+                                # WheelHouse routes on -- dropping it here
+                                # silently disables that routing
+                                # (wh-google-creds-file-picker.1.15)
                                 payload = {
                                     "type": msg_type,
                                     "title": msg_data.get("title", ""),
                                     "message": msg_data.get("message", ""),
+                                    "kind": msg_data.get("kind", ""),
                                     "utterance_id": utt_id,
                                     "is_partial": is_partial
                                 }
@@ -617,12 +622,16 @@ class WSForwarder:
         except Exception:
             pass
 
-    def send_notification(self, title: str, message: str):
+    def send_notification(self, title: str, message: str, kind: str = ""):
         """Send a notification message to trigger a Windows toast notification.
 
         Args:
             title: Notification title
             message: Notification message body
+            kind: Machine-readable classification ("ready",
+                "startup_failed", "error", or "" for a plain notice) so
+                WheelHouse can route on it instead of substring-matching
+                the message text (wh-google-creds-file-picker.1.5)
         """
         if not self._loop or not self._queue:
             return
@@ -631,6 +640,7 @@ class WSForwarder:
             "type": "notification",
             "title": title,
             "message": message,
+            "kind": kind,
             "utterance_id": 0,
             "is_partial": False
         }

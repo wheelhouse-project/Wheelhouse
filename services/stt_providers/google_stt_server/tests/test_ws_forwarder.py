@@ -336,3 +336,108 @@ class TestShutdownCommand:
         await server.wait_closed()
 
         assert callback_fired, "Shutdown callback should fire when shutdown message received"
+
+
+class TestNotificationKind:
+    """The notification payload carries a machine-readable kind so
+    WheelHouse can route on it instead of substring-matching the message
+    text (wh-google-creds-file-picker.1.5)."""
+
+    def _forwarder(self):
+        from unittest.mock import MagicMock
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59999,
+            transcription_enabled_event=threading.Event(),
+        )
+        # No socket: capture the payload at the queue boundary. put() on
+        # a MagicMock is not a coroutine, so run_coroutine_threadsafe
+        # raises inside send_notification's own except and the call
+        # still records the exact payload.
+        forwarder._loop = MagicMock()
+        forwarder._queue = MagicMock()
+        return forwarder
+
+    def test_kind_is_included_in_the_payload(self):
+        forwarder = self._forwarder()
+        forwarder.send_notification("Google STT", "broken", kind="startup_failed")
+        payload = forwarder._queue.put.call_args.args[0]
+        assert payload["type"] == "notification"
+        assert payload["kind"] == "startup_failed"
+
+    def test_kind_defaults_to_empty(self):
+        forwarder = self._forwarder()
+        forwarder.send_notification("Google STT", "hello")
+        payload = forwarder._queue.put.call_args.args[0]
+        assert payload["kind"] == ""
+
+
+class TestNotificationKindOnTheWire:
+    """The kind must survive all the way into the outgoing JSON. The
+    queue-boundary tests above prove send_notification stores it, but
+    _sender_loop rebuilds the notification payload before json.dumps,
+    and a field dropped there silently disables the whole kind routing
+    on the WheelHouse side (review finding
+    wh-google-creds-file-picker.1.15)."""
+
+    @pytest.mark.asyncio
+    async def test_every_kind_reaches_the_outgoing_json(self):
+        import json
+
+        import websockets
+
+        received = []
+        connection_established = asyncio.Event()
+        got_all_notifications = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send(
+                '{"type": "status", "transcription_enabled": true}'
+            )
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    data = json.loads(message)
+                    if data.get("type") == "notification":
+                        received.append(data)
+                        if len(received) >= 4:
+                            got_all_notifications.set()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59997)
+
+        event = threading.Event()
+        event.set()
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59997,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+        try:
+            await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+            await asyncio.sleep(0.1)
+
+            forwarder.send_notification("T", "service ready", kind="ready")
+            forwarder.send_notification(
+                "T", "credentials problem", kind="startup_failed"
+            )
+            forwarder.send_notification("T", "engine error", kind="error")
+            forwarder.send_notification("T", "plain notice")
+
+            await asyncio.wait_for(got_all_notifications.wait(), timeout=3.0)
+        finally:
+            forwarder.stop()
+            server.close()
+            await server.wait_closed()
+
+        by_message = {d["message"]: d.get("kind") for d in received}
+        assert by_message == {
+            "service ready": "ready",
+            "credentials problem": "startup_failed",
+            "engine error": "error",
+            "plain notice": "",
+        }

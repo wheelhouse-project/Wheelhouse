@@ -30,12 +30,19 @@ Typical Usage:
 import logging
 import queue
 import time
+from collections import deque
 from typing import Optional, Callable
 
 import sounddevice as sd
 import numpy as np
 
+from .diagnostics import LoopStallTracker
 from .overflow_monitor import OverflowMonitor, OverflowConfig
+from .thread_priority import (
+    THREAD_PRIORITY_TIME_CRITICAL,
+    elevate_current_thread,
+    get_current_thread_priority,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +72,30 @@ class MicrophoneStream:
             stable_reset_seconds=300.0  # Reset counter after 5 minutes stable
         )
         self.overflow_monitor = OverflowMonitor(overflow_config, self.overflow_callback)
+
+        # Starvation defenses (wh-sounddevice-starvation-parity). PortAudio
+        # owns the callback thread, so the priority check must run inside the
+        # callback itself, once per stream start. Measured on the reference
+        # machine (MME host API, 2026-07-28): PortAudio already runs this
+        # thread at TIME_CRITICAL, so elevation is conditional -- it fires
+        # only when the measured priority is below time-critical, i.e. on a
+        # host API that leaves the thread unprotected
+        # (wh-sounddevice-starvation-parity.3.1). The stall tracker measures
+        # gaps between callback invocations -- a gap means PortAudio could not
+        # deliver audio on time, the direct signature behind "input overflow".
+        # The callback never logs; it appends log-ready lines here and read()
+        # (the consumer thread) drains and emits them
+        # (wh-sounddevice-starvation-parity.3.2). A bounded deque, not a
+        # single slot (wh-sounddevice-starvation-parity.3.5): append and
+        # popleft are atomic under the GIL and non-blocking, the one-by-one
+        # drain cannot erase a concurrently appended entry, and maxlen bounds
+        # memory if the consumer never reads. start() leaves it alone, so
+        # diagnostics from a prior stream still get logged after a restart.
+        self._callback_priority_checked = False
+        self._callback_priority: Optional[int] = None
+        self._callback_elevated: Optional[bool] = None
+        self._pending_log_msgs: deque = deque(maxlen=8)
+        self.stall_tracker = LoopStallTracker(label="capture callback")
 
         # Instrumentation
         self._frames_captured = 0
@@ -106,6 +137,36 @@ class MicrophoneStream:
         :data_out: Audio bytes object queued for processing
         :notes: Low-level audio capture callback running in separate PortAudio thread. Converts NumPy audio buffer to bytes and queues for main thread consumption. Monitors for input overflow errors - if overflow threshold exceeded, triggers automatic microphone restart. Frame counter maintained for diagnostics. Queue consumed by read() method which feeds VAD and STT streaming.
         """
+        if not self._callback_priority_checked:
+            # Elevate only when the host API leaves this thread below
+            # time-critical (MME arrives pre-elevated; measured 2026-07-28).
+            # An unreadable priority (None) also skips elevation -- never
+            # blind-fire SetThreadPriority over unknown host scheduling --
+            # and is reported as unavailable, not as host-managed
+            # (wh-sounddevice-starvation-parity.3.4).
+            self._callback_priority_checked = True
+            prio = get_current_thread_priority()
+            self._callback_priority = prio
+            if prio is None:
+                self._pending_log_msgs.append(
+                    "[mic] Callback thread priority unavailable; "
+                    "elevation skipped")
+            elif prio < THREAD_PRIORITY_TIME_CRITICAL:
+                self._callback_elevated = elevate_current_thread('time_critical')
+                self._pending_log_msgs.append(
+                    f"[mic] Callback thread priority was {prio}; "
+                    f"elevated to time-critical: {self._callback_elevated}")
+            else:
+                self._pending_log_msgs.append(
+                    f"[mic] Callback thread priority: {prio} "
+                    f"(host-managed; no elevation needed)")
+
+        # qsize is passed as a callable: it costs a mutex acquisition, so the
+        # tracker evaluates it only when a rate-limited stall message forms.
+        stall_msg = self.stall_tracker.record(self._q.qsize)
+        if stall_msg:
+            self._pending_log_msgs.append(stall_msg)
+
         if status:
             logger.warning(f"[mic] PortAudio status: {status}")
 
@@ -140,6 +201,17 @@ class MicrophoneStream:
     def start(self):
         if self._stream and self._stream.active:
             return
+
+        # Each start makes PortAudio create a fresh callback thread, so the
+        # priority check must run again from inside it. The stop()-to-start()
+        # pause is intentional and must not be counted as a scheduling stall.
+        # _pending_log_msgs is deliberately NOT cleared: unread diagnostics
+        # from the prior stream still get logged on the next read()
+        # (wh-sounddevice-starvation-parity.3.5).
+        self._callback_priority_checked = False
+        self._callback_priority = None
+        self._callback_elevated = None
+        self.stall_tracker.reset()
 
         if self.debug_frame_stats:
             dname = 'default'
@@ -186,6 +258,17 @@ class MicrophoneStream:
         return self.overflow_monitor.get_status()
 
     def read(self, timeout=1.0):
+        # Log lines composed by the audio callback are emitted here, on the
+        # consumer thread, so the callback never takes logging-handler locks
+        # (wh-sounddevice-starvation-parity.3.2). Draining one entry at a
+        # time means a line the callback appends mid-drain is logged on this
+        # or the next pass, never erased.
+        while True:
+            try:
+                msg = self._pending_log_msgs.popleft()
+            except IndexError:
+                break
+            logger.info(msg)
         try:
             return self._q.get(timeout=timeout)
         except queue.Empty:

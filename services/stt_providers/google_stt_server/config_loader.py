@@ -131,6 +131,11 @@ class AppConfig:
     wake_word_mode: str = "idle_recovery"
     wake_word_model_dir: str = "data/wake_words"
 
+    # Google service-account key file (wh-google-creds-file-picker).
+    # Empty means Application Default Credentials, i.e. the
+    # GOOGLE_APPLICATION_CREDENTIALS environment variable.
+    credentials_file: str = ""
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Google Cloud STT real-time tuner (config-driven)")
@@ -143,6 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wake-word-sensitivity", type=float, default=None, help="Wake word sensitivity")
     p.add_argument("--wake-word-mode", default=None, help="Wake word mode (idle_recovery, push_to_talk)")
     p.add_argument("--wake-word-model-dir", default=None, help="Path to wake word model directory")
+    # Google service-account key file passed by remote_stt_launcher
+    # (overrides config.toml [server] credentials_file)
+    p.add_argument("--credentials-file", default=None, help="Path to a Google service-account key file")
     return p
 
 
@@ -257,5 +265,7 @@ def load_config() -> tuple[argparse.Namespace, AppConfig]:
         wake_word_sensitivity=args.wake_word_sensitivity if args.wake_word_sensitivity is not None else ww.get("sensitivity", 0.5),
         wake_word_mode=args.wake_word_mode or ww.get("mode", "idle_recovery"),
         wake_word_model_dir=args.wake_word_model_dir or ww.get("model_dir", "data/wake_words"),
+        # CLI arg (passed by the WheelHouse launcher) wins over config.toml
+        credentials_file=args.credentials_file or srv.get("credentials_file", ""),
     )
     return args, app_config

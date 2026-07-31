@@ -8,12 +8,20 @@ action functions call into.
 import asyncio
 import logging
 import re
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from ai.help_chat import HelpChatSession
-from ai.prompts import HELP_CHAT_SYSTEM, HELP_SYSTEM_TEMPLATE, TEXT_CORRECTION_SYSTEM
+from ai.prompts import (
+    HELP_CHAT_SYSTEM,
+    HELP_SYSTEM_TEMPLATE,
+    TEXT_CORRECTION_SYSTEM,
+    build_rewrite_system,
+    wrap_selection,
+)
 from ai.providers.openai_compat import ChatResult, ChatStatus, OpenAIProvider
+from ai.server_kind import CLOUD, LOCAL, normalize_server_kind
 from ai.speech_output import SpeechOutput
 
 log = logging.getLogger(__name__)
@@ -58,6 +66,35 @@ _THINKING_TAG = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 _CODE_FENCE = re.compile(r"^```\w*\n?(.*?)\n?```$", re.DOTALL)
 
 
+# How long to leave a Wheelhouse-started server alone after trying to start
+# it. Readiness is re-checked every 60 seconds and again after every failed
+# request, and without a wait between attempts a server that cannot come up
+# would be started from each of those.
+_SERVER_RESTART_MIN_INTERVAL_S = 60.0
+
+# The longest that wait grows to. A server that keeps failing has something
+# wrong that starting it again will not fix -- a deleted model file, a
+# graphics driver that faults -- so the attempts spread out. It keeps trying
+# at this rate rather than giving up, because the cause can be repaired while
+# Wheelhouse is running.
+_SERVER_RESTART_MAX_INTERVAL_S = 600.0
+
+
+def _boundary_whitespace(captured: str) -> tuple[str, str]:
+    """The whitespace at each end of the captured selection.
+
+    Returns ("", "") for a selection that is empty or entirely whitespace.
+    Both cases would otherwise report the same single run of characters as
+    the leading whitespace AND the trailing whitespace, and the caller would
+    put it back twice around the reply.
+    """
+    if not captured or not captured.strip():
+        return "", ""
+    leading = captured[: len(captured) - len(captured.lstrip())]
+    trailing = captured[len(captured.rstrip()):]
+    return leading, trailing
+
+
 class AIService:
     """Manages AI capabilities: text correction, help Q&A."""
 
@@ -85,9 +122,25 @@ class AIService:
         # Background tasks (first probe + periodic loops). Held so they can be
         # cancelled on stop and are not garbage-collected while running.
         self._bg_tasks: list[asyncio.Task] = []
+
+        # -- replacing a Wheelhouse-started server that died --
+        # Set only when Wheelhouse started the server itself; see
+        # set_local_server_restart. None means an external server, which is
+        # not ours to start.
+        self._restart_local_server: Optional[
+            Callable[[], Awaitable[bool]]
+        ] = None
+        self._server_restart_lock = asyncio.Lock()
+        self._server_restart_interval_s: float = _SERVER_RESTART_MIN_INTERVAL_S
+        self._next_server_restart_at: float = 0.0
         # One-time latch: warn at most once when [ai.server] is missing while
         # ai.enabled is true (upgrade-from-old-config case, design 5.4).
         self._warned_missing_server = False
+        # One-time latch for the [ai.server] kind complaint. _server_kind() is
+        # called on every refresh tick and every probe launch, so without this
+        # an unreadable value would print the same line all day
+        # (wh-ai-kind-validation).
+        self._warned_server_kind = False
         # Cached ChatResult from the most recent help_ask()/chat_help() call.
         # help_ask() returns this so _handle_help_ask can read .ok/.truncated
         # without the str-returning chat_help -> HelpChatSession.ask path
@@ -164,7 +217,7 @@ class AIService:
             # Tell the provider whether this is a cloud endpoint so it can
             # suppress the non-/v1 warning for cloud paths like Gemini's
             # /v1beta/openai/ (finding 1.4).
-            is_cloud=(self._server_kind() == "cloud"),
+            is_cloud=(self._server_kind() == CLOUD),
         )
 
     async def stop(self) -> None:
@@ -272,8 +325,20 @@ class AIService:
         return not self._config.get("ai.server.base_url", "")
 
     def _server_kind(self) -> str:
-        """The configured server kind: 'local' (live model list) or 'cloud'."""
-        return self._config.get("ai.server.kind", "local")
+        """The configured server kind: 'local' (live model list) or 'cloud'.
+
+        Always one of those two. A value that is neither falls back to 'local'
+        and is complained about once per service instance -- before this was
+        centralised, a typo took the local path at two of the four sites that
+        read this setting and the cloud path at the other two
+        (wh-ai-kind-validation).
+        """
+        kind, complaint = normalize_server_kind(
+            self._config.get("ai.server.kind", None))
+        if complaint and not self._warned_server_kind:
+            self._warned_server_kind = True
+            log.warning("%s", complaint)
+        return kind
 
     def is_ready(self) -> bool:
         """True when AI is on and the last reachability check passed.
@@ -321,7 +386,7 @@ class AIService:
         in the loop; it is NOT wrapped in any shutdown-on-exception helper, so
         a transient refresh error never takes down voice control (design 5.2).
         """
-        if self._server_kind() == "cloud":
+        if self._server_kind() == CLOUD:
             return  # Cloud has no live model list; local-only contract (design 5.2, wh-ay6h.7.1)
         if self._provider is None:
             return
@@ -377,15 +442,118 @@ class AIService:
         # deadline would silently cut off the fallback probe on any slow-loris
         # primary endpoint (finding wh-ay6h.6.2). The 10 s worst case is well
         # within the goal of not stalling for the full chat timeout (60 s).
+        self._ready = await self._probe_once()
+        if not self._ready:
+            # Detecting the outage is not the same as recovering from it. When
+            # the server is ours, this is what puts one back; when it is
+            # somebody else's, it does nothing.
+            await self._replace_dead_local_server()
+        return self._ready
+
+    async def _probe_once(self) -> bool:
+        """One reachability probe, with every failure read as unavailable."""
+        if self._provider is None:
+            return False
         try:
-            fresh = await self._provider.is_available()
+            return bool(await self._provider.is_available())
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
             log.debug("recheck_ready probe failed: %s", e)
-            fresh = False
-        self._ready = bool(fresh)
-        return self._ready
+            return False
+
+    def set_local_server_restart(
+        self, restart: Optional[Callable[[], Awaitable[bool]]]
+    ) -> None:
+        """Say how to start the model server again, when it is ours to start.
+
+        Called by ServiceManager only when Wheelhouse started the server
+        itself. An external server stays untouched: the user runs it, and its
+        address may not even be on this machine.
+        """
+        self._restart_local_server = restart
+
+    def _hold_off_next_restart(self) -> None:
+        """Say when another attempt may run, from the wait as it stands now.
+
+        Called again after the outcome is known, which is the part that was
+        missing. The deadline used to be worked out once, before the attempt,
+        from the wait it had at that moment. A failure then doubled the wait
+        without moving the deadline, so the next attempt was admitted at the
+        old shorter one and the log's promise was not kept; a success reset the
+        wait to a minute while the deadline kept the grown value, leaving a
+        server that died again down for as long as ten minutes.
+
+        The clock is read here rather than passed in because an attempt can
+        itself take ninety seconds to load the model, and the wait is meant to
+        separate attempts, not to start running while one is still going.
+        """
+        self._next_server_restart_at = (
+            time.monotonic() + self._server_restart_interval_s
+        )
+
+    async def _replace_dead_local_server(self) -> None:
+        """Start our model server again after it stopped answering.
+
+        The server can die long after a healthy start -- out of memory,
+        antivirus, a driver fault, ended in Task Manager. Starting it once at
+        startup left the AI features off until the whole of Wheelhouse was
+        restarted, which is a hard thing to ask of somebody who controls this
+        machine by voice.
+
+        Never raises: this runs inside the periodic readiness loop and inside
+        the triage after a failed request, and an exception escaping here
+        would stop the loop and leave readiness unchecked from then on.
+        """
+        restart = self._restart_local_server
+        if restart is None:
+            return
+        now = time.monotonic()
+        if now < self._next_server_restart_at:
+            return
+        if self._server_restart_lock.locked():
+            # Another readiness check is already starting one. The periodic
+            # loop and a failed request arrive together often enough for this
+            # to be the ordinary case, not a rare one.
+            return
+
+        async with self._server_restart_lock:
+            # Provisional, so a check arriving while this attempt runs is
+            # turned away. It is set again below from the wait the outcome
+            # leaves behind.
+            self._hold_off_next_restart()
+            log.warning(
+                "The local AI server stopped answering; starting it again."
+            )
+            try:
+                started = await restart()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.error("Could not start the local AI server again: %s", e)
+                started = False
+
+            if not started:
+                self._server_restart_interval_s = min(
+                    self._server_restart_interval_s * 2,
+                    _SERVER_RESTART_MAX_INTERVAL_S,
+                )
+                self._hold_off_next_restart()
+                log.error(
+                    "The local AI server did not come back. Trying again in "
+                    "no less than %d seconds.",
+                    int(self._server_restart_interval_s),
+                )
+                return
+
+            self._server_restart_interval_s = _SERVER_RESTART_MIN_INTERVAL_S
+            self._hold_off_next_restart()
+            # Probe again rather than assuming. The user may be mid-sentence,
+            # and waiting for the next scheduled check is the difference
+            # between a command that works and one that does not.
+            self._ready = await self._probe_once()
+            if self._ready:
+                log.info("The local AI server is answering again.")
 
     def _launch_background_probes(self) -> None:
         """Launch the first reachability probe and the periodic loops.
@@ -402,7 +570,7 @@ class AIService:
         loop = asyncio.get_event_loop()
         self._bg_tasks.append(loop.create_task(self.recheck_ready()))
         self._bg_tasks.append(loop.create_task(self._readiness_loop()))
-        if self._server_kind() == "local":
+        if self._server_kind() == LOCAL:
             self._bg_tasks.append(loop.create_task(self._refresh_loop()))
 
     async def _readiness_loop(self, interval: float = _REFRESH_INTERVAL_S) -> None:
@@ -454,11 +622,52 @@ class AIService:
         ``_processing_lock``.  This method must NOT acquire that lock
         itself to avoid non-reentrant deadlock.
         """
+        return await self._transform_text(
+            text,
+            system=TEXT_CORRECTION_SYSTEM,
+            user=text,
+            what="fix_text",
+        )
+
+    async def rewrite_text(self, text: str, instruction: str) -> ChatResult:
+        """Rewrite the selection in the style the voice pattern asked for.
+
+        Same contract as :meth:`fix_text` -- the caller reads result.ok /
+        result.text / result.status, and concurrency is the caller's job via
+        ``_processing_lock``. The difference is the prompt: ``instruction``
+        comes from the pattern's params ("Rewrite this text in plain
+        language...", "...as a pirate would say it"), and
+        :func:`build_rewrite_system` adds the two fixed parts around it. The
+        selection goes in the user message between marker lines, because it is
+        arbitrary highlighted text that may contain sentences addressed to the
+        model; see REWRITE_SOURCE_RULE.
+        """
+        return await self._transform_text(
+            text,
+            system=build_rewrite_system(instruction),
+            user=wrap_selection(text),
+            what="rewrite_text",
+        )
+
+    async def _transform_text(
+        self, text: str, *, system: str, user: str, what: str
+    ) -> ChatResult:
+        """Send one selection-in, selection-out request and clean the answer.
+
+        Shared by fix_text and rewrite_text: the guards, the cancellation
+        handling, the token budget and the sanitizing are identical, and only
+        the two message bodies differ. ``what`` names the caller in the log.
+
+        ``text`` is the captured selection. It is passed to the sanitizer as
+        well as being the basis for the token budget: the sanitizer needs it to
+        tell a code fence the user selected from one the model added
+        (wh-ai-fence-strip-selection).
+        """
         if not text or not text.strip():
             return ChatResult(status=ChatStatus.EMPTY)
 
         if self._provider is None:
-            log.warning("fix_text called with no provider loaded")
+            log.warning("%s called with no provider loaded", what)
             return ChatResult(status=ChatStatus.TRANSPORT_ERROR)
 
         # Check cancellation before starting
@@ -467,8 +676,8 @@ class AIService:
             return ChatResult(status=ChatStatus.CANCELLED)
 
         messages = [
-            {"role": "system", "content": TEXT_CORRECTION_SYSTEM},
-            {"role": "user", "content": text},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ]
 
         # Text correction output ~= input length.  Use generous multiplier
@@ -491,7 +700,7 @@ class AIService:
 
         return ChatResult(
             status=ChatStatus.OK,
-            text=self._sanitize_response(result.text),
+            text=self._sanitize_response(result.text, text),
             finish_reason=result.finish_reason,
             status_code=result.status_code,
         )
@@ -653,8 +862,15 @@ class AIService:
             log.warning("Failed to load knowledge base: %s", e)
             return None
 
-    def _sanitize_response(self, text: str) -> str:
-        """Strip common LLM artifacts from response text."""
+    def _sanitize_response(self, text: str, captured: str = "") -> str:
+        """Strip common LLM artifacts from response text.
+
+        Args:
+            text: The model's reply.
+            captured: The text that was sent for correction, when the caller
+                has it. Used only to tell a fence the user selected apart
+                from one the model added; see rule 3.
+        """
         # 1. Strip thinking tags
         text = _THINKING_TAG.sub("", text)
 
@@ -662,12 +878,28 @@ class AIService:
         for pattern in _PREAMBLE_PATTERNS:
             text = pattern.sub("", text)
 
-        # 3. Strip code fences
-        fence_match = _CODE_FENCE.match(text.strip())
-        if fence_match:
-            text = fence_match.group(1)
+        # 3. Strip code fences, unless the captured text was itself one
+        # fenced block. The rule exists to remove a fence the model wrapped
+        # around its answer; a fence the user selected is their own content
+        # and stripping it silently damages the paste
+        # (wh-ai-fence-strip-selection). Callers with no captured text keep
+        # the original unconditional behaviour.
+        if not _CODE_FENCE.match(captured.strip()):
+            fence_match = _CODE_FENCE.match(text.strip())
+            if fence_match:
+                text = fence_match.group(1)
 
         # 4. Strip trailing commentary
         text = _TRAILING_COMMENTARY.sub("", text)
 
-        return text.strip()
+        # 5. Remove the model's own boundary whitespace, then put back the
+        # whitespace the selection had. The two are not the same thing: a
+        # leading newline the model wrote is an artifact, while the four
+        # spaces the user's line was indented by are the layout the rewrite
+        # instruction promises to keep ("Do not change the line breaks, the
+        # blank lines, the indentation" -- ai/prompts.py). Stripping both
+        # returned correct words at the wrong indentation, and dropped the
+        # trailing newline that separated the selection from the next
+        # paragraph, before replace_selected_text pasted it back.
+        leading, trailing = _boundary_whitespace(captured)
+        return leading + text.strip() + trailing

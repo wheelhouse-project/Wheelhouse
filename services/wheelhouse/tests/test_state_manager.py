@@ -954,6 +954,70 @@ class TestPTTState:
         sm.ptt_stop(reason="drag_cancel")
         assert sm._speech_enabled is False  # Restored to pre-PTT state
 
+    def test_ptt_stop_gesture_cancel_restores_speech(self, sm):
+        """A press whose release was taken away decided nothing.
+
+        The context menu opening or the button being hidden interrupts the hold
+        the same way a drag does, so speech goes back to what the user had
+        rather than being forced off.
+        """
+        sm._speech_enabled = True
+        sm.ptt_start()  # Saves _speech_before_ptt = True
+        sm.ptt_stop(reason="gesture_cancel")
+        assert sm._speech_enabled is True  # Restored, not forced off
+
+    def test_ptt_stop_gesture_cancel_keeps_speech_off(self, sm):
+        """Gesture cancel keeps speech off if it was off before PTT."""
+        sm._speech_enabled = False
+        sm.ptt_start()
+        assert sm._speech_enabled is True  # PTT turns it on
+        sm.ptt_stop(reason="gesture_cancel")
+        assert sm._speech_enabled is False
+
+    def test_ptt_stop_released_still_forces_speech_off(self, sm):
+        """An ordinary release is a decision, so it does turn speech off."""
+        sm._speech_enabled = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="released")
+        assert sm._speech_enabled is False
+
+    def test_a_stop_after_the_safety_timeout_still_corrects_the_display(self, sm):
+        """The interface asked to end a hold that already ended on its own.
+
+        The safety timeout ends a hold the user never released, and it turns
+        speech off. If the button is then hidden or the context menu opens,
+        the interface cancels the hold it still believes in and puts speech
+        back to what it was before -- showing the microphone as open while it
+        is shut. Nothing here can stop that guess being made, so the answer is
+        to send the real state back straight away and correct it.
+        """
+        sm._speech_enabled = True
+        sm.ptt_start()
+        sm._ptt_safety_timeout()
+        assert sm._speech_enabled is False
+        sm.state_to_gui_queue.put_nowait.reset_mock()
+
+        sm.ptt_stop(reason="gesture_cancel")
+
+        updates = [
+            c[0][0]
+            for c in sm.state_to_gui_queue.put_nowait.call_args_list
+            if c[0][0].get("action") == "state_update"
+        ]
+        assert updates, "no state update was sent to correct the display"
+        assert updates[-1]["speech_enabled"] is False
+        assert updates[-1]["ptt_active"] is False
+
+    def test_a_stop_on_a_hold_that_never_ran_changes_nothing(self, sm, mock_event_bus):
+        """Correcting the display must not look like ending a real hold."""
+        sm._speech_enabled = False
+        sm._ptt_active = False
+
+        sm.ptt_stop(reason="gesture_cancel")
+
+        assert sm._speech_enabled is False
+        mock_event_bus.publish.assert_not_called()
+
     def test_set_interaction_mode(self, sm):
         sm.set_speech_interaction_mode("push_to_talk")
         assert sm._speech_interaction_mode == "push_to_talk"
@@ -1018,3 +1082,197 @@ class TestPTTState:
         assert mock_config._config["speech"]["interaction_mode"] == "push_to_talk"
         # save() was scheduled via loop.create_task
         sm.loop.create_task.assert_called()
+
+
+class TestTheSpeechEngineIsToldTheSameThingAsTheDisplay:
+    """Ending a hold must tell the speech engine what the display shows.
+
+    The interface and the speech engine learn about the end of a hold through
+    two separate channels. If they disagree, the user sees an open microphone
+    that cannot hear anything, and nothing repairs it until some other change
+    happens.
+    """
+
+    def _told(self, mock_websocket_manager):
+        """Return the on-or-off value the speech engine was last told."""
+        return mock_websocket_manager.set_transcription_status.call_args[0][0]
+
+    def test_a_cancelled_hold_leaves_the_engine_on_when_speech_was_on(
+        self, sm, mock_websocket_manager
+    ):
+        sm._speech_enabled = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="drag_cancel")
+        assert sm.speech_enabled is True
+        assert self._told(mock_websocket_manager) is True
+
+    def test_a_cancelled_hold_leaves_the_engine_off_when_speech_was_off(
+        self, sm, mock_websocket_manager
+    ):
+        sm._speech_enabled = False
+        sm.ptt_start()
+        sm.ptt_stop(reason="drag_cancel")
+        assert sm.speech_enabled is False
+        assert self._told(mock_websocket_manager) is False
+
+    def test_a_taken_release_leaves_the_engine_on_when_speech_was_on(
+        self, sm, mock_websocket_manager
+    ):
+        """The context menu or a hidden button interrupts the hold the same way."""
+        sm._speech_enabled = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="gesture_cancel")
+        assert sm.speech_enabled is True
+        assert self._told(mock_websocket_manager) is True
+
+    def test_a_taken_release_leaves_the_engine_off_when_speech_was_off(
+        self, sm, mock_websocket_manager
+    ):
+        sm._speech_enabled = False
+        sm.ptt_start()
+        sm.ptt_stop(reason="gesture_cancel")
+        assert sm.speech_enabled is False
+        assert self._told(mock_websocket_manager) is False
+
+    def test_an_ordinary_release_still_turns_the_engine_off(
+        self, sm, mock_websocket_manager
+    ):
+        """The user decided, so the engine goes off even though speech was on."""
+        sm._speech_enabled = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="released")
+        assert self._told(mock_websocket_manager) is False
+
+    def test_the_safety_cutoff_still_turns_the_engine_off(
+        self, sm, mock_websocket_manager
+    ):
+        sm._speech_enabled = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="safety_timeout")
+        assert self._told(mock_websocket_manager) is False
+
+    def test_a_cancelled_hold_under_suppression_still_leaves_the_engine_off(
+        self, sm, mock_websocket_manager
+    ):
+        """Restoring the user's setting does not override a suppression.
+
+        Speech was on before the hold, so the setting is put back on. Sound is
+        playing, though, so the real answer is still off, and that is what the
+        speech engine must be told -- not the raw setting.
+        """
+        sm._speech_enabled = True
+        sm.ptt_start()
+        sm._speech_suppressed_by_audio = True
+        sm.ptt_stop(reason="drag_cancel")
+        assert sm._speech_enabled is True
+        assert sm.speech_enabled is False
+        assert self._told(mock_websocket_manager) is False
+
+    def test_the_engine_is_told_exactly_what_the_display_is_told(
+        self, sm, mock_websocket_manager, mock_gui_queue
+    ):
+        """The two channels agree by construction, not by coincidence."""
+        sm._speech_enabled = True
+        sm.ptt_start()
+        mock_gui_queue.put_nowait.reset_mock()
+        sm.ptt_stop(reason="gesture_cancel")
+        shown = mock_gui_queue.put_nowait.call_args[0][0]["speech_enabled"]
+        assert self._told(mock_websocket_manager) is shown
+
+    def _shown(self, mock_gui_queue):
+        """Return the on-or-off value the button was last shown."""
+        return mock_gui_queue.put_nowait.call_args[0][0]["speech_enabled"]
+
+    def test_the_start_of_a_hold_tells_the_engine_what_the_button_shows(
+        self, sm, mock_websocket_manager, mock_gui_queue
+    ):
+        sm.ptt_start()
+        assert self._told(mock_websocket_manager) is True
+        assert self._shown(mock_gui_queue) is True
+
+    def test_a_hold_never_writes_the_setting_the_audio_monitor_owns(
+        self, sm, mock_websocket_manager, mock_gui_queue
+    ):
+        """Starting a hold must not clear the audio-suppression setting.
+
+        The audio monitor owns that setting and reports only when the answer
+        changes, so nothing puts it back. A hold shorter than one check leaves
+        it cleared for as long as the sound keeps playing, which switches off
+        audio suppression for good. Both channels say off instead, which is the
+        real answer while the sound is still audible.
+        """
+        sm._speech_suppressed_by_audio = True
+        sm.ptt_start()
+        assert sm._speech_suppressed_by_audio is True
+        assert sm.speech_enabled is False
+        assert self._told(mock_websocket_manager) is False
+        assert self._shown(mock_gui_queue) is False
+
+    def test_a_hold_that_begins_and_ends_between_two_checks_changes_nothing(
+        self, sm
+    ):
+        """The whole hold fits inside one monitor check, so no report arrives.
+
+        This is the case that made the earlier version permanent: the sound is
+        still playing at the end, so the monitor sees no change and sends
+        nothing, and there is no other path that would put the setting back.
+        """
+        sm._speech_suppressed_by_audio = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="released")
+        assert sm._speech_suppressed_by_audio is True
+
+    def test_a_cancelled_hold_also_leaves_that_setting_alone(self, sm):
+        sm._speech_suppressed_by_audio = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="drag_cancel")
+        assert sm._speech_suppressed_by_audio is True
+
+    def test_a_hold_that_starts_while_sonos_is_playing_does_not_listen(
+        self, sm, mock_websocket_manager, mock_gui_queue
+    ):
+        """Sonos plays on a separate speaker that the hold cannot mute.
+
+        The design leaves this suppression alone on purpose. The hold therefore
+        hears nothing, and both the engine and the button must say so.
+        """
+        sm._speech_suppressed_by_sonos = True
+        sm.ptt_start()
+        assert sm._speech_suppressed_by_sonos is True
+        assert sm.speech_enabled is False
+        assert self._told(mock_websocket_manager) is False
+        assert self._shown(mock_gui_queue) is False
+
+    def test_a_hold_that_starts_after_an_idle_pause_listens(
+        self, sm, mock_websocket_manager, mock_gui_queue
+    ):
+        """Holding the button proves the user is there, so the idle pause ends."""
+        sm._speech_suppressed_by_idle = True
+        sm.ptt_start()
+        assert sm._speech_suppressed_by_idle is False
+        assert self._told(mock_websocket_manager) is True
+        assert self._shown(mock_gui_queue) is True
+
+    def test_the_two_channels_agree_at_the_start_of_every_hold(
+        self, sm, mock_websocket_manager, mock_gui_queue
+    ):
+        """Whatever is suppressing speech, the engine and the button match."""
+        for flag in (
+            "_speech_suppressed_by_audio",
+            "_speech_suppressed_by_sonos",
+            "_speech_suppressed_by_idle",
+        ):
+            sm._ptt_active = False
+            sm._speech_suppressed_by_audio = False
+            sm._speech_suppressed_by_sonos = False
+            sm._speech_suppressed_by_idle = False
+            setattr(sm, flag, True)
+            mock_gui_queue.put_nowait.reset_mock()
+            mock_websocket_manager.set_transcription_status.reset_mock()
+            sm.ptt_start()
+            # Read both into plain values before asserting. Comparing the two
+            # helper calls directly makes pytest try to describe the mocks when
+            # it builds the failure message, and it cannot.
+            told = self._told(mock_websocket_manager)
+            shown = self._shown(mock_gui_queue)
+            assert told is shown, f"{flag}: engine was told {told}, button showed {shown}"

@@ -353,3 +353,30 @@ class TestStartRemoteSTTMethod:
 
         # Should have tried last_provider first, then fallen back
         assert mock_launcher.start_provider.call_count == 2
+
+
+class TestBuildLauncherGoogleCredentials:
+    """_build_remote_stt_launcher passes stt.google.credentials_file into
+    the launcher (wh-google-creds-file-picker)."""
+
+    def _service_manager_shell(self, config_map):
+        from service_manager import ServiceManager
+
+        sm = ServiceManager.__new__(ServiceManager)
+        sm.config_service = MagicMock()
+        sm.config_service.get.side_effect = (
+            lambda key, default=None: config_map.get(key, default)
+        )
+        return sm
+
+    def test_credentials_file_from_config(self, tmp_path):
+        sm = self._service_manager_shell(
+            {"stt.google.credentials_file": "C:/keys/sa.json"}
+        )
+        launcher = sm._build_remote_stt_launcher(app_data_dir=tmp_path)
+        assert launcher.google_credentials_file == "C:/keys/sa.json"
+
+    def test_credentials_file_defaults_empty(self, tmp_path):
+        sm = self._service_manager_shell({})
+        launcher = sm._build_remote_stt_launcher(app_data_dir=tmp_path)
+        assert launcher.google_credentials_file == ""

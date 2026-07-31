@@ -55,6 +55,8 @@ class ConfigService:
             config_path = os.path.join(base_dir, "config.toml")
         
         self.config_path = config_path
+        # Lets only one settings write run at a time; see save().
+        self._save_lock = asyncio.Lock()
         self.load_config(self.config_path)
 
     def load_config(self, config_path: str):
@@ -141,27 +143,107 @@ class ConfigService:
         else:
             self._config[key] = value
 
-    async def save(self):
+    def unset(self, key: str):
+        """
+        Removes a configuration key from memory, if it is there.
+
+        Supports dot notation for nested keys (e.g., "stt.provider").
+
+        This is what a caller needs to undo a set() for a key that was not
+        there beforehand. Setting the key back to None reads as absent but
+        cannot be written: tomli_w has no representation for it, so the next
+        save fails and takes every unrelated setting down with it.
+
+        Args:
+            key: The configuration key to remove. Use dots for nested keys.
+        """
+        keys = key.split(".") if "." in key else [key]
+        target = self._config
+        for k in keys[:-1]:
+            if not isinstance(target, dict) or k not in target:
+                return
+            target = target[k]
+        if isinstance(target, dict):
+            target.pop(keys[-1], None)
+
+    async def save(self) -> bool:
         """
         Saves the current configuration to the TOML file.
         This is an async method that can be awaited.
+
+        Returns True when the settings reached the disk and False when they did
+        not. Callers act on a save: the floating button reports its new size, a
+        provider switch logs success, a speech-mode change restarts the
+        program. Reporting a failure as a success makes each of those act on
+        settings the next start will not have.
+
+        Two callers can reach this at once -- one gesture that changes two
+        settings, or two settings changed close together -- and each write
+        replaces the whole file. Two of them running at the same time can
+        leave the file torn, so a lock lets only one write run at a time, and
+        the write itself goes to a temporary file that replaces the real one
+        only once it is complete. A crash or a failed write then leaves the
+        previous settings intact rather than a half-written file.
+
+        The lock alone is not enough. Callers change the settings in memory
+        first and ask for the write afterwards, so while one write runs in its
+        worker thread another task can change a value and then wait its turn.
+        A write that read the live settings would pick up half of that later
+        change -- a new size with an old position, the very mismatch that
+        sending them together prevents. So the write takes its own complete
+        copy of the settings first, before anything can run in between, and
+        records that copy. The later change is not lost; it reaches the file in
+        its own write.
         """
+        import copy
+        import os
+        import tempfile
+
         import tomli_w
-        
-        def do_save():
+
+        # Taken here, synchronously, before the first await: nothing else can
+        # run between the caller's change and this copy.
+        snapshot = copy.deepcopy(self._config)
+
+        def do_save() -> bool:
             """Synchronous file write operation for TOML config.
-            
+
             Runs in thread pool via asyncio.to_thread to avoid blocking.
             """
+            directory = os.path.dirname(os.path.abspath(self.config_path)) or "."
+            handle = None
+            temp_path = None
             try:
-                with open(self.config_path, "wb") as f:
-                    tomli_w.dump(self._config, f)
+                handle, temp_path = tempfile.mkstemp(
+                    dir=directory, prefix=".config-", suffix=".tmp"
+                )
+                with os.fdopen(handle, "wb") as f:
+                    handle = None
+                    tomli_w.dump(snapshot, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, self.config_path)
+                temp_path = None
                 logger.info(f"Configuration saved to {self.config_path}")
+                return True
             except Exception as e:
                 logger.error(f"Failed to save configuration: {e}")
+                return False
+            finally:
+                if handle is not None:
+                    try:
+                        os.close(handle)
+                    except OSError:
+                        pass
+                if temp_path is not None and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
 
-        # Run the synchronous file I/O in a separate thread
-        await asyncio.to_thread(do_save)
+        async with self._save_lock:
+            # Run the synchronous file I/O in a separate thread
+            return await asyncio.to_thread(do_save)
 
 # Example of how to use it (optional, for testing)
 if __name__ == "__main__":

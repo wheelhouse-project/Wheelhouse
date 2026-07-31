@@ -22,9 +22,13 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+# Win32 THREAD_PRIORITY_TIME_CRITICAL. Public so callers can compare a
+# measured priority (get_current_thread_priority) against the ceiling.
+THREAD_PRIORITY_TIME_CRITICAL = 15
+
 _LEVELS = {
     "highest": 2,        # THREAD_PRIORITY_HIGHEST
-    "time_critical": 15,  # THREAD_PRIORITY_TIME_CRITICAL
+    "time_critical": THREAD_PRIORITY_TIME_CRITICAL,
 }
 
 _THREAD_PRIORITY_ERROR_RETURN = 0x7FFFFFFF

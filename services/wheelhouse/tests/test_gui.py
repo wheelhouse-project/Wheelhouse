@@ -193,6 +193,13 @@ class TestCheckQueuesAndEvents:
             state_q = MagicMock()
             mgr = GuiManager(shutdown, MagicMock(), state_q)
             mgr.button = mock_button
+            # A plain MagicMock reports every attribute as truthy, so without
+            # this the stand-in button claims to be mid-gesture and tests read
+            # as passing for the wrong reason. Tests that want a gesture
+            # running set these back to True themselves.
+            mock_button._is_resizing = False
+            mock_button._is_dragging = False
+            mock_button._gesture_running = False
             return mgr
 
     def test_processes_initial_state(self, manager):
@@ -235,6 +242,206 @@ class TestCheckQueuesAndEvents:
         assert manager.button_visible is False
         # set_indeterminate(False) should NOT be called again
         manager.button.set_indeterminate.assert_not_called()
+
+    def test_a_state_update_during_a_resize_leaves_the_size_alone(self, manager):
+        """The stored size is the one from before the drag started.
+
+        Size and position are saved when the drag ends, not while it runs, so
+        during a drag the settings still hold the old geometry. An unrelated
+        message from the Logic process -- speech being suppressed, a provider
+        reporting in, a push-to-talk correction -- would put that old geometry
+        back on screen while the user is still dragging.
+        """
+        manager.initial_state_received = True
+        manager.button._is_resizing = True
+        manager.button._gesture_running = True
+        manager.button._is_dragging = False
+        msg = {
+            'action': 'state_update',
+            'speech_enabled': False,
+            'FLOATING_BUTTON_SIZE': 50,
+            'FLOATING_BUTTON_POS': [100, 100],
+        }
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+        manager.button.set_size.assert_not_called()
+        manager.button.move.assert_not_called()
+
+    def test_a_state_update_during_a_move_leaves_the_position_alone(self, manager):
+        """A move drag has the same problem: the stored position is stale."""
+        manager.initial_state_received = True
+        manager.button._is_resizing = False
+        manager.button._is_dragging = True
+        manager.button._gesture_running = True
+        msg = {
+            'action': 'state_update',
+            'speech_enabled': False,
+            'FLOATING_BUTTON_SIZE': 50,
+            'FLOATING_BUTTON_POS': [100, 100],
+        }
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+        manager.button.set_size.assert_not_called()
+        manager.button.move.assert_not_called()
+
+    def test_a_state_update_with_no_gesture_running_does_apply(self, manager):
+        """Skipping is only for a gesture in progress, not in general."""
+        manager.initial_state_received = True
+        manager.button._is_resizing = False
+        manager.button._is_dragging = False
+        msg = {
+            'action': 'state_update',
+            'speech_enabled': False,
+            'FLOATING_BUTTON_SIZE': 70,
+            'FLOATING_BUTTON_POS': [100, 100],
+        }
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+        manager.button.set_size.assert_called_with(70)
+        manager.button.move.assert_called()
+
+    def test_the_first_state_lets_the_button_accept_gestures(self, manager):
+        """The button is on screen before its stored geometry arrives.
+
+        start() shows the button and only afterwards asks the Logic process
+        for the stored state. A gesture begun in that gap measures against the
+        default size and place, and the arriving state then replaces both
+        underneath it. So the button refuses gestures until this point.
+        """
+        manager.initial_state_received = False
+        manager.button._is_resizing = False
+        manager.button._is_dragging = False
+        msg = {
+            'action': 'initial_state',
+            'speech_enabled': False,
+            'FLOATING_BUTTON_SIZE': 70,
+            'FLOATING_BUTTON_POS': [100, 100],
+        }
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+        manager.button.set_size.assert_called_with(70)
+        manager.button.set_ready_for_gestures.assert_called_with(True)
+
+    def _state_message(self, size, pos):
+        return {
+            'action': 'state_update',
+            'speech_enabled': False,
+            'FLOATING_BUTTON_SIZE': size,
+            'FLOATING_BUTTON_POS': pos,
+        }
+
+    def _deliver(self, manager, msg):
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+    def test_geometry_held_back_during_a_gesture_is_applied_when_it_ends(self, manager):
+        """Skipping a change is not the same as discarding it.
+
+        A state update that arrives mid-gesture carries a real change often
+        enough -- the settings window, another machine's copy of the file, a
+        reset. Dropping it left the button at a size no later message would
+        ever correct, because the Logic process only sends geometry it already
+        believes the button has.
+        """
+        manager.initial_state_received = True
+        manager.button._is_resizing = True
+        manager.button._gesture_running = True
+        manager.button._is_dragging = False
+        self._deliver(manager, self._state_message(70, [100, 100]))
+        manager.button.set_size.assert_not_called()
+
+        manager.button._is_resizing = False
+        manager._on_gesture_ended()
+
+        manager.button.set_size.assert_called_with(70)
+        manager.button.move.assert_called()
+
+    def test_only_the_newest_held_back_geometry_is_applied(self, manager):
+        manager.initial_state_received = True
+        manager.button._is_resizing = True
+        manager.button._gesture_running = True
+        manager.button._is_dragging = False
+        self._deliver(manager, self._state_message(70, [100, 100]))
+        self._deliver(manager, self._state_message(90, [200, 200]))
+
+        manager.button._is_resizing = False
+        manager._on_gesture_ended()
+
+        manager.button.set_size.assert_called_once_with(90)
+
+    def test_the_manager_listens_for_the_end_of_a_gesture(self, manager):
+        """Every other test here calls the handler directly.
+
+        Without this one the handler could be correct and never run, and the
+        held-back geometry would sit there until the next message that arrives
+        with no gesture in progress.
+        """
+        manager.button.gesture_ended.connect.assert_called_once_with(
+            manager._on_gesture_ended
+        )
+
+    def test_a_gesture_ending_with_nothing_held_back_changes_nothing(self, manager):
+        manager.initial_state_received = True
+
+        manager._on_gesture_ended()
+
+        manager.button.set_size.assert_not_called()
+        manager.button.move.assert_not_called()
+
+    def test_held_back_geometry_is_applied_only_once(self, manager):
+        manager.initial_state_received = True
+        manager.button._is_resizing = True
+        manager.button._gesture_running = True
+        manager.button._is_dragging = False
+        self._deliver(manager, self._state_message(70, [100, 100]))
+
+        manager.button._is_resizing = False
+        manager._on_gesture_ended()
+        manager.button.set_size.reset_mock()
+        manager._on_gesture_ended()
+
+        manager.button.set_size.assert_not_called()
+
+    def test_the_size_the_user_dragged_to_beats_the_held_back_size(self, manager):
+        """The gesture's own result is newer than anything held back.
+
+        The resize is reported before the gesture is reported as over, so
+        applying the held-back geometry afterwards would undo, on screen, the
+        size the user just dragged to.
+        """
+        manager.initial_state_received = True
+        manager.button._is_resizing = True
+        manager.button._gesture_running = True
+        manager.button._is_dragging = False
+        self._deliver(manager, self._state_message(70, [100, 100]))
+
+        manager.button._is_resizing = False
+        manager.send_resize_commit_command(90, MagicMock(x=lambda: 5, y=lambda: 6))
+        manager._on_gesture_ended()
+
+        manager.button.set_size.assert_not_called()
+
+    def test_the_place_the_user_dragged_to_beats_the_held_back_position(self, manager):
+        manager.initial_state_received = True
+        manager.button._is_resizing = False
+        manager.button._is_dragging = True
+        manager.button._gesture_running = True
+        self._deliver(manager, self._state_message(70, [100, 100]))
+
+        manager.button._is_dragging = False
+        manager.send_pos_change_command(MagicMock(x=lambda: 5, y=lambda: 6))
+        manager._on_gesture_ended()
+
+        manager.button.move.assert_not_called()
 
     def test_handles_empty_queue(self, manager):
         manager.state_from_logic_queue.get_nowait.side_effect = Empty()
@@ -454,28 +661,85 @@ class TestUpdateTrayMenu:
             mgr.icon = mock_icon
             return mgr
 
-    def test_indeterminate_color_before_initial_state(self, manager):
-        manager.initial_state_received = False
-        with patch("gui.create_icon_image") as mock_create:
-            mock_create.return_value = MagicMock()
-            manager.update_tray_menu()
-            mock_create.assert_called_with((100, 100, 100))
+    def test_updating_the_tray_menu_never_touches_the_icon(self, manager):
+        """The user asked for one unchanging picture in the notification area.
 
-    def test_enabled_color_when_speech_active(self, manager):
-        manager.initial_state_received = True
-        manager.speech_enabled = True
-        with patch("gui.create_icon_image") as mock_create:
-            mock_create.return_value = MagicMock()
-            manager.update_tray_menu()
-            mock_create.assert_called_with((200, 0, 0))
+        It used to be a coloured circle: grey before startup finished, red
+        while speech was on, blue in push-to-talk, grey again when off. All of
+        that is gone. The menu still rebuilds, because its checkmarks do
+        follow the state.
+        """
+        manager.icon.icon = "the wheelhouse icon"
 
-    def test_disabled_color_when_speech_inactive(self, manager):
-        manager.initial_state_received = True
-        manager.speech_enabled = False
-        with patch("gui.create_icon_image") as mock_create:
-            mock_create.return_value = MagicMock()
+        for received, enabled, mode in [
+            (False, False, "toggle"),
+            (True, True, "toggle"),
+            (True, False, "toggle"),
+            (True, False, "push_to_talk"),
+        ]:
+            manager.initial_state_received = received
+            manager.speech_enabled = enabled
+            manager.speech_interaction_mode = mode
             manager.update_tray_menu()
-            mock_create.assert_called_with((160, 160, 160))
+
+            assert manager.icon.icon == "the wheelhouse icon"
+
+    def test_updating_the_tray_menu_still_rebuilds_the_menu(self, manager):
+        """The checkmarks in the menu do follow the state, unlike the icon."""
+        manager.icon.menu = None
+
+        manager.update_tray_menu()
+
+        assert manager.icon.menu is not None
+
+
+class TestTheTrayIconPicture:
+
+    def test_the_tray_icon_is_the_wheelhouse_icon_file(self):
+        """Not a drawn shape. The bytes must come from the shipped file."""
+        from pathlib import Path
+
+        from PIL import Image
+
+        import gui
+
+        expected = Image.open(
+            Path(gui.__file__).parent / "WheelHouse.ico"
+        ).convert("RGBA").resize((64, 64), Image.LANCZOS)
+
+        loaded = gui.load_tray_icon()
+
+        assert loaded.tobytes() == expected.tobytes()
+
+    def test_an_unreadable_icon_file_still_produces_an_icon(self):
+        """A tray with no icon at all is worse than a plain shape.
+
+        The file sits beside gui.py in a source checkout and inside the bundle
+        in a build. If a build ever stops shipping it, the notification area
+        should still show something the user can right-click.
+        """
+        import gui
+
+        with patch("gui.Image.open", side_effect=OSError("no such file")):
+            loaded = gui.load_tray_icon()
+
+        assert loaded is not None
+        assert loaded.size == (64, 64)
+
+    def test_the_icon_is_handed_to_the_tray_when_it_is_created(self):
+        """Set once, at creation. Nothing sets it again afterwards."""
+        with patch("gui.FloatingButton"), \
+             patch("gui.WorkingDialog"), \
+             patch("gui.pystray") as mock_pystray, \
+             patch("gui.QTimer"), \
+             patch("gui.load_tray_icon") as mock_load:
+            mock_load.return_value = "the wheelhouse icon"
+            mock_pystray.Icon.return_value = MagicMock()
+            from gui import GuiManager
+            GuiManager(MagicMock(), MagicMock(), MagicMock())
+
+            _, kwargs = mock_pystray.Icon.call_args
+            assert kwargs["icon"] == "the wheelhouse icon"
 
 
 # -----------------------------------------------------------------------
@@ -754,6 +1018,9 @@ class TestPTTCommandRouting:
     def test_hold_threshold_callback_starts_ptt(self, manager):
         manager._ptt_held = False
         manager.button._is_dragging = False
+        # The hold timer now also refuses to start recording while an edge-drag
+        # resize is in progress, so both gestures must be clear here.
+        manager.button._is_resizing = False
         manager._on_hold_threshold()
         assert manager._ptt_held is True
         cmd = manager.commands_to_logic_queue.put_nowait.call_args[0][0]
@@ -814,6 +1081,15 @@ class TestPTTCommandRouting:
     def test_hold_threshold_skipped_during_drag(self, manager):
         """Hold timer firing during drag does not activate PTT."""
         manager.button._is_dragging = True
+        manager.button._is_resizing = False
+        manager._on_hold_threshold()
+        assert manager._ptt_held is False
+        manager.commands_to_logic_queue.put_nowait.assert_not_called()
+
+    def test_hold_threshold_skipped_during_edge_drag_resize(self, manager):
+        """Hold timer firing during a resize does not activate PTT."""
+        manager.button._is_dragging = False
+        manager.button._is_resizing = True
         manager._on_hold_threshold()
         assert manager._ptt_held is False
         manager.commands_to_logic_queue.put_nowait.assert_not_called()
@@ -843,6 +1119,46 @@ class TestPTTCommandRouting:
         """Drag with no active PTT does not send ptt_stop."""
         manager._ptt_held = False
         manager._on_drag_started()
+        manager.commands_to_logic_queue.put_nowait.assert_not_called()
+
+    def test_cancelled_press_closes_a_microphone_the_hold_opened(self, manager):
+        """The release was taken by the menu or the button being hidden.
+
+        Without this the microphone stays open with nothing held down, which is
+        the worst failure the resize gesture can cause.
+        """
+        manager.speech_enabled = True
+        manager._speech_before_hold = False
+        manager._ptt_held = True
+
+        manager._on_press_cancelled()
+
+        assert manager._ptt_held is False
+        cmd = manager.commands_to_logic_queue.put_nowait.call_args[0][0]
+        assert cmd["action"] == "ptt_stop"
+        assert cmd["reason"] == "gesture_cancel"
+        assert manager.speech_enabled is False
+
+    def test_cancelled_press_restores_speech_that_was_already_on(self, manager):
+        """A cancelled press decides nothing, so it must not turn speech off."""
+        manager.speech_enabled = True
+        manager._speech_before_hold = True
+        manager._ptt_held = True
+
+        manager._on_press_cancelled()
+
+        assert manager.speech_enabled is True
+
+    def test_cancelled_press_drops_a_pending_click_without_toggling(self, manager):
+        """A quick press that got cancelled must not toggle speech on."""
+        manager.speech_interaction_mode = "toggle"
+        manager._double_click_timer = MagicMock()
+        manager._on_button_press()
+
+        manager._on_press_cancelled()
+
+        manager._press_timer.stop.assert_called()
+        manager._double_click_timer.start.assert_not_called()
         manager.commands_to_logic_queue.put_nowait.assert_not_called()
 
 
@@ -964,6 +1280,32 @@ class TestPTTModeMenuItem:
 # GuiManager double-click to toggle interaction mode
 # -----------------------------------------------------------------------
 
+class _StatefulTimer:
+    """A stand-in for QTimer that remembers whether it is running.
+
+    A MagicMock answers isActive() with a truthy Mock whatever has happened to
+    it, so a test using one cannot tell a stopped timer from a running one --
+    and "the timer was left running" is exactly the failure being guarded
+    against here.
+    """
+
+    def __init__(self):
+        self._active = False
+        self.timeout = MagicMock()
+
+    def start(self, _ms=None):
+        self._active = True
+
+    def stop(self):
+        self._active = False
+
+    def isActive(self):
+        return self._active
+
+    def setSingleShot(self, _value):
+        pass
+
+
 class TestDoubleClickModeToggle:
     """Test double-click on floating button toggles PTT/toggle mode."""
 
@@ -1044,12 +1386,393 @@ class TestDoubleClickModeToggle:
         manager._on_double_click()
         manager.commands_to_logic_queue.put_nowait.assert_not_called()
 
-    def test_second_release_after_double_click_is_ignored(self, manager):
-        """The mouseReleaseEvent after a double-click should not trigger action."""
+    def test_a_double_click_switches_the_mode_exactly_once(self, manager):
+        """The whole sequence a double-click really produces, start to finish.
+
+        Qt sends press, release, then the double-click -- and no second
+        release, because the widget only reports a release for a press it
+        recorded, and the double-click handler records none. So the mode must
+        switch once across the sequence, and the deferred single click that
+        the release started must be called off.
+        """
         manager.speech_interaction_mode = "toggle"
-        manager._on_double_click()
-        manager.commands_to_logic_queue.put_nowait.reset_mock()
-        # Second release after double-click
+        manager._press_timer = _StatefulTimer()
+        manager._double_click_timer = _StatefulTimer()
+
+        manager._on_button_press()
         manager._on_button_release()
-        # Should not send any additional command
+        manager._on_double_click()
+
+        modes = [
+            c[0][0]["mode"]
+            for c in manager.commands_to_logic_queue.put_nowait.call_args_list
+            if c[0][0].get("action") == "set_speech_interaction_mode"
+        ]
+        assert modes == ["push_to_talk"]
+        assert manager._double_click_timer.isActive() is False
+
+    def test_a_double_click_does_not_swallow_a_later_click(self, manager):
+        """A click minutes later is its own click, not the double-click's tail.
+
+        The manager used to hold a flag saying "ignore the next release",
+        waiting for a second release that never comes. The flag stayed set and
+        swallowed the next real release instead -- and a swallowed release
+        leaves the hold timer running, so it fires with the mouse already up.
+        """
+        manager.speech_interaction_mode = "toggle"
+        manager._press_timer = _StatefulTimer()
+        manager._double_click_timer = _StatefulTimer()
+
+        manager._on_button_press()
+        manager._on_button_release()
+        manager._on_double_click()
+
+        # Some time later, an ordinary click.
+        manager._on_button_press()
+        assert manager._press_timer.isActive() is True
+        manager._on_button_release()
+
+        assert manager._press_timer.isActive() is False
+
+    def test_a_swallowed_release_opens_the_microphone_with_nothing_held(self, manager):
+        """The harm the stale flag caused, stated as the user would meet it."""
+        manager.speech_interaction_mode = "toggle"
+        manager._press_timer = _StatefulTimer()
+        manager._double_click_timer = _StatefulTimer()
+        # The real button is doing nothing; the mock says "dragging" to every
+        # question asked of it, which would hide the failure.
+        manager.button._is_dragging = False
+        manager.button._is_resizing = False
+
+        manager._on_button_press()
+        manager._on_button_release()
+        manager._on_double_click()
+
+        manager._on_button_press()
+        manager._on_button_release()
+        manager.commands_to_logic_queue.put_nowait.reset_mock()
+
+        # The hold timer only reaches this handler if it is still running.
+        # Nothing is pressed any more, so nothing may start recording.
+        if manager._press_timer.isActive():
+            manager._on_hold_threshold()
+
+        actions = [
+            c[0][0].get("action")
+            for c in manager.commands_to_logic_queue.put_nowait.call_args_list
+        ]
+        assert "ptt_start" not in actions
+
+
+# -----------------------------------------------------------------------
+# Help and About on the right-click menu
+# -----------------------------------------------------------------------
+
+class TestHelpAndAboutOnTheMenu:
+    """Both entries belong to the shared menu builder.
+
+    The tray icon and the floating button show the same menu through the same
+    method, one branch each. An entry added to only one branch appears in only
+    one place, which is the mistake these tests exist to catch.
+    """
+
+    @pytest.fixture
+    def manager(self, qapp):
+        import pystray
+        with patch("gui.FloatingButton"), \
+             patch("gui.WorkingDialog"), \
+             patch("gui.QTimer"), \
+             patch("gui.pystray.Icon") as mock_icon_cls:
+            mock_icon_cls.return_value = MagicMock()
+            from gui import GuiManager
+            mgr = GuiManager(MagicMock(), MagicMock(), MagicMock())
+            mgr.initial_state_received = True
+            return mgr
+
+    def _tray_labels(self, manager):
+        menu = manager._create_menu(is_tray_menu=True)
+        return [getattr(item, "text", "") for item in menu]
+
+    def _window_labels(self, manager):
+        menu = manager._create_menu(is_tray_menu=False)
+        return [action.text() for action in menu.actions()]
+
+    def test_the_tray_menu_offers_help(self, manager):
+        assert "Help" in self._tray_labels(manager)
+
+    def test_the_button_menu_offers_help(self, manager):
+        assert "Help" in self._window_labels(manager)
+
+    def test_the_tray_menu_offers_about(self, manager):
+        assert "About Wheelhouse" in self._tray_labels(manager)
+
+    def test_the_button_menu_offers_about(self, manager):
+        assert "About Wheelhouse" in self._window_labels(manager)
+
+    def test_help_asks_the_logic_process_to_open_the_help_page(self, manager):
+        """The address is a setting, and settings live in the Logic process.
+
+        The GUI process has no copy of it, so the menu sends a command rather
+        than opening a browser itself. This is the same setting the spoken
+        command 'wheelhouse help online' uses.
+        """
+        with patch.object(manager, "send_command") as send:
+            manager.request_help_online()
+
+        send.assert_called_once_with({"action": "open_help_online"})
+
+    def test_about_shows_a_dialog_naming_the_program_and_version(self, manager):
+        with patch("gui.QMessageBox") as message_box, \
+             patch("gui.get_app_version", return_value="9.9.9"):
+            manager.show_about_dialog()
+
+        assert message_box.information.called
+        body = message_box.information.call_args[0][2]
+        assert "Wheelhouse" in body
+        assert "9.9.9" in body
+
+
+class TestGeometryDuringAMiddlePressThatIsNotYetADrag:
+    """A press is a live gesture from the moment it lands (.1.22).
+
+    Deferral used to check _is_resizing or _is_dragging. Neither is true
+    between a press in the middle of the button and the pointer travelling far
+    enough to count as a drag -- and that interval is not brief: it covers a
+    click that never moves, and a stationary push-to-talk hold for as long as
+    the user holds it. Geometry arriving then moved or resized the button under
+    the user's finger, and a press that later became a drag started from
+    geometry that had changed since it began.
+    """
+
+    @pytest.fixture
+    def manager(self):
+        with patch("gui.FloatingButton") as mock_button_cls, \
+             patch("gui.WorkingDialog"), \
+             patch("gui.pystray") as mock_pystray, \
+             patch("gui.QTimer"), \
+             patch("gui.QPoint") as mock_qpoint:
+            mock_button = MagicMock()
+            mock_button_cls.return_value = mock_button
+            mock_pystray.Icon.return_value = MagicMock()
+            mock_qpoint.side_effect = lambda *args: MagicMock()
+            from gui import GuiManager
+            # A bare MagicMock reports the shutdown event as already set, and
+            # the queue is then never read at all.
+            shutdown = MagicMock()
+            shutdown.is_set.return_value = False
+            state_q = MagicMock()
+            mgr = GuiManager(shutdown, MagicMock(), state_q)
+            mgr.button = mock_button
+            mock_button._is_resizing = False
+            mock_button._is_dragging = False
+            mock_button._gesture_running = False
+            mgr.initial_state_received = True
+            return mgr
+
+    def _deliver(self, manager, size):
+        msg = {
+            'action': 'state_update',
+            'speech_enabled': False,
+            'FLOATING_BUTTON_SIZE': size,
+            'FLOATING_BUTTON_POS': [100, 100],
+        }
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+    def test_a_press_that_has_not_moved_holds_geometry_back(self, manager):
+        manager.button._gesture_running = True
+
+        self._deliver(manager, 70)
+
+        manager.button.set_size.assert_not_called()
+        manager.button.move.assert_not_called()
+
+    def test_that_geometry_arrives_when_the_press_ends(self, manager):
+        manager.button._gesture_running = True
+        self._deliver(manager, 70)
+
+        manager.button._gesture_running = False
+        manager._on_gesture_ended()
+
+        manager.button.set_size.assert_called_with(70)
+
+    def test_a_click_that_moved_the_button_first_keeps_where_it_was_put(self, manager):
+        """The drag's own result is newer than what was held back."""
+        manager.button._gesture_running = True
+        self._deliver(manager, 70)
+
+        manager.send_pos_change_command(MagicMock(x=lambda: 5, y=lambda: 6))
+        manager.button._gesture_running = False
+        manager._on_gesture_ended()
+
+        manager.button.set_size.assert_not_called()
+
+    def test_geometry_still_applies_when_no_gesture_is_running(self, manager):
+        manager.button._gesture_running = False
+
+        self._deliver(manager, 70)
+
+        manager.button.set_size.assert_called_with(70)
+
+
+# -----------------------------------------------------------------------
+# The GUI process stays alive with no window on screen
+# -----------------------------------------------------------------------
+
+class TestApplicationOutlivesItsWindows:
+    """wh-gui-about-box-quits-app.
+
+    Wheelhouse lives in the notification area. Every window it opens is
+    temporary, and the floating button -- the only one that is usually on
+    screen -- is a tool window, which Qt does not count when it decides
+    whether the last window has closed. Closing the About box therefore
+    ended the GUI process, and the launcher shut the whole program down.
+    """
+
+    def test_closing_a_parentless_dialog_leaves_the_loop_running(self, qapp):
+        """The real event loop, because only it can be ended this way.
+
+        Qt's quit reaches the top-level loop the GUI process runs, not a
+        nested one, so this test runs qapp.exec() itself. Every step is on a
+        timer, and the last one stops the loop, so the test ends either way:
+        early if the About box took the loop down, on its own terms if not.
+        """
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtWidgets import QMessageBox, QWidget
+
+        from gui import configure_gui_application
+
+        was_set = qapp.quitOnLastWindowClosed()
+        button = QWidget()
+        button.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        box = QMessageBox(
+            QMessageBox.Icon.Information,
+            "About Wheelhouse",
+            "Wheelhouse",
+        )
+        reached_the_end = []
+
+        try:
+            configure_gui_application(qapp)
+            button.show()
+
+            QTimer.singleShot(0, box.show)
+            QTimer.singleShot(50, box.close)
+            QTimer.singleShot(150, lambda: reached_the_end.append(True))
+            QTimer.singleShot(250, qapp.quit)
+            qapp.exec()
+        finally:
+            box.deleteLater()
+            button.close()
+            qapp.setQuitOnLastWindowClosed(was_set)
+
+        assert reached_the_end == [True], (
+            "the event loop ended when the About box closed"
+        )
+
+    def test_the_gui_process_configures_the_application(self):
+        """The helper above is only worth anything if the process calls it."""
+        import gui
+
+        with patch("gui.QApplication") as mock_qapplication, \
+             patch("gui.GuiManager"), \
+             patch("gui.configure_gui_application") as mock_configure, \
+             patch("utils.logging_setup.setup_logging"), \
+             patch("services.wheelhouse.config_service.ConfigService"), \
+             patch("gui.sys.exit"):
+            gui.gui_process_target(MagicMock(), MagicMock(), MagicMock())
+
+        mock_configure.assert_called_once_with(mock_qapplication.return_value)
+
+    def _run_process_target(self, shutdown_is_set: bool, exit_code: int):
+        """Run gui_process_target with the Qt loop returning exit_code."""
+        import gui
+
+        shutdown_event = MagicMock()
+        shutdown_event.is_set.return_value = shutdown_is_set
+
+        with patch("gui.QApplication") as mock_qapplication, \
+             patch("gui.GuiManager"), \
+             patch("gui.configure_gui_application"), \
+             patch("gui.logger") as mock_logger, \
+             patch("utils.logging_setup.setup_logging"), \
+             patch("services.wheelhouse.config_service.ConfigService"), \
+             patch("gui.sys.exit"):
+            mock_qapplication.return_value.exec.return_value = exit_code
+            gui.gui_process_target(shutdown_event, MagicMock(), MagicMock())
+
+        return mock_logger
+
+    def test_an_unrequested_exit_says_so_in_the_log(self):
+        """The loop ends quietly, with a success code and no traceback."""
+        mock_logger = self._run_process_target(shutdown_is_set=False, exit_code=0)
+
+        assert mock_logger.error.called
+        assert "no shutdown requested" in mock_logger.error.call_args[0][0]
+
+    def test_a_requested_exit_is_not_reported_as_a_failure(self):
+        mock_logger = self._run_process_target(shutdown_is_set=True, exit_code=0)
+
+        assert not mock_logger.error.called
+
+
+# -----------------------------------------------------------------------
+# Google Cloud credentials file picker (wh-google-creds-file-picker)
+# -----------------------------------------------------------------------
+
+class TestGoogleCredentialsPicker:
+    """The tray menu's Google Cloud Credentials item opens a file dialog
+    and sends the chosen service-account key path to the Logic process."""
+
+    @pytest.fixture
+    def manager(self):
+        with patch("gui.FloatingButton"), \
+             patch("gui.WorkingDialog"), \
+             patch("gui.pystray") as mock_pystray, \
+             patch("gui.QTimer"):
+            mock_pystray.Icon.return_value = MagicMock()
+            from gui import GuiManager
+            mgr = GuiManager(MagicMock(), MagicMock(), MagicMock())
+            return mgr
+
+    def test_set_google_credentials_file_sends_command(self, manager):
+        manager.set_google_credentials_file("C:/keys/sa.json")
+        manager.commands_to_logic_queue.put_nowait.assert_called_with(
+            {'action': 'set_google_credentials_file', 'path': 'C:/keys/sa.json'}
+        )
+
+    def test_picker_sends_selected_path(self, manager):
+        with patch(
+            "gui.QFileDialog.getOpenFileName",
+            return_value=("C:/keys/sa.json", "JSON key files (*.json)"),
+        ):
+            manager._pick_google_credentials_file()
+        manager.commands_to_logic_queue.put_nowait.assert_called_with(
+            {'action': 'set_google_credentials_file', 'path': 'C:/keys/sa.json'}
+        )
+
+    def test_picker_cancel_sends_nothing(self, manager):
+        with patch(
+            "gui.QFileDialog.getOpenFileName",
+            return_value=("", ""),
+        ):
+            manager._pick_google_credentials_file()
         manager.commands_to_logic_queue.put_nowait.assert_not_called()
+
+    def test_menu_offers_item_only_with_google_provider(self):
+        """Both menu builders (pystray and Qt) show the credentials item,
+        gated on the google_stt provider being installed."""
+        import inspect
+
+        import gui as gui_module
+
+        source = inspect.getsource(gui_module.GuiManager)
+        assert source.count("Google Cloud Credentials") >= 2
+        assert 'google_stt' in source
+        assert "open_google_credentials_picker" in source

@@ -41,6 +41,7 @@ this vision:
 
 import asyncio
 import enum
+import functools
 import logging
 import os
 import queue as queue_module
@@ -654,6 +655,199 @@ class OverlayFocusHookManager:
         logger.debug("OverlayFocusHookManager: hook thread torn down.")
 
 
+# How long _set_google_credentials_file waits for the old google_stt
+# process to exit after the shutdown command before giving up on the
+# restart. Module-level so tests can shorten it.
+_GOOGLE_RESTART_WAIT_S = 10.0
+
+# A service-account key is a few kilobytes; refuse anything larger than
+# this by its size alone, before reading it (wh-google-creds-file-picker.1.7).
+_GOOGLE_KEY_MAX_BYTES = 1_000_000
+
+# How long the credentials handler waits for the key-file validation
+# before giving up. A filesystem call against a disconnected network
+# share can stay pending for minutes; without this bound the handler
+# would hang silently (wh-google-creds-file-picker.1.9).
+_GOOGLE_KEY_VALIDATE_TIMEOUT_S = 30.0
+
+
+def _google_key_file_error(path: str) -> "str | None":
+    """Validate the picked service-account key file.
+
+    Returns the user-facing error message, or None when the file is
+    usable. Called through asyncio.to_thread: the checks read the file
+    and parse RSA key material, and a key on a slow or unreachable
+    network drive must not stall the Logic event loop that routes every
+    voice command (wh-google-creds-file-picker.1.7).
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    file_path = _Path(path)
+    if not file_path.is_file():
+        return f'File not found: {path}'
+    try:
+        if file_path.stat().st_size > _GOOGLE_KEY_MAX_BYTES:
+            return (
+                'That file is too large to be a service-account key. '
+                'A real key is a few kilobytes of JSON.'
+            )
+        data = _json.loads(file_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return (
+            'That file is not a Google service-account key '
+            '(it could not be read as JSON).'
+        )
+    if not isinstance(data, dict) or data.get('type') != 'service_account':
+        # Google's console also offers OAuth client files for download;
+        # only a service-account key works here.
+        return (
+            'That file is not a service-account key. In the Google '
+            'Cloud console, create the key under IAM & Admin > '
+            'Service Accounts.'
+        )
+    # Parse the key with Google's own loader before saving it. The type
+    # check alone accepts a key that is missing its client_email or
+    # carries an unparseable private key, and such a key fails only at
+    # the first utterance, with the engine looking ready the whole time
+    # (wh-google-creds-file-picker.1.4).
+    try:
+        from google.oauth2 import service_account as _service_account
+    except ImportError:
+        # google-auth is a wheelhouse dependency; if it is somehow
+        # absent, the provider's own startup preflight still catches a
+        # bad key.
+        return None
+    try:
+        _service_account.Credentials.from_service_account_info(data)
+    except Exception:
+        return (
+            'That file is a service-account key, but it is missing '
+            'required fields or its private key is invalid. Download a '
+            'new key from the Google Cloud console (IAM & Admin > '
+            'Service Accounts > Keys).'
+        )
+    return None
+
+
+def _serialized_stt_lifecycle(func):
+    """Serialize the STT lifecycle commands behind one shared lock
+    (wh-google-creds-file-picker.1.3).
+
+    The GUI listener starts each command as its own asyncio task, and
+    the credentials handler awaits for up to _GOOGLE_RESTART_WAIT_S
+    between reading the selected provider and starting the replacement
+    process. Without this lock a provider switch, a second credentials
+    selection, or a restart command could run inside that window and
+    leave two provider processes running or none. The lock is created
+    lazily (no await between the check and the assignment, so tasks
+    cannot race the creation on the single-threaded loop): tests build
+    the controller as a spec'd mock that never runs __init__.
+    """
+    @functools.wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        async with _get_stt_lifecycle_lock(self):
+            return await func(self, *args, **kwargs)
+    return wrapper
+
+
+def _get_stt_lifecycle_lock(self):
+    """The shared STT lifecycle lock, created lazily (no await between
+    the check and the assignment, so tasks cannot race the creation on
+    the single-threaded loop): tests build the controller as a spec'd
+    mock that never runs __init__."""
+    lock = getattr(self, '_stt_lifecycle_lock', None)
+    if lock is None:
+        lock = self._stt_lifecycle_lock = asyncio.Lock()
+    return lock
+
+
+def _next_google_creds_generation(self):
+    """Increment and return the credentials-selection generation.
+
+    The key-file validation runs before the lifecycle lock, so two
+    overlapping picks queue for the lock in validation-completion order,
+    not the order the user picked them. Each pick takes a generation
+    number at command arrival; the apply phase discards its result if a
+    newer pick has arrived since, so an older pick on a slow path can
+    never overwrite the user's latest selection
+    (wh-google-creds-file-picker.1.13). Incremented only on the
+    single-threaded event loop, so no lock is needed. Created lazily for
+    the same reason as the lifecycle lock above.
+    """
+    value = getattr(self, '_google_creds_generation', 0) + 1
+    self._google_creds_generation = value
+    return value
+
+
+def _start_owed_google_restart(self) -> None:
+    """Start google_stt if a superseded pick stopped it and no successful
+    successor performed the restart (wh-google-creds-file-picker.1.21).
+
+    A pick superseded at the post-stop fence returns without starting
+    the provider and records the debt in _google_creds_restart_owed.
+    The freshness fences assume the newer pick will restart, but the
+    newer pick can fail validation or fail its save -- this function is
+    how a FAILING pick pays the debt so the engine is never left
+    stopped with no owner. Must be called while holding the STT
+    lifecycle lock. Lazy flag read for the same spec'd-mock reason as
+    the lock and generation helpers above.
+    """
+    if not getattr(self, '_google_creds_restart_owed', False):
+        return
+    self._google_creds_restart_owed = False
+    launcher = getattr(self.service_manager, 'remote_stt_launcher', None)
+    current_mode = self.config_service.get('stt.mode', 'remote')
+    current_provider = self.config_service.get(
+        'stt.last_provider', DEFAULT_STT_PROVIDER
+    )
+    if (
+        launcher is not None
+        and current_mode == 'remote'
+        and current_provider == 'google_stt'
+        and not launcher.is_running('google_stt')
+    ):
+        logger.info(
+            'Starting google_stt stopped by a superseded credentials pick'
+        )
+        if not launcher.start_provider('google_stt'):
+            logger.error(
+                'Failed to start google_stt after a superseded '
+                'credentials pick'
+            )
+
+
+async def _resolve_restart_after_failed_pick(self, generation) -> None:
+    """A pick that fails validation may have superseded an older pick
+    right after that pick stopped the provider; someone must still
+    start the engine or it stays stopped with no owner
+    (wh-google-creds-file-picker.1.21).
+
+    Lock-free in the common case: a validation failure must complete
+    even while another lifecycle command holds the lock indefinitely
+    (wh-google-creds-file-picker.1.9). The marker write and the
+    debt-flag read below run with no await between them, and the older
+    pick's post-stop fence is synchronous too, so on the
+    single-threaded loop exactly one of two orders exists: the fence
+    ran first and recorded the debt (this pick sees the flag and pays
+    it under the lock), or this failure ran first (the fence sees the
+    marker, keeps ownership of the restart, and starts the engine
+    itself). The lock is taken only in the first case -- the older
+    pick has already released it on the way out, and serializing with
+    any OTHER lifecycle command is required there: starting a provider
+    mid-switch would race the switch's own stop/start.
+    """
+    self._google_creds_failed_generation = generation
+    if getattr(self, '_google_creds_generation', 0) != generation:
+        # A newer pick exists; the engine's state is its problem now.
+        return
+    if not getattr(self, '_google_creds_restart_owed', False):
+        return
+    async with _get_stt_lifecycle_lock(self):
+        if getattr(self, '_google_creds_generation', 0) == generation:
+            _start_owed_google_restart(self)
+
+
 class LogicController:
     """Main application logic coordinator."""
 
@@ -851,6 +1045,26 @@ class LogicController:
         # gate drops a timer for a superseded generation.
         # ``_overlay_hold_timer`` is the single live 200ms "click N" hold handle.
         self._overlay_effect_lock = asyncio.Lock()
+        # One lock for every STT lifecycle command (credentials restart,
+        # provider switch, service restarts); acquired by the
+        # ``_serialized_stt_lifecycle`` decorator so no two of them
+        # interleave their read-config/stop/start steps
+        # (wh-google-creds-file-picker.1.3).
+        self._stt_lifecycle_lock = asyncio.Lock()
+        # Credentials-selection generation: each pick takes a number at
+        # command arrival so an older pick whose validation finishes late
+        # cannot overwrite a newer one (wh-google-creds-file-picker.1.13).
+        self._google_creds_generation = 0
+        # True while a superseded pick has stopped google_stt and the
+        # restart is owed to its successor; a failing successor pays the
+        # debt via _start_owed_google_restart
+        # (wh-google-creds-file-picker.1.21).
+        self._google_creds_restart_owed = False
+        # The generation of the most recent credentials pick that failed
+        # validation; an older pick at its post-stop fence compares it to
+        # the current generation to learn that no live successor will
+        # perform the restart (wh-google-creds-file-picker.1.21).
+        self._google_creds_failed_generation: "int | None" = None
         self._overlay_timer: "asyncio.TimerHandle | None" = None
         self._overlay_timer_pair: "tuple[int, int] | None" = None
         # The OverlayState the live per-state timer guards (WALK_IN_FLIGHT /
@@ -1210,6 +1424,7 @@ class LogicController:
         except IOError as e:
             logger.error(f"Could not create restart flag file: {e}")
 
+    @_serialized_stt_lifecycle
     async def restart_stt_service(self):
         """
         Sends a restart command to the STT server via WebSocket.
@@ -1229,6 +1444,7 @@ class LogicController:
         except Exception as e:
             logger.error(f"Failed to send STT restart command: {e}", exc_info=True)
 
+    @_serialized_stt_lifecycle
     async def hard_restart_stt_service(self):
         """
         Sends a hard restart command to the STT server via WebSocket.
@@ -1369,6 +1585,220 @@ class LogicController:
         logger.debug(f"Queued {len(words)} words from in-process STT (final={event.is_final})")
 
 
+    async def _set_google_credentials_file(self, path: str) -> None:
+        """Save the Google service-account key file the user picked
+        (wh-google-creds-file-picker) and restart the Google speech
+        provider process when it is the one currently running.
+
+        A path that fails the checks is never saved: a saved bad path
+        would break the next provider start with no visible cause. A
+        failed write takes the value back out of the settings held in
+        memory, for the same reason the mode-switch rollback exists.
+
+        The validation runs BEFORE the shared STT lifecycle lock is
+        taken, with a bounded wait: the checks read the file from disk,
+        and a key on an unreachable network drive can hang those reads
+        indefinitely -- holding the lock through that would block every
+        later provider switch, restart, and credentials selection
+        (wh-google-creds-file-picker.1.9). Only the save-and-restart
+        phase below is serialized.
+        """
+        if not path:
+            return
+
+        # Taken at command arrival, before the validation: the apply
+        # phase below discards this pick if a newer one has arrived,
+        # whatever order their validations finish in
+        # (wh-google-creds-file-picker.1.13).
+        generation = _next_google_creds_generation(self)
+
+        title = 'Wheelhouse: Google Cloud Credentials'
+
+        def notify(message: str) -> None:
+            try:
+                self.state_manager.state_to_gui_queue.put_nowait({
+                    'action': 'show_notification',
+                    'title': title,
+                    'message': message,
+                    'timeout': 5,
+                })
+            except Exception:
+                pass
+
+        try:
+            error = await asyncio.wait_for(
+                asyncio.to_thread(_google_key_file_error, path),
+                timeout=_GOOGLE_KEY_VALIDATE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f'Validating the credentials file timed out: {path}')
+            notify(
+                'Reading that file timed out. If the key is on a network '
+                'drive, copy it to this computer and pick it again.'
+            )
+            await _resolve_restart_after_failed_pick(self, generation)
+            return
+        except Exception as e:
+            logger.error(f'Validating the credentials file failed: {e}')
+            notify(f'Could not read that file: {e}')
+            await _resolve_restart_after_failed_pick(self, generation)
+            return
+        if error is not None:
+            notify(error)
+            await _resolve_restart_after_failed_pick(self, generation)
+            return
+
+        def superseded() -> bool:
+            return getattr(self, '_google_creds_generation', 0) != generation
+
+        async with _get_stt_lifecycle_lock(self):
+            if superseded():
+                # A newer pick arrived while this one was validating or
+                # waiting for the lock; applying this one would overwrite
+                # the user's latest selection with an older file
+                # (wh-google-creds-file-picker.1.13).
+                logger.info(
+                    f'Discarding superseded credentials selection: {path}'
+                )
+                return
+
+            key = 'stt.google.credentials_file'
+            _absent = object()
+            previous = self.config_service.get(key, _absent)
+            self.config_service.set(key, str(path))
+            saved = await self.config_service.save()
+            if not saved:
+                if previous is _absent:
+                    self.config_service.unset(key)
+                else:
+                    self.config_service.set(key, previous)
+                # A concurrent save can have snapshotted the refused value
+                # before this write failed and landed it on disk anyway.
+                # Save once more after the rollback so the file converges on
+                # the rolled-back state (wh-google-creds-file-picker.1.8).
+                await self.config_service.save()
+                logger.error('Google credentials file path was not saved')
+                notify('Could not save the settings file. Nothing changed.')
+                if not superseded():
+                    # This failed pick may have superseded an older one
+                    # right after that pick stopped the provider; pay
+                    # the owed restart so the engine is not left
+                    # stopped (wh-google-creds-file-picker.1.21). When
+                    # a newer pick is queued, it inherits the debt.
+                    _start_owed_google_restart(self)
+                return
+
+            if superseded():
+                # A newer pick arrived while this one was suspended in
+                # the save above. Its file is saved, but installing it
+                # on the launcher and burning a stop/start cycle would
+                # delay the newer pick, which is queued on this lock and
+                # will save and restart with the latest file
+                # (wh-google-creds-file-picker.1.20).
+                logger.info(
+                    'Skipping restart for superseded credentials '
+                    f'selection: {path}'
+                )
+                return
+
+            launcher = getattr(self.service_manager, 'remote_stt_launcher', None)
+            if launcher is not None:
+                # The launcher holds the value it was built with; without
+                # this update a restarted provider would use the old key.
+                launcher.google_credentials_file = str(path)
+
+            current_mode = self.config_service.get('stt.mode', 'remote')
+            current_provider = self.config_service.get(
+                'stt.last_provider', DEFAULT_STT_PROVIDER
+            )
+            if (
+                launcher is not None
+                and current_mode == 'remote'
+                and current_provider == 'google_stt'
+            ):
+                logger.info('Restarting google_stt with the new credentials file')
+                # This pick now owns the engine's stopped/started state;
+                # any restart owed by an earlier superseded pick is
+                # subsumed by the stop/start below
+                # (wh-google-creds-file-picker.1.21).
+                self._google_creds_restart_owed = False
+                await launcher.stop_provider('google_stt')
+                # stop_provider only sends the shutdown command and returns;
+                # if start_provider runs while the old process is still
+                # alive, its already-running check returns True without
+                # spawning a replacement and the engine stays down
+                # (wh-google-creds-file-picker.1.2). Wait for the old
+                # process to exit first.
+                waited = 0.0
+                still_running = launcher.is_running('google_stt')
+                while still_running and waited < _GOOGLE_RESTART_WAIT_S:
+                    await asyncio.sleep(0.2)
+                    waited += 0.2
+                    still_running = launcher.is_running('google_stt')
+                if superseded():
+                    if (
+                        getattr(self, '_google_creds_failed_generation', None)
+                        == getattr(self, '_google_creds_generation', 0)
+                    ):
+                        # The newest pick -- the one that superseded
+                        # this one -- already failed its validation, so
+                        # no live successor will perform the restart.
+                        # This pick's key is saved and installed on the
+                        # launcher; start with it rather than leaving
+                        # the engine stopped
+                        # (wh-google-creds-file-picker.1.21).
+                        logger.info(
+                            'Superseding credentials pick already '
+                            f'failed; continuing restart with: {path}'
+                        )
+                    else:
+                        # A newer pick arrived while this one was
+                        # suspended in stop_provider or the exit-wait
+                        # sleeps above. Starting the provider here would
+                        # run it on the superseded key; the newer pick,
+                        # queued on this lock, performs the one restart
+                        # with the latest file
+                        # (wh-google-creds-file-picker.1.20). The
+                        # engine is stopped, so record the restart
+                        # debt: if the newer pick FAILS instead of
+                        # restarting, it pays the debt via
+                        # _resolve_restart_after_failed_pick
+                        # (wh-google-creds-file-picker.1.21).
+                        self._google_creds_restart_owed = True
+                        logger.info(
+                            'Skipping start for superseded credentials '
+                            f'selection: {path}'
+                        )
+                        return
+                if still_running:
+                    logger.error(
+                        'google_stt did not exit after shutdown; not restarting'
+                    )
+                    notify(
+                        'Credentials saved, but the Google speech engine did not '
+                        'restart. Use Restart Transcription Service or restart '
+                        'Wheelhouse to apply them.'
+                    )
+                elif launcher.start_provider('google_stt'):
+                    notify('Credentials saved. Restarting the Google speech engine.')
+                else:
+                    logger.error('Failed to restart google_stt with new credentials')
+                    notify(
+                        'Credentials saved, but the Google speech engine could '
+                        'not be restarted.'
+                    )
+            else:
+                # The provider is no longer google_stt (or there is no
+                # launcher); a provider switch owns the engine state
+                # now, so any owed google_stt restart is moot
+                # (wh-google-creds-file-picker.1.21).
+                self._google_creds_restart_owed = False
+                notify(
+                    'Credentials saved. They will be used the next time the '
+                    'Google speech engine starts.'
+                )
+
+    @_serialized_stt_lifecycle
     async def _switch_stt_provider(self, provider: str) -> None:
         """Switch to a different STT provider.
 
@@ -1405,16 +1835,69 @@ class LogicController:
         if mode_change_needed:
             # Update config for mode change
             logger.info(f"STT mode change requested: {current_mode} -> {target_mode}")
-            self.config_service.set("stt.mode", target_mode)
+            # What to put back if the write fails. The settings held in memory
+            # are changed first and written afterwards, so a failed write that
+            # simply stopped would leave the program holding a mode it never
+            # saved: the next attempt would read that mode, decide the switch
+            # had already happened, and never restart -- and any later
+            # unrelated write would save the change the user was told was not
+            # made.
             if target_mode == "remote":
-                # Store base provider (zipformer, not zipformer_cpu/gpu)
-                self.config_service.set("stt.last_provider", base_provider)
-                # Update zipformer GPU config if switching to a zipformer variant
-                if is_zipformer_variant:
-                    await self._update_zipformer_gpu_config(provider == "zipformer_gpu")
+                changed_key = "stt.last_provider"
+                changed_value = base_provider
             else:
-                self.config_service.set("stt.provider", provider)
-            await self.config_service.save()
+                changed_key = "stt.provider"
+                changed_value = provider
+            _absent = object()
+            previous = {
+                "stt.mode": current_mode,
+                changed_key: self.config_service.get(changed_key, _absent),
+            }
+
+            self.config_service.set("stt.mode", target_mode)
+            # Store base provider (zipformer, not zipformer_cpu/gpu)
+            self.config_service.set(changed_key, changed_value)
+            saved = await self.config_service.save()
+
+            if not saved:
+                # The mode is read at startup, so restarting now would bring the
+                # program back on the OLD mode after telling the user it
+                # switched. Stop here and say so instead.
+                for key, value in previous.items():
+                    if value is _absent:
+                        self.config_service.unset(key)
+                    else:
+                        self.config_service.set(key, value)
+                # A concurrent save can have snapshotted the never-saved
+                # mode before this write failed and landed it on disk
+                # anyway. Save once more after the rollback so the file
+                # converges on the rolled-back state
+                # (wh-google-creds-file-picker.1.8).
+                await self.config_service.save()
+                logger.error(
+                    "STT mode change was not saved; not restarting into the old mode"
+                )
+                try:
+                    self.state_manager.state_to_gui_queue.put_nowait({
+                        'action': 'show_notification',
+                        'title': 'Wheelhouse: STT Mode Not Changed',
+                        'message': (
+                            f'Could not save the switch to {provider}. '
+                            'Settings were not written, so nothing changed.'
+                        ),
+                        'timeout': 5
+                    })
+                except Exception:
+                    pass
+                return
+
+            # The provider keeps its own settings file, so this is a second
+            # write that taking the mode back out of memory cannot undo. It
+            # happens only once the write it belongs to has succeeded, or a
+            # failed switch would leave the provider set to a mode the program
+            # is not going to start in.
+            if target_mode == "remote" and is_zipformer_variant:
+                await self._update_zipformer_gpu_config(provider == "zipformer_gpu")
 
             # Send notification and trigger restart
             try:
@@ -1481,9 +1964,17 @@ class LogicController:
                 if remote_launcher.start_provider(base_provider):
                     # Store base provider name in config (zipformer, not zipformer_cpu)
                     self.config_service.set("stt.last_provider", base_provider)
-                    await self.config_service.save()
+                    saved = await self.config_service.save()
                     self.state_manager.send_state_update()
-                    logger.info(f"Switched to remote STT provider: {provider}")
+                    if saved:
+                        logger.info(f"Switched to remote STT provider: {provider}")
+                    else:
+                        # The switch itself worked; only the record of it failed,
+                        # so the next start will come back on the old provider.
+                        logger.error(
+                            f"Switched to remote STT provider {provider}, but the "
+                            "choice was NOT saved and will not survive a restart"
+                        )
                 else:
                     logger.error(f"Failed to start remote STT provider: {provider}")
         else:
@@ -1500,9 +1991,15 @@ class LogicController:
             else:
                 # No STTManager but same mode - just update config
                 self.config_service.set("stt.provider", provider)
-                await self.config_service.save()
+                saved = await self.config_service.save()
                 self.state_manager.send_state_update()
-                logger.info(f"Updated STT provider config to: {provider}")
+                if saved:
+                    logger.info(f"Updated STT provider config to: {provider}")
+                else:
+                    logger.error(
+                        f"STT provider {provider} was NOT saved; the next start "
+                        "will use the previous one"
+                    )
 
     async def _switch_ai_provider(self, provider: str) -> None:
         """Select the active AI model on the thin-client coordinator.
@@ -1534,8 +2031,13 @@ class LogicController:
         await ai_service.refresh_models()
         # Persist the selection so it survives restart (finding wh-ay6h.10.5).
         self.config_service.set("ai.server.model", provider)
-        await self.config_service.save()
-        logger.info("AI model set to: %s", provider)
+        if await self.config_service.save():
+            logger.info("AI model set to: %s", provider)
+        else:
+            logger.error(
+                "AI model set to %s, but the choice was NOT saved and will not "
+                "survive a restart", provider
+            )
 
         self.state_manager.send_state_update()
 
@@ -5423,6 +5925,56 @@ class LogicController:
             # the network/IPC issue resolves.
             self._in_flight_retry_tokens.discard(correlation_token)
 
+    async def _open_help_online(self) -> None:
+        """Open the Wheelhouse help page for the Help menu entry.
+
+        The GUI process shows the menu but holds no settings, so it sends a
+        command and this opens the browser. The address is the ai.help
+        gem_url setting, which is the same setting the spoken command
+        "wheelhouse help online" reads -- one place to change, both ways in.
+
+        Nothing here is allowed to raise. This runs as a background task in
+        the process that routes speech, and a browser that will not start is
+        not a reason to take that down.
+        """
+        config = getattr(self, "config_service", None)
+        if not config:
+            logger.warning("Help menu: no settings available, cannot open help.")
+            return
+
+        gem_url = config.get("ai.help.gem_url", "")
+        if not gem_url:
+            # Blanking the setting is how a user turns online help off, so
+            # this is a plain statement of fact rather than an error.
+            self._send_gui_notification(
+                "Online help is not configured. Set gem_url under [ai.help]."
+            )
+            return
+
+        try:
+            import webbrowser
+            await asyncio.to_thread(webbrowser.open, gem_url)
+        except Exception as exc:
+            logger.warning("Help menu: could not open the browser: %s", exc)
+            self._send_gui_notification("Wheelhouse could not open your browser.")
+
+    def _send_gui_notification(self, message: str) -> None:
+        """Put a one-line notice on the GUI queue. Never raises."""
+        state_manager = getattr(self, "state_manager", None)
+        queue = getattr(state_manager, "state_to_gui_queue", None)
+        if queue is None:
+            logger.warning("Cannot show a notice, no GUI queue: %s", message)
+            return
+        try:
+            queue.put_nowait({
+                "action": "show_notification",
+                "title": "Wheelhouse",
+                "message": message,
+                "timeout": 5,
+            })
+        except Exception as exc:
+            logger.warning("Notice could not be queued: %s", exc)
+
     def _send_retry_followup_toast(self) -> None:
         """Push a one-line follow-up toast onto the GUI state queue.
 
@@ -6342,8 +6894,11 @@ class LogicController:
             "restart_stt_service": self.restart_stt_service,
             "hard_restart_stt_service": self.hard_restart_stt_service,
             "set_config_value": lambda: self.create_task_with_error_handling(self.state_manager.set_config_value(command.get('key'), command.get('value')), "SetConfigValue"),
+            "set_config_values": lambda: self.create_task_with_error_handling(self.state_manager.set_config_values(command.get('values') or {}), "SetConfigValues"),
             "switch_stt_provider": lambda: self.create_task_with_error_handling(self._switch_stt_provider(command.get('provider')), "SwitchSTTProvider"),
+            "set_google_credentials_file": lambda: self.create_task_with_error_handling(self._set_google_credentials_file(command.get('path', '')), "SetGoogleCredentialsFile"),
             "switch_ai_provider": lambda: self.create_task_with_error_handling(self._switch_ai_provider(command.get('provider')), "SwitchAIProvider"),
+            "open_help_online": lambda: self.create_task_with_error_handling(self._open_help_online(), "OpenHelpOnline"),
             "help_ask": lambda: self.create_task_with_error_handling(self._handle_help_ask(command.get("question", "")), "HelpAsk"),
             "help_reset": lambda: self._handle_help_reset(),
             "help_cancel": lambda: self._handle_help_cancel(),

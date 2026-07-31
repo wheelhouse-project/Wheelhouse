@@ -98,6 +98,59 @@ def _find_group_end(raw, start):
     raise _UnsupportedConstruct(raw)
 
 
+# One "[...]" character class, with an optional trailing * or +. Nothing
+# else -- a counted repetition or a literal beside the class leaves the run
+# unmatched, and the caller falls back rather than guessing.
+_CLASS_ATOM_RE = re.compile(r"\[([^\]\\]+)\]([*+]?)")
+
+
+def _admits_only_letters_and_spaces(chars):
+    """True when a character-class body lists nothing but ASCII letters and
+    the space. A range's endpoints must sit in the SAME case: letter
+    endpoints alone do not confine what lies between them, because the six
+    punctuation characters between "Z" and "a" sit inside any range that
+    starts uppercase and ends lowercase -- "[A-z]" matches "_" and the
+    backtick as well as every letter (wh-local-ai-runtime.2.27)."""
+    lower = "abcdefghijklmnopqrstuvwxyz"
+    upper = lower.upper()
+    i = 0
+    n = len(chars)
+    while i < n:
+        if i + 2 < n and chars[i + 1] == "-":
+            lo, hi = chars[i], chars[i + 2]
+            same_case = ((lo in lower and hi in lower)
+                         or (lo in upper and hi in upper))
+            if not same_case or lo > hi:
+                return False
+            i += 3
+        elif chars[i] in lower or chars[i] in upper or chars[i] == " ":
+            i += 1
+        else:
+            return False
+    return True
+
+
+def _letter_class_run(body):
+    """Read a capture body written as letter/space classes.
+
+    Returns True when the run must match at least one character, False when
+    it may match nothing, and None when the body is not such a run at all.
+    "[a-z][a-z ]*" and "[a-zA-Z ]+" are the shapes that occur; both mean
+    "plain words", which is narrower than what (.+) accepts, so the caller
+    gives them their own wording rather than borrowing "any words".
+    """
+    pos = 0
+    required = False
+    while pos < len(body):
+        match = _CLASS_ATOM_RE.match(body, pos)
+        if not match or not _admits_only_letters_and_spaces(match.group(1)):
+            return None
+        if match.group(2) != "*":
+            required = True
+        pos = match.end()
+    return required if pos else None
+
+
 def _split_alternation(body):
     """Split group content on top-level ``|`` (respecting nesting/escapes)."""
     branches = []
@@ -207,6 +260,8 @@ def _parse_trigger(raw):
                 suffixes.append(("number", optional_after))
             elif body == r"\d*":
                 suffixes.append(("number", True))
+            elif (must_match := _letter_class_run(body)) is not None:
+                suffixes.append(("letters", optional_after or not must_match))
             else:
                 alts = []
                 for branch in _split_alternation(body):
@@ -256,7 +311,10 @@ def _phrase_display(variants):
 def _suffix_clauses(suffixes):
     parts = []
     for kind, optional in suffixes:
-        noun = "any words" if kind == "words" else "a number"
+        noun = {
+            "words": "any words",
+            "letters": "any words made of letters and spaces",
+        }.get(kind, "a number")
         if optional:
             parts.append(f", optionally followed by {noun}")
         else:

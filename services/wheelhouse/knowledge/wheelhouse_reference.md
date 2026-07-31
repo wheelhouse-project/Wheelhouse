@@ -142,10 +142,15 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 |---|---|---|
 | push to talk mode | Switches to press-and-hold listening: Wheelhouse listens only while you hold the floating button | A notification confirms the switch |
 | click to talk mode | Switches back to toggle listening (click to start, click to stop) -- the default |  |
-| x-ray wheelhouse help online | Opens the Wheelhouse Assistant (the official online help) in your browser | Uses the gem_url setting under [ai.help]; if blanked, Wheelhouse says out loud that online help is not configured |
+| x-ray help | Opens the Wheelhouse Assistant (the official online help) in your browser | Uses the gem_url setting under [ai.help]; if blanked, Wheelhouse says out loud that online help is not configured |
 | x-ray patterns | Opens the Pattern Manager | "x-ray pattern manager" also works; see "Special Commands" |
 | x-ray fix | Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version | Requires the AI server to be configured and reachable; Wheelhouse speaks its progress and always preserves your original text on any failure |
-| x-ray cancel fix | Cancels an in-progress fix |  |
+| x-ray simplify | Rewrites the selected text in plain language, using shorter sentences and simpler words Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged. | Same AI server and same safeguards as "x-ray fix"; the selection comes back as plain text, so formatting applied in a word processor is lost |
+| x-ray shorten | Rewrites the selected text more briefly, cutting repetition and padding | Same AI server and same safeguards as "x-ray fix" |
+| x-ray make formal | Rewrites the selected text in a formal register, avoiding contractions and casual wording | Same AI server and same safeguards as "x-ray fix" |
+| x-ray pirate | Rewrites the selected text the way a pirate would say it | Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Special Commands" for writing your own. |
+| x-ray translate to [language] | Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese" Keeps every fact and leaves names and numbers as they are. | Same AI server and same safeguards as "x-ray fix"; say the language in English and in lower case, as one or more plain words with no punctuation. How good the translation is depends on the model you have configured. |
+| x-ray cancel fix | Cancels an in-progress fix or rewrite |  |
 | x-ray boost | Adds the selected text to the speech recognition hints | See "Special Commands" -- on the default engine this saves the hint but does not apply it until you opt in |
 
 ## Configuration Reference
@@ -170,7 +175,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **LOG_FILE** *(default: `""`)* -- Where the activity log goes; empty means the standard log location. Change only when a support conversation asks you to.
 
-**LOG_LEVEL** *(default: `"DEBUG"`)* -- How detailed the activity log is. Change only when a support conversation asks you to.
+**LOG_LEVEL** *(default: `"INFO"`)* -- How detailed the activity log is. Change only when a support conversation asks you to.
 
 **LOG_TRANSCRIPTS** *(default: `false`)* -- A privacy setting: false keeps the words you dictate and your clipboard contents out of the log files (only text lengths are noted). Set true only while troubleshooting recognition, then turn it back off; while on, everything you dictate, including passwords, accumulates in the logs.
 
@@ -180,11 +185,11 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **VOLUME_INCREMENT** *(default: `0.5`)* -- The size of each thumb-wheel volume adjustment step. Raise for faster, coarser changes; lower for finer control.
 
-**FLOATING_BUTTON_SIZE** *(default: `30`)* -- Size in pixels of the small on-screen status button.
+**FLOATING_BUTTON_SIZE** *(default: `50`)* -- Size in pixels of the small on-screen status button. Dragging the button's outer edge, or holding Ctrl and rolling the mouse wheel over it, writes this setting.
 
-**FLOATING_BUTTON_POS** *(default: `[-18, -15]`)* -- Screen-corner offset position of the small on-screen status button.
+**FLOATING_BUTTON_POS** *(default: `[100, 100]`)* -- Screen position of the small on-screen status button, as [x, y] pixels from the top-left of the desktop. Dragging the button writes this setting, and so does resizing it, because the button grows and shrinks around its own centre.
 
-**FLOATING_BUTTON_VISIBLE** *(default: `false`)* -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target, especially handy in push-to-talk mode.
+**FLOATING_BUTTON_VISIBLE** *(default: `true`)* -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target, especially handy in push-to-talk mode.
 
 **SPEECH_ENABLED_ON_STARTUP** *(default: `true`)* -- Whether Wheelhouse starts listening as soon as it launches. Set false to turn the microphone on manually each session.
 
@@ -318,6 +323,10 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **last_provider** *(default: `"parakeet_tdt"`)* -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the tray menu, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account), "distil_medium_en" (local, runs on an NVIDIA graphics card), or "google_stt" (Google Cloud; needs an account, sends audio to Google).
 
+### [stt.google]
+
+**credentials_file** *(default: `""`)* -- Full path to the Google service-account key file (the JSON file downloaded during Google Cloud setup). Wheelhouse writes this when you pick the file from the tray menu's Google Cloud Credentials item; when it is empty, the GOOGLE_APPLICATION_CREDENTIALS environment variable is used instead.
+
 ### [stt.azure]
 
 **subscription_key** *(default: `""`)* -- Credential for the Azure cloud speech option; only matters if you deliberately set up Azure, which most people never do.
@@ -332,13 +341,27 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [ai.server]
 
-**base_url** *(default: `"http://localhost:11434/v1"`)* -- The address of the AI server Wheelhouse talks to, using the standard OpenAI-style interface; empty leaves AI off. Any OpenAI-compatible address works, local or hosted; the installer's AI-helper choice fills in Google's Gemini address.
+**base_url** *(default: `"http://127.0.0.1:8781/v1"`)* -- The address of the AI server Wheelhouse talks to, using the standard OpenAI-style interface; empty leaves AI off. Any OpenAI-compatible address works, local or hosted; the installer's AI-helper choice fills in Google's Gemini address.
 
-**model** *(default: `"gemma3:12b"`)* -- The model name to request from the AI server. Change it to whatever model your server has installed.
+**model** *(default: `"gemma-4-e4b"`)* -- The model name to request from the AI server. Change it to whatever model your server has installed.
 
-**kind** *(default: `"local"`)* -- Whether the AI server is on your own machine or out on the internet, which frames the privacy tradeoff: with a local server, the text being corrected never leaves your computer. Valid values: "local" or "cloud" -- spell "cloud" exactly; any other value is treated as local.
+**kind** *(default: `"local"`)* -- Whether the AI server is on your own machine or out on the internet, which frames the privacy tradeoff: with a local server, the text being corrected never leaves your computer. Valid values: "local" or "cloud". This setting does not decide where your text is sent -- base_url above does that. Capitals and stray spaces are forgiven; anything else falls back to local and says so in the log.
 
 **timeout_s** *(default: `30`)* -- Seconds Wheelhouse waits for the AI server before giving up on a request. Raise it if a slow local model keeps timing out.
+
+### [ai.runtime]
+
+**enabled** *(default: `false`)* -- Whether Wheelhouse starts its own model server. False means you start one yourself and point base_url at it. Valid values: true or false. When true, base_url above must name 127.0.0.1 or localhost and include a port -- the port Wheelhouse starts its server on comes from that address, so the two cannot drift apart. The installer sets this to true when it has downloaded a model for you. Set it to false if you would rather run your own server, or point Wheelhouse at a hosted one.
+
+**model_path** *(default: `""`)* -- The full path to the model file Wheelhouse loads. The installer writes this. Point it at a different model file to change which model answers. Nothing else has to change.
+
+**binary_dir** *(default: `""`)* -- The folder holding llama-server.exe, the program that runs the model. The installer writes this. Change it if you moved the llama.cpp build, or to use a build made for different graphics hardware.
+
+**context_size** *(default: `8192`)* -- How much text the model can consider at once, counted in tokens. Raise it if you correct or rewrite long passages and the reply comes back cut short. A larger value uses more memory.
+
+**gpu_layers** *(default: `99`)* -- How much of the model to place on the graphics card. Valid values: 99 places the whole model on the graphics card; 0 runs it entirely on the processor, which the installer chooses for a machine with enough system memory but no suitable graphics card. Values in between split it. Lower it if the server fails to start because the graphics card is out of memory.
+
+**startup_timeout_seconds** *(default: `90`)* -- How long Wheelhouse waits for its model server to report itself ready before giving up and leaving the AI features off. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.
 
 ### [ai.help]
 
@@ -372,4 +395,4 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ---
 
-Generated: 2026-07-24 for the v1.0.5 release
+Generated: 2026-07-30 for the v1.0.6 release

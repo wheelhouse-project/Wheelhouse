@@ -180,6 +180,14 @@ class RealTextParser:
             return None
         action_funcs._functions["cancel_fix"] = mock_cancel_fix
 
+        # Mock rewrite_text_ai - the five rewriting commands (simplify,
+        # shorten, make formal, pirate, translate to [language]) all call
+        # this one action with a different instruction. It reaches the same
+        # AIService methods fix_text_ai does, so it needs the same treatment.
+        async def mock_rewrite_text_ai(instruction=None):
+            return None
+        action_funcs._functions["rewrite_text_ai"] = mock_rewrite_text_ai
+
         # Mock wheelhouse_help_online - would os.startfile a browser URL
         async def mock_help_online():
             return None

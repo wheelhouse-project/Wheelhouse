@@ -12,16 +12,17 @@
 
 WheelHouse ships three STT providers and a thin-client AI subsystem. The
 default experience is fully local: the Parakeet provider runs offline on CPU,
-and the AI features talk to a local Ollama server if one is present (and
-quietly disable themselves if not). No custom-built GPU wheels are required
-at runtime by any shipped component.
+and the AI features talk to a llama.cpp server on this machine that the
+installer puts there and WheelHouse starts and stops itself (and quietly
+disable themselves if the server is not reachable). No custom-built GPU
+wheels are required at runtime by any shipped component.
 
 | Subsystem | What runs | Where inference happens |
 |-----------|-----------|------------------------|
 | STT (default) | Parakeet TDT 0.6B v3 int8 via sherpa-onnx | Local, CPU |
 | STT (opt-in) | Distil-Whisper distil-medium.en via faster-whisper | Local, NVIDIA CUDA |
 | STT (opt-in) | Google Cloud Speech-to-Text | Google's servers |
-| AI text fixing / help chat | Any OpenAI-compatible server (Ollama by default) | Wherever that server runs |
+| AI text fixing / help chat | Any OpenAI-compatible server (a bundled llama.cpp server by default) | Wherever that server runs |
 
 ## 2. STT provider architecture
 
@@ -104,16 +105,16 @@ enabled = true
 knowledge_base = "knowledge/wheelhouse_help.md"
 
 [ai.server]
-base_url = "http://localhost:11434/v1"   # local Ollama by default
-model = "gemma3:12b"
+base_url = "http://127.0.0.1:8781/v1"    # the bundled local server
+model = "gemma-4-e4b"
 api_key = ""                              # only needed by hosted endpoints
 ```
 
 If `base_url` is empty or the server is unreachable, the AI features
 (dictation fix-up, help chat) disable themselves quietly and everything else
 keeps working. Privacy note: whatever text the AI features operate on is
-sent to the configured server -- local Ollama means it stays on the machine;
-a hosted endpoint means it leaves.
+sent to the configured server -- the bundled local server means it stays on
+the machine; a hosted endpoint means it leaves.
 
 ## 4. Dev-only: the evaluation harness and the Vulkan whisper wheel
 
@@ -148,8 +149,8 @@ Supply-chain posture, hash sidecars, and the re-vendoring procedure live in
 - **Distil-Whisper:** inference is local; the model download itself comes
   from Hugging Face once.
 - **Google STT:** audio streams to Google while dictating.
-- **AI features:** operate through the configured server; local Ollama keeps
-  text on-device.
+- **AI features:** operate through the configured server; the bundled local
+  server keeps text on-device.
 - WheelHouse itself sends no telemetry. See `PRIVACY.md` (public release)
   for the full statement, including what the app can observe and modify on
   the machine and where logs live.

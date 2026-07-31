@@ -1,0 +1,40 @@
+// Reading the Windows microphone permission, as the wizard sees it.
+//
+// This file is included into the [Code] section of Wheelhouse-Setup.iss, so
+// everything in it is Pascal Script and takes Pascal comments -- a ';' comment
+// here is read as code and fails the compile with "'BEGIN' expected".
+//
+// Two separate programs ask Windows the same question. The wizard asks it to
+// decide whether to show the microphone-permission page at all; the engine
+// (install-wheelhouse.ps1, Resolve-MicrophoneConsent) asks it to decide whether
+// to print the closing advice about turning the microphone on. A machine where
+// the two disagree shows the user a page about a problem the engine says they
+// do not have, or stays silent about one they do.
+//
+// The part that can disagree is the decision, not the registry read, so the
+// decision lives here on its own and takes the two values as arguments. The
+// engine has a function of the same shape, and
+// scripts/release/tests/test_installer.py runs both over one table of value
+// pairs and requires the same answer from each. Reading the registry stays in
+// MicrophoneAllowed, which is the part a test cannot drive without writing to
+// the user's real permission setting.
+
+function ResolveMicrophoneConsent(const First, Second: string): Boolean;
+begin
+  { First is the per-application value (the NonPackaged subkey), Second the
+    umbrella one. Either is an empty string when Windows could not read it, when
+    the key is absent, or when the value is present and empty -- Windows reports
+    success on a value that exists and is empty, and an empty string is not
+    'Allow', so a check that only asked whether the read succeeded would report
+    a working microphone as blocked.
+
+    An empty first value is not an answer, so the umbrella value is asked next.
+    When neither answers, the result is "allowed": a Windows build that stores
+    this somewhere else must not leave the user looking at a warning about a
+    microphone that works. }
+  Result := True;
+  if First <> '' then
+    Result := (CompareText(First, 'Allow') = 0)
+  else if Second <> '' then
+    Result := (CompareText(Second, 'Allow') = 0);
+end;

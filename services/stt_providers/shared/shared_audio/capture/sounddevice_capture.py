@@ -73,27 +73,37 @@ class SounddeviceAudioCapture:
         """
         self.config = config or AudioConfig()
         self.overflow_callback = overflow_callback
+        # One MicrophoneStream serves the adapter's whole lifetime, created
+        # lazily on first start(). stop()/start() cycles (the provider soft
+        # restart) restart it rather than replace it: MicrophoneStream is
+        # restart-safe by design, and replacing it would discard its pending
+        # diagnostics deque -- unread callback-priority and [stall] lines --
+        # along with the overflow monitor's restart-attempt history
+        # (wh-sounddevice-starvation-parity.4.1).
         self._stream = None
+        self._started = False
 
     def start(self) -> None:
         """Start audio capture."""
-        if self._stream is not None:
+        if self._started:
             return
 
         if not SOUNDDEVICE_AVAILABLE:
             raise RuntimeError("sounddevice not available")
 
-        # Import here to avoid import errors when not available
-        from ..microphone import MicrophoneStream
+        if self._stream is None:
+            # Import here to avoid import errors when not available
+            from ..microphone import MicrophoneStream
 
-        self._stream = MicrophoneStream(
-            rate=self.config.rate,
-            channels=self.config.channels,
-            chunk_ms=self.config.chunk_ms,
-            device_index=self.config.device_index,
-            overflow_callback=self.overflow_callback
-        )
+            self._stream = MicrophoneStream(
+                rate=self.config.rate,
+                channels=self.config.channels,
+                chunk_ms=self.config.chunk_ms,
+                device_index=self.config.device_index,
+                overflow_callback=self.overflow_callback
+            )
         self._stream.start()
+        self._started = True
 
         logger.debug(
             f"sounddevice audio started: {self.config.rate}Hz, "
@@ -102,9 +112,9 @@ class SounddeviceAudioCapture:
 
     def stop(self) -> None:
         """Stop audio capture."""
-        if self._stream:
+        if self._stream and self._started:
             self._stream.stop()
-            self._stream = None
+        self._started = False
         logger.debug("sounddevice audio stopped")
 
     def read(self, timeout: float = 1.0) -> Optional[bytes]:
@@ -116,7 +126,7 @@ class SounddeviceAudioCapture:
         Returns:
             Audio bytes (int16 PCM) or None if timeout.
         """
-        if self._stream:
+        if self._stream and self._started:
             return self._stream.read(timeout=timeout)
         return None
 

@@ -13,7 +13,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ai.service import AIService, _legacy_to_result
+from ai.service import (
+    AIService,
+    _SERVER_RESTART_MIN_INTERVAL_S,
+    _legacy_to_result,
+)
 from ai.help_chat import HelpChatSession
 from ai.providers.openai_compat import ChatResult, ChatStatus, OpenAIProvider
 
@@ -117,8 +121,8 @@ class TestLifecycle:
         still fires for a local endpoint that is not a /v1 root."""
         config = MagicMock()
         config.get = MagicMock(side_effect=lambda key, default=None: {
-            "ai.server.base_url": "http://localhost:11434/v1",
-            "ai.server.model": "gemma3:12b",
+            "ai.server.base_url": "http://127.0.0.1:8781/v1",
+            "ai.server.model": "gemma-4-e4b",
             "ai.server.kind": "local",
             "ai.server.timeout_s": 60,
         }.get(key, default))
@@ -429,6 +433,28 @@ class TestFixText:
         assert result.text == "Corrected text"
 
     @pytest.mark.asyncio
+    async def test_fix_text_keeps_fences_from_a_fenced_selection(
+        self, ai_config, mock_provider
+    ):
+        """Selecting a whole fenced block keeps its fences.
+
+        fix_text must pass the captured text to the sanitizer so a fence the
+        user selected is told apart from one the model added
+        (wh-ai-fence-strip-selection).
+        """
+        reply = "```python\nx = add_up(1)\n```"
+        mock_provider.chat = AsyncMock(
+            return_value=ChatResult(status=ChatStatus.OK, text=reply)
+        )
+        service = AIService(ai_config)
+        service._provider = mock_provider
+
+        result = await service.fix_text("```python\nx = compute(1)\n```")
+
+        assert result.ok is True
+        assert result.text == reply
+
+    @pytest.mark.asyncio
     async def test_fix_text_uses_correction_prompt(self, ai_config, mock_provider):
         """fix_text uses TEXT_CORRECTION_SYSTEM as the system message."""
         service = AIService(ai_config)
@@ -643,6 +669,459 @@ class TestSanitizeResponse:
             result = service._sanitize_response(f"{preamble}Hello world")
             assert result == "Hello world", f"Failed to strip preamble: {preamble!r}"
 
+    def test_sanitize_keeps_fences_the_captured_text_already_had(
+        self, ai_config
+    ):
+        """A fence the user selected is not an artifact -- keep it.
+
+        Fence stripping exists to remove a fence the model wrapped around
+        its answer. When the captured text was itself a fenced block, the
+        same fence in the reply is the user's own content
+        (wh-ai-fence-strip-selection).
+        """
+        service = self._make_service(ai_config)
+        captured = "```python\nx = compute(1)\n```"
+        reply = "```python\nx = add_up(1)\n```"
+
+        result = service._sanitize_response(reply, captured)
+
+        assert result == reply
+
+    def test_sanitize_still_strips_a_fence_the_captured_text_lacked(
+        self, ai_config
+    ):
+        """The original rule holds when the model added the fence itself."""
+        service = self._make_service(ai_config)
+
+        result = service._sanitize_response(
+            "```\nHello world\n```", "hello world"
+        )
+
+        assert result == "Hello world"
+
+    def test_sanitize_language_tag_differs_between_capture_and_reply(
+        self, ai_config
+    ):
+        """Fenced in, fenced out -- the language tag need not match."""
+        service = self._make_service(ai_config)
+        captured = "```\nSELECT 1;\n```"
+        reply = "```sql\nSELECT 1;\n```"
+
+        result = service._sanitize_response(reply, captured)
+
+        assert result == reply
+
+
+class _Clock:
+    """A clock the test moves by hand.
+
+    The backoff tests have to say exactly when they are, because what is being
+    checked is when the next attempt becomes due. Patching monotonic to a fixed
+    number far in the future -- which the two oldest tests here do -- puts every
+    deadline in the past and hides that question entirely.
+    """
+
+    def __init__(self, t: float = 0.0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class TestReplacingAServerThatDied:
+    """A model server Wheelhouse started can die after a healthy start: out of
+    memory, removed by antivirus, a driver fault, ended in Task Manager, or an
+    ordinary crash.
+
+    Before this, nothing replaced it. The periodic readiness check and the
+    check after a failed request both noticed -- they set readiness to false,
+    and every spoken fix or rewrite then said the AI was unavailable -- but
+    the only call that starts a server ran once, during startup. The server
+    stayed dead until the user restarted the whole of Wheelhouse, which is a
+    hard thing to ask of somebody who controls this machine by voice.
+    """
+
+    def _service(self, ai_config, available, restart=None):
+        service = AIService(ai_config)
+        provider = MagicMock()
+        provider.is_available = AsyncMock(side_effect=available)
+        service._provider = provider
+        if restart is not None:
+            service.set_local_server_restart(restart)
+        return service
+
+    @pytest.mark.asyncio
+    async def test_a_server_that_stopped_answering_is_started_again(
+        self, ai_config
+    ):
+        restarts = []
+
+        async def restart():
+            restarts.append(1)
+            return True
+
+        service = self._service(ai_config, available=[False, True], restart=restart)
+
+        await service.recheck_ready()
+
+        assert restarts == [1]
+
+    @pytest.mark.asyncio
+    async def test_readiness_comes_back_without_waiting_for_the_next_check(
+        self, ai_config
+    ):
+        """The user is mid-sentence. Waiting another 60 seconds for the loop
+        to come round again is the difference between a command that works
+        and one that does not.
+        """
+        async def restart():
+            return True
+
+        service = self._service(ai_config, available=[False, True], restart=restart)
+
+        assert await service.recheck_ready() is True
+        assert service.is_ready() is True
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_server_is_not_restarted(self, ai_config):
+        restarts = []
+
+        async def restart():
+            restarts.append(1)
+            return True
+
+        service = self._service(ai_config, available=[True], restart=restart)
+
+        await service.recheck_ready()
+
+        assert restarts == []
+
+    @pytest.mark.asyncio
+    async def test_an_external_server_is_never_started_by_us(self, ai_config):
+        """We did not start it, so we have no business starting it. The user
+        runs that server themselves and the address may not even be on this
+        machine.
+        """
+        service = self._service(ai_config, available=[False, False])
+
+        assert await service.recheck_ready() is False
+
+    @pytest.mark.asyncio
+    async def test_a_second_check_straight_afterwards_does_not_start_it_again(
+        self, ai_config
+    ):
+        """Readiness is re-checked every 60 seconds and again after every
+        failed request. Starting a server on each of those would spend the
+        whole machine on a server that cannot come up.
+        """
+        restarts = []
+
+        async def restart():
+            restarts.append(1)
+            return False
+
+        service = self._service(
+            ai_config, available=[False, False, False, False], restart=restart
+        )
+
+        await service.recheck_ready()
+        await service.recheck_ready()
+
+        assert restarts == [1]
+
+    @pytest.mark.asyncio
+    async def test_the_wait_between_attempts_grows_while_they_keep_failing(
+        self, ai_config
+    ):
+        """A server that cannot start -- a deleted model file, a graphics
+        driver that faults -- must not be retried at the same rate forever.
+        """
+        async def restart():
+            return False
+
+        service = self._service(
+            ai_config, available=[False] * 10, restart=restart
+        )
+
+        await service.recheck_ready()
+        first = service._server_restart_interval_s
+        with patch("ai.service.time.monotonic", return_value=1e9):
+            await service.recheck_ready()
+        second = service._server_restart_interval_s
+
+        assert second > first
+
+    @pytest.mark.asyncio
+    async def test_the_wait_goes_back_to_the_shortest_after_one_works(
+        self, ai_config
+    ):
+        outcomes = iter([False, True])
+
+        async def restart():
+            return next(outcomes)
+
+        service = self._service(
+            ai_config, available=[False] * 10, restart=restart
+        )
+
+        await service.recheck_ready()
+        grown = service._server_restart_interval_s
+        with patch("ai.service.time.monotonic", return_value=1e9):
+            await service.recheck_ready()
+
+        assert service._server_restart_interval_s < grown
+
+    @pytest.mark.asyncio
+    async def test_a_failed_attempt_waits_the_longer_gap_it_announced(
+        self, ai_config
+    ):
+        """The log after a failed attempt promises the next one no sooner than
+        the doubled wait. The moment the next attempt became due was worked
+        out before the attempt ran, from the wait it had then, and nothing put
+        it right afterwards -- so another attempt was admitted at the old,
+        shorter wait and the promise in the log was never kept.
+
+        The two tests above cannot see this: both move the clock to 1e9, past
+        every deadline there could be, and compare only the interval.
+        """
+        restarts = []
+
+        async def restart():
+            restarts.append(1)
+            return False
+
+        clock = _Clock()
+        service = self._service(
+            ai_config, available=[False] * 10, restart=restart
+        )
+
+        with patch("ai.service.time.monotonic", clock):
+            await service.recheck_ready()
+            assert restarts == [1]
+            announced = service._server_restart_interval_s
+            # Past the wait the first attempt began with, short of the one its
+            # failure announced. Nothing may run here.
+            clock.t = announced - 1.0
+            await service.recheck_ready()
+
+        assert restarts == [1]
+
+    @pytest.mark.asyncio
+    async def test_a_server_dying_after_a_recovery_waits_only_the_short_gap(
+        self, ai_config
+    ):
+        """A wait grown by earlier failures must not outlive the recovery that
+        reset it. The interval went back to its shortest on success while the
+        deadline kept the grown value, so a server that died again straight
+        afterwards stayed down for as long as ten minutes -- with every spoken
+        fix and rewrite reporting the AI unavailable throughout.
+        """
+        outcomes = iter([False, False, True, True])
+        restarts = []
+
+        async def restart():
+            restarts.append(1)
+            return next(outcomes)
+
+        clock = _Clock()
+        service = self._service(
+            ai_config, available=[False] * 20, restart=restart
+        )
+
+        with patch("ai.service.time.monotonic", clock):
+            await service.recheck_ready()          # fails, wait grows
+            clock.t = 1000.0
+            await service.recheck_ready()          # fails again, grows again
+            clock.t = 2000.0
+            await service.recheck_ready()          # works: wait back to 60s
+            assert restarts == [1, 1, 1]
+            assert (
+                service._server_restart_interval_s
+                == _SERVER_RESTART_MIN_INTERVAL_S
+            )
+            # The server dies again immediately. One minute on, another
+            # attempt is due -- the grown deadline must not still be in force.
+            clock.t = 2000.0 + _SERVER_RESTART_MIN_INTERVAL_S + 1.0
+            await service.recheck_ready()
+
+        assert restarts == [1, 1, 1, 1]
+
+    @pytest.mark.asyncio
+    async def test_a_start_that_raises_does_not_reach_the_caller(self, ai_config):
+        """recheck_ready is awaited from the periodic loop and from the
+        triage after a failed request. An exception escaping here would stop
+        the loop, and readiness would never be checked again.
+        """
+        async def restart():
+            raise OSError("the model file is gone")
+
+        service = self._service(
+            ai_config, available=[False, False], restart=restart
+        )
+
+        assert await service.recheck_ready() is False
+
+    @pytest.mark.asyncio
+    async def test_two_checks_at_once_start_only_one_server(self, ai_config):
+        """The periodic loop and a failed request can arrive together. Two
+        starts at once is the case the launcher's own lock exists for; not
+        making two is better still.
+        """
+        restarts = []
+        second_may_run = asyncio.Event()
+
+        async def restart():
+            restarts.append(1)
+            await second_may_run.wait()
+            return True
+
+        service = self._service(
+            ai_config, available=[False] * 10, restart=restart
+        )
+
+        first = asyncio.create_task(service.recheck_ready())
+        await asyncio.sleep(0)
+        second = asyncio.create_task(service.recheck_ready())
+        await asyncio.sleep(0)
+        second_may_run.set()
+        await asyncio.gather(first, second)
+
+        assert restarts == [1]
+
+    @pytest.mark.asyncio
+    async def test_a_start_still_running_is_not_joined_by_a_second_one(
+        self, ai_config
+    ):
+        """Loading a model outlasts the shortest wait between attempts.
+
+        A 5 GB file on a mechanical disk takes minutes; the wait between
+        attempts starts at one. The periodic check therefore comes round
+        again while the first start is still working, by which time the
+        wait no longer holds it back -- and nothing else would. Two
+        llama-server processes then start on one port, the second cannot
+        bind, and the record of which one is ours ends up naming the one
+        that failed.
+
+        This is the case the check on the lock exists for, and it is not
+        the same case as two checks arriving in the same instant: those
+        two are already an instant apart in the wait.
+        """
+        restarts = []
+        finish_the_first = asyncio.Event()
+
+        async def restart():
+            restarts.append(1)
+            await finish_the_first.wait()
+            return True
+
+        service = self._service(
+            ai_config, available=[False] * 10, restart=restart
+        )
+
+        first = asyncio.create_task(service.recheck_ready())
+        await asyncio.sleep(0)  # far enough in to be inside restart()
+
+        # Far enough ahead that the wait between attempts has passed --
+        # which is exactly what the model load outlasts.
+        with patch("ai.service.time.monotonic", return_value=1e9):
+            second = asyncio.create_task(service.recheck_ready())
+            await asyncio.sleep(0)
+
+        finish_the_first.set()
+        await asyncio.gather(first, second)
+
+        assert restarts == [1]
+
+
+class TestSanitizeKeepsTheSelectionsOwnLayout:
+    """The whitespace around the selection is the user's layout, not an artifact.
+
+    The rewrite instruction promises to keep the layout exactly as it is --
+    the line breaks, the blank lines, the indentation (ai/prompts.py). The
+    sanitizer used to end by removing all leading and trailing whitespace,
+    which broke that promise for every selection that began indented or ended
+    with a blank line: the corrected words came back correct and were pasted
+    back at the wrong indentation.
+
+    The rule is that the model's own boundary whitespace is still removed --
+    a model that answers with a leading newline gets it trimmed -- and the
+    captured selection's boundary whitespace is then restored.
+    """
+
+    def _make_service(self, ai_config):
+        return AIService(ai_config)
+
+    @pytest.mark.parametrize("captured,reply,expected", [
+        # Leading indentation: the commonest case, any selection taken from
+        # inside an indented block or a list.
+        ("    hello world", "Hello, world.", "    Hello, world."),
+        ("\thello world", "Hello, world.", "\tHello, world."),
+        # A trailing newline delimits the selected block from what follows.
+        ("hello world\n", "Hello, world.", "Hello, world.\n"),
+        # A blank line at either end is a paragraph break the user selected.
+        ("hello world\n\n", "Hello, world.", "Hello, world.\n\n"),
+        ("\n\nhello world", "Hello, world.", "\n\nHello, world."),
+        # Both ends at once, which is what selecting a whole indented
+        # paragraph with the mouse actually produces.
+        ("  hello world\n\n", "Hello, world.", "  Hello, world.\n\n"),
+        # Windows line endings must survive as they were captured.
+        ("hello world\r\n", "Hello, world.", "Hello, world.\r\n"),
+        ("\r\n  hello\r\n", "Hello.", "\r\n  Hello.\r\n"),
+        # A bullet marker with its indentation.
+        ("  - hello world\n", "- Hello, world.", "  - Hello, world.\n"),
+        # No boundary whitespace: nothing to restore, nothing to change.
+        ("hello world", "Hello, world.", "Hello, world."),
+    ])
+    def test_the_captured_boundary_whitespace_comes_back(
+        self, ai_config, captured, reply, expected
+    ):
+        service = self._make_service(ai_config)
+        assert service._sanitize_response(reply, captured) == expected
+
+    def test_the_models_own_boundary_whitespace_is_still_removed(
+        self, ai_config
+    ):
+        """Restoring the selection's layout must not keep the model's."""
+        service = self._make_service(ai_config)
+
+        result = service._sanitize_response("\n\n  Hello, world.  \n\n", "  hi\n")
+
+        assert result == "  Hello, world.\n"
+
+    def test_a_preamble_is_still_stripped_before_the_layout_is_restored(
+        self, ai_config
+    ):
+        """The two rules compose: remove the artifact, then restore layout."""
+        service = self._make_service(ai_config)
+
+        result = service._sanitize_response(
+            "Here is the corrected text:\nHello, world.", "    hello world"
+        )
+
+        assert result == "    Hello, world."
+
+    def test_a_caller_with_no_captured_text_still_gets_a_stripped_reply(
+        self, ai_config
+    ):
+        """The captured argument is optional; those callers are unchanged."""
+        service = self._make_service(ai_config)
+
+        assert service._sanitize_response("\n  Hello world  \n") == "Hello world"
+
+    def test_a_selection_that_is_only_whitespace_does_not_double_it(
+        self, ai_config
+    ):
+        """Guard against counting the same run as both leading and trailing.
+
+        _transform_text refuses a blank selection before the sanitizer sees
+        it, so this cannot arrive from the voice path. It is asserted because
+        the obvious implementation of "restore both ends" reads one run of
+        whitespace twice and returns it doubled.
+        """
+        service = self._make_service(ai_config)
+
+        assert service._sanitize_response("Hello.", "   ") == "Hello."
+
 
 # ---------------------------------------------------------------------------
 # Multi-turn help chat tests
@@ -826,8 +1305,8 @@ class TestEagerLoad:
 # Phase A thin-client coordinator API (design 5.2)
 # ---------------------------------------------------------------------------
 
-def _server_config(enabled=True, base_url="http://localhost:11434/v1",
-                   kind="local", model="qwen3.5:9b", timeout_s=30,
+def _server_config(enabled=True, base_url="http://127.0.0.1:8781/v1",
+                   kind="local", model="gemma-4-e4b", timeout_s=30,
                    server_enabled=True):
     """A ConfigService mock carrying the additive [ai.server] block.
 

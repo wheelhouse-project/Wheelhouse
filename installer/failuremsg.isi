@@ -1,0 +1,149 @@
+// What the user reads when the install stops, and the state behind it.
+//
+// This file is included into the [Code] section of Wheelhouse-Setup.iss, after
+// tagparse.isi, so everything in it is Pascal Script and takes Pascal comments
+// -- a ';' comment here is read as code and fails the compile with "'BEGIN'
+// expected".
+//
+// The wizard runs the installation engine hidden, so this dialog is the only
+// place the person at the screen learns anything. Its wording used to sit
+// inline in ReportEngineFailure, where nothing could execute it: the tests
+// could check that a name appeared somewhere in the procedure, which a dialog
+// built from the wrong branch also satisfies. The text is built here instead,
+// by functions that take everything they need as arguments, and the harness in
+// scripts/release/tests/test_wizard.py includes this same file and runs them
+// over each case (wh-wizard-failure-guidance.2.5).
+
+const
+  { What the dialog says about a failure the engine reported without naming.
+    The advice stored with such a failure describes it, so the wizard says the
+    engine did not name it rather than offering a cause of its own
+    (wh-wizard-failure-guidance.2.6). }
+  UNNAMED_FAILURE = 'The installation step reported a problem but did not say what it was.';
+
+function ApplyFailureTag(const Line: string; var Reason, Advice: string; var Seen: Boolean): Boolean;
+var
+  payload: string;
+begin
+  { True when the line was one of the two failure tags, whether or not its text
+    was kept. FAILHINT describes the FAILURE printed just before it, so advice
+    that arrives with no failure in front of it is dropped rather than stored:
+    kept, it would produce a dialog that says the engine stopped without saying
+    why and then tells the user what to do about the problem it just said it
+    could not name (wh-wizard-failure-guidance.2.2). The rule is a failure
+    having been seen, not the reason text being non-empty -- a FAILURE line
+    whose text is empty is exactly the case whose advice matters most. }
+  Result := True;
+  if TagPayload(Line, 'FAILURE', Reason) then begin
+    Advice := '';
+    Seen := True;
+  end else if TagPayload(Line, 'FAILHINT', payload) then begin
+    if Seen then
+      Advice := payload;
+  end else
+    Result := False;
+end;
+
+function EngineRaisedReason(const Started, Finished, Seen: Boolean; const ExceptionMessage: string): string;
+var
+  detail: string;
+begin
+  { Windows chooses this text and nothing bounds its length, so it is shortened
+    for the same reason the tag payloads are: it reaches a message box with no
+    scrollbar. }
+  detail := ShortenTagText(ExceptionMessage);
+  if Seen then
+    { The engine had already reported a failure, so it plainly started. Saying
+      it could not start would contradict the advice stored with that report. }
+    Result := UNNAMED_FAILURE + ' Setup then stopped with: ' + detail
+  else if Finished then
+    { The engine is waited for, so once the launch call returns the process is
+      gone and what is left is clearing up. Calling that a step that was running
+      is wrong in the same way as calling it a step that never started
+      (wh-wizard-failure-guidance.2.10). }
+    Result := 'The installation step finished, and Setup stopped while clearing up '
+            + 'afterwards. Windows reported: ' + detail
+  else if Started then
+    { One handler covers the whole run, and the reader that follows the engine's
+      output touches the wizard form on every line. Nothing reported yet does not
+      mean nothing started, and telling the user Setup could not start a step
+      that ran for minutes sends them after the wrong problem
+      (wh-wizard-failure-guidance.2.9). }
+    Result := 'The installation step was running when Setup stopped. Windows reported: '
+            + detail
+  else
+    Result := 'Setup could not start the installation step. Windows reported: ' + detail;
+end;
+
+function MayOfferTheLog(const Exists, KeyLeft: Boolean): Boolean;
+begin
+  { Opening the log starts a child process, and a child inherits the environment
+    of the process that starts it. While the cloud key is still in Setup's
+    environment the offer is withheld: the dialog names the path either way, so
+    the user can still open the file (wh-wizard-failure-guidance.2.8). }
+  Result := Exists and not KeyLeft;
+end;
+
+function EngineStopReason(const Seen, Launched: Boolean; const ExitCode: Integer; const OutputError: string): string;
+begin
+  { Used only when the reason is still empty at the end of the run. Each of
+    these is something the wizard knows and the user does not, so reporting them
+    beats the old single sentence saying the install stopped for no stated
+    reason (wh-wizard-failure-guidance.2.1). A failure the engine reported comes
+    first even when its text was empty: what the wizard would say instead can
+    contradict it outright, and the advice on screen belongs to that failure. }
+  if Seen then
+    Result := UNNAMED_FAILURE + ' It ended with exit code ' + IntToStr(ExitCode) + '.'
+  else if not Launched then
+    Result := 'Setup could not start Windows PowerShell, which does the installation. '
+            + 'Security software or a system policy blocking PowerShell is the usual cause.'
+  else if OutputError <> '' then
+    Result := 'Setup lost contact with the installation step while it was running. '
+            + 'Windows reported: ' + ShortenTagText(OutputError)
+  else
+    Result := 'The installation step stopped early without saying why. '
+            + 'It ended with exit code ' + IntToStr(ExitCode) + '.';
+end;
+
+function FailureDialogText(const Reason, Advice, LogPath, HelpEmail, IssuesUrl: string): string;
+var
+  msg: string;
+begin
+  if Reason <> '' then
+    msg := 'Wheelhouse setup could not finish.' + #13#10 + #13#10
+         + 'What went wrong:' + #13#10 + Reason
+  else
+    msg := 'Wheelhouse setup could not finish, and it stopped without saying why.';
+
+  msg := msg + #13#10 + #13#10 + 'What to try:' + #13#10;
+  if Advice <> '' then
+    msg := msg + Advice
+  else if LogPath <> '' then
+    msg := msg + 'Run Setup again. If it stops the same way, send the setup log '
+               + 'to the address below.'
+  else
+    { With no path to give, nothing below names the file, so asking for it here
+      would send the user after something they cannot find. }
+    msg := msg + 'Run Setup again. If it stops the same way, write to the '
+               + 'address below.';
+
+  msg := msg + #13#10 + #13#10
+       + 'Still stuck? Email ' + HelpEmail + ', or open an issue at' + #13#10
+       + IssuesUrl;
+  if LogPath <> '' then
+    msg := msg + #13#10 + #13#10 + 'Either way, please attach the setup log:'
+               + #13#10 + LogPath;
+
+  Result := msg;
+end;
+
+function FailureAbortText(const LogPath, HelpEmail: string): string;
+begin
+  { Inno needs an exception to abort the install, and its own box is the last
+    thing on screen, so this repeats the two facts the user still needs. }
+  if LogPath <> '' then
+    Result := 'Wheelhouse setup could not finish. The setup log is at '
+            + LogPath + ' -- email it to ' + HelpEmail + ' if you need help.'
+  else
+    Result := 'Wheelhouse setup could not finish. For help, email ' + HelpEmail + '.';
+end;

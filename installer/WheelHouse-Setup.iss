@@ -71,6 +71,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 WelcomeLabel2=This will install Wheelhouse, voice control for your PC.%n%nThis takes about 10 to 20 minutes and needs an internet connection. Click Next to begin.
+; Inno shows this box after our own failure dialog. The stock wording ("Please
+; correct the problem and run Setup again") tells the user to do the one thing
+; they do not know how to do, so it names the help address instead.
+SetupAborted=Wheelhouse was not installed.%n%nYou can run Setup again at any time. If it keeps failing, email help@wheelhouse-project.org. Attach the setup log if the previous message showed you where to find it.
 
 [Files]
 ; Bundled into the .exe and copied to {app} so the uninstaller can call it.
@@ -81,8 +85,15 @@ WelcomeLabel2=This will install Wheelhouse, voice control for your PC.%n%nThis t
 Source: "install-wheelhouse.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Code]
+#include "tagparse.isi"
+#include "failuremsg.isi"
+#include "notices.isi"
+#include "micconsent.isi"
+
 const
   ENGINE = 'install-wheelhouse.ps1';
+  HELP_EMAIL = 'help@wheelhouse-project.org';
+  ISSUES_URL = 'https://github.com/wheelhouse-project/Wheelhouse/issues';
 
 var
   SpeechPage: TInputOptionWizardPage;
@@ -94,6 +105,31 @@ var
   MicPage: TWizardPage;
   MicStatusLabel, MicHelpLabel: TNewStaticText;
   MicOpenButton, MicRecheckButton: TNewButton;
+  { Why the engine stopped, and what it told the user to try, taken from its
+    tagged FAILURE / FAILHINT output. Empty until the engine reports one.
+    EngineFailSeen is what makes advice belong to a failure; the reason text
+    cannot serve, because a FAILURE line whose text is empty is still a failure.
+    EngineOutputError holds what Inno said if it could not go on reading the
+    engine's output -- every tag after that point is lost, so it is the best
+    remaining answer to what went wrong.
+    EngineStarted answers a different question from EngineFailSeen: the engine
+    can be running for minutes before it reports anything, so what the wizard
+    says about an exception depends on both. EngineFinished answers a third one:
+    the engine is waited for, so after the launch call returns the process is
+    gone and anything that goes wrong belongs to clearing up.
+    KeyLeftInEnvironment records that the cloud key could not be taken back out
+    of this process's environment, which decides whether the failure dialog may
+    start a child process (wh-wizard-failure-guidance.2.8). }
+  EngineFailReason, EngineFailAdvice, EngineOutputError: string;
+  EngineFailSeen, EngineStarted, EngineFinished, KeyLeftInEnvironment: Boolean;
+  { What the engine had to say that did not stop the install: the speech engine
+    it substituted, a requirement this machine does not meet, a step it could
+    not finish. Collected from its tagged NOTICE output and shown on the finish
+    page. EngineNoticesDropped counts the ones that did not fit, so the user is
+    told they exist rather than left with a list that quietly stops
+    (wh-wizard-distil-fallback). }
+  EngineNotices: string;
+  EngineNoticesDropped: Integer;
 
 function SetEnvironmentVariable(lpName: string; lpValue: string): Boolean;
   external 'SetEnvironmentVariableW@kernel32.dll stdcall';
@@ -153,16 +189,22 @@ end;
 
 function MicrophoneAllowed: Boolean;
 var
-  v, base: string;
+  base, perApp, umbrella: string;
 begin
-  // Default to "allowed" when the setting cannot be read, so we never block a
-  // machine whose Windows build stores this differently.
-  Result := True;
+  { Read both values, then let ResolveMicrophoneConsent in micconsent.isi decide.
+    A read that fails and a value that is present and empty are both handed on as
+    an empty string, because Windows reports success on a value that exists and
+    is empty and the two cases mean the same thing here: this key did not answer
+    the question. The engine's Resolve-MicrophoneConsent has the same shape and
+    the two are run over one table of value pairs in
+    scripts/release/tests/test_installer.py, because one decides whether a page
+    is shown and the other decides whether a sentence is printed. }
   base := 'Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone';
-  if RegQueryStringValue(HKEY_CURRENT_USER, base + '\NonPackaged', 'Value', v) then
-    Result := (CompareText(v, 'Allow') = 0)
-  else if RegQueryStringValue(HKEY_CURRENT_USER, base, 'Value', v) then
-    Result := (CompareText(v, 'Allow') = 0);
+  if not RegQueryStringValue(HKEY_CURRENT_USER, base + '\NonPackaged', 'Value', perApp) then
+    perApp := '';
+  if not RegQueryStringValue(HKEY_CURRENT_USER, base, 'Value', umbrella) then
+    umbrella := '';
+  Result := ResolveMicrophoneConsent(perApp, umbrella);
 end;
 
 procedure UpdateMicStatus;
@@ -226,10 +268,23 @@ var
   line, rest, msg: string;
   sp, pct: Integer;
 begin
+  { Any callback at all means Inno created the process and is reading from it,
+    including the one below that reports a broken output channel and returns
+    straight away. Recorded first so no branch can leave it unrecorded. }
+  EngineStarted := True;
   Log('engine: ' + S);
+  if Error then begin
+    { Inno reports a problem reading the engine's output through this same
+      callback, with the description in S instead of a line of output. Nothing
+      more will arrive, so keep it: without this the run ends with no reason at
+      all and the dialog can only say the engine stopped without saying why
+      (wh-wizard-failure-guidance.2.1). }
+    if EngineOutputError = '' then
+      EngineOutputError := Trim(S);
+    Exit;
+  end;
   line := Trim(S);
-  if Copy(line, 1, 9) = 'PROGRESS ' then begin
-    rest := Trim(Copy(line, 10, Length(line)));
+  if TagPayload(line, 'PROGRESS', rest) then begin
     sp := Pos(' ', rest);
     if sp > 0 then begin
       pct := StrToIntDef(Copy(rest, 1, sp - 1), -1);
@@ -245,13 +300,72 @@ begin
     end;
     if msg <> '' then
       WizardForm.StatusLabel.Caption := msg;
-  end else if Copy(line, 1, 10) = 'HEARTBEAT ' then begin
-    msg := Trim(Copy(line, 11, Length(line)));
+  end else if TagPayload(line, 'HEARTBEAT', msg) then begin
     WizardForm.ProgressGauge.Style := npbstMarquee;
     if msg <> '' then
       WizardForm.StatusLabel.Caption := msg + '  (still working, please wait...)';
-  end;
+  end else if TagPayload(line, 'NOTICE', msg) then begin
+    { Kept for the finish page rather than shown here: the status label is
+      overwritten by the next PROGRESS line, so a note put there would be gone
+      before the user could read it. Which notes fit is decided in notices.isi,
+      where the harness can run it. }
+    AddNotice(msg, EngineNotices, EngineNoticesDropped);
+  end else
+    { Which failure line each piece of text belongs to is decided in
+      failuremsg.isi, where the harness can run it. }
+    ApplyFailureTag(line, EngineFailReason, EngineFailAdvice, EngineFailSeen);
   WizardForm.Refresh;
+end;
+
+// ---------- failure reporting ----------
+
+function SetupLogPath: string;
+begin
+  // SetupLogging=yes guarantees a log file, and the log constant expands to its
+  // full path. The guard is for the case where that ever stops holding: an
+  // exception raised here would replace whatever message was being built with an
+  // internal error, at the worst possible moment to lose it. Both callers treat
+  // an empty result as "say nothing about a log", because naming a path the
+  // wizard could not produce sends the user after a file they cannot find.
+  // (A brace comment cannot be used around the line below -- the closing brace
+  // of the constant would end the comment early.)
+  try
+    Result := ExpandConstant('{log}');
+  except
+    Result := '';
+  end;
+end;
+
+procedure ReportEngineFailure;
+var
+  msg, logPath: string;
+  ResultCode: Integer;
+begin
+  { The engine already worked out why it stopped and what the user should try.
+    It runs hidden, so without this its explanation reached only the setup log
+    and the user was left with a dialog that named no cause and no next step
+    (wh-wizard-failure-guidance). }
+  logPath := SetupLogPath;
+
+  msg := FailureDialogText(EngineFailReason, EngineFailAdvice, logPath,
+                           HELP_EMAIL, ISSUES_URL);
+
+  { Naming the file is not the same as handing it over: it sits in %TEMP% under
+    a name containing spaces and a '#'. Offer to open it only when it is really
+    there, so the question is never asked about a file the user cannot find --
+    and only when the child process that would open it cannot inherit the cloud
+    key from this one. }
+  if MayOfferTheLog((logPath <> '') and FileExists(logPath), KeyLeftInEnvironment) then begin
+    if MsgBox(msg + #13#10 + #13#10 + 'Open the setup log now?', mbError, MB_YESNO) = IDYES then begin
+      if not ShellExec('open', logPath, '', '', SW_SHOW, ewNoWait, ResultCode) then
+        MsgBox('The setup log could not be opened. Its full path is:' + #13#10
+             + logPath, mbInformation, MB_OK);
+    end;
+  end else
+    MsgBox(msg, mbError, MB_OK);
+
+  { Inno needs an exception to abort the install. }
+  RaiseException(FailureAbortText(logPath, HELP_EMAIL));
 end;
 
 // ---------- run the engine ----------
@@ -262,48 +376,108 @@ var
   ResultCode: Integer;
   ok, cloud: Boolean;
 begin
-  ExtractTemporaryFile(ENGINE);
-  cloud := AiCloudRadio.Checked;
-
-  Params :=
-    '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\' + ENGINE) + '"' +
-    ' -SttProvider ' + SpeechProviderArg +
-    ' -AutoStart ' + YesNo(OptionsPage.Values[0]) +
-    ' -StartNow ' + YesNo(OptionsPage.Values[1]);
-
-  if cloud then
-    Params := Params + ' -AiMode cloud'
-  else if ExistingInstall then
-    // Re-run with the default "leave AI unchanged": preserve the existing [ai]
-    // config and any persisted key. -AiMode off would make the engine delete the
-    // stored cloud credential on what the user thinks is a harmless repair.
-    Params := Params + ' -AiMode keep'
-  else
-    Params := Params + ' -AiMode off';
-
-  // The cloud key reaches the child only through the environment. Setting it on
-  // this installer process means the child inherits it at launch; we clear it
-  // immediately afterward so it does not linger in the installer environment.
-  if cloud then
-    SetEnvironmentVariable('WHEELHOUSE_AI_API_KEY_INPUT', Trim(AiKeyEdit.Text));
-
-  WizardForm.ProgressGauge.Style := npbstMarquee;
-  WizardForm.StatusLabel.Caption := 'Setting up Wheelhouse. This can take 10 to 20 minutes...';
-  WizardForm.Refresh;
-
+  { Everything from here to the end of the engine run is inside one handler.
+    Unpacking the engine, expanding a path and setting up the output redirection
+    can all raise, and an exception raised here leaves this procedure without
+    ever reaching ReportEngineFailure: Inno then shows its own internal error
+    text, which names no cause and no next step -- the exact dialog this whole
+    change exists to replace (wh-wizard-failure-guidance.2.1). }
   try
-    ok := ExecAndLogOutput(
-      ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
-      Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode, @EngineLog);
-  finally
+    ExtractTemporaryFile(ENGINE);
+    cloud := AiCloudRadio.Checked;
+
+    Params :=
+      '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\' + ENGINE) + '"' +
+      ' -SttProvider ' + SpeechProviderArg +
+      ' -AutoStart ' + YesNo(OptionsPage.Values[0]) +
+      ' -StartNow ' + YesNo(OptionsPage.Values[1]) +
+      { Asks the engine to write its notices to stdout as well as to the console
+        nobody is watching. Passed present-only, never as -TaggedOutput:$false,
+        for the same reason the yes/no answers are strings: under `powershell
+        -File` a switch given a value is a parameter-binding error. }
+      ' -TaggedOutput';
+
     if cloud then
-      SetEnvironmentVariable('WHEELHOUSE_AI_API_KEY_INPUT', '');
+      Params := Params + ' -AiMode cloud'
+    else if ExistingInstall then
+      // Re-run with the default "leave AI unchanged": preserve the existing [ai]
+      // config and any persisted key. -AiMode off would make the engine delete the
+      // stored cloud credential on what the user thinks is a harmless repair.
+      Params := Params + ' -AiMode keep'
+    else
+      Params := Params + ' -AiMode off';
+
+    // The cloud key reaches the child only through the environment. Setting it on
+    // this installer process means the child inherits it at launch. Everything
+    // after the key is set is inside the region that clears it: the wizard-form
+    // calls below can raise, and this procedure goes on to show a dialog and can
+    // start a child process to open the setup log, either of which would then be
+    // running with the key still in the environment
+    // (wh-wizard-failure-guidance.2.7).
+    try
+      if cloud then begin
+        if not SetEnvironmentVariable('WHEELHOUSE_AI_API_KEY_INPUT', Trim(AiKeyEdit.Text)) then begin
+          { The key reaches the engine only this way. Launching anyway installs
+            with the AI features off while the wizard reports success, so what
+            the user chose is discarded with nothing on screen to say so
+            (wh-wizard-failure-guidance.2.8). Raising rather than reporting from
+            here leaves the clearing below and the dialog to the handlers that
+            already run in the right order. }
+          EngineFailReason := 'Setup could not hand the AI key you entered to the '
+                            + 'installation step, so it stopped rather than installing '
+                            + 'with the AI features switched off.';
+          { Naming the other choice by its caption would be wrong half the time:
+            it reads "Skip for now" on a first install and "Leave my AI helper
+            setting unchanged" on a repair, where it keeps an existing cloud
+            setup rather than skipping anything (wh-wizard-failure-guidance.2.11). }
+          EngineFailAdvice := 'Run Setup again and select the other choice on the AI '
+                            + 'helper page; Setup does not need the key for that choice. '
+                            + 'Speech, voice commands, dictation and clicking all work '
+                            + 'without the AI helper.';
+          RaiseException('the cloud key could not be placed in the environment');
+        end;
+      end;
+
+      WizardForm.ProgressGauge.Style := npbstMarquee;
+      WizardForm.StatusLabel.Caption := 'Setting up Wheelhouse. This can take 10 to 20 minutes...';
+      WizardForm.Refresh;
+
+      ok := ExecAndLogOutput(
+        ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
+        Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode, @EngineLog);
+      { The call waits for the engine, so a launch that returned is a process
+        that existed and has now ended. Only ever set, never cleared: what the
+        engine's own output already proved cannot be taken back by a later
+        answer. }
+      if ok then begin
+        EngineStarted := True;
+        EngineFinished := True;
+      end;
+    finally
+      if cloud then begin
+        if not SetEnvironmentVariable('WHEELHOUSE_AI_API_KEY_INPUT', '') then begin
+          KeyLeftInEnvironment := True;
+          Log('engine: the cloud key could not be cleared from the environment; '
+            + 'setup will not start any further programs from this process');
+        end;
+      end;
+    end;
+  except
+    { The engine never got far enough to say anything, so the wizard says what
+      it knows instead. Anything it already reported is better and is kept --
+      including a failure whose text was empty, which is why the function is
+      told whether one was seen and not only whether the reason is blank. }
+    if EngineFailReason = '' then
+      EngineFailReason := EngineRaisedReason(EngineStarted, EngineFinished, EngineFailSeen,
+                                             GetExceptionMessage);
+    ReportEngineFailure;
   end;
 
-  if (not ok) or (ResultCode <> 0) then
-    RaiseException(
-      'Wheelhouse setup could not finish. Details are in the setup log. Please try '
-      + 'again; if it keeps failing, visit the Wheelhouse issues page for help.');
+  if (not ok) or (ResultCode <> 0) then begin
+    if EngineFailReason = '' then
+      EngineFailReason := EngineStopReason(EngineFailSeen, ok, ResultCode, EngineOutputError);
+    ReportEngineFailure;
+  end;
 end;
 
 // ---------- wizard events ----------
@@ -430,12 +604,30 @@ begin
   MicRecheckButton.OnClick := @RecheckMicClick;
 end;
 
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  { The microphone page exists to fix a permission that is off. Shown to a user
+    whose permission is already on, it opens by saying Wheelhouse will hear
+    nothing without it, then says it is on, then explains what to do "if it is
+    off", above two buttons that do nothing for them -- three sentences about a
+    problem they do not have (wh-wizard-mic-permission-noise). The check reads
+    the same two registry values the engine reads at the end of the install, and
+    both treat an unreadable setting as allowed, so a Windows build that stores
+    it elsewhere is never sent after a setting that is not the problem. }
+  Result := (MicPage <> nil) and (PageID = MicPage.ID) and MicrophoneAllowed;
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
+var
+  notes, kept, standing: string;
+  dropped, room, i: Integer;
+  texts: TArrayOfString;
+  heights: TArrayOfInteger;
 begin
   if (MicPage <> nil) and (CurPageID = MicPage.ID) then
     UpdateMicStatus;
-  if CurPageID = wpFinished then
-    WizardForm.FinishedLabel.Caption :=
+  if CurPageID = wpFinished then begin
+    standing :=
       'You''re all set. To see everything you can say and how it works:' + #13#10 + #13#10 +
       '  - Say "x-ray pattern manager," then click the "? Help" button, or' + #13#10 +
       '  - Right-click the Wheelhouse icon near the clock (it shows as a red dot when' + #13#10 +
@@ -443,6 +635,47 @@ begin
       '    "Pattern Manager."' + #13#10 + #13#10 +
       'Say each command as its own short phrase, not inside a longer sentence. Most ' +
       'commands work on their own; only a few need the word "x-ray" first.';
+
+    { Build one candidate caption per number of notes kept, from every note down
+      to none. The notes go above the standing text rather than below it: a note
+      saying the speech engine was substituted is the one thing on this page the
+      user did not already choose (wh-wizard-distil-fallback). MAX_NOTICE_TEXT
+      bounds the characters, which says nothing about how many lines they wrap
+      to, so the page may still have more than it can draw. }
+    kept := EngineNotices;
+    dropped := EngineNoticesDropped;
+    SetArrayLength(texts, 0);
+    while True do begin
+      notes := NoticeBlockText(kept, dropped, SetupLogPath);
+      if notes <> '' then
+        notes := notes + #13#10;
+      SetArrayLength(texts, GetArrayLength(texts) + 1);
+      texts[GetArrayLength(texts) - 1] := notes + standing;
+      if not DropLastNotice(kept, dropped) then
+        Break;
+    end;
+
+    { The label Inno lays out here is a fixed rectangle sized for its own
+      one-sentence finish message, and it does not grow when the caption is
+      replaced: measured on this machine it stands at 193 pixels while the
+      standing text alone needs 529, so eight of its eleven lines were never
+      drawn. Letting it size itself is what makes the text visible; the space
+      below its top is what it has to fit inside, and that measured 1035. }
+    WizardForm.FinishedLabel.AutoSize := True;
+    room := WizardForm.FinishedLabel.Parent.ClientHeight
+            - WizardForm.FinishedLabel.Top;
+
+    { Nothing here can work out how tall a caption will be, so each candidate is
+      assigned and measured. Choosing between them is BestNoticeCandidate's job,
+      because taking a note off does not reliably shorten the page and simply
+      walking to the end can lose a note's text while leaving the page taller. }
+    SetArrayLength(heights, GetArrayLength(texts));
+    for i := 0 to GetArrayLength(texts) - 1 do begin
+      WizardForm.FinishedLabel.Caption := texts[i];
+      heights[i] := WizardForm.FinishedLabel.Height;
+    end;
+    WizardForm.FinishedLabel.Caption := texts[BestNoticeCandidate(heights, room)];
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -450,7 +683,10 @@ begin
   Result := True;
   if (AiPage <> nil) and (CurPageID = AiPage.ID) then begin
     if AiCloudRadio.Checked and (Trim(AiKeyEdit.Text) = '') then begin
-      MsgBox('Please paste your Google API key, or choose "Skip for now."', mbError, MB_OK);
+      { Same reason as the advice in RunEngine: the other choice is captioned
+        differently on a repair, so it is pointed at rather than quoted. }
+      MsgBox('Please paste your Google API key, or select the other choice on this page.',
+             mbError, MB_OK);
       Result := False;
     end;
   end;

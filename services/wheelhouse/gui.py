@@ -32,6 +32,14 @@ from multiprocessing.synchronize import Event
 import logging
 
 from utils.redact import redact_transcript
+from utils.app_version import get_app_version
+from floating_button_geometry import (
+    MAX_BUTTON_SIZE,
+    MIN_BUTTON_SIZE,
+    correct_onto_screen,
+    is_in_resize_ring,
+    resize_from_pointer,
+)
 import sys
 import struct
 import json
@@ -42,7 +50,7 @@ import threading
 from functools import partial
 
 # --- Qt and PySide6 Imports ---
-from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame
+from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame, QMessageBox, QFileDialog
 from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject
 from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QAction, QFont, QPixmap
 
@@ -54,6 +62,19 @@ from PIL import Image, ImageDraw
 from plyer import notification
 
 logger = logging.getLogger(__name__)
+
+# Windows 11 gives every top-level window rounded corners and a thin border of
+# its own, drawn by the desktop compositor rather than by the application. The
+# floating button is a top-level frameless window, so it inherited a grey ring
+# in every colour state even though paintEvent draws the circle with NoPen and
+# never strokes an outline. These are the documented DwmSetWindowAttribute
+# constants used to switch both off for that one window; they require Windows 11
+# build 22000 or later and are rejected on Windows 10, which is harmless (the
+# button just keeps the border it already had).
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+_DWMWCP_DONOTROUND = 1
+_DWMWA_BORDER_COLOR = 34
+_DWMWA_COLOR_NONE = 0xFFFFFFFE
 
 
 def _grant_foreground_to_any_process() -> None:
@@ -86,24 +107,42 @@ def _grant_foreground_to_any_process() -> None:
         logger.debug("AllowSetForegroundWindow grant failed: %s", exc)
 
 
+TRAY_ICON_SIZE = 64
+
+
 def create_icon_image(color_tuple):
+    """Draw a plain filled circle at the tray icon's size.
+
+    This used to be the tray icon itself, in a colour that followed whether
+    speech was on. It is now only the stand-in for a build that does not ship
+    WheelHouse.ico: a tray with no icon at all is harder to right-click than a
+    plain shape.
     """
-    :flow: GUI State Synchronization
-    :step: 1
-    :description: Creates system tray icon with dynamic color state.
-    :data_in: RGB color tuple from StateManager indicating system state.
-    :data_out: PIL Image object for QSystemTrayIcon rendering.
-    :produces_for: GUI State Synchronization
-    :notes: Generates a circular icon indicating WheelHouse operational state:
-    Green (normal operation), Red (speech suppressed), Yellow (transitional states).
-    Used by GUI process to provide visual feedback of system state via system tray.
-    """
-    width = 64
-    height = 64
+    width = TRAY_ICON_SIZE
+    height = TRAY_ICON_SIZE
     image = Image.new('RGBA', (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     draw.ellipse((8, 8, width - 8, height - 8), fill=color_tuple)
     return image
+
+
+def load_tray_icon():
+    """Return the Wheelhouse icon for the notification area.
+
+    One picture, loaded once when the tray is created, and never replaced.
+    The file sits beside this module in a source checkout and inside the
+    bundle in a build, which is the same way the plaque image is found.
+    """
+    try:
+        icon_path = Path(__file__).parent / "WheelHouse.ico"
+        return (
+            Image.open(icon_path)
+            .convert("RGBA")
+            .resize((TRAY_ICON_SIZE, TRAY_ICON_SIZE), Image.LANCZOS)
+        )
+    except Exception as exc:
+        logger.warning("Could not load the tray icon file: %s", exc)
+        return create_icon_image((120, 120, 120))
 
 
 # wh-n29v.118 / wh-n29v.120.1: the numbered-overlay "walking" cue self-clear
@@ -141,11 +180,18 @@ class FloatingButton(QWidget):
     left_clicked = Signal()
     press_started = Signal()
     press_ended = Signal()
+    press_cancelled = Signal()
     drag_started = Signal()
     double_clicked = Signal()
     closed = Signal()
     size_changed = Signal(int)
     moved = Signal(QPoint)
+    resize_finished = Signal(int, QPoint)
+    # Sent once whenever a gesture stops, by whichever route it stopped --
+    # including the routes that save nothing. The manager holds back the
+    # stored size and position while a gesture is running, so it needs to know
+    # the moment nothing is running any more.
+    gesture_ended = Signal()
     context_menu_requested = Signal(QPoint)
 
     def __init__(self, initial_size=50):
@@ -166,7 +212,48 @@ class FloatingButton(QWidget):
         self._is_dragging = False
         self._drag_position = QPoint(0, 0)
         self._initial_press_pos = None
-        
+
+        # Edge-drag resizing. A press on the outer ring becomes a resize and
+        # nothing else -- notably it never emits press_started, so the
+        # push-to-talk hold timer cannot start from grabbing the edge. The
+        # centre recorded here stays fixed for the whole drag so the button
+        # grows and shrinks evenly around the point it occupied.
+        self._is_resizing = False
+        # While a gesture runs, this button asks Windows to send it every
+        # mouse event. Five separate defects in this feature were all the same
+        # accident: the release went to another window -- the right-click
+        # menu's own loop, a window that took focus, the button being hidden --
+        # so the gesture was never told it had ended, and what it left behind
+        # did damage later. Holding the mouse removes the cause instead of
+        # patching each route the release can take.
+        #
+        # The hold is given back on every exit, and the "the button is no
+        # longer down" checks in the move handler stay as a backstop for a
+        # hold that never took effect. A hold nobody gives back leaves the
+        # whole desktop unable to click anything, which for this program would
+        # be worse than the defect it prevents.
+        self._mouse_held = False
+        # True from the moment a gesture starts until nothing is running.
+        self._gesture_running = False
+        # The button appears on screen before its stored size and position
+        # arrive from the Logic process. A gesture begun in that gap measures
+        # against the default geometry, and the arriving state then replaces
+        # the size and position underneath it. The manager already ignores
+        # presses until the state arrives; this is the same rule for the
+        # gestures the manager never sees.
+        self._accepts_gestures = False
+        # Where the previous left press landed. Qt pairs a press with whatever
+        # press came before it, so a grab of the edge followed by a press in
+        # the middle arrives as a double-click on the middle. Remembering the
+        # first one is what lets the double-click handler tell that pair apart
+        # from two real presses in the middle.
+        self._last_press_was_on_edge = False
+        self._resize_centre = QPoint(0, 0)
+        self._resize_start_size = initial_size
+        self._resize_start_pos = QPoint(0, 0)
+        self._resize_screen = None
+        self._resize_cursor_active = False
+
         # Activity state for speech feedback
         self._activity_state = 'idle'  # 'idle', 'hearing', 'confirmed'
         self._pulse_phase = 0.0  # 0.0 to 1.0 for pulse animation
@@ -226,6 +313,175 @@ class FloatingButton(QWidget):
         """Resize button to specified diameter (preserves circular shape)."""
         self.setFixedSize(diameter, diameter)
         self.update()
+
+    def _cancel_press_in_flight(self):
+        """Forget a press whose release never arrived, without acting on it.
+
+        This is not the same as the press ending. A real release means the user
+        finished what they were doing, so it clicks or stops push-to-talk. An
+        abandoned press means the opposite: nothing was decided. Reporting it as
+        a release would turn speech ON, because a quick press that never
+        reaches the hold threshold is treated as a click. So the button reports
+        a cancellation instead, and the manager stops the hold timer and puts
+        the microphone back the way it was.
+        """
+        if self._initial_press_pos is None and not self._is_dragging:
+            return
+        self._is_dragging = False
+        self._initial_press_pos = None
+        self.press_cancelled.emit()
+        self._settle_after_gesture()
+
+    def _end_gesture_in_flight(self):
+        """End whatever gesture is still marked live, whichever one it is.
+
+        A gesture normally ends on the mouse release. Several endings deliver
+        no release at all: the button is hidden mid-drag, the context menu's
+        modal loop grabs the mouse and takes the release with it, or the user
+        simply presses again. Each of those has to end BOTH kinds of gesture,
+        because either one can be the one left in flight. A resize is finished
+        (so the size the user can see is the size that gets saved) and a press
+        is cancelled (so the microphone does not stay open).
+        """
+        self._finish_resize()
+        self._cancel_press_in_flight()
+
+    def set_ready_for_gestures(self, ready: bool):
+        """Allow or refuse gestures. Off until the stored geometry arrives."""
+        self._accepts_gestures = bool(ready)
+
+    def _hold_mouse(self):
+        """Ask Windows to send every mouse event here until further notice."""
+        if self._mouse_held:
+            return
+        self._mouse_held = True
+        # A window that is not on screen cannot hold the mouse, and asking
+        # prints a warning. The record is kept either way, so the giving-back
+        # path runs whatever happened, and the move handler's backstop covers
+        # the case where the hold did not take.
+        if self.isVisible():
+            self.grabMouse()
+
+    def _let_mouse_go(self):
+        """Give the mouse back. Safe to call when it was never held."""
+        if not self._mouse_held:
+            return
+        self._mouse_held = False
+        self.releaseMouse()
+
+    def _settle_after_gesture(self):
+        """Give the mouse back and report the end, once nothing is running.
+
+        Called from every place a gesture can stop. It checks rather than
+        assumes, so a call made while another gesture is still live does
+        nothing -- which is what makes it safe to call from the shared paths
+        that end one gesture while starting another.
+        """
+        if (
+            self._is_resizing
+            or self._is_dragging
+            or self._initial_press_pos is not None
+        ):
+            return
+        self._let_mouse_go()
+        if self._gesture_running:
+            self._gesture_running = False
+            self.gesture_ended.emit()
+
+    def _begin_press(self, global_point):
+        """Start the press that may become a click, a hold, or a move."""
+        self._initial_press_pos = global_point
+        self._gesture_running = True
+        self._hold_mouse()
+        self.press_started.emit()
+
+    def _begin_resize(self):
+        """Record everything a resize drag measures against, from right now.
+
+        Both ways of starting a resize come through here: an ordinary press on
+        the ring, and the second press of a double-click, which Qt delivers to
+        a different handler. Sharing one starting point is what stops those two
+        entry points from drifting apart.
+        """
+        self._is_resizing = True
+        self._gesture_running = True
+        self._hold_mouse()
+        self._resize_start_size = self.width()
+        self._resize_start_pos = self.pos()
+        self._resize_centre = QPoint(
+            self.pos().x() + self.width() // 2,
+            self.pos().y() + self.height() // 2,
+        )
+        self._resize_screen = self._current_screen_bounds()
+
+    def hideEvent(self, event):
+        """Abandon any gesture in flight when the button leaves the screen."""
+        self._end_gesture_in_flight()
+        # Unconditionally, not only through the settling path. A hold left
+        # behind by a window that is no longer on screen makes the whole
+        # desktop unclickable, which is the one failure here bad enough to be
+        # worth a second, order-independent guarantee.
+        self._let_mouse_go()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        """Re-apply the borderless window style every time the button is shown.
+
+        Qt destroys and re-creates the underlying window whenever window flags
+        change, and a re-created window comes back with Windows' default border
+        and rounded corners. Applying this once in __init__ would therefore be
+        undone later, so it is re-issued on every show.
+
+        This is also the point where any gesture left in flight is abandoned. A
+        button that was never shown receives no hide event, so clearing the
+        state only on hide would leave that case uncovered.
+        """
+        super().showEvent(event)
+        self._end_gesture_in_flight()
+        self._apply_borderless_window_style()
+
+    def _apply_borderless_window_style(self):
+        """Ask Windows to stop drawing a border and rounded corners on this window.
+
+        Wheelhouse never paints a border itself (paintEvent uses NoPen), so the
+        grey ring users saw around the button came from the Windows compositor.
+        Both attributes need Windows 11 build 22000+; older builds reject them
+        and the button simply keeps the border it had. Failure is logged at
+        debug level and swallowed: this runs during GUI startup, and a cosmetic
+        border is not worth taking down the tray and button surface.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            dwmapi = ctypes.windll.dwmapi
+            dwmapi.DwmSetWindowAttribute.argtypes = [
+                wintypes.HWND,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+            ]
+            dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
+            window_handle = int(self.winId())
+
+            corner_preference = ctypes.c_int(_DWMWCP_DONOTROUND)
+            dwmapi.DwmSetWindowAttribute(
+                window_handle,
+                _DWMWA_WINDOW_CORNER_PREFERENCE,
+                ctypes.byref(corner_preference),
+                ctypes.sizeof(corner_preference),
+            )
+
+            border_color = ctypes.c_uint(_DWMWA_COLOR_NONE)
+            dwmapi.DwmSetWindowAttribute(
+                window_handle,
+                _DWMWA_BORDER_COLOR,
+                ctypes.byref(border_color),
+                ctypes.sizeof(border_color),
+            )
+        except Exception as exc:
+            logger.debug("floating button border removal failed: %s", exc)
 
     def _reassert_topmost(self):
         """Periodically re-assert topmost position.
@@ -383,11 +639,104 @@ class FloatingButton(QWidget):
         Args:
             event: Qt mouse event
         """
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._is_dragging = False
-            self._initial_press_pos = event.globalPosition().toPoint()
-            self.press_started.emit()
+        if event.button() == Qt.MouseButton.LeftButton and self._accepts_gestures:
+            # A press is one more way an earlier gesture can end. Finishing that
+            # one first -- before deciding what THIS press is -- is what keeps a
+            # lost release from throwing the earlier gesture away: the resize it
+            # made gets saved, and the press it left open stops holding the
+            # microphone. Doing it before the ring check covers both orders, an
+            # abandoned resize followed by any press and an abandoned press
+            # followed by a grab of the edge.
+            self._end_gesture_in_flight()
+
+            if self._point_is_on_edge(event.position()):
+                # A resize and nothing else: no press_started (so push-to-talk
+                # never arms), no move, no click. Suppressing the signal here
+                # rather than cancelling later is what makes an accidental
+                # recording structurally impossible instead of a race.
+                self._last_press_was_on_edge = True
+                self._begin_resize()
+                return
+
+            self._last_press_was_on_edge = False
+            self._begin_press(event.globalPosition().toPoint())
         super().mousePressEvent(event)
+
+    def _point_is_on_edge(self, local_pos) -> bool:
+        """Return whether a button-local point falls in the resize ring."""
+        return is_in_resize_ring(local_pos.x(), local_pos.y(), self.width())
+
+    def _current_screen_bounds(self):
+        """Return the usable bounds of the screen the button is on right now."""
+        screen = self.screen()
+        if screen is None:
+            return None
+        available = screen.availableGeometry()
+        return (
+            available.x(),
+            available.y(),
+            available.width(),
+            available.height(),
+        )
+
+    def _apply_resize_to(self, global_pos):
+        """Resize so the button's edge follows the pointer, centre unmoved."""
+        size, left, top = resize_from_pointer(
+            self._resize_centre.x(),
+            self._resize_centre.y(),
+            global_pos.x(),
+            global_pos.y(),
+        )
+
+        # The bounds recorded when the drag began, NOT the screen the button is
+        # on right now. The button grows around a fixed centre, so its corner
+        # travels outward and can reach a neighbouring monitor part-way through
+        # a drag. Asking again at that moment returns the neighbour, and
+        # correcting against the neighbour's bounds throws the button onto it in
+        # a single frame.
+        if self._resize_screen is not None:
+            left, top = correct_onto_screen(left, top, size, self._resize_screen)
+
+        self.set_size(size)
+        self.move(left, top)
+
+    def _finish_resize(self):
+        """End a resize in progress, saving the result if anything changed.
+
+        Called from every way a resize can end, not just the release: the left
+        button coming up somewhere else, the context menu opening, a wheel
+        resize starting, and the button being hidden or shown. Each of those
+        leaves the button at its new size on screen, so each has to save that
+        size, or what is displayed and what is stored drift apart.
+
+        Size and position go together as one value. The button grows around
+        its centre, so its top-left corner moves with its diameter, and the
+        corner is what the stored position holds. A drag can also change only
+        the position: if the button started partly off screen, the correction
+        pulls it back without the diameter ending up any different. Comparing
+        the size alone would call that "nothing changed" and leave the old
+        position stored, so both are compared.
+        """
+        if not self._is_resizing:
+            return
+        self._is_resizing = False
+        if (
+            self.width() != self._resize_start_size
+            or self.pos() != self._resize_start_pos
+        ):
+            self.resize_finished.emit(self.width(), self.pos())
+        self._settle_after_gesture()
+
+    def _update_resize_cursor(self, local_pos):
+        """Show a resize cursor over the ring and the plain arrow inside it."""
+        on_edge = self._point_is_on_edge(local_pos)
+        if on_edge == self._resize_cursor_active:
+            return
+        self._resize_cursor_active = on_edge
+        if on_edge:
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        else:
+            self.unsetCursor()
 
     def mouseMoveEvent(self, event):
         """Handle mouse move for button dragging.
@@ -395,6 +744,36 @@ class FloatingButton(QWidget):
         Args:
             event: Qt mouse event
         """
+        if self._is_resizing:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                self._apply_resize_to(event.globalPosition().toPoint())
+                return
+            # The left button is no longer down, so this resize is over even
+            # though no release reached us -- the context menu's modal loop
+            # takes the release when the user right-clicks mid-drag. Without
+            # this check the next ordinary hover carries on resizing, and the
+            # button grows while nothing is being pressed.
+            self._finish_resize()
+
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            self._update_resize_cursor(event.position())
+            # The same reasoning as the resize check above, for the other
+            # gesture. Holding the mouse should make a lost release impossible,
+            # but a hold can fail to take -- the window is not on screen yet, or
+            # another program is holding the mouse already -- so this stays as
+            # the backstop. Without it a lost release leaves the press recorded
+            # and the hold timer armed, and push-to-talk starts with the mouse
+            # already up.
+            if self._is_dragging:
+                # The move already happened on screen, so it is saved here
+                # exactly as a real release would save it.
+                self.moved.emit(self.pos())
+                self._is_dragging = False
+                self._initial_press_pos = None
+                self._settle_after_gesture()
+            elif self._initial_press_pos is not None:
+                self._cancel_press_in_flight()
+
         if event.buttons() & Qt.MouseButton.LeftButton and self._initial_press_pos:
             if not self._is_dragging and (event.globalPosition().toPoint() - self._initial_press_pos).manhattanLength() >= QApplication.startDragDistance():
                 self._is_dragging = True
@@ -411,6 +790,10 @@ class FloatingButton(QWidget):
         Args:
             event: Qt mouse event
         """
+        if event.button() == Qt.MouseButton.LeftButton and self._is_resizing:
+            self._finish_resize()
+            return
+
         if event.button() == Qt.MouseButton.LeftButton and self._initial_press_pos:
             if not self._is_dragging:
                 self.press_ended.emit()
@@ -418,11 +801,52 @@ class FloatingButton(QWidget):
                 self.moved.emit(self.pos())
             self._is_dragging = False
             self._initial_press_pos = None
+            self._settle_after_gesture()
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """Handle double-click to emit double_clicked signal."""
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and self._accepts_gestures:
+            # A double-click is one more way an earlier gesture can end, so it
+            # finishes whatever was in flight before classifying this event --
+            # the same thing the press handler does, and for the same reason.
+            # All three paths below need it: a resize whose release went to
+            # another window survives into any of them, and the release that
+            # follows would then take the resize branch and return without
+            # ending the press this handler just recorded, leaving the hold
+            # timer to fire with the mouse already up.
+            self._end_gesture_in_flight()
+
+            if self._point_is_on_edge(event.position()):
+                # Two quick grabs of the edge are two resizes, not a
+                # double-click on the button. Qt sends the second press of a
+                # double-click here INSTEAD of to the press handler, so this is
+                # the only place that second grab can start its resize. Merely
+                # refusing to report a double-click would leave it recording no
+                # centre and no starting size, and the drag that follows would
+                # do nothing at all.
+                # Nothing records the edge here the way the press handler
+                # does: Qt always sends a plain press next, even for a third
+                # quick click, and that press records where it landed itself.
+                self._begin_resize()
+                return
+
+            if self._last_press_was_on_edge:
+                # Qt counted a grab of the edge as the first half of this
+                # double-click, because it pairs a press with whichever press
+                # came before it and does not care what we decided that one
+                # meant. The user pressed the middle once, so treat it as one
+                # press: reporting a double-click here would switch the speech
+                # interaction mode off an edge grab and a single click, and at
+                # every size the two regions are neighbours.
+                #
+                # The memory is not cleared here. The press handler is the only
+                # place that writes it, and Qt always sends a plain press
+                # before it can send another double-click, so that handler has
+                # already replaced this value by the time it is read again.
+                self._begin_press(event.globalPosition().toPoint())
+                return
+
             self.double_clicked.emit()
         # Don't call super -- prevent Qt from firing another press
 
@@ -432,6 +856,10 @@ class FloatingButton(QWidget):
         Args:
             event: Qt close event
         """
+        # Same guarantee the hide path makes, for the ending that does not go
+        # through a hide at all.
+        self._end_gesture_in_flight()
+        self._let_mouse_go()
         self.closed.emit()
         event.accept()
 
@@ -441,10 +869,18 @@ class FloatingButton(QWidget):
         Args:
             event: Qt wheel event
         """
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and self._accepts_gestures:
+            # Two resize gestures must not run at once: the wheel resizes
+            # around the top-left while an edge drag holds its own centre, so
+            # the next move of that drag would snap the button back.
+            self._finish_resize()
             delta = event.angleDelta().y()
             new_size = self.width() + (delta / 12)
-            new_size = int(max(30, min(new_size, 150)))
+            # The same limits the edge-drag gesture uses. Reading them from the
+            # shared constants rather than writing the numbers here again is
+            # what keeps the two gestures from disagreeing about how small or
+            # large the button may get.
+            new_size = int(max(MIN_BUTTON_SIZE, min(new_size, MAX_BUTTON_SIZE)))
             self.set_size(new_size)
             self.size_changed.emit(new_size)
         else:
@@ -456,6 +892,11 @@ class FloatingButton(QWidget):
         Args:
             event: Qt context menu event
         """
+        # The menu's modal loop grabs the mouse, so the left-button release
+        # would go to it and never reach this button. Whichever gesture was in
+        # flight has to end here instead of being left marked as still running:
+        # a resize gets saved, and a press stops holding the microphone open.
+        self._end_gesture_in_flight()
         self.context_menu_requested.emit(event.globalPos())
 
 
@@ -835,16 +1276,26 @@ class GuiManager(QObject):
             post_notification=self._post_editor_rebuilt_notification,
         )
 
-        self.icon = pystray.Icon("wheelhouse", title="Wheelhouse")
+        self.icon = pystray.Icon(
+            "wheelhouse", icon=load_tray_icon(), title="Wheelhouse"
+        )
 
         self.button.press_started.connect(self._on_button_press)
         self.button.press_ended.connect(self._on_button_release)
         self.button.double_clicked.connect(self._on_double_click)
         self.button.drag_started.connect(self._on_drag_started)
+        self.button.press_cancelled.connect(self._on_press_cancelled)
         self.button.closed.connect(self.hide_button)
         self.button.size_changed.connect(self.send_size_change_command)
         self.button.moved.connect(self.send_pos_change_command)
+        self.button.resize_finished.connect(self.send_resize_commit_command)
+        self.button.gesture_ended.connect(self._on_gesture_ended)
         self.button.context_menu_requested.connect(self.show_context_menu)
+
+        # A size and position from the Logic process that arrived while the
+        # user was mid-gesture, waiting for the gesture to end. None when
+        # nothing is waiting.
+        self._deferred_geometry = None
 
         self.queue_timer = QTimer(self)
         self.queue_timer.timeout.connect(self._check_queues_and_events)
@@ -859,7 +1310,6 @@ class GuiManager(QObject):
         self._double_click_timer.setSingleShot(True)
         self._double_click_timer.timeout.connect(self._on_deferred_single_click)
         self._DOUBLE_CLICK_WAIT_MS = 350
-        self._double_click_consumed = False
 
         # Tray icon double-click detection (threading.Timer since pystray runs in its own thread)
         self._tray_click_timer: threading.Timer | None = None
@@ -1108,12 +1558,44 @@ class GuiManager(QObject):
                     self.interim_results_enabled = message.get('interim_results_enabled', True)
                     self.debug_mode = message.get('debug_mode', False)
                     self.speech_interaction_mode = message.get('speech_interaction_mode', 'toggle')
-                    self.button.set_size(message.get('FLOATING_BUTTON_SIZE', 50))
-                    pos = message.get('FLOATING_BUTTON_POS', [100, 100])
-                    self.button.move(QPoint(*pos))
+                    # Not while the user is dragging. Size and position are
+                    # saved when the drag ends, so during one the settings
+                    # still hold the geometry from before it started. Putting
+                    # that back on screen mid-drag snaps the button to its old
+                    # size and place, and a release straight afterwards saves
+                    # nothing at all, because the gesture then sees the size it
+                    # began with. Any unrelated message would do it: speech
+                    # being suppressed, a provider reporting in, a
+                    # push-to-talk correction.
+                    #
+                    # Held back, not dropped. A state update does sometimes
+                    # carry a real change -- the settings window, a reset --
+                    # and dropping it leaves the button at a size no later
+                    # message corrects, because Logic only ever sends the
+                    # geometry it already believes the button has. The newest
+                    # one waits for the gesture to end.
+                    geometry = (
+                        message.get('FLOATING_BUTTON_SIZE', 50),
+                        message.get('FLOATING_BUTTON_POS', [100, 100]),
+                    )
+                    # Whether ANY gesture is running, not just the two that
+                    # move something. A press in the middle is live from the
+                    # moment it lands, and neither of the moving flags is set
+                    # between then and the pointer travelling far enough to
+                    # count as a drag -- an interval that covers a click that
+                    # never moves and a stationary push-to-talk hold, for as
+                    # long as the user holds it.
+                    if self.button._gesture_running:
+                        self._deferred_geometry = geometry
+                    else:
+                        self._apply_geometry(geometry)
 
                     if was_initial:
                         self.button.set_indeterminate(False)
+                        # Only now. Until the stored size and position arrive,
+                        # a gesture would measure against the default geometry
+                        # and this message would replace it underneath.
+                        self.button.set_ready_for_gestures(True)
 
                     self.update_ui_state()
                 elif action == "show_working":
@@ -1214,6 +1696,8 @@ class GuiManager(QObject):
                     self._show_declined_write_failed_toast(message)
                 elif action == "open_pattern_manager":
                     self._open_pattern_manager()
+                elif action == "open_google_credentials_picker":
+                    self._pick_google_credentials_file()
                 elif action and action.startswith("pm_"):
                     if hasattr(self, '_pm_dialog') and self._pm_dialog is not None:
                         self._pm_dialog.handle_response(message)
@@ -2019,8 +2503,40 @@ class GuiManager(QObject):
         
     def send_pos_change_command(self, new_pos: QPoint):
         """Send config update to Logic process for button position change."""
+        self._deferred_geometry = None
         self.send_command({'action': 'set_config_value', 'key': 'FLOATING_BUTTON_POS', 'value': [new_pos.x(), new_pos.y()]})
-        
+
+    def _apply_geometry(self, geometry):
+        """Put a size and a position from the settings onto the button."""
+        size, pos = geometry
+        self._deferred_geometry = None
+        self.button.set_size(size)
+        self.button.move(QPoint(*pos))
+
+    def _on_gesture_ended(self):
+        """Apply whatever was held back while the gesture was running."""
+        if self._deferred_geometry is not None:
+            self._apply_geometry(self._deferred_geometry)
+
+    def send_resize_commit_command(self, new_size: int, new_pos: QPoint):
+        """Send the button's new size and position to Logic as one change.
+
+        One message, not two. The pair is meaningless apart: a size that
+        survived without its position puts a differently sized button at a
+        corner belonging to the old size on the next start.
+        """
+        # The gesture's own result is newer than anything held back while it
+        # was running, so the held-back geometry is dropped rather than
+        # applied a moment later on top of the size the user dragged to.
+        self._deferred_geometry = None
+        self.send_command({
+            'action': 'set_config_values',
+            'values': {
+                'FLOATING_BUTTON_SIZE': new_size,
+                'FLOATING_BUTTON_POS': [new_pos.x(), new_pos.y()],
+            },
+        })
+
     def toggle_button_visibility(self):
         """Send command to toggle floating button visibility."""
         self.send_command({'action': 'toggle_button_visibility'})
@@ -2054,10 +2570,12 @@ class GuiManager(QObject):
         """Handle floating button mouse-up."""
         if not self.initial_state_received:
             return
-        # Ignore the second release after a double-click was consumed
-        if self._double_click_consumed:
-            self._double_click_consumed = False
-            return
+        # There is deliberately nothing here about a second release after a
+        # double-click. The button reports a release only for a press it
+        # recorded, and the double-click handler records none, so no second
+        # release ever arrives. The manager used to hold a flag waiting for
+        # one; it stayed set and swallowed the next real release instead,
+        # leaving the hold timer running to fire with the mouse already up.
         if self._ptt_held:
             # Was holding for PTT -- stop it
             self._stop_ptt()
@@ -2071,8 +2589,8 @@ class GuiManager(QObject):
                 self._double_click_timer.start(self._DOUBLE_CLICK_WAIT_MS)
 
     def _on_hold_threshold(self):
-        """Hold timer expired -- activate PTT (unless drag in progress)."""
-        if self.button._is_dragging:
+        """Hold timer expired -- activate PTT (unless a gesture is in progress)."""
+        if self.button._is_dragging or self.button._is_resizing:
             return
         self._ptt_held = True
         self._start_ptt()
@@ -2103,7 +2621,6 @@ class GuiManager(QObject):
         if not self.initial_state_received:
             return
         self._double_click_timer.stop()
-        self._double_click_consumed = True
         # If PTT was activated by the first click, cancel it
         if self._ptt_held:
             self._stop_ptt()
@@ -2115,13 +2632,28 @@ class GuiManager(QObject):
 
     def _on_drag_started(self):
         """Handle drag start -- cancel any pending PTT activation."""
+        self._cancel_pending_press("drag_cancel")
+
+    def _on_press_cancelled(self):
+        """Handle a press whose release never arrived.
+
+        The button reports this when something takes the release away -- the
+        context menu opening, the button being hidden, or the user pressing
+        again. The press decided nothing, so it must not toggle speech; and if
+        the hold threshold already opened the microphone, it has to close
+        again. That is the same treatment a drag gives an interrupted hold.
+        """
+        self._cancel_pending_press("gesture_cancel")
+
+    def _cancel_pending_press(self, reason: str):
+        """Drop a press in progress and put the microphone back as it was."""
         self._press_timer.stop()
         self._double_click_timer.stop()
         if self._ptt_held:
-            # Hold timer activated PTT before drag was detected -- cancel PTT
+            # Hold timer activated PTT before the interruption -- cancel PTT
             # and restore the pre-hold speech state (don't change what the user had)
             self._ptt_held = False
-            self.send_command({"action": "ptt_stop", "reason": "drag_cancel"})
+            self.send_command({"action": "ptt_stop", "reason": reason})
             self.speech_enabled = self._speech_before_hold
             self.button.set_state(self._speech_before_hold)
             self.button.set_ptt_mode(self.speech_interaction_mode == "push_to_talk")
@@ -2155,6 +2687,25 @@ class GuiManager(QObject):
     def switch_stt_provider(self, provider: str) -> None:
         """Request STT provider switch from Logic process."""
         self.send_command({'action': 'switch_stt_provider', 'provider': provider})
+
+    def set_google_credentials_file(self, path: str) -> None:
+        """Send the chosen Google service-account key path to Logic."""
+        self.send_command({'action': 'set_google_credentials_file', 'path': path})
+
+    def _pick_google_credentials_file(self):
+        """Open a file dialog for the Google service-account key.
+
+        Must run on the Qt thread; the pystray menu item marshals here
+        through the state queue, like the Pattern Manager item.
+        """
+        path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Choose your Google service-account key file",
+            "",
+            "JSON key files (*.json);;All files (*.*)",
+        )
+        if path:
+            self.set_google_credentials_file(path)
 
     def _get_provider_display_name(self, provider: str) -> str:
         """Get user-friendly display name for STT provider.
@@ -2469,6 +3020,20 @@ class GuiManager(QObject):
                     pystray.MenuItem("STT Provider", pystray.Menu(*provider_items))
                 )
 
+            # Google credentials picker, only when google_stt is installed
+            # (marshal to Qt thread via state queue -- file dialogs must
+            # run there, like the Pattern Manager)
+            if "google_stt" in self.stt_providers_available:
+                menu_items.append(
+                    pystray.MenuItem(
+                        "Google Cloud Credentials",
+                        lambda: self.state_from_logic_queue.put(
+                            {"action": "open_google_credentials_picker"}
+                        ),
+                        enabled=is_ready,
+                    )
+                )
+
             # Add AI Model submenu if models available
             if self.ai_providers_available:
                 current_ai = self.ai_provider
@@ -2533,6 +3098,9 @@ class GuiManager(QObject):
                     enabled=is_ready
                 ),
                 pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Help", self.request_help_online, enabled=is_ready),
+                pystray.MenuItem("About Wheelhouse", self.show_about_dialog),
+                pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Restart Transcription Service", self.request_stt_restart, enabled=is_ready),
                 pystray.MenuItem("Restart Wheelhouse", self.request_restart, enabled=is_ready),
                 pystray.MenuItem("Exit", self.exit_app, enabled=is_ready)
@@ -2586,6 +3154,12 @@ class GuiManager(QObject):
                     stt_submenu.addAction(action)
                 menu.addMenu(stt_submenu)
 
+            # Google credentials picker, only when google_stt is installed
+            if "google_stt" in self.stt_providers_available:
+                creds_action = menu.addAction("Google Cloud Credentials")
+                creds_action.setEnabled(is_ready)
+                creds_action.triggered.connect(self._pick_google_credentials_file)
+
             # AI Model submenu (only if models available)
             if self.ai_providers_available:
                 ai_submenu = QMenu("AI Model", menu)
@@ -2637,6 +3211,19 @@ class GuiManager(QObject):
 
             menu.addSeparator()
 
+            help_action = QAction("Help", self)
+            help_action.setEnabled(is_ready)
+            help_action.triggered.connect(self.request_help_online)
+            menu.addAction(help_action)
+
+            # No is_ready check. This one needs nothing from the Logic
+            # process, so it works even when the rest of the menu cannot.
+            about_action = QAction("About Wheelhouse", self)
+            about_action.triggered.connect(self.show_about_dialog)
+            menu.addAction(about_action)
+
+            menu.addSeparator()
+
             restart_stt_action = QAction("Restart Transcription Service", self)
             restart_stt_action.setEnabled(is_ready)
             restart_stt_action.triggered.connect(self.request_stt_restart)
@@ -2660,24 +3247,34 @@ class GuiManager(QObject):
         :description: Rebuilds system tray icon and menu to reflect current state
         :data_in: Current speech_enabled, button_visible state values
         :data_out: Updated system tray icon color and menu items
-        :notes: Final visual update step. Rebuilds tray menu via _create_menu(is_tray_menu=True) to update checkmarks on state-dependent items. Updates tray icon color based on three states: indeterminate (gray, 100,100,100) before initial state received, enabled (red, 200,0,0) when speech active, disabled (gray, 160,160,160) when speech inactive. This provides persistent visual feedback even when floating button is hidden.
+        :notes: Final visual update step. Rebuilds tray menu via _create_menu(is_tray_menu=True) to update checkmarks on state-dependent items. The icon picture is NOT touched here: it is the Wheelhouse icon, set once when the tray is created, and nothing changes it in response to anything.
         """
         self.icon.menu = self._create_menu(is_tray_menu=True)
-        color_map = {
-            "indeterminate": (100, 100, 100),
-            "enabled": (200, 0, 0),
-            "ptt_idle": (50, 120, 200),
-            "disabled": (160, 160, 160),
-        }
-        if not self.initial_state_received:
-            state = "indeterminate"
-        elif self.speech_enabled:
-            state = "enabled"
-        elif self.speech_interaction_mode == "push_to_talk":
-            state = "ptt_idle"
-        else:
-            state = "disabled"
-        self.icon.icon = create_icon_image(color_map[state])
+
+    def request_help_online(self):
+        """Ask the Logic process to open the Wheelhouse help page.
+
+        The address is the ai.help gem_url setting, and settings live in the
+        Logic process -- the GUI process has no copy of it. This is the same
+        setting, read the same way, as the spoken command "wheelhouse help
+        online", so changing it in one place changes both.
+        """
+        self.send_command({"action": "open_help_online"})
+
+    def show_about_dialog(self):
+        """Show the program name, version, and where to get help."""
+        version = get_app_version()
+        QMessageBox.information(
+            None,
+            "About Wheelhouse",
+            (
+                "Wheelhouse\n"
+                f"Version {version}\n\n"
+                "Voice-controlled desktop automation for Windows.\n\n"
+                "Choose Help from this menu, or say \"x-ray wheelhouse help "
+                "online\", to open the Wheelhouse Assistant in your browser."
+            ),
+        )
 
     def exit_app(self):
         """Set shutdown event to trigger graceful application exit."""
@@ -2690,6 +3287,22 @@ class GuiManager(QObject):
         if app:
             app.quit()
         logger.info("GUI shutdown sequence complete.")
+
+
+def configure_gui_application(app) -> None:
+    """Keep the GUI process running while nothing of its is on screen.
+
+    Wheelhouse lives in the notification area, and every window it opens --
+    the About box, the Pattern Manager, a notice -- is temporary. Qt's
+    default is to end the program when the last window that counts closes,
+    and the floating button does not count: it is a tool window, which Qt
+    leaves out of that decision, and the user can turn it off entirely
+    anyway. Closing the About box was therefore ending the GUI process, and
+    the launcher, seeing a child gone, shut the rest of Wheelhouse down with
+    it (wh-gui-about-box-quits-app). This process leaves through its
+    shutdown event and nothing else.
+    """
+    app.setQuitOnLastWindowClosed(False)
 
 
 def gui_process_target(shutdown_event: Event, commands_to_logic_queue: Queue, state_to_gui_queue: Queue, gui_shm_name: str = None):
@@ -2715,9 +3328,21 @@ def gui_process_target(shutdown_event: Event, commands_to_logic_queue: Queue, st
     logger.info("GUI process started.")
     try:
         app = QApplication(sys.argv)
+        configure_gui_application(app)
         manager = GuiManager(shutdown_event, commands_to_logic_queue, state_to_gui_queue, gui_shm_name, config=config)
         manager.start()
-        sys.exit(app.exec())
+        exit_code = app.exec()
+        if not shutdown_event.is_set():
+            # Nothing asked this process to stop, so the Qt loop ended on its
+            # own -- and it ends quietly, with a success code and no traceback.
+            # The launcher will take the rest of Wheelhouse down a moment from
+            # now, so say here why, while the reason is still known.
+            logger.error(
+                "Qt event loop ended (code %s) with no shutdown requested. "
+                "Wheelhouse will stop.",
+                exit_code,
+            )
+        sys.exit(exit_code)
     except Exception as e:
         logger.critical(f"Unhandled exception in GUI process: {e}", exc_info=True)
     finally:

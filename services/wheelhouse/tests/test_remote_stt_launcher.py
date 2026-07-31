@@ -866,6 +866,11 @@ launcher = "launcher.py"
             hide=lambda: working_calls.append(("hide",)),
         )
 
+        # start_provider establishes the starting state before spawning
+        # (wh-google-creds-file-picker.1.10); simulate that reset here
+        # since the monitor is called directly.
+        launcher._provider_ready_event.clear()
+
         # Call monitor directly with very short timeout
         launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=0.1)
 
@@ -953,6 +958,10 @@ startup_timeout_seconds = 180
         fake_proc.poll.return_value = None
         launcher._subprocesses["google_stt"] = fake_proc
 
+        # Simulate start_provider's synchronous reset
+        # (wh-google-creds-file-picker.1.10).
+        launcher._provider_ready_event.clear()
+
         launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=0.1)
 
         # No failure notification when subprocess is alive
@@ -982,6 +991,10 @@ startup_timeout_seconds = 180
         fake_proc.poll.return_value = 1
         launcher._subprocesses["google_stt"] = fake_proc
 
+        # Simulate start_provider's synchronous reset
+        # (wh-google-creds-file-picker.1.10).
+        launcher._provider_ready_event.clear()
+
         launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=0.1)
 
         assert len(notifications) == 1
@@ -999,6 +1012,10 @@ startup_timeout_seconds = 180
 
         notifications = []
         launcher.set_notify_callback(lambda title, msg: notifications.append((title, msg)))
+
+        # Simulate start_provider's synchronous reset
+        # (wh-google-creds-file-picker.1.10).
+        launcher._provider_ready_event.clear()
 
         launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=0.1)
 
@@ -1192,3 +1209,457 @@ launcher = "launcher.py"
             assert result is True
             mock_proc.terminate.assert_called_once()
             mock_popen.assert_called_once()
+
+
+class TestGoogleCredentialsFileArg:
+    """The configured Google service-account key file travels to the
+    google_stt provider process as a --credentials-file argument
+    (wh-google-creds-file-picker), the same way wake-word settings travel.
+    """
+
+    @pytest.fixture
+    def services_dir(self, tmp_path):
+        """Two providers: google_stt and parakeet."""
+        google_dir = tmp_path / "google_stt_server"
+        google_dir.mkdir()
+        (google_dir / "config.toml").write_text("""
+[provider]
+name = "google_stt"
+display_name = "Google Cloud STT"
+launcher = "launcher.py"
+""")
+        (google_dir / "launcher.py").write_text("# launcher stub")
+
+        parakeet_dir = tmp_path / "parakeet_server"
+        parakeet_dir.mkdir()
+        (parakeet_dir / "config.toml").write_text("""
+[provider]
+name = "parakeet"
+display_name = "Parakeet"
+launcher = "launcher.py"
+""")
+        (parakeet_dir / "launcher.py").write_text("# launcher stub")
+        return tmp_path
+
+    @pytest.fixture
+    def app_data_dir(self, tmp_path):
+        app_data = tmp_path / "appdata"
+        app_data.mkdir()
+        return app_data
+
+    def test_passes_credentials_file_to_google_stt(self, services_dir, app_data_dir):
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir,
+            app_data_dir=app_data_dir,
+            ws_port=5500,
+            google_credentials_file="C:/keys/sa.json",
+        )
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_popen.return_value = MagicMock(pid=12345)
+            launcher.start_provider("google_stt")
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--credentials-file" in cmd
+        assert cmd[cmd.index("--credentials-file") + 1] == "C:/keys/sa.json"
+
+    def test_no_flag_when_not_configured(self, services_dir, app_data_dir):
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir,
+            app_data_dir=app_data_dir,
+            ws_port=5500,
+        )
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_popen.return_value = MagicMock(pid=12345)
+            launcher.start_provider("google_stt")
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--credentials-file" not in cmd
+
+    def test_no_flag_for_other_providers(self, services_dir, app_data_dir):
+        """Only the google_stt launcher understands the flag; other
+        providers' argument parsers would reject it."""
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir,
+            app_data_dir=app_data_dir,
+            ws_port=5500,
+            google_credentials_file="C:/keys/sa.json",
+        )
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_popen.return_value = MagicMock(pid=12345)
+            launcher.start_provider("parakeet")
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--credentials-file" not in cmd
+
+
+class TestProviderStartupFailedSignal:
+    """A provider that reports a failed startup must end the starting
+    state (review finding wh-google-creds-file-picker.1.5).
+
+    Before the structured signal existed, a provider whose startup
+    failed never set the ready event, so is_starting stayed true for
+    the rest of the session and the startup suppression swallowed every
+    later notification from that provider.
+    """
+
+    @pytest.fixture
+    def services_dir(self, tmp_path):
+        google_dir = tmp_path / "google_stt_server"
+        google_dir.mkdir()
+        (google_dir / "config.toml").write_text("""
+[provider]
+name = "google_stt"
+display_name = "Google Cloud STT"
+launcher = "launcher.py"
+""")
+        (google_dir / "launcher.py").write_text("# launcher stub")
+        return tmp_path
+
+    @pytest.fixture
+    def app_data_dir(self, tmp_path):
+        app_data = tmp_path / "appdata"
+        app_data.mkdir()
+        return app_data
+
+    def test_failure_signal_ends_is_starting(self, services_dir, app_data_dir):
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir
+        )
+        launcher._provider_ready_event.clear()  # a startup is in progress
+        assert launcher.is_starting is True
+
+        launcher.signal_provider_startup_failed()
+
+        assert launcher.is_starting is False
+
+    def test_monitor_treats_the_failure_signal_as_terminal(
+        self, services_dir, app_data_dir
+    ):
+        """The monitor must end its wait on the failure signal, close the
+        working dialog, and NOT send the generic timeout notification --
+        the provider already told the user exactly what is wrong."""
+        import threading
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir
+        )
+        notifications = []
+        launcher.set_notify_callback(
+            lambda title, msg: notifications.append((title, msg))
+        )
+        hidden = []
+        launcher.set_working_callback(
+            lambda msg: None, lambda: hidden.append(True)
+        )
+
+        # start_provider establishes the starting state before spawning
+        # (wh-google-creds-file-picker.1.10); simulate that reset here
+        # since the monitor is called directly.
+        launcher._provider_ready_event.clear()
+        launcher._provider_startup_failed = False
+
+        def signal_failed():
+            time.sleep(0.05)
+            launcher.signal_provider_startup_failed()
+
+        threading.Thread(target=signal_failed, daemon=True).start()
+
+        start = time.monotonic()
+        launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=1.0)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.9  # ended on the signal, not the timeout
+        assert notifications == []
+        assert hidden == [True]
+
+    def test_ready_signal_still_confirms_startup(
+        self, services_dir, app_data_dir
+    ):
+        """The failure flag from an earlier startup must not leak into a
+        later successful one. The reset happens in start_provider before
+        the spawn (wh-google-creds-file-picker.1.10); simulated here
+        because the monitor is called directly."""
+        import threading
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir
+        )
+        launcher.signal_provider_startup_failed()  # earlier failed startup
+
+        hidden = []
+        launcher.set_working_callback(
+            lambda msg: None, lambda: hidden.append(True)
+        )
+
+        # The next start_provider resets the starting state ...
+        launcher._provider_ready_event.clear()
+        launcher._provider_startup_failed = False
+
+        def signal_ready():
+            time.sleep(0.05)
+            launcher.signal_provider_ready()
+
+        threading.Thread(target=signal_ready, daemon=True).start()
+        launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=1.0)
+
+        # The confirmed-ready path leaves the working dialog to the
+        # ready notification handler, so nothing hides it here.
+        assert hidden == []
+
+
+class TestStartupSignalNotErased:
+    """A fast provider can send its startup notification after the
+    subprocess spawns but before the monitor thread has run a single
+    line. The starting state must therefore be reset synchronously in
+    start_provider, before the spawn -- if the monitor thread did the
+    reset, it would erase a signal that already arrived
+    (review finding wh-google-creds-file-picker.1.10)."""
+
+    @pytest.fixture
+    def services_dir(self, tmp_path):
+        google_dir = tmp_path / "google_stt_server"
+        google_dir.mkdir()
+        (google_dir / "config.toml").write_text("""
+[provider]
+name = "google_stt"
+display_name = "Google Cloud STT"
+launcher = "launcher.py"
+""")
+        (google_dir / "launcher.py").write_text("# launcher stub")
+        return tmp_path
+
+    @pytest.fixture
+    def app_data_dir(self, tmp_path):
+        app_data = tmp_path / "appdata"
+        app_data.mkdir()
+        return app_data
+
+    def test_start_provider_resets_the_starting_state_before_spawning(
+        self, services_dir, app_data_dir
+    ):
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir, ws_port=5500
+        )
+        # Left over from an earlier startup that failed
+        launcher.signal_provider_startup_failed()
+
+        observed = []
+
+        def fake_popen(*args, **kwargs):
+            observed.append(
+                (launcher.is_starting, launcher._provider_startup_failed)
+            )
+            proc = MagicMock()
+            proc.pid = 12345
+            return proc
+
+        with patch("subprocess.Popen", side_effect=fake_popen):
+            assert launcher.start_provider("google_stt") is True
+
+        # At spawn time the launcher already counts as starting, with the
+        # old failure flag cleared -- a signal arriving any time after the
+        # spawn lands on fresh state.
+        assert observed == [(True, False)]
+        # Release the background monitor thread started by start_provider
+        launcher.signal_provider_ready()
+
+    def test_a_signal_delivered_before_the_monitor_starts_is_not_erased(
+        self, services_dir, app_data_dir
+    ):
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir
+        )
+        notifications = []
+        launcher.set_notify_callback(
+            lambda title, msg: notifications.append((title, msg))
+        )
+        hidden = []
+        launcher.set_working_callback(
+            lambda msg: None, lambda: hidden.append(True)
+        )
+
+        # start_provider reset the state synchronously ...
+        launcher._provider_ready_event.clear()
+        launcher._provider_startup_failed = False
+        # ... and the provider's failure signal landed before the monitor
+        # thread executed its first line.
+        launcher.signal_provider_startup_failed()
+
+        start = time.monotonic()
+        launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=1.0)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.9  # honored the signal, did not wait out the timeout
+        assert notifications == []
+        assert hidden == [True]
+
+    def test_a_spawn_failure_does_not_leave_the_launcher_starting(
+        self, services_dir, app_data_dir
+    ):
+        """start_provider enters the starting state before Popen; if Popen
+        raises, no subprocess and no monitor exist, so nothing would ever
+        end the starting state. The exception handler must restore it --
+        otherwise is_starting stays true forever and the notification
+        suppression swallows every later provider notice
+        (review finding wh-google-creds-file-picker.1.14)."""
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir, ws_port=5500
+        )
+
+        with patch("subprocess.Popen", side_effect=OSError("cannot execute")):
+            assert launcher.start_provider("google_stt") is False
+
+        assert launcher.is_starting is False
+
+    def test_a_monitor_start_failure_stops_the_spawned_process(
+        self, services_dir, app_data_dir
+    ):
+        """If the subprocess spawns but the monitor thread cannot start,
+        the process would run with no startup supervision and the starting
+        state would never end. The handler must end the starting state and
+        stop the unsupervised process
+        (review finding wh-google-creds-file-picker.1.14)."""
+        import threading
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir, ws_port=5500
+        )
+
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.poll.return_value = None  # still alive
+
+        with patch("subprocess.Popen", return_value=proc):
+            with patch.object(
+                threading, "Thread", side_effect=RuntimeError("no threads")
+            ):
+                assert launcher.start_provider("google_stt") is False
+
+        assert launcher.is_starting is False
+        proc.terminate.assert_called_once()
+
+
+class TestInFlightLaunchLiveness:
+    """A just-launched provider must count as running before its PID file
+    exists (review finding wh-google-creds-file-picker.1.22).
+
+    start_provider() records the spawned supervisor process in
+    _subprocesses and returns; the child writes <provider>.pid only
+    after its own uv bootstrap. A liveness model that consults only the
+    PID file reports the provider as stopped for that whole window, so
+    a second serialized lifecycle command would launch a duplicate
+    supervisor for the same provider name.
+    """
+
+    @pytest.fixture
+    def services_dir(self, tmp_path):
+        google_dir = tmp_path / "google_stt_server"
+        google_dir.mkdir()
+        (google_dir / "config.toml").write_text("""
+[provider]
+name = "google_stt"
+display_name = "Google Cloud STT"
+launcher = "launcher.py"
+""")
+        (google_dir / "launcher.py").write_text("# launcher stub")
+        return tmp_path
+
+    @pytest.fixture
+    def app_data_dir(self, tmp_path):
+        app_data = tmp_path / "appdata"
+        app_data.mkdir()
+        return app_data
+
+    def test_is_running_true_while_tracked_launch_alive_before_pid_file(
+        self, app_data_dir
+    ):
+        """is_running() must report True for a live tracked subprocess
+        even though the PID file has not been written yet."""
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(app_data_dir=app_data_dir)
+        proc = MagicMock()
+        proc.poll.return_value = None  # supervisor alive
+        launcher._subprocesses["google_stt"] = proc
+
+        assert not (app_data_dir / "google_stt.pid").exists()
+        assert launcher.is_running("google_stt") is True
+
+    def test_is_running_false_when_tracked_launch_exited(self, app_data_dir):
+        """A tracked subprocess that has exited must not count as
+        running; the PID-file check still decides."""
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(app_data_dir=app_data_dir)
+        proc = MagicMock()
+        proc.poll.return_value = 0  # supervisor exited
+        launcher._subprocesses["google_stt"] = proc
+
+        assert launcher.is_running("google_stt") is False
+
+    def test_second_start_does_not_spawn_a_duplicate_during_the_pid_gap(
+        self, services_dir, app_data_dir
+    ):
+        """A second start_provider() call while the first launch is
+        alive but has not yet written its PID file must not spawn a
+        second supervisor process."""
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir,
+            app_data_dir=app_data_dir,
+            ws_port=5500,
+        )
+
+        proc = MagicMock(pid=12345)
+        proc.poll.return_value = None  # supervisor alive, no PID file yet
+        with patch("subprocess.Popen", return_value=proc) as mock_popen:
+            assert launcher.start_provider("google_stt") is True
+            assert not (app_data_dir / "google_stt.pid").exists()
+            assert launcher.start_provider("google_stt") is True
+            mock_popen.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_provider_sends_shutdown_to_an_in_flight_launch(
+        self, services_dir, app_data_dir
+    ):
+        """stop_provider() must not report an in-flight launch as
+        already stopped; it must send the shutdown command."""
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir,
+            app_data_dir=app_data_dir,
+        )
+        mock_ws_manager = MagicMock()
+        mock_ws_manager.send_command_to_stt = AsyncMock()
+        launcher.set_websocket_manager(mock_ws_manager)
+
+        proc = MagicMock()
+        proc.poll.return_value = None  # supervisor alive, no PID file yet
+        launcher._subprocesses["google_stt"] = proc
+
+        result = await launcher.stop_provider("google_stt")
+
+        assert result is True
+        mock_ws_manager.send_command_to_stt.assert_called_once_with("shutdown")

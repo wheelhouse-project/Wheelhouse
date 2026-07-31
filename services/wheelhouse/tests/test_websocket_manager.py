@@ -873,6 +873,330 @@ class TestNotificationHandling:
 
         assert manager.word_queue.empty()
 
+    def _state_manager_with_notifier(self):
+        mock_notifier = MagicMock()
+        mock_notifier._send_notification = MagicMock()
+        mock_sm = MagicMock()
+        mock_sm.speech_notifier = mock_notifier
+        return mock_sm, mock_notifier
+
+    @pytest.mark.asyncio
+    async def test_startup_failed_kind_signals_failure_and_still_toasts(
+        self, manager
+    ):
+        """kind="startup_failed" ends the launcher's starting state,
+        closes the working dialog, and still shows the toast -- the
+        message says exactly what is wrong with the credentials
+        (review finding wh-google-creds-file-picker.1.5)."""
+        launcher = MagicMock()
+        launcher.is_starting = True
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "notification",
+            "title": "Google STT",
+            "message": (
+                "Google credentials problem - transcription will not "
+                "work: ValueError: bad key"
+            ),
+            "kind": "startup_failed",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_startup_failed.assert_called_once()
+        launcher.signal_provider_ready.assert_not_called()
+        mock_sm.state_to_gui_queue.put_nowait.assert_any_call(
+            {"action": "hide_working"}
+        )
+        mock_notifier._send_notification.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_error_kind_bypasses_startup_suppression(self, manager):
+        """kind="error" is a runtime failure notice; is_starting
+        suppression must not swallow it, or a failed startup leaves the
+        user with no signal at the first utterance
+        (review finding wh-google-creds-file-picker.1.5)."""
+        launcher = MagicMock()
+        launcher.is_starting = True
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "notification",
+            "title": "Google STT",
+            "message": (
+                "Speech engine error - transcription is not working: "
+                "ValueError: bad key"
+            ),
+            "kind": "error",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        mock_notifier._send_notification.assert_called_once()
+        launcher.signal_provider_ready.assert_not_called()
+        launcher.signal_provider_startup_failed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_plain_notification_is_still_suppressed_during_startup(
+        self, manager
+    ):
+        """A kind-less notification during startup keeps today's
+        behavior: the working dialog is the only signal."""
+        launcher = MagicMock()
+        launcher.is_starting = True
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "notification",
+            "title": "Google STT",
+            "message": "Loading model...",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        mock_notifier._send_notification.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: Stale-client notification gate
+# ---------------------------------------------------------------------------
+
+class _GatedWS:
+    """A fake websocket whose message iteration waits on an asyncio.Event.
+
+    Lets a test hold a connection open (registered but not yet delivering)
+    while a second connection registers and becomes the active client, then
+    release the first connection's frames afterwards -- the stale delivery
+    ordering that review finding wh-google-creds-file-picker.1.16 is about.
+    """
+
+    def __init__(self, messages, gate, remote_address=("127.0.0.1", 9999)):
+        self._messages = [
+            json.dumps(m) if isinstance(m, dict) else m for m in messages
+        ]
+        self._gate = gate
+        self.remote_address = remote_address
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        await self._gate.wait()
+        for m in self._messages:
+            yield m
+
+
+async def _wait_until(predicate, timeout=2.0):
+    """Poll *predicate* on the running loop until true (bounded)."""
+    async def _poll():
+        while not predicate():
+            await asyncio.sleep(0)
+    await asyncio.wait_for(_poll(), timeout)
+
+
+class TestStaleClientNotificationGate:
+    """Notifications from a connected-but-not-active client must not steer
+    the launcher or reach the user (wh-google-creds-file-picker.1.16).
+
+    add_client keeps older connections open (merely DISABLED) and marks
+    only the newest as active. An orphaned provider from a previous
+    generation can therefore still deliver queued notification frames
+    while a new provider is starting; capabilities are already gated on
+    the active client (wh-nvyh.1.1) and notifications need the same gate.
+    """
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        return WebSocketManager(loop=event_loop)
+
+    def _state_manager_with_notifier(self):
+        mock_notifier = MagicMock()
+        mock_notifier._send_notification = MagicMock()
+        mock_sm = MagicMock()
+        mock_sm.speech_notifier = mock_notifier
+        return mock_sm, mock_notifier
+
+    async def _run_stale_frames(self, manager, stale_messages):
+        """Connect a stale socket, supersede it with an active one, then
+        deliver the stale socket's frames. Returns after the stale
+        connection has fully drained and closed."""
+        stale_gate = asyncio.Event()
+        active_gate = asyncio.Event()
+        stale_ws = _GatedWS(stale_messages, stale_gate, ("127.0.0.1", 9001))
+        active_ws = _GatedWS([], active_gate, ("127.0.0.1", 9002))
+
+        stale_task = asyncio.create_task(manager.handle_connection(stale_ws))
+        await _wait_until(lambda: manager._active_stt_client is stale_ws)
+        active_task = asyncio.create_task(manager.handle_connection(active_ws))
+        await _wait_until(lambda: manager._active_stt_client is active_ws)
+
+        stale_gate.set()
+        await stale_task
+
+        active_gate.set()
+        await active_task
+
+    @pytest.mark.asyncio
+    async def test_stale_startup_failed_does_not_end_the_active_startup(
+        self, manager
+    ):
+        """A stale socket's kind="startup_failed" must not mark the NEW
+        provider's startup as failed or close its working dialog."""
+        launcher = MagicMock()
+        launcher.is_starting = True
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        await self._run_stale_frames(manager, [{
+            "type": "notification",
+            "title": "Google STT",
+            "message": (
+                "Google credentials problem - transcription will not "
+                "work: ValueError: bad key"
+            ),
+            "kind": "startup_failed",
+        }])
+
+        launcher.signal_provider_startup_failed.assert_not_called()
+        mock_sm.state_to_gui_queue.put_nowait.assert_not_called()
+        mock_notifier._send_notification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_ready_does_not_complete_the_active_startup(
+        self, manager
+    ):
+        """A stale socket's ready notification must not signal the
+        launcher that the NEW provider is ready."""
+        launcher = MagicMock()
+        launcher.is_starting = True
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        await self._run_stale_frames(manager, [{
+            "type": "notification",
+            "title": "STT Provider",
+            "message": "Provider is ready for transcription",
+        }])
+
+        launcher.signal_provider_ready.assert_not_called()
+        mock_sm.state_to_gui_queue.put_nowait.assert_not_called()
+        mock_notifier._send_notification.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_error_notice_is_not_shown_to_the_user(
+        self, manager
+    ):
+        """A stale socket's kind="error" notice describes the OLD
+        provider's failure; showing it while the new provider starts
+        misreports the system state."""
+        launcher = MagicMock()
+        launcher.is_starting = True
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        await self._run_stale_frames(manager, [{
+            "type": "notification",
+            "title": "Google STT",
+            "message": (
+                "Speech engine error - transcription is not working: "
+                "ValueError: bad key"
+            ),
+            "kind": "error",
+        }])
+
+        mock_notifier._send_notification.assert_not_called()
+        launcher.signal_provider_startup_failed.assert_not_called()
+        launcher.signal_provider_ready.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: add_client registration atomicity
+# ---------------------------------------------------------------------------
+
+class TestAddClientRegistrationAtomicity:
+    """Registration and promotion must happen before any await inside
+    add_client (wh-google-creds-file-picker.1.19).
+
+    add_client used to await DISABLE sends to existing clients BEFORE
+    registering and promoting the newcomer. Two overlapping add_client
+    calls could then finish in the wrong order: an older call whose
+    DISABLE send completed slowly would overwrite the newer connection
+    that had already promoted itself, making a stale socket the active
+    client and dropping the real provider's frames at the active-socket
+    gates."""
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        return WebSocketManager(loop=event_loop)
+
+    @pytest.mark.asyncio
+    async def test_overlapping_registrations_leave_the_newest_active(
+        self, manager
+    ):
+        """When add_client(A) is suspended awaiting a DISABLE send and
+        add_client(B) runs to completion, B (the newest arrival) must
+        stay the active client after A resumes."""
+        first_send_started = asyncio.Event()
+        release_first_send = asyncio.Event()
+        send_count = 0
+
+        class _SlowFirstSendWS:
+            remote_address = ("127.0.0.1", 9000)
+
+            async def send(self, _payload):
+                nonlocal send_count
+                send_count += 1
+                if send_count == 1:
+                    first_send_started.set()
+                    await release_first_send.wait()
+
+        existing = _SlowFirstSendWS()
+        await manager.add_client(existing)
+
+        ws_a = AsyncMock()
+        ws_a.remote_address = ("127.0.0.1", 9001)
+        ws_b = AsyncMock()
+        ws_b.remote_address = ("127.0.0.1", 9002)
+
+        task_a = asyncio.create_task(manager.add_client(ws_a))
+        await asyncio.wait_for(first_send_started.wait(), 2.0)
+
+        await manager.add_client(ws_b)
+        assert manager._active_stt_client is ws_b
+
+        release_first_send.set()
+        await asyncio.wait_for(task_a, 2.0)
+
+        assert manager._active_stt_client is ws_b
+
 
 # ---------------------------------------------------------------------------
 # Test: Malformed Message Handling

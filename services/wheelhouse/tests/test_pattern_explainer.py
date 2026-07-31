@@ -296,6 +296,32 @@ class TestCapturePatterns:
             "Move the cursor by voice ('go g1' (g1 = the words you say))."
         )
 
+    def test_letter_class_capture_is_not_described_as_any_words(self):
+        # Shipped ^translate to ([a-z][a-z ]*)$ pattern. The capture takes
+        # letters and spaces only, so borrowing (.+)'s "any words" would
+        # promise the user something the expression refuses.
+        pattern = _pattern_dict(
+            r"^translate to ([a-z][a-z ]*)$",
+            [{"function": "rewrite_text_ai", "params": ["Into g1."]}],
+            requires_hotword=True,
+        )
+        assert explain_pattern(pattern, HOTWORD) == (
+            "You must say 'x-ray' first.\n"
+            "Say 'translate to' followed by any words made of letters and "
+            "spaces.\n"
+            "Rewrite text with AI ('Into g1.' (g1 = the words you say))."
+        )
+
+    def test_a_letter_class_capture_that_may_be_empty_is_optional(self):
+        # "[a-z ]*" alone matches nothing at all, so the words after the
+        # phrase are optional rather than required.
+        pattern = _pattern_dict(
+            r"^dictate ([a-z ]*)$",
+            [{"function": "text", "params": ["g1"]}],
+        )
+        assert "optionally followed by any words made of letters and spaces" \
+            in explain_pattern(pattern, HOTWORD)
+
     def test_bare_dot_star_reads_as_optional_words(self):
         # Shipped ^okay Google.*$ pattern (anchored, so a command).
         pattern = _pattern_dict(
@@ -349,6 +375,16 @@ class TestRawExpressionFallback:
             r"^(.+) stop$",          # literal text AFTER a capture
             r"^so+n$",               # quantifier on a literal
             r"^back\S*$",            # non-space shorthand
+            r"^pick ([0-9a-z]+)$",   # captured class that admits digits
+            r"^pick ([a-z]{2})$",    # counted repetition inside a capture
+            r"^pick ([a-z]+x)$",     # a literal riding along inside a capture
+            # A range whose endpoints are both letters but whose span crosses
+            # the ASCII gap between the cases. [A-z] matches [ \ ] ^ _ and
+            # the backtick as well as letters, so calling it "letters and
+            # spaces" would be a wrong translation, the one failure this
+            # subsystem promises never to produce (wh-local-ai-runtime.2.27).
+            r"^pick ([A-z]+)$",      # the full cross-case range
+            r"^pick ([Z-a]+)$",      # a narrow range entirely inside the gap
         ]
         for raw in exotic:
             pattern = _pattern_dict(

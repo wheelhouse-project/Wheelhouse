@@ -1,0 +1,159 @@
+// The notes the wizard shows when the install finishes.
+//
+// This file is included into the [Code] section of Wheelhouse-Setup.iss, after
+// tagparse.isi, so everything in it is Pascal Script and takes Pascal comments
+// -- a ';' comment here is read as code and fails the compile with "'BEGIN'
+// expected".
+//
+// The wizard runs the installation engine hidden, so anything the engine prints
+// that is not a failure used to reach the setup log and nothing else. The
+// wizard offers Distil-Whisper on every machine, because it builds its pages
+// before the hardware check has anything to run on; on a machine with no
+// suitable NVIDIA graphics card the engine installs Parakeet instead, and the
+// person at the screen was never told which engine they actually got
+// (wh-wizard-distil-fallback). The same silence covered every requirement the
+// machine did not meet. Those messages now arrive on the NOTICE tag and are
+// collected here, by functions that take everything they need as arguments, so
+// the harness in scripts/release/tests/test_wizard.py can run them over each
+// case rather than read them.
+
+const
+  { How much of the collected text the finish page will show. The label on that
+    page is a fixed height: text past the bottom of it is not scrolled to, it is
+    simply not drawn, so a long enough run of notes would push the last ones off
+    the screen with nothing on it to say they existed. Notes past this budget
+    are counted instead, and the count is reported together with the path of the
+    log that holds them all.
+
+    It is above MAX_TAG_TEXT by enough room for one note's bullet and line
+    break, so the longest note the tag parser can hand over always fits. A note
+    that does not fit is dropped, and there is no shorter form to fall back on,
+    which would otherwise mean losing the whole message on a machine that had
+    exactly one thing to say. The relation between the two limits is checked in
+    test_the_longest_note_the_tag_allows_fits_inside_the_page_budget. }
+  MAX_NOTICE_TEXT = 700;
+
+function AddNotice(const Text: string; var Notices: string; var Dropped: Integer): Boolean;
+var
+  candidate, entry: string;
+begin
+  { True when the note was kept. A note whose text is empty is neither kept nor
+    counted as left out: the tag carries an empty message as the bare tag name,
+    and putting it on the finish page would draw a bullet with nothing after it
+    while the count claimed the user had been denied something. }
+  Result := False;
+  if Trim(Text) = '' then
+    Exit;
+
+  entry := '  - ' + Trim(Text) + #13#10;
+  { One kind of failure can happen on more than one of the engine's steps, and
+    each one sends its own note -- telling running programs an environment
+    variable changed is done for the PATH and again for the AI key. Two
+    identical lines under one heading read as a mistake in the installer rather
+    than as one thing that happened twice. A note already on the page was not
+    left out either, so it is not counted among the ones the log holds. The
+    bullet and the line break are part of what is compared, so a note that only
+    begins the same way as another is still its own note. }
+  if Pos(entry, Notices) > 0 then
+    Exit;
+
+  candidate := Notices + entry;
+  if Length(candidate) > MAX_NOTICE_TEXT then begin
+    Dropped := Dropped + 1;
+    Exit;
+  end;
+
+  Notices := candidate;
+  Result := True;
+end;
+
+function DropLastNotice(var Notices: string; var Dropped: Integer): Boolean;
+var
+  body: string;
+  cut, i: Integer;
+begin
+  { True when a note came off. The finish page adds every note it has and then
+    calls this until what is left fits the space it has to draw in, because how
+    much fits is measured in pixels and nothing here can know that. The note
+    taken off is the LAST one, so the earliest notes -- the ones about what the
+    engine decided, which is what the user did not choose -- are the ones that
+    survive. It is counted among the notes the log holds rather than lost. }
+  Result := False;
+  if Notices = '' then
+    Exit;
+
+  { Every entry ends with a line break, so the last one begins after the break
+    before it. That trailing break comes off first, or the search below finds
+    the end of the entry being removed instead of the end of the one before it. }
+  body := Copy(Notices, 1, Length(Notices) - 2);
+  cut := 0;
+  for i := 1 to Length(body) - 1 do
+    if Copy(body, i, 2) = #13#10 then
+      cut := i + 1;
+
+  Notices := Copy(Notices, 1, cut);
+  Dropped := Dropped + 1;
+  Result := True;
+end;
+
+function BestNoticeCandidate(const Heights: TArrayOfInteger; Room: Integer): Integer;
+var
+  i: Integer;
+begin
+  { Which of the finish page's candidate captions to draw. The caller builds one
+    candidate per number of notes kept, ordered from every note down to none,
+    measures each, and passes the heights here. The first that fits is the one
+    that shows the most notes.
+
+    When none of them fits, the SHORTEST is drawn, not the last one built.
+    Taking a note off does not reliably shorten the page: the first one removed
+    replaces its bullet with the "and one more note, in the setup log:" line and
+    the log path line beneath it, which is two lines where there was one.
+    Measured on this machine at the finish page's width, one short note stands at
+    673 pixels and the same page with that note removed stands at 721 -- so
+    walking to the end would lose the note's text AND leave the page taller than
+    it started. A longer note measured 721 both ways, which loses the text and
+    buys nothing.
+
+    Heights are compared with a strict less-than, so when two candidates are the
+    same height the earlier one wins and the note it carries is kept. }
+  Result := 0;
+  for i := 0 to GetArrayLength(Heights) - 1 do begin
+    if Heights[i] <= Room then begin
+      Result := i;
+      Exit;
+    end;
+    if Heights[i] < Heights[Result] then
+      Result := i;
+  end;
+end;
+
+function NoticeBlockText(const Notices: string; const Dropped: Integer; const LogPath: string): string;
+var
+  tail: string;
+begin
+  { Most installs have nothing to report, and those users must not be shown a
+    heading with nothing under it. }
+  Result := '';
+  if (Notices = '') and (Dropped = 0) then
+    Exit;
+
+  if Dropped = 1 then
+    tail := '  - and one more note'
+  else if Dropped > 1 then
+    tail := '  - and ' + IntToStr(Dropped) + ' more notes'
+  else
+    tail := '';
+
+  Result := 'Please note:' + #13#10 + Notices;
+  if tail <> '' then begin
+    if LogPath <> '' then
+      Result := Result + tail + ', in the setup log:' + #13#10
+              + '    ' + LogPath + #13#10
+    else
+      { With no path to give, nothing here names the file, so telling the user
+        to open it would send them after something they cannot find. This is the
+        same rule the failure dialog follows (wh-wizard-failure-guidance.1.1). }
+      Result := Result + tail + ', in the setup log.' + #13#10;
+  end;
+end;

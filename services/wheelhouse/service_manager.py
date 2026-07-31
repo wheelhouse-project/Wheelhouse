@@ -53,6 +53,12 @@ from services.wheelhouse.plugins.registry import PluginRegistry
 from services.wheelhouse.coordinators.brightness_coordinator import BrightnessCoordinator
 from services.wheelhouse.stt.remote_stt_launcher import RemoteSTTLauncher
 from services.wheelhouse.ai.service import AIService
+from services.wheelhouse.ai.runtime_config import RuntimeConfig
+from services.wheelhouse.ai.server_launcher import (
+    PID_FILE_NAME,
+    LocalAIServerLauncher,
+)
+from services.wheelhouse.utils.system import get_user_data_dir
 
 
 if TYPE_CHECKING:
@@ -109,6 +115,11 @@ class ServiceManager:
 
         # AI Service (text correction, help Q&A)
         self.ai_service: Optional[AIService] = None
+
+        # The model server Wheelhouse starts for itself. None whenever
+        # [ai.runtime] is off, which is the usual case: the AI client then
+        # talks to a server somebody else started.
+        self.local_ai_launcher: Optional[LocalAIServerLauncher] = None
 
     def set_logic_controller(self, logic_controller: 'LogicController'):
         """Sets the logic controller after initialization to break circular dependency."""
@@ -198,7 +209,73 @@ class ServiceManager:
             self.state_manager.set_ai_service(self.ai_service)
             log.info("AIService initialized")
 
+        self.local_ai_launcher = self._build_local_ai_launcher()
+        if self.local_ai_launcher and self.ai_service:
+            # Detecting that the server died is not the same as replacing it.
+            # AIService already re-probes every 60 seconds and after every
+            # failed request; this is what lets those checks put a server
+            # back rather than only reporting that there is none. Passed only
+            # when the server is ours -- an external one is not ours to start.
+            self.ai_service.set_local_server_restart(
+                self._restart_local_ai_server
+            )
+
         log.info("Services initialized.")
+
+    async def _restart_local_ai_server(self) -> bool:
+        """Replace the model server. True when one is running and healthy.
+
+        Runs off the event loop: starting a server loads a model file, which
+        takes tens of seconds, and this thread is the one every other service
+        in the Logic process shares.
+
+        This asks for a replacement rather than a start because of what the
+        caller has just seen. AIService calls it only after the server stopped
+        answering, and a server can stop answering while its process stays
+        alive -- a deadlock, a health thread that died. The launcher's start()
+        reports success on sight of a live process without asking whether it
+        answers, so it would leave that server in place, report that the
+        outage had been dealt with, and be asked again a minute later for as
+        long as Wheelhouse ran.
+        """
+        launcher = self.local_ai_launcher
+        if launcher is None:
+            return False
+        return await asyncio.to_thread(launcher.restart)
+
+    def _build_local_ai_launcher(self) -> Optional[LocalAIServerLauncher]:
+        """The launcher for a Wheelhouse-started model server, or None.
+
+        None means "do not start a server", not "no AI". Every path to None
+        here leaves the AI client alone, and an external server at
+        [ai.server] base_url keeps working exactly as before:
+
+        - [ai] enabled is false, so there is no AI at all.
+        - [ai.runtime] is absent or enabled = false, which is the usual case.
+        - The section is malformed, or base_url does not name a port on this
+          machine. RuntimeConfig has already logged which key was at fault.
+        """
+        if not self.config_service.get("ai.enabled", False):
+            return None
+
+        runtime = RuntimeConfig.from_raw(
+            self.config_service.get("ai.runtime"),
+            self.config_service.get("ai.server.base_url", ""),
+        )
+        if not runtime.enabled:
+            return None
+
+        log.info(
+            "Wheelhouse will start its own model server on port %d",
+            runtime.port,
+        )
+        # The recorded process id is how the next start finds a server left
+        # running by a session that crashed. get_user_data_dir is the one
+        # resolver that agrees between a source checkout and a frozen build.
+        return LocalAIServerLauncher(
+            runtime,
+            pid_file=get_user_data_dir() / PID_FILE_NAME,
+        )
 
     def _build_remote_stt_launcher(self, app_data_dir=None) -> RemoteSTTLauncher:
         """Construct the RemoteSTTLauncher from config.
@@ -228,6 +305,9 @@ class ServiceManager:
             app_data_dir=app_data_dir,
             ws_host=self.config_service.get("stt.ws_host", "localhost"),
             wake_word_config=wake_word_config,
+            google_credentials_file=self.config_service.get(
+                "stt.google.credentials_file", ""
+            ),
         )
 
     def start_services(self):
@@ -278,7 +358,29 @@ class ServiceManager:
             log.error(f"Error starting plugin system: {e}", exc_info=True)
 
     async def _start_ai_service(self):
-        """Start AIService (provider check, knowledge base load)."""
+        """Start the local model server if we own one, then start AIService.
+
+        The server goes first so the client's first reachability probe finds
+        something live. It has to run off the event loop: loading a model file
+        takes tens of seconds, and this coroutine shares a thread with every
+        other service in the Logic process.
+
+        A server that fails to start is not a reason to skip the client. The
+        client fails soft on an unreachable address -- it keeps probing -- and
+        it still has a knowledge base to load.
+        """
+        if self.local_ai_launcher:
+            try:
+                started = await asyncio.to_thread(self.local_ai_launcher.start)
+                if not started:
+                    log.error(
+                        "The local model server did not start. AI features "
+                        "stay off until a server answers at the configured "
+                        "address."
+                    )
+            except Exception as e:
+                log.error(f"Error starting the local model server: {e}", exc_info=True)
+
         try:
             if not self.ai_service:
                 return
@@ -424,6 +526,20 @@ class ServiceManager:
                 log.info("AIService stopped")
             except Exception as e:
                 log.error(f"Error stopping AIService: {e}", exc_info=True)
+
+        # After the client, so nothing is mid-request when the server goes.
+        # Its own block: an error stopping the client must not orphan a model
+        # server that is holding the graphics card.
+        if self.local_ai_launcher:
+            try:
+                # shutdown(), not stop(): a restart may be running on a worker
+                # thread right now, and stopping the AI client above only
+                # cancelled the coroutine awaiting it -- the thread carries on
+                # and would spawn a server nothing here will ever stop.
+                await asyncio.to_thread(self.local_ai_launcher.shutdown)
+                log.info("Local model server stopped")
+            except Exception as e:
+                log.error(f"Error stopping the local model server: {e}", exc_info=True)
 
         if self.mouse_handler:
             await asyncio.to_thread(self.mouse_handler.stop_listeners)

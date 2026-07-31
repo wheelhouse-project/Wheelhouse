@@ -32,7 +32,10 @@ ENABLE_SONOS_SUPPRESSION = true
 ENABLE_IDLE_SUPPRESSION = true
 
 LOG_FILE = ""
-LOG_LEVEL = "DEBUG"
+# INFO for an ordinary install. The Debug item on the tray menu switches
+# this to DEBUG at runtime, and that menu item starts unchecked, so a
+# shipped value of DEBUG would leave the menu disagreeing with the log.
+LOG_LEVEL = "INFO"
 
 # Privacy: when false (the default), log lines never contain dictated text
 # or clipboard content -- they carry a length-only placeholder instead.
@@ -46,13 +49,18 @@ SIDE_OFFSET = 10
 BRIGHTNESS_INCREMENT = 1.0
 VOLUME_INCREMENT = 0.5
 
-# The small on-screen status button.
-FLOATING_BUTTON_SIZE = 30
+# The small on-screen status button. These three values match the
+# fallbacks the application itself uses when a key is absent
+# (state_manager.py). Both installers copy this file verbatim on a fresh
+# install, so a value here is what a new user actually gets: the button
+# must start visible, at an on-screen position, and at a size that can be
+# hit with a mouse.
+FLOATING_BUTTON_SIZE = 50
 FLOATING_BUTTON_POS = [
-    -18,
-    -15,
+    100,
+    100,
 ]
-FLOATING_BUTTON_VISIBLE = false
+FLOATING_BUTTON_VISIBLE = true
 
 SPEECH_ENABLED_ON_STARTUP = true
 SHOW_SPEECH_PULSE = true
@@ -93,11 +101,6 @@ enabled = false
 ip_address = ""
 psk = ""
 device_name = "SONY TV"
-
-[plugins.software_dimmer]
-enabled = false
-initial_brightness = 100
-dim_step = 20
 
 [plugins.idle_monitor]
 enabled = true
@@ -175,6 +178,11 @@ last_provider = "parakeet_tdt"
 
 [stt.google]
 boost_words = []
+# Full path to the Google service-account key file (JSON). Wheelhouse
+# writes this when you pick the file from the tray menu's "Google Cloud
+# Credentials" item. Empty means the GOOGLE_APPLICATION_CREDENTIALS
+# environment variable is used instead.
+credentials_file = ""
 
 [stt.azure]
 # Azure Speech Services key, only if you use the Azure provider.
@@ -188,16 +196,46 @@ knowledge_base = "knowledge/wheelhouse_help.md"
 
 [ai.server]
 # WheelHouse talks to an external OpenAI-compatible server for AI features.
-# base_url is the server address (a local Ollama endpoint by default). Leave
-# base_url empty to turn AI off. If the server is unreachable, AI features
-# quietly disable themselves and everything else keeps working.
-base_url = "http://localhost:11434/v1"
-model = "gemma3:12b"
-# An API key is only needed for a cloud server (a local Ollama needs none). It
-# is NOT stored here -- set the WHEELHOUSE_AI_API_KEY environment variable
-# instead, so a secret never lands in this git-tracked file.
+# base_url is the server address. The default is the runtime the installer
+# puts on this machine in local mode, which WheelHouse starts and stops
+# itself. Leave base_url empty to turn AI off. If the server is unreachable,
+# AI features quietly disable themselves and everything else keeps working.
+base_url = "http://127.0.0.1:8781/v1"
+model = "gemma-4-e4b"
+# An API key is only needed for a cloud server; a server on this machine needs
+# none. It is NOT stored here -- set the WHEELHOUSE_AI_API_KEY environment
+# variable instead, so a secret never lands in this git-tracked file.
 timeout_s = 30
+# Whether that server is on this machine ("local") or out on the internet
+# ("cloud"). It does not decide where your text is sent -- base_url does that.
+# It tells Wheelhouse how to talk to whatever is at that address: a local
+# server is asked for its model list, a cloud one is not. Capitals and stray
+# spaces are forgiven; anything else falls back to "local" and says so in the
+# log rather than being obeyed halfway.
 kind = "local"
+
+[ai.runtime]
+# Wheelhouse normally talks to a model server that somebody else is running.
+# Set enabled = true and it starts one itself, using the llama.cpp build and
+# the model file the installer downloaded. Leave it false and base_url above
+# must point at a server you started.
+#
+# There is deliberately no port key here. The port comes from the base_url
+# above, so the server Wheelhouse starts and the address it talks to cannot
+# drift apart. base_url must name 127.0.0.1 or localhost and include a port.
+enabled = false
+# Absolute path to the model file. The installer writes this.
+model_path = ""
+# Directory holding llama-server.exe. The installer writes this.
+binary_dir = ""
+# How much text the model can consider at once, in tokens.
+context_size = 8192
+# How many layers to place on the graphics card. 99 places all of them; 0 runs
+# entirely on the processor, which the installer chooses for a machine with
+# enough system memory but no suitable graphics card.
+gpu_layers = 99
+# How long to wait for the server to report healthy before giving up.
+startup_timeout_seconds = 90
 
 [ai.help]
 gem_url = "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"

@@ -301,8 +301,9 @@ class ActionFunctions:
         self._functions["hide_overlay_command"] = self.hide_overlay_command
         # AI Service
         self._functions["fix_text_ai"] = self.fix_text_ai
+        self._functions["rewrite_text_ai"] = self.rewrite_text_ai
         self._functions["cancel_fix"] = self.cancel_fix
-        self._functions["wheelhouse_help"] = self.wheelhouse_help
+        #self._functions["wheelhouse_help"] = self.wheelhouse_help
         self._functions["wheelhouse_help_online"] = self.wheelhouse_help_online
         # Pattern Manager
         self._functions["open_pattern_manager"] = self.open_pattern_manager
@@ -974,9 +975,64 @@ class ActionFunctions:
 
     async def fix_text_ai(self):
         """Capture text from focused element, correct via AI, paste back."""
+        return await self._run_ai_text_transform(
+            send=lambda ai, captured: ai.fix_text(captured),
+            working_word="Correcting",
+            no_text_message="No text to correct.",
+            failed_message="Correction failed. Original text preserved.",
+        )
+
+    async def rewrite_text_ai(self, instruction: str):
+        """Rewrite the selection in the style the pattern asked for.
+
+        ``instruction`` is the pattern's single parameter -- "Rewrite this text
+        in plain language...", "...as a pirate would say it", or anything a
+        user writes in their own pattern file. Nothing about a style lives in
+        this method; it is the same sequence as fix_text_ai with a different
+        request and different wording.
+        """
+        if not instruction or not str(instruction).strip():
+            logger.warning("rewrite_text_ai called with no instruction")
+            return None
+        return await self._run_ai_text_transform(
+            send=lambda ai, captured: ai.rewrite_text(captured, instruction),
+            working_word="Rewriting",
+            no_text_message="No text to rewrite.",
+            failed_message="Rewrite failed. Original text preserved.",
+        )
+
+    async def _run_ai_text_transform(
+        self,
+        send,
+        *,
+        working_word: str,
+        no_text_message: str,
+        failed_message: str,
+    ):
+        """Capture the selection, send it somewhere, paste the answer back.
+
+        Every AI command that transforms the selected text runs this same
+        sequence: check the service is there and ready, take the processing
+        lock, capture, send, check for a cancellation that raced the answer,
+        paste. Only three things differ between the correcting command and the
+        rewriting ones, and they are the three keyword arguments -- the request
+        itself plus the wording spoken to the user.
+
+        Args:
+            send: Called with the AIService and the captured text, returning
+                an awaitable ChatResult. This is the whole difference between
+                correcting and rewriting. It receives the service rather than
+                looking it up again so there is exactly one lookup per command
+                and the caller cannot be handed a different one mid-sequence.
+            working_word: Present participle spoken and shown while waiting,
+                for example "Correcting".
+            no_text_message: Spoken when the selection is empty.
+            failed_message: Spoken when the server answered but the request
+                did not succeed, and the server is still reachable.
+        """
         ai = self._get_ai_service()
         if not ai:
-            logger.warning("fix_text_ai: AIService not available")
+            logger.warning("AI text transform: AIService not available")
             return None
 
         # Readiness gate moved here (finding 1.9). When AI is off / unreachable
@@ -995,9 +1051,9 @@ class ActionFunctions:
                 "capture_selected_text", params={}
             )
             text = result.get("text", "")
-            logger.debug("fix_text_ai: captured %d chars", len(text))
+            logger.debug("AI text transform: captured %d chars", len(text))
             if not text or not text.strip():
-                await ai.speak("No text to correct.")
+                await ai.speak(no_text_message)
                 return None
 
             # Step 2: Word-count notice for large text (no time estimate -- the
@@ -1008,12 +1064,14 @@ class ActionFunctions:
             if word_count > 200:
                 await ai.speak(f"About {word_count} words.")
 
-            await ai.speak_brief("Correcting.")
-            self._send_gui_action({"action": "show_working", "message": "Correcting..."})
+            await ai.speak_brief(f"{working_word}.")
+            self._send_gui_action(
+                {"action": "show_working", "message": f"{working_word}..."}
+            )
 
             try:
-                # Step 3: Send to AI for correction (returns a ChatResult).
-                corrected = await ai.fix_text(text)
+                # Step 3: Send to the AI (returns a ChatResult).
+                corrected = await send(ai, text)
 
                 # Step 3a: Cancellation is a distinct outcome -- do NOT probe
                 # the server or speak an error (finding wh-ay6h.6.4).
@@ -1023,7 +1081,7 @@ class ActionFunctions:
 
                 if not corrected.ok:
                     logger.warning(
-                        "fix_text_ai: correction not ok (status=%s)",
+                        "AI text transform: not ok (status=%s)",
                         corrected.outcome,
                     )
                     # MODEL_NOT_FOUND means the server responded (404 on
@@ -1057,7 +1115,7 @@ class ActionFunctions:
                             "Original text preserved."
                         )
                     else:
-                        await ai.speak("Correction failed. Original text preserved.")
+                        await ai.speak(failed_message)
                     return None
 
                 corrected_text = corrected.text
@@ -1069,7 +1127,7 @@ class ActionFunctions:
                     await ai.speak_brief("Cancelled.")
                     return None
 
-                # Step 5: Replace with corrected text via Input Process
+                # Step 5: Replace with the answer via Input Process
                 if corrected_text != text:
                     await self.speech_handler.app.send_request(
                         "replace_selected_text", params={"text": corrected_text}
@@ -1090,17 +1148,13 @@ class ActionFunctions:
             await ai.speak_brief("Cancelling.")
         return None
 
-    async def wheelhouse_help(self, question: str = ""):
-        """Open the local help chat window, optionally with a spoken question.
+    """ async def wheelhouse_help(self, question: str = ""):
 
-        If question is provided (from 'wheelhouse help [question]' pattern),
-        the chat window opens AND the question is submitted immediately.
-        """
         payload = {"action": "show_help_chat"}
         if question:
             payload["question"] = question
         self._send_gui_action(payload)
-        return None
+        return None """
 
     async def wheelhouse_help_online(self):
         """Open cloud help in browser (Gemini Gem)."""

@@ -62,7 +62,14 @@ param(
     # instead, which Resolve-AiApiKey reads. -AiApiKey stays for the developer /
     # one-liner path. -AiBaseUrl / -AiModel are optional cloud overrides that
     # default to the pinned Gemini values above.
-    [ValidateSet("keep", "off", "cloud")]
+    # "local" downloads a llama.cpp build and a model file and configures
+    # Wheelhouse to start its own server. It needs no account and no key, which
+    # is why it exists: the cloud option requires a Google key, and a user who
+    # cannot or will not get one had no way to use the fix and rewrite commands
+    # at all. It runs the hardware check first and, on a machine that cannot
+    # run the model, reports why and writes the off state rather than
+    # installing 5 GB that will not start (wh-ai-installer-local-mode).
+    [ValidateSet("keep", "off", "cloud", "local")]
     [string]$AiMode = "keep",
     [string]$AiApiKey = "",
     [string]$AiBaseUrl = "",
@@ -75,7 +82,14 @@ param(
     # for an uninstall (it cannot answer an interactive prompt); the one-liner
     # -Uninstall path passes neither and is asked both questions.
     [switch]$Force,
-    [switch]$KeepData
+    [switch]$KeepData,
+    # Asks for the machine-readable copy of every notice (see Write-InstallNotice).
+    # The graphical installer passes it; a person running this script in a console
+    # does not, and reads the [!] lines instead. Without the switch both would be
+    # printed and every notice would appear twice on that console. A bare switch
+    # is safe under `powershell -File` as long as the caller passes it present or
+    # omits it, never "-TaggedOutput:$false", which is what the wizard does.
+    [switch]$TaggedOutput
 )
 
 $ErrorActionPreference = "Stop"
@@ -89,7 +103,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.5"
+$AppVersion = "1.0.6"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -125,11 +139,43 @@ $CudaMinVramBytes = 4GB
 $DefaultAiBaseUrl = "https://generativelanguage.googleapis.com/v1beta/openai/"
 $DefaultAiModel = "gemini-2.5-flash-lite"
 
+# Local AI runtime (-AiMode local). The same two addresses and hashes are
+# pinned in services/installer/components/registry.py; this script is
+# downloaded and run on its own and cannot import Python, so the duplication is
+# guarded by a test that reads both files rather than prevented
+# (test_installer_local_ai.py test_the_pins_match_the_component_registry).
+#
+# The llama.cpp build is the VULKAN one, not CUDA: Vulkan covers NVIDIA, AMD,
+# and Intel alike, which is what lets the hardware check accept any vendor's
+# card instead of stranding every AMD machine on the processor.
+#
+# We do NOT redistribute the weights. The model address is Google's own
+# repository on Hugging Face, pinned by the hash its publisher records.
+$LlamaServerUrl = "https://github.com/ggml-org/llama.cpp/releases/download/b10107/llama-b10107-bin-win-vulkan-x64.zip"
+$LlamaServerSha256 = "c5b3a5ee8319b1eccbb748a54390aa806bbf7d1aceeea452e4c57921d113e53e"
+$LocalAiModelUrl = "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf"
+$LocalAiModelSha256 = "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee"
+$LocalAiModelFileName = "gemma-4-E4B_q4_0-it.gguf"
+# The name shown in the model menu. llama-server serves one model and ignores
+# the name in a request, so this is for the user to recognize, not for routing.
+$LocalAiModelName = "gemma-4-e4b"
+# The address Wheelhouse talks to AND the port it starts the server on --
+# [ai.runtime] deliberately has no port key, so these cannot drift apart
+# (ai/runtime_config.py). It must be loopback with an explicit port or the
+# runtime refuses to start.
+$LocalAiBaseUrl = "http://127.0.0.1:8781/v1"
+
 # --- Paths ------------------------------------------------------------------
 
 $LocalRoot = Join-Path $env:LOCALAPPDATA "Wheelhouse"
 $AppDir = Join-Path $LocalRoot "app"
 $ModelsDir = Join-Path $LocalRoot "models"
+# Deliberately NOT $ModelsDir: that directory holds the extracted speech model,
+# and Test-ModelComplete judges whether the speech model is installed by which
+# files are sitting in it. A 5 GB GGUF dropped in there invites exactly that
+# confusion.
+$AiModelsDir = Join-Path $LocalRoot "ai-models"
+$LlamaDir = Join-Path $LocalRoot "llama"
 $DownloadsDir = Join-Path $LocalRoot "downloads"
 $RoamingRoot = Join-Path $env:APPDATA "Wheelhouse"
 $OverrideFile = Join-Path $LocalRoot "stt_model_overrides.toml"
@@ -184,6 +230,96 @@ function Write-InstallHeartbeat {
     [Console]::Out.WriteLine("HEARTBEAT $Label")
 }
 
+# The reason this install is stopping, in the same machine-readable form as
+# PROGRESS and HEARTBEAT and for the same reason: the graphical installer runs
+# this script hidden, and the person at the screen must be told what went wrong
+# and what to do about it. Write-Host output goes to the PowerShell host, whose
+# redirection across a hidden child process is exactly what these tagged lines
+# avoid, so the wizard's failure dialog is built from these two lines rather
+# than from the [x] and What-to-try lines a console user reads.
+# Each tag is one line: the wizard reads stdout a line at a time and cannot
+# tell a wrapped message from a new one, so any newline inside the text is
+# folded to a space before it is written (wh-wizard-failure-guidance).
+function Write-InstallFailure {
+    param([string]$Reason, [string]$WhatToTry = "")
+    [Console]::Out.WriteLine("FAILURE " + ($Reason -replace '\s+', ' '))
+    if ($WhatToTry) {
+        [Console]::Out.WriteLine("FAILHINT " + ($WhatToTry -replace '\s+', ' '))
+    }
+}
+
+# Something the user should still know about once setup has finished: the speech
+# engine that was substituted for the one they picked, a requirement this machine
+# does not meet, a step that could not be completed. Write-Warn alone reaches the
+# PowerShell host, and the graphical installer runs this script hidden, so those
+# messages reached the setup log and nothing else -- a user whose Distil-Whisper
+# choice was swapped for Parakeet was told nothing at all
+# (wh-wizard-distil-fallback). The tagged copy goes to the real stdout stream the
+# wizard reads, on the same one-line-per-message contract as FAILURE and FAILHINT:
+# the wizard cannot tell a wrapped message from a new one, so any newline in the
+# text is folded to a space before it is written.
+#
+# Warnings about something the installer went on to recover from -- a download
+# retried, a stale partial file discarded -- stay on Write-Warn: they are true
+# while they are printed and not afterwards, and the finish page is read at the
+# end.
+function Write-InstallNotice {
+    param([string]$Message)
+    Write-Warn $Message
+    if ($TaggedOutput) {
+        [Console]::Out.WriteLine("NOTICE " + ($Message -replace '\s+', ' '))
+    }
+}
+
+# Whether Windows currently lets desktop applications use the microphone. The
+# wizard reads these same two values before it decides whether to show its
+# microphone page (MicrophoneAllowed in Wheelhouse-Setup.iss); two checks of one
+# setting that disagreed would be silent in both directions, so both read the
+# per-application value first, fall back to the umbrella one, and treat a setting
+# they cannot read as allowed rather than telling the user to go and fix a
+# setting that is not the problem (wh-wizard-mic-permission-noise).
+function Resolve-MicrophoneConsent {
+    param([string]$PerApp, [string]$Umbrella)
+    # $PerApp is the NonPackaged value, $Umbrella the one on the key above it.
+    # Either arrives empty when the key is absent, when the read failed, or when
+    # the value is present and empty -- Windows reports success on a value that
+    # exists and is empty, and the three cases mean the same thing here: this key
+    # did not answer the question.
+    #
+    # An empty first value is not an answer, so the umbrella value is asked next.
+    # When neither answers, the result is "allowed": a Windows build that stores
+    # this somewhere else must not make the installer warn about a microphone
+    # that works.
+    #
+    # This is the half of the check the wizard has to agree with. Its Pascal
+    # counterpart is ResolveMicrophoneConsent in micconsent.isi, and
+    # scripts/release/tests/test_installer.py runs both over one table of value
+    # pairs, because this decides whether a sentence is printed and that one
+    # decides whether a whole page is shown.
+    if ($PerApp) { return ($PerApp -eq "Allow") }
+    if ($Umbrella) { return ($Umbrella -eq "Allow") }
+    return $true
+}
+
+function Test-MicrophonePermission {
+    $base = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+    $values = @("", "")
+    $keys = @("$base\NonPackaged", $base)
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        try {
+            $raw = (Get-ItemProperty -LiteralPath $keys[$i] -Name Value -ErrorAction Stop).Value
+            # Only a string answers. Windows writes this setting as a string, and
+            # the wizard's RegQueryStringValue refuses anything else and moves on
+            # to the next key -- converting a number to text here instead would
+            # make the two disagree on a machine that had one.
+            if ($raw -is [string]) { $values[$i] = $raw }
+        } catch {
+            # This key is absent on this Windows build; it answers nothing.
+        }
+    }
+    return (Resolve-MicrophoneConsent -PerApp $values[0] -Umbrella $values[1])
+}
+
 function Write-TomlFile {
     param([string]$Path, [string[]]$Lines, [string]$NewLine = "`r`n")
     # The app reads its TOML files in binary mode with tomllib, which
@@ -220,6 +356,8 @@ function Stop-Install {
     Write-Fail $Message
     if ($WhatToTry) { Write-Host "    What to try: $WhatToTry" }
     Write-Host "    If you are stuck, please file an issue: $IssuesUrl"
+    Write-Host "    or email help@wheelhouse-project.org"
+    Write-InstallFailure -Reason $Message -WhatToTry $WhatToTry
     # Unwinds to the top-level handler instead of calling `exit`: under the
     # irm|iex path, `exit` terminates the user's whole console session.
     throw "WHEELHOUSE-INSTALL-STOP"
@@ -250,16 +388,18 @@ function Test-Preflights {
     Write-Status "Checking this computer meets the requirements..."
 
     if (-not [Environment]::Is64BitOperatingSystem) {
-        Stop-Install "Wheelhouse needs 64-bit Windows; this system is 32-bit."
+        Stop-Install "Wheelhouse needs 64-bit Windows; this system is 32-bit." `
+            "There is nothing to fix on this computer. Wheelhouse needs 64-bit Windows 10 or 11, and cannot run here."
     }
     $os = Get-CimInstance Win32_OperatingSystem
     $osVersion = [Version]$os.Version
     if ($osVersion.Major -lt 10) {
-        Stop-Install "Wheelhouse needs Windows 10 or 11; this system reports Windows version $($os.Version)."
+        Stop-Install "Wheelhouse needs Windows 10 or 11; this system reports Windows version $($os.Version)." `
+            "Update this computer to Windows 10 or 11, then run Setup again."
     }
 
     # Disk space on the drive that will hold the install.
-    $driveName = (Get-Item $env:LOCALAPPDATA).PSDrive.Name
+    $driveName = (Get-Item -LiteralPath $env:LOCALAPPDATA).PSDrive.Name
     $free = (Get-PSDrive -Name $driveName).Free
     if ($free -lt $DiskFloorBytes) {
         $freeGb = [math]::Round($free / 1GB, 1)
@@ -278,13 +418,13 @@ function Test-Preflights {
             "Use the Google Cloud speech engine instead -- it runs in the cloud and needs far less memory, but requires a Google Cloud account (see INSTALL.md in the Wheelhouse repository). Or add memory to this computer."
     }
     if ($ram -lt $RamRecommendedBytes) {
-        Write-Warn "This computer has $([math]::Round($ram / 1GB, 1)) GB of memory. Wheelhouse will run, but 16 GB is recommended."
+        Write-InstallNotice "This computer has $([math]::Round($ram / 1GB, 1)) GB of memory. Wheelhouse will run, but 16 GB is recommended."
     }
 
     # CPU floor: warn and continue (see the note on the constant above).
     $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
     if ($cores -lt $CpuWarnCores) {
-        Write-Warn "This computer has $cores CPU cores. Speech recognition may respond slowly; 4 or more cores are recommended."
+        Write-InstallNotice "This computer has $cores CPU cores. Speech recognition may respond slowly; 4 or more cores are recommended."
     }
 
     # Microphone presence: warn only -- the user may plug one in later.
@@ -293,13 +433,13 @@ function Test-Preflights {
         $captureKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture"
         if (Test-Path $captureKey) {
             foreach ($endpoint in Get-ChildItem $captureKey) {
-                $state = (Get-ItemProperty -Path $endpoint.PSPath -Name DeviceState -ErrorAction SilentlyContinue).DeviceState
+                $state = (Get-ItemProperty -LiteralPath $endpoint.PSPath -Name DeviceState -ErrorAction SilentlyContinue).DeviceState
                 if ($state -eq 1) { $micCount++ }
             }
         }
     } catch { $micCount = -1 }
     if ($micCount -eq 0) {
-        Write-Warn "No active microphone was found. Wheelhouse needs one to hear you -- plug one in before the first run."
+        Write-InstallNotice "No active microphone was found. Wheelhouse needs one to hear you -- plug one in before the first run."
     }
 
     # tar.exe ships with Windows 10 1803+ but is absent on some older/LTSC
@@ -307,7 +447,7 @@ function Test-Preflights {
     # only if the Parakeet download actually runs.
     $script:HasTar = [bool](Get-Command tar.exe -ErrorAction SilentlyContinue)
     if (-not $script:HasTar) {
-        Write-Warn "tar.exe was not found. It is needed to unpack the offline speech model; the installer will stop at that step if you choose the default engine."
+        Write-InstallNotice "tar.exe was not found. It is needed to unpack the offline speech model; the installer will stop at that step if you choose the default engine."
     }
 
     Write-Status "Requirement checks passed."
@@ -372,7 +512,7 @@ function Find-UvExe {
         (Join-Path $env:USERPROFILE ".cargo\bin\uv.exe")
     )
     foreach ($c in $candidates) {
-        if (Test-Path $c) { return $c }
+        if (Test-Path -LiteralPath $c) { return $c }
     }
     return $null
 }
@@ -386,11 +526,11 @@ function Test-DirOnPersistedPath {
     $target = $Directory.TrimEnd('\')
     $values = @()
     try {
-        $userPath = (Get-ItemProperty -Path "HKCU:\Environment" -Name Path -ErrorAction SilentlyContinue).Path
+        $userPath = (Get-ItemProperty -LiteralPath "HKCU:\Environment" -Name Path -ErrorAction SilentlyContinue).Path
         if ($userPath) { $values += $userPath }
     } catch {}
     try {
-        $machinePath = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" -Name Path -ErrorAction SilentlyContinue).Path
+        $machinePath = (Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" -Name Path -ErrorAction SilentlyContinue).Path
         if ($machinePath) { $values += $machinePath }
     } catch {}
     foreach ($value in $values) {
@@ -403,6 +543,11 @@ function Test-DirOnPersistedPath {
 }
 
 function Send-EnvironmentChangeBroadcast {
+    # $Advice is what the user is told when the broadcast fails. It comes from
+    # the caller because this runs for more than one variable: once for the
+    # PATH that carries uv, and again for the AI key. One fixed sentence for
+    # both sent the AI-key user looking for a uv problem they did not have.
+    param([string]$Advice)
     # A registry PATH write is invisible to already-running processes --
     # including Explorer, which every shortcut launch inherits its
     # environment from -- until a WM_SETTINGCHANGE "Environment" broadcast.
@@ -422,11 +567,23 @@ public static extern IntPtr SendMessageTimeout(
         $result = [UIntPtr]::Zero
         # HWND_BROADCAST (0xffff), WM_SETTINGCHANGE (0x1A),
         # SMTO_ABORTIFHUNG (2), 5-second per-window timeout.
-        [WheelHouseInstaller.NativeMethods]::SendMessageTimeout(
+        $sent = [WheelHouseInstaller.NativeMethods]::SendMessageTimeout(
             [IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, "Environment",
-            2, 5000, [ref]$result) | Out-Null
+            2, 5000, [ref]$result)
+        # Windows reports a refused or timed-out broadcast by returning zero,
+        # and a zero from a native call raises nothing, so discarding this
+        # return value made every broadcast look like a success. The registry
+        # write has already happened at this point: what did not happen is
+        # telling the running programs, which is exactly what the caller's
+        # advice is about. Raise so both ways of failing leave by one path.
+        if ($sent.ToInt64() -eq 0) {
+            throw "Windows did not deliver the environment-change broadcast."
+        }
     } catch {
-        Write-Warn "Could not tell running programs about the PATH change. If Wheelhouse cannot find uv when it starts, sign out and back in once."
+        # A caller that says nothing gets nothing shown, rather than a bullet
+        # with no text after it; test_every_caller_of_the_broadcast_says_what_
+        # it_was_announcing is what keeps every caller supplying one.
+        if ($Advice) { Write-InstallNotice $Advice }
     }
 }
 
@@ -452,7 +609,8 @@ function Add-DirToUserPath {
     } finally {
         $key.Close()
     }
-    Send-EnvironmentChangeBroadcast
+    Send-EnvironmentChangeBroadcast -Advice ("Could not tell running programs about the PATH change. " +
+        "If Wheelhouse cannot find uv when it starts, sign out and back in once.")
 }
 
 function Set-UserEnvVar {
@@ -465,7 +623,8 @@ function Set-UserEnvVar {
     # REG_SZ that SetEnvironmentVariable writes is correct here (unlike PATH,
     # which must keep its REG_EXPAND_SZ kind).
     [Environment]::SetEnvironmentVariable($Name, $Value, "User")
-    Send-EnvironmentChangeBroadcast
+    Send-EnvironmentChangeBroadcast -Advice ("Could not tell running programs that $Name changed. " +
+        "If Wheelhouse does not see it, sign out and back in once.")
 }
 
 function Set-AiApiKeyEnv {
@@ -592,13 +751,13 @@ function Invoke-VerifiedDownload {
     # buffers the whole response in memory).
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    if (Test-Path $Destination) {
-        $existing = (Get-FileHash -Path $Destination -Algorithm SHA256).Hash
+    if (Test-Path -LiteralPath $Destination) {
+        $existing = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
         if ($existing -ieq $ExpectedSha256) {
             Write-Status "$Description is already downloaded and verified."
             return
         }
-        Remove-Item $Destination -Force
+        Remove-Item -LiteralPath $Destination -Force
     }
 
     $partial = "$Destination.partial"
@@ -626,8 +785,8 @@ function Invoke-VerifiedDownload {
             $resumeNote = "retrying (resuming from the partial download)"
             if ((Get-WebResponseStatusCode -ErrorRecord $_) -eq 416) {
                 Write-Warn "The server rejected resuming the partial download; starting $Description from the beginning."
-                Remove-Item $partial -Force -ErrorAction SilentlyContinue
-                Remove-Item $meta -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $meta -Force -ErrorAction SilentlyContinue
                 $resumeNote = "retrying from the beginning"
             }
             if ($attempt -ge 2) {
@@ -638,10 +797,10 @@ function Invoke-VerifiedDownload {
             continue
         }
 
-        $hash = (Get-FileHash -Path $partial -Algorithm SHA256).Hash
+        $hash = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash
         if ($hash -ieq $ExpectedSha256) {
-            Move-Item -Path $partial -Destination $Destination -Force
-            if (Test-Path $meta) { Remove-Item $meta -Force }
+            Move-Item -LiteralPath $partial -Destination $Destination -Force
+            if (Test-Path -LiteralPath $meta) { Remove-Item -LiteralPath $meta -Force }
             Write-Status "$Description downloaded and verified."
             return
         }
@@ -649,8 +808,8 @@ function Invoke-VerifiedDownload {
         # Hash-mismatch recovery: DELETE the partial before retrying. A
         # persisted corrupt partial plus Range resume would otherwise be a
         # permanent failure loop that re-running the installer never clears.
-        Remove-Item $partial -Force
-        if (Test-Path $meta) { Remove-Item $meta -Force }
+        Remove-Item -LiteralPath $partial -Force
+        if (Test-Path -LiteralPath $meta) { Remove-Item -LiteralPath $meta -Force }
         if ($attempt -ge 2) {
             Stop-Install "$Description failed its integrity check twice. The downloaded file does not match the expected checksum." `
                 "This can mean a proxy or antivirus is altering downloads, or the release asset changed. Run the installer again later; if it keeps failing, file an issue."
@@ -690,21 +849,21 @@ function Get-ResumeState {
     # ReadAllText because PowerShell 5.1's ConvertFrom-Json cannot parse
     # multi-line JSON piped line-by-line from Get-Content, and
     # ConvertTo-Json writes multi-line JSON.
-    if ((Test-Path $Partial) -and (Test-Path $Meta)) {
+    if ((Test-Path -LiteralPath $Partial) -and (Test-Path -LiteralPath $Meta)) {
         $saved = $null
         try {
             $saved = [System.IO.File]::ReadAllText($Meta) | ConvertFrom-Json
         } catch { $saved = $null }
         if ($null -ne $saved) {
-            return @{ ResumeFrom = (Get-Item $Partial).Length; SavedMeta = $saved }
+            return @{ ResumeFrom = (Get-Item -LiteralPath $Partial).Length; SavedMeta = $saved }
         }
         Write-Warn "The saved download-resume information is unreadable; starting this download from the beginning."
-        Remove-Item $Partial -Force -ErrorAction SilentlyContinue
-        Remove-Item $Meta -Force -ErrorAction SilentlyContinue
-    } elseif (Test-Path $Partial) {
-        Remove-Item $Partial -Force
-    } elseif (Test-Path $Meta) {
-        Remove-Item $Meta -Force
+        Remove-Item -LiteralPath $Partial -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $Meta -Force -ErrorAction SilentlyContinue
+    } elseif (Test-Path -LiteralPath $Partial) {
+        Remove-Item -LiteralPath $Partial -Force
+    } elseif (Test-Path -LiteralPath $Meta) {
+        Remove-Item -LiteralPath $Meta -Force
     }
     return @{ ResumeFrom = 0; SavedMeta = $null }
 }
@@ -752,7 +911,7 @@ function Invoke-DownloadOnce {
             LastModified = $response.Headers["Last-Modified"]
             ContentLength = $response.ContentLength
         }
-        $newMeta | ConvertTo-Json | Set-Content -Path $Meta -Encoding ASCII
+        $newMeta | ConvertTo-Json | Set-Content -LiteralPath $Meta -Encoding ASCII
 
         $startState = Get-DownloadStartState -Append $append -ResumeFrom $resumeFrom -ContentLength $response.ContentLength
         $totalBytes = $startState.TotalBytes
@@ -798,11 +957,11 @@ function Initialize-UpdateStaging {
     # staged snapshots go stale while the user keeps working. Restoring
     # those later would silently roll the user's files back, so discard
     # them and re-stage from the live tree.
-    if ((Test-Path $StagingDir) -and -not (Test-Path $MarkerPath)) {
-        Remove-Item $StagingDir -Recurse -Force
+    if ((Test-Path -LiteralPath $StagingDir) -and -not (Test-Path -LiteralPath $MarkerPath)) {
+        Remove-Item -LiteralPath $StagingDir -Recurse -Force
     }
-    if ((Test-Path $MarkerPath) -and -not (Test-Path $StagingDir)) {
-        Remove-Item $MarkerPath -Force
+    if ((Test-Path -LiteralPath $MarkerPath) -and -not (Test-Path -LiteralPath $StagingDir)) {
+        Remove-Item -LiteralPath $MarkerPath -Force
     }
 }
 
@@ -812,7 +971,7 @@ function Save-PreservedFiles {
     foreach ($rel in $PreservePaths) {
         $dst = Join-Path $StagingDir $rel
         $src = Join-Path $AppDir $rel
-        if ((Test-Path $dst) -and -not ($OverwriteFromLive -and (Test-Path $src))) {
+        if ((Test-Path -LiteralPath $dst) -and -not ($OverwriteFromLive -and (Test-Path -LiteralPath $src))) {
             # Already in staging, and the caller either wants
             # skip-if-staged semantics or the live file is gone.
             # Update flow (no switch): a crash survivor from an
@@ -826,9 +985,9 @@ function Save-PreservedFiles {
             $saved += $rel
             continue
         }
-        if (Test-Path $src) {
+        if (Test-Path -LiteralPath $src) {
             New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
-            Copy-Item -Path $src -Destination $dst -Force
+            Copy-Item -LiteralPath $src -Destination $dst -Force
             $saved += $rel
         }
     }
@@ -842,14 +1001,14 @@ function Restore-PreservedFiles {
     # user's files only in staging, and the next run must recover them even
     # though its own save step (no app dir) found nothing to save. Returns
     # the number of files restored.
-    if (-not (Test-Path $StagingDir)) { return 0 }
-    $files = @(Get-ChildItem -Path $StagingDir -Recurse -File)
-    $stagingRoot = (Get-Item $StagingDir).FullName.TrimEnd('\')
+    if (-not (Test-Path -LiteralPath $StagingDir)) { return 0 }
+    $files = @(Get-ChildItem -LiteralPath $StagingDir -Recurse -File)
+    $stagingRoot = (Get-Item -LiteralPath $StagingDir).FullName.TrimEnd('\')
     foreach ($f in $files) {
         $rel = $f.FullName.Substring($stagingRoot.Length + 1)
         $dst = Join-Path $AppDir $rel
         New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
-        Copy-Item -Path $f.FullName -Destination $dst -Force
+        Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
     }
     return $files.Count
 }
@@ -865,7 +1024,7 @@ function Install-AppArchive {
     # The marker lives NEXT TO staging, not inside it, so the restore
     # (which copies everything staging holds) never plants it in the app.
     $marker = "$staging.wipe-started"
-    if (Test-Path $AppDir) {
+    if (Test-Path -LiteralPath $AppDir) {
         Write-Status "Updating the existing install (your settings and voice patterns are preserved)..."
         Initialize-UpdateStaging -StagingDir $staging -MarkerPath $marker
         New-Item -ItemType Directory -Force -Path $staging | Out-Null
@@ -882,23 +1041,23 @@ function Install-AppArchive {
         # re-check, so a refusal cannot strand fresh staging as a false
         # crash survivor.
         New-Item -ItemType File -Force -Path $marker | Out-Null
-        Remove-Item -Path $AppDir -Recurse -Force
+        Remove-Item -LiteralPath $AppDir -Recurse -Force
     }
 
     Write-Status "Unpacking the application..."
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-    Expand-Archive -Path $zipPath -DestinationPath $AppDir -Force
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $AppDir -Force
 
     # If the archive wraps everything in a single top-level directory,
     # flatten it so $AppDir is the repository root.
-    if (-not (Test-Path (Join-Path $AppDir "VERSION"))) {
-        $children = @(Get-ChildItem $AppDir)
-        if ($children.Count -eq 1 -and $children[0].PSIsContainer -and (Test-Path (Join-Path $children[0].FullName "VERSION"))) {
-            Get-ChildItem $children[0].FullName -Force | Move-Item -Destination $AppDir
-            Remove-Item $children[0].FullName -Recurse -Force
+    if (-not (Test-Path -LiteralPath (Join-Path $AppDir "VERSION"))) {
+        $children = @(Get-ChildItem -LiteralPath $AppDir)
+        if ($children.Count -eq 1 -and $children[0].PSIsContainer -and (Test-Path -LiteralPath (Join-Path $children[0].FullName "VERSION"))) {
+            Get-ChildItem -LiteralPath $children[0].FullName -Force | Move-Item -Destination $AppDir
+            Remove-Item -LiteralPath $children[0].FullName -Recurse -Force
         }
     }
-    if (-not (Test-Path (Join-Path $AppDir "VERSION"))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $AppDir "VERSION"))) {
         Stop-Install "The unpacked application archive does not look like Wheelhouse (no VERSION file)." `
             "If you overrode the archive URL, check it points at a Wheelhouse release archive."
     }
@@ -909,8 +1068,8 @@ function Install-AppArchive {
     if ($restored -gt 0) {
         Write-Status "Restored $restored preserved file(s) from the previous install."
     }
-    if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
-    if (Test-Path $marker) { Remove-Item $marker -Force }
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
 }
 
 # --- Environment syncs (step d) ---------------------------------------------------
@@ -924,20 +1083,41 @@ function Invoke-UvSync {
     # as a failed sync -- an unguarded Push-Location would crash the whole
     # install even for the optional components. -PathType Container:
     # plain Test-Path is also true for a FILE left at the path.
-    if (-not (Test-Path $serviceDir -PathType Container)) {
+    if (-not (Test-Path -LiteralPath $serviceDir -PathType Container)) {
         if ($Fatal) {
             Stop-Install "Setting up $ServiceRelPath failed: that path in the unpacked application is missing or is not a folder." `
                 "Run the installer again (it re-downloads and re-unpacks the application). An antivirus quarantining files can also cause this."
         }
-        Write-Warn "Setting up $ServiceRelPath failed (the path is missing or is not a folder); this optional component will be disabled."
+        Write-InstallNotice "Setting up $ServiceRelPath failed (the path is missing or is not a folder); this optional component will be disabled."
         return $false
     }
-    Push-Location $serviceDir
+    # The guard above is only a snapshot: the folder can still vanish
+    # (antivirus quarantine, manual deletion) between the check and the
+    # push, and an unhandled Push-Location failure would abort the whole
+    # install even for the optional components. Same fatal/non-fatal
+    # contract as the guard.
+    $stackDepth = (Get-Location -Stack).Count
     try {
+        Push-Location -LiteralPath $serviceDir
         $result = Invoke-Native -Exe $Uv -Arguments @("sync", "--locked", "--no-dev")
         $code = $result.ExitCode
+    } catch {
+        if ($_.ToString() -eq "WHEELHOUSE-INSTALL-STOP") { throw }
+        if ($Fatal) {
+            Stop-Install "Setting up $ServiceRelPath failed: $($_.Exception.Message)" `
+                "Run the installer again (it re-downloads and re-unpacks the application). An antivirus quarantining files can also cause this."
+        }
+        Write-InstallNotice "Setting up $ServiceRelPath failed ($($_.Exception.Message)); this optional component will be disabled."
+        return $false
     } finally {
-        Pop-Location
+        # 5.1 pushes the stack entry BEFORE setting the location, so a
+        # FAILED push still leaves an orphaned entry behind (probe-verified
+        # on 5.1.26100). Restore to the depth this call found rather than
+        # guessing whether the push "happened": that pops exactly what this
+        # call added -- one entry after a successful push, the orphaned
+        # entry after a failed one, nothing if the failure preceded the
+        # push -- and never touches an entry the caller owns.
+        while ((Get-Location -Stack).Count -gt $stackDepth) { Pop-Location }
     }
     if ($code -ne 0) {
         # Show the tail of uv's output so a failed install is diagnosable
@@ -948,7 +1128,7 @@ function Invoke-UvSync {
             Stop-Install "Setting up $ServiceRelPath failed (uv sync exit code $code)." `
                 "Check your internet connection and run the installer again. Corporate proxies can also block package downloads."
         }
-        Write-Warn "Setting up $ServiceRelPath failed (exit code $code); this optional component will be disabled."
+        Write-InstallNotice "Setting up $ServiceRelPath failed (exit code $code); this optional component will be disabled."
         return $false
     }
     return $true
@@ -956,36 +1136,77 @@ function Invoke-UvSync {
 
 # --- Hardware snapshot for the STT offer (step e) ---------------------------------
 
-function Get-CudaCapable {
+function Get-HardwareSnapshot {
     param([string]$Uv)
-    # syscheck's venv has its own dependencies that nothing else installs;
-    # its role here is GPU detection only (the RAM/CPU floor already ran
-    # natively in the preflights). Any failure degrades to "no CUDA offer".
+    # ONE syscheck run, answering two questions: whether to offer the CUDA
+    # speech engine, and where -- or whether -- the local AI model runs. Each
+    # run is a `uv run` that pays for interpreter startup and an environment
+    # check; a second one would spend several seconds of an install on data
+    # already in hand. syscheck's venv has its own dependencies that nothing
+    # else installs.
+    #
+    # Returns the parsed snapshot, or $null when it could not be produced. Both
+    # callers degrade on $null rather than failing the install: no CUDA offer,
+    # and no local AI model. The RAM/CPU floor already ran natively in the
+    # preflights, so nothing fatal depends on this.
     $serviceDir = Join-Path $AppDir "services\syscheck"
+    $stackDepth = (Get-Location -Stack).Count
     try {
-        Push-Location $serviceDir
-        try {
-            $result = Invoke-Native -Exe $Uv -Arguments @(
-                "run", "python", "syscheck.py", "--compact")
-        } finally {
-            Pop-Location
-        }
-        if ($result.ExitCode -ne 0) { return $false }
+        Push-Location -LiteralPath $serviceDir
+        $result = Invoke-Native -Exe $Uv -Arguments @(
+            "run", "python", "syscheck.py", "--compact")
+        if ($result.ExitCode -ne 0) { return $null }
         # The merged stream carries uv's stderr progress as error records;
         # the JSON is the plain-string stdout lines.
         $json = ($result.Output | Where-Object { $_ -is [string] }) -join "`n"
-        if (-not $json) { return $false }
-        $data = $json | ConvertFrom-Json
-        foreach ($gpu in $data.gpu) {
-            if ($gpu.software) { continue }
-            if ($gpu.vendor_id -eq $NvidiaVendorId -and $gpu.dedicated_vram_bytes -ge $CudaMinVramBytes) {
-                return $true
-            }
-        }
+        if (-not $json) { return $null }
+        return ($json | ConvertFrom-Json)
     } catch {
-        Write-Warn "GPU detection failed ($($_.Exception.Message)); offering CPU and cloud speech engines only."
+        Write-InstallNotice "Hardware detection failed ($($_.Exception.Message)); offering CPU and cloud speech engines only."
+        return $null
+    } finally {
+        # Same rule as Invoke-UvSync: 5.1 pushes the stack entry BEFORE
+        # setting the location, so a FAILED push still leaves an orphan --
+        # and under `irm | iex` that orphan outlives the installer in the
+        # user's own session. Restore to the depth this call found.
+        while ((Get-Location -Stack).Count -gt $stackDepth) { Pop-Location }
+    }
+}
+
+function Test-CudaCapable {
+    param($Snapshot)
+    # A capable NVIDIA card is what makes the Distil-Whisper offer honest.
+    # No snapshot means no offer.
+    if ($null -eq $Snapshot) { return $false }
+    foreach ($gpu in $Snapshot.gpu) {
+        if ($gpu.software) { continue }
+        if ($gpu.vendor_id -eq $NvidiaVendorId -and $gpu.dedicated_vram_bytes -ge $CudaMinVramBytes) {
+            return $true
+        }
     }
     return $false
+}
+
+function Get-LocalAiDecision {
+    param($Snapshot)
+    # The decision is MADE in services/syscheck/recommendations.py and carried
+    # in the snapshot. This reads it; it does not decide anything. A second
+    # copy of the thresholds here is the failure where syscheck tells a user
+    # their machine is fine and the installer refuses it -- so there are no
+    # numbers in this function, on purpose.
+    #
+    # A snapshot that could not be produced, or one from an older syscheck that
+    # predates the local_ai key, answers "no local model" with a sentence that
+    # says which of those happened.
+    if ($null -eq $Snapshot -or $null -eq $Snapshot.local_ai) {
+        return [pscustomobject]@{
+            install = $false
+            model = $null
+            gpu_layers = $null
+            reason = "The hardware check did not run on this machine, so the local AI model was not installed."
+        }
+    }
+    return $Snapshot.local_ai
 }
 
 function Get-CurrentProvider {
@@ -993,7 +1214,7 @@ function Get-CurrentProvider {
     # fresh install. Keeps an update's Enter-through-the-prompt from
     # silently switching a user's engine.
     $config = Join-Path $AppDir "services\wheelhouse\config.toml"
-    if (Test-Path $config) {
+    if (Test-Path -LiteralPath $config) {
         $content = [System.IO.File]::ReadAllText($config)
         # Both TOML string quotings: the write path normalizes to double
         # quotes, but a user-edited config may legally use single quotes,
@@ -1026,7 +1247,7 @@ function Select-SttProvider {
             throw "Unknown speech engine '$SttProvider'. Valid values: parakeet_tdt, google_stt, distil_medium_en."
         }
         if ($SttProvider -eq "distil_medium_en" -and -not $CudaCapable) {
-            Write-Warn "Distil-Whisper needs an NVIDIA graphics card, which was not detected; using Parakeet instead."
+            Write-InstallNotice "Distil-Whisper needs an NVIDIA graphics card, which was not detected; using Parakeet instead."
             return "parakeet_tdt"
         }
         return $SttProvider
@@ -1043,7 +1264,7 @@ function Select-SttProvider {
     # longer offerable on this hardware, say so before the prompt instead
     # of letting Enter quietly switch it.
     if ($CurrentProvider -and $names.ContainsKey($CurrentProvider) -and $default -ne $CurrentProvider) {
-        Write-Warn "Your current speech engine ($($names[$CurrentProvider])) is not available on this computer (it needs an NVIDIA graphics card, which was not detected), so the default has changed to $($names[$default])."
+        Write-InstallNotice "Your current speech engine ($($names[$CurrentProvider])) is not available on this computer (it needs an NVIDIA graphics card, which was not detected), so the default has changed to $($names[$default])."
     }
 
     Write-Host ""
@@ -1074,11 +1295,11 @@ function Test-ModelComplete {
     # tokens.txt alone is NOT proof of a finished extraction -- an
     # interrupted tar can leave it behind without the much larger ONNX
     # files, and the app then fails at startup with nothing to repair it.
-    if (-not (Test-Path (Join-Path $ModelDir "tokens.txt"))) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $ModelDir "tokens.txt"))) { return $false }
     foreach ($suffix in @(".int8.onnx", ".onnx")) {
         $allPresent = $true
         foreach ($part in @("encoder", "decoder", "joiner")) {
-            if (-not (Test-Path (Join-Path $ModelDir "$part$suffix"))) {
+            if (-not (Test-Path -LiteralPath (Join-Path $ModelDir "$part$suffix"))) {
                 $allPresent = $false
                 break
             }
@@ -1098,11 +1319,11 @@ function Install-ParakeetModel {
         Write-Status "The speech model is already installed."
         return
     }
-    if (Test-Path $extractedDir) {
+    if (Test-Path -LiteralPath $extractedDir) {
         # Leftover from an interrupted extraction. Remove it so the fresh
         # extraction cannot mix old and new files.
         Write-Warn "An incomplete speech model was found from an earlier run; reinstalling it."
-        Remove-Item $extractedDir -Recurse -Force
+        Remove-Item -LiteralPath $extractedDir -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
     New-Item -ItemType Directory -Force -Path $DownloadsDir | Out-Null
@@ -1119,7 +1340,7 @@ function Install-ParakeetModel {
         Stop-Install "Unpacking the speech model failed (tar exit code $($tar.ExitCode))." `
             "Run the installer again; the download itself is kept and will not repeat."
     }
-    Remove-Item $archive -Force
+    Remove-Item -LiteralPath $archive -Force
     Write-Status "Speech model installed."
 }
 
@@ -1131,7 +1352,7 @@ function Set-TomlProviderDisabled {
     # environments were not set up must be undiscoverable: discovery treats
     # an absent-or-true enabled key as available, and launch cannot repair a
     # missing venv -- the provider would appear in the menu and then fail.
-    if (-not (Test-Path $ConfigPath)) { return }
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { return }
     # .NET read: Get-Content without -Encoding decodes BOM-less UTF-8 as
     # ANSI on PowerShell 5.1, corrupting any non-ASCII byte it touches.
     # Preserve the file's existing line-ending style: the shipped provider
@@ -1171,8 +1392,8 @@ function Write-UserConfig {
     $wheelhouseDir = Join-Path $AppDir "services\wheelhouse"
     $example = Join-Path $wheelhouseDir "config.toml.example"
     $config = Join-Path $wheelhouseDir "config.toml"
-    if (-not (Test-Path $config)) {
-        Copy-Item -Path $example -Destination $config
+    if (-not (Test-Path -LiteralPath $config)) {
+        Copy-Item -LiteralPath $example -Destination $config
     }
     # Point the app at the chosen provider, preserving everything else in an
     # existing (restored) config. .NET read: Get-Content -Raw without
@@ -1223,7 +1444,7 @@ function Set-TomlSectionValues {
     # TomlBasicString, or a bare true/false). The section header is matched
     # exactly on its dotted name, so -Section "ai" never matches [ai.server] or
     # [ai.help], and -Section "ai.server" never matches [ai] or [ai.help].
-    if (-not (Test-Path $ConfigPath)) { return }
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { return }
 
     # Build the header pattern from the literal section name. Each dotted part is
     # regex-escaped (a literal name matches a literal name), then the parts are
@@ -1323,6 +1544,394 @@ function Set-AiServerConfig {
     Set-TomlSectionValues -ConfigPath $ConfigPath -Section "ai.server" -Updates $updates
 }
 
+function Set-AiRuntimeConfig {
+    param(
+        [string]$ConfigPath,
+        [string]$ModelPath,
+        [string]$BinaryDir,
+        [int]$GpuLayers
+    )
+    # Turns on the Wheelhouse-managed model server and tells it where the two
+    # pieces are. context_size and startup_timeout_seconds are left alone: the
+    # shipped defaults are right for this model, and a value the installer
+    # writes is a value a user's later edit has to fight.
+    #
+    # GpuLayers is typed [int] and written unquoted. runtime_config.py
+    # type-checks the key and disables the WHOLE local runtime on a bad type,
+    # so a quoted 99 would turn the feature off with nothing but a log line to
+    # say why.
+    #
+    # Writes no key of any kind. The local model needs no account.
+    $updates = [ordered]@{
+        enabled = "true"
+        model_path = (ConvertTo-TomlBasicString $ModelPath)
+        binary_dir = (ConvertTo-TomlBasicString $BinaryDir)
+        gpu_layers = "$GpuLayers"
+    }
+    Set-TomlSectionValues -ConfigPath $ConfigPath -Section "ai.runtime" -Updates $updates
+}
+
+function Disable-AiRuntimeConfig {
+    param([string]$ConfigPath)
+    # The refusal path, and the path every non-local mode takes. Writing
+    # enabled = false explicitly matters on a RE-RUN: a machine that had the
+    # local model and is being switched to cloud or off must stop starting its
+    # own server, and leaving the key at its previous true would keep it doing
+    # so behind whatever address the new mode wrote.
+    Set-TomlSectionValues -ConfigPath $ConfigPath -Section "ai.runtime" `
+        -Updates ([ordered]@{ enabled = "false" })
+}
+
+function Get-LocalAiRuntimeMarkerName {
+    # A function rather than a script variable so that the two callers below
+    # cannot disagree about the name, including when they are loaded on their
+    # own -- which is how the tests exercise them.
+    "wheelhouse-runtime.json"
+}
+
+function Write-LocalAiRuntimeMarker {
+    # Records what a complete extraction produced: which pinned archive it came
+    # from, and every file it wrote. Called only after Expand-Archive has
+    # finished, so a marker existing is itself the evidence that extraction
+    # completed. Written before the directory is put in its final place.
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$Sha256
+    )
+    $markerPath = Join-Path $Directory (Get-LocalAiRuntimeMarkerName)
+    # The marker is written into the same directory, so it must not record
+    # itself: on a later check the file list would never be satisfied.
+    # Each file is recorded with its length as well as its name, because a
+    # name is the one thing damage leaves behind: antivirus quarantines the
+    # contents and keeps the entry, and an extraction interrupted mid-file
+    # leaves it short. Length is not a checksum and is not meant to be -- the
+    # archive is verified by checksum on the way in, and this record answers
+    # the different question of whether everything it produced is still there.
+    $files = Get-ChildItem -LiteralPath $Directory -Recurse -File |
+        Where-Object { $_.FullName -ne $markerPath } |
+        ForEach-Object {
+            [ordered]@{
+                path  = $_.FullName.Substring($Directory.Length).TrimStart('\', '/')
+                bytes = $_.Length
+            }
+        }
+    $marker = [ordered]@{
+        archive_sha256 = $Sha256
+        files          = @($files)
+    }
+    $json = $marker | ConvertTo-Json -Depth 3
+    [System.IO.File]::WriteAllText($markerPath, $json, (New-Object System.Text.UTF8Encoding $false))
+}
+
+function Get-LocalAiRuntimeMarker {
+    # The marker of a COMPLETE extraction in $Directory, or $null.
+    #
+    # The runtime is a directory of about 93 MB -- llama-server.exe plus the
+    # libraries it loads -- so the executable being present says nothing about
+    # the rest. An extraction interrupted after the first file, a library
+    # removed by antivirus, or a previous pinned build all leave an executable
+    # in place, and all of them produce a server that cannot start. So does a
+    # file that is present but damaged, which is why each recorded file is
+    # checked for being a file and for still being the length it was written
+    # at, rather than merely for something existing at that path.
+    #
+    # Complete says nothing about WHICH build this is. That is a separate
+    # question, and only one of the two callers asks it: the swap below has to
+    # ask whether a directory is a whole build without caring which one, since
+    # the build it is comparing against is by then the one being replaced.
+    #
+    # This answers; it does not fail. The whole body is guarded, because the
+    # script makes every error terminating and both callers are worse off with
+    # an exception than with a no. The repair caller would abandon the install
+    # instead of re-extracting, and the swap caller asks this before its own
+    # try block, so an exception carries the run past the branch that keeps
+    # the last complete build. Anything that stops completeness being
+    # established is correctly "not complete": re-extracting costs one 33 MB
+    # download, and that is the cheaper mistake in both directions.
+    #
+    # But "no" then covers two different situations, and one caller has to
+    # tell them apart. Every plain no below is something this run observed --
+    # no marker, an entry the writer never wrote, a directory where a file
+    # belongs, a file that is not the length it was written at. A no from the
+    # catch is the opposite: nothing was observed, because the disk would not
+    # answer. -Unreadable reports which of the two happened, for the caller
+    # that deletes a directory on the strength of the answer. The distinction
+    # is where the no came from rather than what kind of error was raised, so
+    # it does not depend on classifying exceptions.
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [ref]$Unreadable
+    )
+    try {
+        if ($null -ne $Unreadable) { $Unreadable.Value = $false }
+        if (-not (Test-Path -LiteralPath $Directory)) { return $null }
+        $markerPath = Join-Path $Directory (Get-LocalAiRuntimeMarkerName)
+        if (-not (Test-Path -LiteralPath $markerPath)) { return $null }
+
+        # Unreadable or not JSON lands in the catch below, as does anything
+        # the filesystem refuses while the files are being checked.
+        $marker = Get-Content -Raw -LiteralPath $markerPath | ConvertFrom-Json
+        if (-not $marker.files) { return $null }
+
+        foreach ($entry in $marker.files) {
+            # An entry this installer's own writer did not produce -- a marker
+            # from an older format, or one whose write was cut short -- says
+            # nothing about the file it names, so it cannot be counted as
+            # satisfied. bytes is compared against $null rather than tested
+            # for truth, because a legitimately empty file records a length of
+            # zero. The path half of this is belt and braces: Join-Path
+            # accepts a null child and hands back $Directory itself, which
+            # then fails the file check below, so every marker shape tried
+            # reaches the same answer either way. It is kept because that
+            # answer arrives by a chain of coincidences, and the requirement
+            # is worth stating outright.
+            if (-not $entry.path -or $null -eq $entry.bytes) { return $null }
+            # One observation, not two. Asking whether the path exists and
+            # then reading the item are separate looks at the disk, and
+            # antivirus can take the file away in between -- which is how the
+            # exception above got in. Fetching the item once and asking it
+            # both questions removes that gap as well as the exception.
+            $item = Get-Item -LiteralPath (Join-Path $Directory $entry.path)
+            # A directory of the right name is not the file. The extraction
+            # can leave one, and so can a later archive that moves a library
+            # into a folder named after it. The length check does not cover
+            # this: PowerShell reports a Length of 1 for any object that has
+            # none, directories included, so a one-byte file replaced by a
+            # directory passes it.
+            if ($item -isnot [System.IO.FileInfo]) { return $null }
+            if ($item.Length -ne $entry.bytes) { return $null }
+        }
+        return $marker
+    } catch {
+        if ($null -ne $Unreadable) { $Unreadable.Value = $true }
+        return $null
+    }
+}
+
+function Test-LocalAiRuntimeInstalled {
+    # True only for a complete extraction of the archive we currently pin.
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+    $marker = Get-LocalAiRuntimeMarker -Directory $Directory
+    if ($null -eq $marker) { return $false }
+    return $marker.archive_sha256 -eq $ExpectedSha256
+}
+
+function Remove-LocalAiRuntimeResidue {
+    # Removes the three directories the replacement below can leave beside the
+    # installed runtime.
+    #
+    # Only safe where a whole build of the pinned archive has just been shown
+    # to be at $Directory. Until that is known, .previous or .unreadable may be
+    # the only working build on the machine, which is what the choice inside
+    # Move-DirectoryIntoPlace exists to protect.
+    #
+    # A failure is reported and not thrown. The build is installed and verified
+    # by the time this runs, so a directory that will not delete is untidy
+    # rather than harmful, and throwing would end the install past the point
+    # where the runtime is on disk -- the caller's catch only warns, so the
+    # configuration pointing at the runtime would never be written, and a
+    # locked directory would turn into no AI features at all.
+    #
+    # The existence check is inside the try with the removal, not before it.
+    # Whatever holds a directory open holds it against the question "is it
+    # there?" as firmly as against the delete, so guarding only the delete
+    # would move the abort one line rather than remove it.
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    foreach ($name in @("previous", "unreadable", "incoming")) {
+        $residue = "$Directory.$name"
+        try {
+            if (Test-Path -LiteralPath $residue) { Remove-Item -LiteralPath $residue -Recurse -Force }
+        } catch {
+            Write-Warning ("The leftover AI runtime at $residue could not " +
+                "be removed. It is not in use and is safe to delete by hand. " +
+                "This installer tries again each time it runs.")
+        }
+    }
+}
+
+function Move-DirectoryIntoPlace {
+    param([string]$Staging, [string]$Final)
+    # Replaces $Final with $Staging so that $Final holds one complete
+    # directory or the other at every moment, never neither.
+    #
+    # Deleting $Final first and moving $Staging second is the obvious order
+    # and the wrong one: when the move fails the user is left with nothing
+    # installed, past a 33 MB download, and with the build that worked this
+    # morning gone. A failure here is not exotic either -- antivirus holds a
+    # freshly written executable open, and llama-server.exe is exactly the
+    # kind of file it holds longest.
+    $backup = "$Final.previous"
+    # A second holding place, used only on the run that can read neither of
+    # the two directories it would otherwise choose between. It is emptied by
+    # the last line of this function, so it survives no longer than it takes
+    # to install a build that makes both of the old ones residue.
+    $held = "$Final.unreadable"
+    $movedAside = $false
+
+    # An existing copy is one of two very different things, and the difference
+    # decides whether it may be deleted. When the installed build is whole,
+    # the copy is residue from a run that lost power between the two moves,
+    # and it has to go or the rename below has nowhere to land. When the
+    # installed build is missing or partial, the copy is what a failed restore
+    # left -- the message that failure prints tells the user to rely on it --
+    # and it is then the only whole build on the machine. Deleting it there,
+    # or letting the partial build overwrite it, is what leaves a user who
+    # reran the installer with no runtime at all rather than an old one.
+    #
+    # There is a third state, and it decides which of the two survives: this
+    # run could not read the installed build at all. A locked file is not
+    # evidence that a build is partial, and this is the one place where
+    # treating it as such destroys something -- a file lock here would delete
+    # a build that works in favour of a leftover that may never have been one.
+    # A lock is also not a far-fetched thing to hit at this moment, since it
+    # is the same antivirus behaviour the rest of this function exists to
+    # survive. So when the installed build cannot be read, ask about the copy
+    # instead, and keep whichever of the two is more likely to run: the copy
+    # if it can be shown whole, and otherwise the installed build, which is at
+    # least the one the machine has been running.
+    #
+    # And there is a fourth: the copy cannot be read either. Whatever locked
+    # one of these directories is as likely to have locked the other, since
+    # they sit side by side and hold the same files. Nothing is then known
+    # about either one, so every choice between them is a guess, and either
+    # guess destroys the only whole build whenever it guesses wrong. Both are
+    # kept instead. The rename below needs $backup free to land in, so the
+    # copy moves one step further out of the way and waits there.
+    if (Test-Path -LiteralPath $backup) {
+        $installedUnreadable = $false
+        $installedIsWhole = $null -ne (Get-LocalAiRuntimeMarker `
+            -Directory $Final -Unreadable ([ref]$installedUnreadable))
+
+        if (-not $installedUnreadable) {
+            $keep = if ($installedIsWhole) { 'installed' } else { 'copy' }
+        } else {
+            $copyUnreadable = $false
+            $copyIsWhole = $null -ne (Get-LocalAiRuntimeMarker `
+                -Directory $backup -Unreadable ([ref]$copyUnreadable))
+            if (-not $copyUnreadable) {
+                $keep = if ($copyIsWhole) { 'copy' } else { 'installed' }
+            } elseif (Test-Path -LiteralPath $Final) {
+                $keep = 'both'
+            } else {
+                # Nothing to weigh the copy against, so it is not a guess.
+                $keep = 'copy'
+            }
+        }
+
+        if ($keep -eq 'installed') {
+            Remove-Item -LiteralPath $backup -Recurse -Force
+        } elseif ($keep -eq 'copy') {
+            if (Test-Path -LiteralPath $Final) { Remove-Item -LiteralPath $Final -Recurse -Force }
+            # Already where a restore expects to find it.
+            $movedAside = $true
+        } elseif (Test-Path -LiteralPath $held) {
+            # A third directory, from an earlier run that kept both and then
+            # could not put the build it moved aside back. Three is one more
+            # than this function has places for, and none of them can be
+            # thrown away on what this run has been able to read.
+            throw ("The AI runtime could not be replaced. $Final, $backup " +
+                "and $held are all present, and this run could not read " +
+                "the first two, so none of them can be discarded safely. " +
+                "Delete the ones you do not want and run this installer " +
+                "again.")
+        } else {
+            Move-Item -LiteralPath $backup -Destination $held
+        }
+    }
+
+    if (-not $movedAside -and (Test-Path -LiteralPath $Final)) {
+        Move-Item -LiteralPath $Final -Destination $backup
+        $movedAside = $true
+    }
+
+    try {
+        Move-Item -LiteralPath $Staging -Destination $Final
+    } catch {
+        $failure = $_
+        if ($movedAside) {
+            try {
+                # A move that failed part-way leaves some of the new build at
+                # the destination, and that has to go before the old one can
+                # come back.
+                if (Test-Path -LiteralPath $Final) { Remove-Item -LiteralPath $Final -Recurse -Force }
+                Move-Item -LiteralPath $backup -Destination $Final
+            } catch {
+                Write-Warning ("The previous AI runtime could not be put " +
+                    "back. It is at $backup; rename it to $Final to restore " +
+                    "it, or rerun this installer.")
+            }
+        }
+        throw $failure
+    }
+
+    # The new build is installed and was verified on the way in, so the copy
+    # and any build kept because an earlier run could not read it have nothing
+    # left to be kept for. This runs whether or not this run was the one that
+    # made them, which is what stops them accumulating across runs.
+    Remove-LocalAiRuntimeResidue -Directory $Final
+}
+
+function Install-LocalAiRuntime {
+    param([int]$GpuLayers)
+    # Puts the two pieces on disk and returns the model file's full path.
+    # Downloads go through Invoke-VerifiedDownload like every other download in
+    # this script: hash-checked, resumable, and re-runnable -- which matters
+    # more here than anywhere else, because the model is 5.15 GB and a user on
+    # a domestic connection may well be interrupted.
+    New-Item -ItemType Directory -Force -Path $AiModelsDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $DownloadsDir | Out-Null
+
+    $modelPath = Join-Path $AiModelsDir $LocalAiModelFileName
+
+    if (-not (Test-LocalAiRuntimeInstalled -Directory $LlamaDir `
+              -ExpectedSha256 $LlamaServerSha256)) {
+        $archive = Join-Path $DownloadsDir "llama-server-vulkan.zip"
+        Write-Status "Downloading the AI runtime (about 33 MB)..."
+        Invoke-VerifiedDownload -Url $LlamaServerUrl -Destination $archive `
+            -ExpectedSha256 $LlamaServerSha256 -Description "the AI runtime"
+
+        # Unpack beside the destination, not into it. An interruption then
+        # leaves the staging directory half-filled and the installed one
+        # untouched, so a rerun still sees the state it saw before rather
+        # than a directory that is neither the old build nor the new one.
+        $staging = "$LlamaDir.incoming"
+        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $staging | Out-Null
+        Write-Status "Unpacking the AI runtime..."
+        Expand-Archive -LiteralPath $archive -DestinationPath $staging -Force
+        if (-not (Test-Path -LiteralPath (Join-Path $staging "llama-server.exe"))) {
+            Remove-Item -LiteralPath $staging -Recurse -Force
+            throw "The AI runtime archive did not contain llama-server.exe."
+        }
+        # Only now, with every file written: the marker is what a later run
+        # reads as proof that an extraction finished.
+        Write-LocalAiRuntimeMarker -Directory $staging -Sha256 $LlamaServerSha256
+
+        Move-DirectoryIntoPlace -Staging $staging -Final $LlamaDir
+        Remove-Item -LiteralPath $archive -Force
+    } else {
+        Write-Status "The AI runtime is already installed."
+        # The only other place these are removed is the end of
+        # Move-DirectoryIntoPlace, which this branch does not reach. Without
+        # this call a leftover directory beside a current build would never be
+        # removed by any later run: each one would come back here and stop.
+        # A run interrupted between moving the copy aside and moving the build
+        # out of the way ends in exactly that state, and so does a run whose
+        # own removal of a copy failed.
+        Remove-LocalAiRuntimeResidue -Directory $LlamaDir
+    }
+
+    # 5.15 GB, so the size is stated before the wait rather than after it.
+    Write-Status "Downloading the AI model (about 5.2 GB; this is a large download)..."
+    Invoke-VerifiedDownload -Url $LocalAiModelUrl -Destination $modelPath `
+        -ExpectedSha256 $LocalAiModelSha256 -Description "the AI model"
+
+    return $modelPath
+}
+
 function Write-ModelOverrideFile {
     # The per-machine model-path channel: the provider resolves
     # [parakeet_tdt].model_path from this file ahead of its tracked config.
@@ -1358,7 +1967,7 @@ function New-AppShortcut {
     $shortcut.Arguments = "run --directory `"$workDir`" --locked --no-sync python launcher.py"
     $shortcut.WorkingDirectory = $workDir
     $icon = Join-Path $AppDir "services\wheelhouse\WheelHouse.ico"
-    if (Test-Path $icon) { $shortcut.IconLocation = $icon }
+    if (Test-Path -LiteralPath $icon) { $shortcut.IconLocation = $icon }
     $shortcut.Description = "Wheelhouse voice control"
     $shortcut.Save()
 }
@@ -1366,7 +1975,7 @@ function New-AppShortcut {
 function Remove-AllShortcuts {
     foreach ($folder in @("Programs", "Desktop", "Startup")) {
         $lnk = Join-Path ([Environment]::GetFolderPath($folder)) $ShortcutName
-        if (Test-Path $lnk) { Remove-Item $lnk -Force }
+        if (Test-Path -LiteralPath $lnk) { Remove-Item -LiteralPath $lnk -Force }
     }
 }
 
@@ -1374,7 +1983,7 @@ function Remove-AllShortcuts {
 
 function Invoke-Uninstall {
     Write-Host "Wheelhouse uninstaller" -ForegroundColor Cyan
-    if (-not (Test-Path $LocalRoot) -and -not (Test-Path $RoamingRoot)) {
+    if (-not (Test-Path -LiteralPath $LocalRoot) -and -not (Test-Path -LiteralPath $RoamingRoot)) {
         Write-Status "Wheelhouse does not appear to be installed for this user. Removing any leftover shortcuts."
         Remove-AllShortcuts
         return
@@ -1416,12 +2025,12 @@ function Invoke-Uninstall {
         # kept copy can be the user's only copy.
         New-Item -ItemType Directory -Force -Path $keepDir | Out-Null
         $saved = @(Save-PreservedFiles -StagingDir $keepDir -OverwriteFromLive)
-        if (Test-Path $AppDir) { Remove-Item $AppDir -Recurse -Force }
-        if (Test-Path $DownloadsDir) { Remove-Item $DownloadsDir -Recurse -Force }
+        if (Test-Path -LiteralPath $AppDir) { Remove-Item -LiteralPath $AppDir -Recurse -Force }
+        if (Test-Path -LiteralPath $DownloadsDir) { Remove-Item -LiteralPath $DownloadsDir -Recurse -Force }
         Write-Status "Your personal data was kept at: $keepDir (and your speech model at $ModelsDir)."
         Write-Host "    Re-running the installer later will offer a fresh install; copy files back from there if you want them."
     } else {
-        if (Test-Path $LocalRoot) { Remove-Item $LocalRoot -Recurse -Force }
+        if (Test-Path -LiteralPath $LocalRoot) { Remove-Item -LiteralPath $LocalRoot -Recurse -Force }
     }
 
     # The persisted cloud AI key (WHEELHOUSE_AI_API_KEY) is an app credential,
@@ -1433,13 +2042,13 @@ function Invoke-Uninstall {
     # a failure to remove the variable cannot abort a completed removal.
     if (-not $keep) {
         try { Clear-AiApiKeyEnv }
-        catch { Write-Warn "Could not clear the saved AI key from your environment: $($_.Exception.Message). You can remove WHEELHOUSE_AI_API_KEY manually in Windows Environment Variables." }
+        catch { Write-InstallNotice "Could not clear the saved AI key from your environment: $($_.Exception.Message). You can remove WHEELHOUSE_AI_API_KEY manually in Windows Environment Variables." }
     }
 
     # The roaming root holds provider PID and port files, never user data. A
     # stale PID file surviving into a reinstall could point cleanup at an
     # innocent process that now owns the recycled PID.
-    if (Test-Path $RoamingRoot) { Remove-Item $RoamingRoot -Recurse -Force }
+    if (Test-Path -LiteralPath $RoamingRoot) { Remove-Item -LiteralPath $RoamingRoot -Recurse -Force }
     Remove-AllShortcuts
     Write-Status "Wheelhouse has been removed."
     Write-Host "    If anything is left behind, the folders to check are:"
@@ -1476,8 +2085,11 @@ function Invoke-MainInstall {
     Invoke-UvSync -Uv $uv -ServiceRelPath "services\wheelhouse" -Fatal | Out-Null
     $syscheckOk = Invoke-UvSync -Uv $uv -ServiceRelPath "services\syscheck"
 
-    $cudaCapable = $false
-    if ($syscheckOk) { $cudaCapable = Get-CudaCapable -Uv $uv }
+    # One hardware snapshot, two answers: the CUDA speech-engine offer here and
+    # the local-AI decision in the AI block below.
+    $snapshot = $null
+    if ($syscheckOk) { $snapshot = Get-HardwareSnapshot -Uv $uv }
+    $cudaCapable = Test-CudaCapable -Snapshot $snapshot
 
     $currentProvider = Get-CurrentProvider
     $provider = Select-SttProvider -CudaCapable $cudaCapable -CurrentProvider $currentProvider -SttProvider $SttProvider
@@ -1528,12 +2140,17 @@ function Invoke-MainInstall {
     # (the release archive excludes it -- manifest.toml). Capture it BEFORE
     # Write-UserConfig, which creates it from config.toml.example on a fresh
     # install. So $configPreexisted true == re-run/update, false == first install.
-    $configPreexisted = Test-Path (Join-Path $AppDir "services\wheelhouse\config.toml")
+    $configPreexisted = Test-Path -LiteralPath (Join-Path $AppDir "services\wheelhouse\config.toml")
     Write-UserConfig -Provider $provider
 
-    # AI helper: write [ai.server] from the -AiMode choice. Three intents:
+    # AI helper: write [ai.server] from the -AiMode choice. Four intents:
     #   cloud -- pin Google's Gemini Flash Lite and route the key to the
     #            environment (never config.toml, git-tracked -- wh-ai-key-from-env).
+    #   local -- download a llama.cpp build and a model file and configure
+    #            Wheelhouse to start its own server. No account, no key. The
+    #            hardware check runs FIRST; a machine that cannot run the model
+    #            is told why and gets the off state instead of 5 GB that will
+    #            not start (wh-ai-installer-local-mode).
     #   off   -- explicit: write the AI-off state (empty base_url, disabled) AND
     #            clear the persisted key so no stale secret lingers (codex 2.3).
     #   keep  -- the default when -AiMode is omitted. A re-run/update PRESERVES
@@ -1559,6 +2176,10 @@ function Invoke-MainInstall {
                 Set-AiApiKeyEnv -Key $aiKey
                 $aiBaseUrl = if ($AiBaseUrl) { $AiBaseUrl } else { $DefaultAiBaseUrl }
                 $aiModel = if ($AiModel) { $AiModel } else { $DefaultAiModel }
+                # Switching a machine that had the local model over to cloud
+                # must stop it starting its own server; the runtime's enabled
+                # key is separate from base_url and would otherwise stay true.
+                Disable-AiRuntimeConfig -ConfigPath $aiConfigPath
                 Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl $aiBaseUrl -Model $aiModel -Kind "cloud"
                 # Re-enable the [ai] master switch (a prior "off" install may have
                 # turned it off); base_url alone does not undo that.
@@ -1570,6 +2191,7 @@ function Invoke-MainInstall {
                 # disabled) so the app is not left failing every AI request
                 # against a keyless cloud endpoint. The user can set the key and
                 # re-run, or enable AI in config.toml later.
+                Disable-AiRuntimeConfig -ConfigPath $aiConfigPath
                 Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl "" -Kind "local"
                 Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "false" })
                 # Also clear any previously-persisted key, so the off state is
@@ -1579,11 +2201,48 @@ function Invoke-MainInstall {
                 # the out-of-band -AiApiKey / WHEELHOUSE_AI_API_KEY_INPUT, not this
                 # persisted variable.
                 Clear-AiApiKeyEnv
-                Write-Warn "AI helper was set to cloud but no API key was provided, so AI is left off. Set the WHEELHOUSE_AI_API_KEY environment variable and enable AI in config.toml to turn it on later."
+                Write-InstallNotice "AI helper was set to cloud but no API key was provided, so AI is left off. Set the WHEELHOUSE_AI_API_KEY environment variable and enable AI in config.toml to turn it on later."
+            }
+        } elseif ($AiMode -eq "local") {
+            # The hardware decision is READ, not made -- it comes from
+            # services/syscheck/recommendations.py by way of the snapshot
+            # fetched above, so syscheck and the installer cannot give a user
+            # different answers about the same machine. Read BEFORE any
+            # download: finding out after 5 GB that the machine cannot run it
+            # is the same mistake in a more expensive form.
+            $decision = Get-LocalAiDecision -Snapshot $snapshot
+            if ($decision.install) {
+                $modelPath = Install-LocalAiRuntime -GpuLayers $decision.gpu_layers
+                # Order matters, as in the cloud branch: put the pieces on disk
+                # and point the runtime at them BEFORE enabling AI. The
+                # surrounding try/catch only warns, so a failure between these
+                # steps must not leave AI enabled against a server that has
+                # nothing to serve.
+                Set-AiRuntimeConfig -ConfigPath $aiConfigPath -ModelPath $modelPath `
+                    -BinaryDir $LlamaDir -GpuLayers $decision.gpu_layers
+                # base_url carries the port the server is started on -- there is
+                # deliberately no port key in [ai.runtime], so this address is
+                # the only place it lives (ai/runtime_config.py).
+                Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl $LocalAiBaseUrl `
+                    -Model $LocalAiModelName -Kind "local"
+                # A prior "off" install left [ai] enabled = false, and base_url
+                # alone does not undo that.
+                Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "true" })
+                Write-Status "AI helper configured (local model, running on $(if ($decision.gpu_layers -gt 0) { 'the graphics card' } else { 'the processor' }))."
+            } else {
+                # The machine cannot run it. Say why in the ladder's own words
+                # -- a wording rewritten here would be a second place for it to
+                # go stale -- and write the off state rather than installing
+                # something that cannot start.
+                Disable-AiRuntimeConfig -ConfigPath $aiConfigPath
+                Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl "" -Kind "local"
+                Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "false" })
+                Write-InstallNotice "$($decision.reason)"
             }
         } elseif ($AiMode -eq "off") {
             # Explicit off: write the off state and clear the persisted key so a
             # switch-off actually turns AI off end to end (codex 2.3).
+            Disable-AiRuntimeConfig -ConfigPath $aiConfigPath
             Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl "" -Kind "local"
             # Disable the [ai] master switch too, so the app does not log an
             # every-startup "enabled but no server" upgrade warning on a fresh
@@ -1601,19 +2260,20 @@ function Invoke-MainInstall {
             # the off state (empty base_url, disabled) rather than shipping the
             # example's default pointed at an Ollama the installer never set up.
             # No persisted key exists on a fresh machine, so nothing to clear.
+            Disable-AiRuntimeConfig -ConfigPath $aiConfigPath
             Set-AiServerConfig -ConfigPath $aiConfigPath -BaseUrl "" -Kind "local"
             Set-TomlSectionValues -ConfigPath $aiConfigPath -Section "ai" -Updates ([ordered]@{ enabled = "false" })
             Write-Status "AI helper left off. You can set one up later in config.toml."
         }
     } catch {
-        Write-Warn "Could not configure the AI helper: $($_.Exception.Message). Wheelhouse is installed; you can set up AI later in config.toml."
+        Write-InstallNotice "Could not configure the AI helper: $($_.Exception.Message). Wheelhouse is installed; you can set up AI later in config.toml."
     }
 
     if ($provider -eq "google_stt") {
-        Write-Warn "The Google Cloud engine needs credentials before it can hear you. See the Google Cloud section of INSTALL.md in the install folder: $AppDir"
+        Write-InstallNotice "The Google Cloud engine needs credentials before it can hear you. See the Google Cloud section of INSTALL.md in the install folder: $AppDir"
     }
     if ($provider -eq "distil_medium_en") {
-        Write-Warn "The Distil-Whisper engine downloads its own model on first start; the first launch will take a few minutes."
+        Write-InstallNotice "The Distil-Whisper engine downloads its own model on first start; the first launch will take a few minutes."
     }
 
     Write-InstallProgress 95 "Finishing up"
@@ -1629,7 +2289,7 @@ function Invoke-MainInstall {
             New-AppShortcut -LnkPath $lnkPath
             Write-Status "Shortcut created: $lnkPath"
         } catch {
-            Write-Warn "Could not create the $shortcutFolder shortcut at ${lnkPath}: $($_.Exception.Message)"
+            Write-InstallNotice "Could not create the $shortcutFolder shortcut at ${lnkPath}: $($_.Exception.Message)"
         }
     }
 
@@ -1642,15 +2302,23 @@ function Invoke-MainInstall {
             New-AppShortcut -LnkPath $startupLnk
             Write-Status "Wheelhouse will start automatically at login ($startupLnk)."
         } catch {
-            Write-Warn "Could not create the Startup shortcut at ${startupLnk}: $($_.Exception.Message)"
+            Write-InstallNotice "Could not create the Startup shortcut at ${startupLnk}: $($_.Exception.Message)"
         }
     }
 
     Write-Host ""
     Write-Status "Wheelhouse $AppVersion is installed."
     Write-InstallProgress 100 "Wheelhouse is installed"
-    Write-Host "    Before the first run: check Windows microphone permission is on"
-    Write-Host "    (Settings > Privacy and security > Microphone > Let desktop apps access your microphone)."
+    # Only when it is actually off. This used to tell every user to go and check
+    # a Windows setting whether or not anything was wrong with it, which is a
+    # chore for the many and buries the warning for the few
+    # (wh-wizard-mic-permission-noise). Checked here, at the end, because the
+    # graphical installer offers to fix it on a page near the start and the
+    # answer can have changed since.
+    if (-not (Test-MicrophonePermission)) {
+        Write-InstallNotice ("Windows is blocking desktop apps from the microphone, so Wheelhouse will hear nothing. " +
+            "Turn it on at Settings > Privacy and security > Microphone > Let desktop apps access your microphone.")
+    }
     Write-Host ""
 
     $startNow = Resolve-YesNoChoice -Specified ($StartNow -ne "") -Value ($StartNow -eq "yes") `
@@ -1689,6 +2357,13 @@ try {
     if ($_.ToString() -notlike "*WHEELHOUSE-INSTALL-STOP*") {
         Write-Fail "Unexpected error: $($_.Exception.Message)"
         Write-Host "    Please run the installer again; if it keeps failing, file an issue: $IssuesUrl"
+        Write-Host "    or email help@wheelhouse-project.org"
+        # The graphical installer's failure dialog is built from these tagged
+        # lines. Without them the one failure with no plain-English reason --
+        # the unexpected one -- would also be the one the user is told nothing
+        # about.
+        Write-InstallFailure -Reason "Unexpected error: $($_.Exception.Message)" `
+            -WhatToTry "Run Setup again. If it stops the same way, send the setup log to help@wheelhouse-project.org."
     }
     if ($script:RunningFromFile) { exit 1 }
 }

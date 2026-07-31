@@ -1379,3 +1379,52 @@ class TestUtteranceStateEnum:
         assert UtteranceState.IDLE != UtteranceState.ACTIVE
         assert UtteranceState.ACTIVE != UtteranceState.FINALIZED
         assert UtteranceState.IDLE != UtteranceState.FINALIZED
+
+
+# ---------------------------------------------------------------------------
+# build_streamer factory (wh-google-creds-file-picker)
+# ---------------------------------------------------------------------------
+
+class TestBuildStreamer:
+    """main.build_streamer passes the configured credentials file (and the
+    rest of the config) into GoogleDirectStreamer."""
+
+    def _cfg(self, **overrides):
+        cfg = MagicMock()
+        cfg.language = "en-US"
+        cfg.model = "latest_short"
+        cfg.rate = 16000
+        cfg.auto_punct = False
+        cfg.single_utterance = False
+        cfg.phrase_hints = ["hint"]
+        cfg.hints_boost = 10.0
+        cfg.class_tokens = []
+        cfg.credentials_file = ""
+        cfg.debug = FakeDebugConfig()
+        for key, value in overrides.items():
+            setattr(cfg, key, value)
+        return cfg
+
+    def test_passes_credentials_file(self):
+        import main as main_module
+
+        event = threading.Event()
+        with patch.object(main_module, "GoogleDirectStreamer") as mock_streamer:
+            main_module.build_streamer(
+                self._cfg(credentials_file="C:/keys/sa.json"), event
+            )
+        kwargs = mock_streamer.call_args.kwargs
+        assert kwargs["credentials_file"] == "C:/keys/sa.json"
+        assert kwargs["transcription_enabled_event"] is event
+
+    def test_passes_core_config_values(self):
+        import main as main_module
+
+        event = threading.Event()
+        with patch.object(main_module, "GoogleDirectStreamer") as mock_streamer:
+            main_module.build_streamer(self._cfg(), event)
+        kwargs = mock_streamer.call_args.kwargs
+        assert kwargs["language"] == "en-US"
+        assert kwargs["model"] == "latest_short"
+        assert kwargs["sample_rate"] == 16000
+        assert kwargs["credentials_file"] == ""

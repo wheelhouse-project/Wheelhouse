@@ -4,6 +4,8 @@ Tests the sounddevice wrapper that adapts MicrophoneStream to the
 AudioProvider interface.
 """
 
+import logging
+
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 
@@ -139,7 +141,8 @@ class TestSounddeviceCaptureStartStop:
                 capture.start()
 
     def test_stop_calls_stream_stop(self, mock_microphone_stream):
-        """Should call stop on MicrophoneStream."""
+        """Should call stop on MicrophoneStream and keep the instance for
+        the next start (wh-sounddevice-starvation-parity.4.1)."""
         _, mock_instance = mock_microphone_stream
         capture = SounddeviceAudioCapture()
         capture.start()
@@ -147,7 +150,8 @@ class TestSounddeviceCaptureStartStop:
         capture.stop()
 
         mock_instance.stop.assert_called_once()
-        assert capture._stream is None
+        assert capture._stream is mock_instance
+        assert capture._started is False
 
     def test_stop_when_not_started_is_noop(self):
         """Should be no-op when not started."""
@@ -361,25 +365,78 @@ class TestSounddeviceCaptureListDevices:
             assert devices == []
 
 
+class TestSounddeviceCaptureRestartDiagnostics:
+    """The adapter must not lose MicrophoneStream's pending diagnostics on
+    restart (wh-sounddevice-starvation-parity.4.1).
+
+    MicrophoneStream deliberately preserves its _pending_log_msgs deque
+    across its own stop()/start(), but the production restart path (the
+    google provider soft restart) cycles the ADAPTER: mic.stop() then
+    mic.start(). If the adapter discards the MicrophoneStream and builds a
+    fresh one, unread callback-priority and [stall] lines vanish with the
+    old instance.
+    """
+
+    def test_stop_start_reuses_microphone_stream(self, mock_microphone_stream):
+        """One MicrophoneStream instance must serve the adapter's whole
+        lifetime; stop()/start() cycles restart it rather than replace it."""
+        MockStream, mock_instance = mock_microphone_stream
+        capture = SounddeviceAudioCapture()
+
+        capture.start()
+        capture.stop()
+        capture.start()
+
+        assert MockStream.call_count == 1
+        assert capture._stream is mock_instance
+        assert mock_instance.start.call_count == 2
+        assert mock_instance.stop.call_count == 1
+
+    def test_pending_diagnostics_survive_adapter_stop_start(self, caplog):
+        """A diagnostic line composed before an adapter-level restart must
+        still be logged by the first read() after the restart. Uses the real
+        MicrophoneStream (only the PortAudio stream object is faked) so the
+        production adapter lifecycle is what is exercised."""
+        with patch('shared_audio.capture.sounddevice_capture.SOUNDDEVICE_AVAILABLE', True), \
+                patch('shared_audio.microphone.sd.InputStream',
+                      return_value=MagicMock()):
+            capture = SounddeviceAudioCapture()
+            capture.start()
+            capture._stream._pending_log_msgs.append(
+                "[stall] diagnostic composed before restart")
+
+            capture.stop()
+            capture.start()
+
+            with caplog.at_level(logging.INFO):
+                capture.read(timeout=0.01)
+
+        assert any("diagnostic composed before restart" in r.message
+                   for r in caplog.records)
+
+
 class TestSounddeviceCaptureAdversarial:
     """Adversarial tests for edge cases."""
 
     def test_multiple_start_stop_cycles(self, mock_microphone_stream):
-        """Should handle multiple start/stop cycles."""
+        """Should handle multiple start/stop cycles, restarting the one
+        MicrophoneStream instance each time rather than replacing it."""
         MockStream, mock_instance = mock_microphone_stream
         capture = SounddeviceAudioCapture()
 
         for i in range(3):
             capture.start()
-            assert capture._stream is not None
+            assert capture._stream is mock_instance
             mock_instance.start.assert_called()
 
             capture.stop()
-            assert capture._stream is None
+            assert capture._stream is mock_instance
             mock_instance.stop.assert_called()
 
             mock_instance.start.reset_mock()
             mock_instance.stop.reset_mock()
+
+        MockStream.assert_called_once()
 
     def test_read_after_stop(self, mock_microphone_stream):
         """Should return None when reading after stop."""

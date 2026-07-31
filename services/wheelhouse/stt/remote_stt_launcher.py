@@ -60,6 +60,7 @@ class RemoteSTTLauncher:
         ws_host: str = "localhost",
         ws_port: int = 0,
         wake_word_config: Optional[dict] = None,
+        google_credentials_file: str = "",
     ):
         """Initialize RemoteSTTLauncher.
 
@@ -70,6 +71,10 @@ class RemoteSTTLauncher:
             ws_port: WebSocket port to pass to providers when starting.
             wake_word_config: Wake word configuration dict with keys: enabled, keyword,
                 sensitivity, mode, model_dir. Passed to STT providers as CLI args.
+            google_credentials_file: Path to the Google service-account key file
+                (stt.google.credentials_file). Passed to the google_stt provider
+                as a --credentials-file CLI arg; empty means the provider uses
+                the GOOGLE_APPLICATION_CREDENTIALS environment variable.
         """
         if services_dir is None:
             # Default: project_root/services/stt_providers/
@@ -89,6 +94,7 @@ class RemoteSTTLauncher:
         self.ws_host = ws_host
         self.ws_port = ws_port
         self.wake_word_config: dict = wake_word_config or {}
+        self.google_credentials_file: str = google_credentials_file
         self._providers: Optional[list[dict]] = None
         self._ws_manager: Optional["WebSocketManager"] = None
         self._notify_callback: Optional["NotifyCallback"] = None
@@ -98,6 +104,11 @@ class RemoteSTTLauncher:
         # Initialized as set so is_starting returns False before any provider launch
         self._provider_ready_event: threading.Event = threading.Event()
         self._provider_ready_event.set()
+        # True when the provider reported its startup FAILED
+        # (kind="startup_failed"). The same event is set so is_starting
+        # ends and _monitor_startup wakes; the flag tells them apart
+        # (wh-google-creds-file-picker.1.5).
+        self._provider_startup_failed: bool = False
         # Popen handles for spawned provider subprocesses, keyed by provider name.
         # Used by _monitor_startup (wh-v0q) to check liveness on ready-timeout and
         # suppress false-failure notifications when the subprocess is still alive
@@ -203,6 +214,19 @@ class RemoteSTTLauncher:
         self._provider_ready_event.set()
         logger.debug("Provider ready signal received")
 
+    def signal_provider_startup_failed(self) -> None:
+        """Signal that the provider reported its startup FAILED
+        (a notification with kind="startup_failed").
+
+        Ends the starting state -- without this, a failed startup left
+        is_starting true for the rest of the session and the startup
+        suppression swallowed every later notification from the
+        provider (wh-google-creds-file-picker.1.5).
+        """
+        self._provider_startup_failed = True
+        self._provider_ready_event.set()
+        logger.debug("Provider startup-failed signal received")
+
     @property
     def is_starting(self) -> bool:
         """True while a provider startup is in progress (before 'ready' received)."""
@@ -227,13 +251,28 @@ class RemoteSTTLauncher:
             display_name: User-friendly name for notifications.
             timeout: Maximum seconds to wait for startup.
         """
-        # Clear the event before waiting (in case it was set from a previous startup)
-        self._provider_ready_event.clear()
+        # The starting state (event cleared, failure flag reset) was
+        # already established by start_provider BEFORE the subprocess
+        # was spawned. Resetting here instead would erase a ready or
+        # startup-failed signal that a fast provider delivered between
+        # the spawn and this thread starting
+        # (wh-google-creds-file-picker.1.10).
 
         # Wait for the ready signal with timeout
         ready = self._provider_ready_event.wait(timeout=timeout)
 
         if ready:
+            if self._provider_startup_failed:
+                # The provider reported a FAILED startup
+                # (kind="startup_failed"); it already told the user
+                # exactly what is wrong, so no generic notification --
+                # just close the working dialog
+                # (wh-google-creds-file-picker.1.5).
+                logger.warning(
+                    f"Provider {provider_name} reported a failed startup"
+                )
+                self._hide_working()
+                return
             logger.debug(f"Provider {provider_name} startup confirmed via ready notification")
             # No failure notification needed - provider already sent "ready" toast
             return
@@ -386,15 +425,27 @@ class RemoteSTTLauncher:
     def is_running(self, provider_name: str) -> bool:
         """Check if a provider is currently running.
 
-        Checks if the PID file exists and the process is alive.
-        Cleans up stale PID files if process is dead.
+        A provider counts as running when the supervisor subprocess this
+        launcher spawned is still alive, OR when the provider's PID file
+        names a live process. The first check matters because the PID
+        file is written by the child launcher only after its own uv
+        bootstrap: for that whole window the PID file does not exist,
+        and a PID-file-only answer would let a second serialized
+        lifecycle command launch a duplicate supervisor for the same
+        provider (wh-google-creds-file-picker.1.22). Cleans up stale
+        PID files if the process they name is dead.
 
         Args:
             provider_name: Provider name.
 
         Returns:
-            True if provider is running, False otherwise.
+            True if provider is running (or its launch is in flight),
+            False otherwise.
         """
+        proc = self._subprocesses.get(provider_name)
+        if proc is not None and proc.poll() is None:
+            return True
+
         pid_file = self._get_pid_file_path(provider_name)
 
         if not pid_file.exists():
@@ -474,6 +525,21 @@ class RemoteSTTLauncher:
 
         # Check if already running with correct port
         if self.is_running(provider_name):
+            tracked = self._subprocesses.get(provider_name)
+            if tracked is not None and tracked.poll() is None:
+                # A supervisor this launcher spawned is still alive; its
+                # launch may not have written the PID or port file yet.
+                # The stale-port handling below is for processes left
+                # over from a PREVIOUS session -- terminating by PID
+                # file would miss this one and a duplicate would be
+                # spawned (wh-google-creds-file-picker.1.22). Within one
+                # session the port never changes, so this launch is
+                # current by construction.
+                logger.info(
+                    f"Provider {provider_name} launch from this session "
+                    "is still alive - not starting a duplicate"
+                )
+                return True
             port_file = self.app_data_dir / f"{provider_name}.port"
             try:
                 stored_port = int(port_file.read_text().strip()) if port_file.exists() else None
@@ -512,6 +578,7 @@ class RemoteSTTLauncher:
         # Show working dialog immediately before starting
         self._show_working(f"Loading {display_name}")
 
+        proc = None
         try:
             logger.info(f"Starting provider {provider_name} from {launcher_script}")
             # Start the launcher subprocess via uv to ensure correct virtualenv.
@@ -534,6 +601,11 @@ class RemoteSTTLauncher:
                 "--ws-port", str(self.ws_port),
             ]
 
+            # Only the google_stt launcher understands --credentials-file;
+            # other providers' argument parsers would reject it.
+            if provider_name == "google_stt" and self.google_credentials_file:
+                cmd.extend(["--credentials-file", str(self.google_credentials_file)])
+
             # Append wake word config as CLI args if enabled
             if self.wake_word_config.get("enabled", False):
                 ww = self.wake_word_config
@@ -550,6 +622,15 @@ class RemoteSTTLauncher:
                         service_dir,
                     )
                     cmd.extend(["--wake-word-model-dir", str(model_dir)])
+
+            # Enter the starting state BEFORE spawning: a fast provider
+            # can deliver its ready or startup-failed signal in the gap
+            # between Popen and the monitor thread's first instruction,
+            # and a reset inside the monitor would erase that signal and
+            # turn a reported failure into a silent timeout
+            # (wh-google-creds-file-picker.1.10).
+            self._provider_ready_event.clear()
+            self._provider_startup_failed = False
 
             proc = subprocess.Popen(
                 cmd,
@@ -585,6 +666,23 @@ class RemoteSTTLauncher:
 
         except Exception as e:
             logger.error(f"Failed to start provider {provider_name}: {e}")
+            # The starting state was entered before Popen. On this path no
+            # monitor thread is running, so nothing else would ever end
+            # it: is_starting would read true forever and the startup
+            # suppression would swallow every later provider notice
+            # (wh-google-creds-file-picker.1.14).
+            self._provider_ready_event.set()
+            if proc is not None and proc.poll() is None:
+                # A process was spawned but its startup monitor never
+                # started; nothing would supervise it. Stop it rather
+                # than leave it running unmanaged.
+                try:
+                    proc.terminate()
+                except Exception as terminate_error:
+                    logger.warning(
+                        f"Failed to stop unmonitored provider process: "
+                        f"{terminate_error}"
+                    )
             self._hide_working()
             self._notify(display_name, "Failed to start - try restarting Wheelhouse")
             return False

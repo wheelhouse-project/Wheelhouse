@@ -576,18 +576,56 @@ class WebSocketManager:
                     if msg_type == "notification":
                         title = data.get("title", "Wheelhouse Notification")
                         notification_message = data.get("message", "")
+                        # Structured classification set by the provider
+                        # (shared_stt/ws_forwarder.py:send_notification):
+                        # "ready", "startup_failed", "error", or "" for a
+                        # plain notice (wh-google-creds-file-picker.1.5).
+                        # Only the google_stt provider sends it today.
+                        kind = data.get("kind", "")
+
+                        # Same gate as _apply_capabilities (wh-nvyh.1.1):
+                        # add_client keeps older connections open (merely
+                        # DISABLED), so an orphaned provider from a previous
+                        # generation can still deliver queued notification
+                        # frames while a new provider starts. Its
+                        # "startup_failed"/"ready" describes the OLD
+                        # generation and must not end or complete the NEW
+                        # startup, and its notices misreport the system
+                        # state (wh-google-creds-file-picker.1.16).
+                        if (
+                            self._active_stt_client is not None
+                            and websocket is not self._active_stt_client
+                        ):
+                            logger.info(
+                                "Ignoring notification from non-active STT "
+                                f"client {getattr(websocket, 'remote_address', None)}: "
+                                f"{title} - {redact_transcript(notification_message)}"
+                            )
+                            continue
+
                         logger.info(f"Received notification: {title} - {redact_transcript(notification_message)}")
 
+                        # A failed startup: end the launcher's starting
+                        # state, close the working dialog, and fall
+                        # through to the toast -- the message says what
+                        # is wrong, and suppressing it left the user
+                        # with a dead engine and no signal
+                        # (wh-google-creds-file-picker.1.5).
+                        if kind == "startup_failed":
+                            if self.remote_stt_launcher:
+                                self.remote_stt_launcher.signal_provider_startup_failed()
+                            if self.state_manager and hasattr(self.state_manager, 'state_to_gui_queue'):
+                                try:
+                                    self.state_manager.state_to_gui_queue.put_nowait({"action": "hide_working"})
+                                except Exception:
+                                    pass
                         # Check if this is a "ready" notification from STT provider
                         # Signal the launcher to cancel the startup timeout monitor.
                         # wh-v0q follow-up: substring match is brittle (matches "already",
-                        # "not ready", "Ready to retry"). Replace with a structured field
-                        # (e.g. kind="ready" in the notification payload from
-                        # shared_stt/ws_forwarder.py:send_notification) before touching
-                        # tlog->logger wiring (wh-6wp) -- that refactor will reshape how
-                        # providers emit startup messages and is a natural moment to
-                        # introduce the discriminator.
-                        if self.remote_stt_launcher and "ready" in notification_message.lower():
+                        # "not ready", "Ready to retry"). The structured kind above is the
+                        # replacement; the substring path stays until every provider
+                        # sends kind="ready" (only google_stt does today).
+                        elif self.remote_stt_launcher and "ready" in notification_message.lower():
                             self.remote_stt_launcher.signal_provider_ready()
                             # Close the working dialog
                             if self.state_manager and hasattr(self.state_manager, 'state_to_gui_queue'):
@@ -597,8 +635,15 @@ class WebSocketManager:
                                     pass
                             continue  # Working dialog dismissal is sufficient; skip toast
 
-                        # Suppress toast during provider startup -- working dialog is sufficient
-                        if self.remote_stt_launcher and self.remote_stt_launcher.is_starting:
+                        # Suppress toast during provider startup -- working dialog is
+                        # sufficient. Failure notices are exempt: they are the only
+                        # signal the engine is not coming up
+                        # (wh-google-creds-file-picker.1.5).
+                        if (
+                            kind not in ("startup_failed", "error")
+                            and self.remote_stt_launcher
+                            and self.remote_stt_launcher.is_starting
+                        ):
                             logger.debug(f"Suppressing toast during startup: {redact_transcript(notification_message)}")
                             continue
 
@@ -937,15 +982,15 @@ class WebSocketManager:
         DISABLE so they stop sending transcripts but remain connected for
         potential re-enabling later.
         """
-        # Disable existing clients (but keep them connected)
-        if self._clients:
-            logger.info(f"New STT client connecting - disabling {len(self._clients)} existing client(s)")
-            disable_msg = json.dumps({"type": "set_transcription_status", "enabled": False})
-            for existing_client in list(self._clients):
-                try:
-                    await existing_client.send(disable_msg)
-                except Exception as e:
-                    logger.warning(f"Error disabling existing client: {e}")
+        # Register and promote BEFORE any await
+        # (wh-google-creds-file-picker.1.19): the DISABLE sends below can
+        # suspend this coroutine, and an older add_client resuming after a
+        # newer one had already promoted itself used to overwrite the
+        # newer connection -- promotion then followed send-completion
+        # order, not arrival order. With no await between registration and
+        # promotion, the last add_client to START is the one that stays
+        # active.
+        existing_clients = [c for c in self._clients if c is not websocket]
 
         # The new client becomes the active stream. Reset retraction policy
         # state so the prior active stream's per-utterance and diagnostic
@@ -957,6 +1002,16 @@ class WebSocketManager:
         # The newest client is the active stream; only its capabilities
         # declaration may set the per-stream flags (wh-nvyh.1.1).
         self._active_stt_client = websocket
+
+        # Disable existing clients (but keep them connected)
+        if existing_clients:
+            logger.info(f"New STT client connecting - disabling {len(existing_clients)} existing client(s)")
+            disable_msg = json.dumps({"type": "set_transcription_status", "enabled": False})
+            for existing_client in existing_clients:
+                try:
+                    await existing_client.send(disable_msg)
+                except Exception as e:
+                    logger.warning(f"Error disabling existing client: {e}")
 
     def remove_client(self, websocket: Any):
         """Unregisters a client connection and cleans up in-progress utterances.

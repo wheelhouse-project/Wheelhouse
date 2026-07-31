@@ -30,7 +30,7 @@ import logging
 import math
 import time
 import wave
-from typing import Optional, Protocol, TYPE_CHECKING
+from typing import Callable, Optional, Protocol, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
@@ -60,25 +60,43 @@ class LoopStallTracker:
     before the restart still belong to the current reporting window, matching
     the other [overflow-diag] accumulators (VAD/AGC timing lists).
 
-    Not thread-safe; call from the loop thread only.
+    Threading: no internal locking; record() and reset() must never run
+    concurrently. The supported usage is record() from a single loop or
+    callback thread and reset() from the lifecycle-management thread, with
+    the caller guaranteeing the two cannot overlap. MicrophoneStream gets
+    this guarantee from stream sequencing: start() calls reset() before the
+    stream (and its callback thread) exists, and stop() blocks until
+    PortAudio has quiesced the callback. Do not add a record()/reset() call
+    from a new context without providing the same guarantee.
     """
 
     def __init__(self, stall_threshold_s: float = 1.0,
-                 min_log_interval_s: float = 5.0, clock=time.monotonic):
+                 min_log_interval_s: float = 5.0, clock=time.monotonic,
+                 label: str = "consumer loop"):
         self._threshold = stall_threshold_s
         self._min_log_interval = min_log_interval_s
         self._clock = clock
+        # Names the loop in the [stall] message ("consumer loop" for the
+        # provider main loops, "capture callback" for the PortAudio callback).
+        self._label = label
         self._last_time: Optional[float] = None
         self._last_log_time: Optional[float] = None
         self.stall_count = 0
         self.max_gap_ms = 0.0
 
-    def record(self, queue_depth: Optional[int] = None) -> Optional[str]:
+    def record(
+        self, queue_depth: Optional[int | Callable[[], int]] = None
+    ) -> Optional[str]:
         """Record one loop iteration; return a log message if a stall ended.
 
         Args:
             queue_depth: Current capture queue depth, included in the message
                 so the log shows whether the stall was long enough to drop.
+                May be a zero-argument callable; it is invoked only when a
+                rate-limited stall message actually forms, so a caller on a
+                real-time thread (the PortAudio callback) does not pay the
+                queue-mutex acquisition on every frame
+                (wh-sounddevice-starvation-parity.3.2).
 
         Returns:
             A message describing the stall, or None (no stall, or rate-limited).
@@ -100,8 +118,17 @@ class LoopStallTracker:
                 and (now - self._last_log_time) < self._min_log_interval):
             return None
         self._last_log_time = now
+        if callable(queue_depth):
+            # The probe runs on the caller's (possibly real-time) thread; a
+            # diagnostic read must never break the loop it observes
+            # (wh-sounddevice-starvation-parity.3.3). On failure the message
+            # still forms, just without the depth suffix.
+            try:
+                queue_depth = queue_depth()
+            except Exception:
+                queue_depth = None
         depth = "" if queue_depth is None else f"; capture queue depth now {queue_depth}"
-        return (f"[stall] consumer loop made no progress for {gap:.1f}s "
+        return (f"[stall] {self._label} made no progress for {gap:.1f}s "
                 f"(likely whole-machine CPU starvation){depth}")
 
     def reset(self) -> None:

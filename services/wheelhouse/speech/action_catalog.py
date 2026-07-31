@@ -597,6 +597,37 @@ ACTION_CATALOG = (
         "audience": "advanced",
     },
     {
+        "name": "rewrite_text_ai",
+        "label": "Rewrite text with AI",
+        "summary": (
+            "Captures the text in the focused field, sends it to the "
+            "configured AI to be rewritten in the style you describe, and "
+            "pastes the rewritten version back. You write the style "
+            "sentence and nothing else: Wheelhouse adds the wording that "
+            "keeps the layout intact and the wording that stops the "
+            "highlighted text from redirecting the AI."
+        ),
+        "params": [
+            {
+                "name": "instruction",
+                "summary": (
+                    "One sentence describing the style, addressed to the "
+                    "AI, ending with \"Return only the rewritten text.\" "
+                    "For example: \"Rewrite this text in plain language. "
+                    "Keep every fact. Return only the rewritten text.\""
+                ),
+                "kind": "text",
+            },
+        ],
+        "example": (
+            'Trigger "^simplify$" with params ["Rewrite this text in plain '
+            'language. Keep every fact. Return only the rewritten text."]: '
+            'saying "x-ray simplify" rewrites the highlighted text in '
+            "plain language."
+        ),
+        "audience": "advanced",
+    },
+    {
         "name": "cancel_fix",
         "label": "Cancel AI fix",
         "summary": (

@@ -53,6 +53,7 @@ from services.wheelhouse.events import (
     SystemConfigurationErrorEvent, SystemIdleStateChangedEvent,
     WakeWordDetectedEvent, PTTStartedEvent, PTTStoppedEvent,
 )
+from services.wheelhouse.ai.server_kind import LOCAL, normalize_server_kind
 from services.wheelhouse.integrations.websocket_manager import WebSocketManager
 from services.wheelhouse.utils.speech_notifier import SpeechNotifier
 from services.wheelhouse.config_service import DEFAULT_STT_PROVIDER
@@ -377,6 +378,18 @@ class StateManager:
         self._speech_before_ptt = self._speech_enabled  # Save for drag cancel restore
         self._ptt_active = True
         self._speech_enabled = True
+        # Holding the button proves the user is at the machine, so the idle
+        # pause ends.
+        #
+        # The other two suppression settings are deliberately left alone. The
+        # design doc calls audio suppression "moot" during a hold, because the
+        # hold mutes the computer's speakers, but that describes an expected
+        # outcome rather than permission to clear the setting here. The audio
+        # monitor owns it and reports only when its answer changes, so a hold
+        # shorter than one check would leave a cleared setting with nothing to
+        # put it back, switching off audio suppression until the sound stops
+        # and starts again. Making a hold work over playing audio needs the
+        # mute to be confirmed first; that is wh-ptt-audio-override, not this.
         self._speech_suppressed_by_idle = False
 
         logger.info(f"[PTT] Push-to-talk started (source={source})")
@@ -384,9 +397,13 @@ class StateManager:
         # Publish event for audio muting
         self.loop.create_task(self.event_bus.publish(PTTStartedEvent(source=source)))
 
-        # Broadcast to STT providers
+        # Tell the speech engine exactly what send_state_update is about to show
+        # the user. Sending a flat True here would start the engine listening
+        # while the button shows speech off, whenever Sonos is still playing.
         if self.websocket_manager:
-            message = self.websocket_manager.set_transcription_status(True, reason="ptt")
+            message = self.websocket_manager.set_transcription_status(
+                self.speech_enabled, reason="ptt"
+            )
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
         # Start safety timeout
@@ -402,7 +419,15 @@ class StateManager:
     def ptt_stop(self, reason: str = "released"):
         """Deactivate push-to-talk: disable speech, restore audio."""
         if not self._ptt_active:
-            return  # Not active, nothing to do
+            # The hold already ended -- almost always the safety timeout ending
+            # one the user never released. The interface still believes it has
+            # a hold, and on a cancellation it puts speech back to what it was
+            # before the hold, which would show the microphone open while it is
+            # shut. Send the real state instead of returning silently. Nothing
+            # else changes here: no event is published and speech is not
+            # touched, because there is no hold to end.
+            self.send_state_update()
+            return
 
         # Cancel safety timeout
         if self._ptt_safety_handle:
@@ -410,8 +435,11 @@ class StateManager:
             self._ptt_safety_handle = None
 
         self._ptt_active = False
-        if reason == "drag_cancel":
-            # Drag interrupted hold -- restore pre-PTT speech state
+        if reason in ("drag_cancel", "gesture_cancel"):
+            # Something interrupted the hold rather than the user ending it --
+            # a drag, or a press whose release was taken by the context menu or
+            # by the button being hidden. Restore the pre-PTT speech state
+            # rather than forcing speech off, because the user never decided.
             self._speech_enabled = getattr(self, '_speech_before_ptt', False)
         else:
             self._speech_enabled = False
@@ -421,9 +449,16 @@ class StateManager:
         # Publish event for audio restore
         self.loop.create_task(self.event_bus.publish(PTTStoppedEvent(reason=reason)))
 
-        # Broadcast to STT providers
+        # Tell the speech engine exactly what send_state_update is about to
+        # show the user. A cancellation puts speech back to what it was, which
+        # can be on, and sending a flat False there would leave the button
+        # showing an open microphone that cannot hear anything. An ordinary
+        # release and the safety cutoff both set _speech_enabled to False just
+        # above, so this is False for them without a separate branch.
         if self.websocket_manager:
-            message = self.websocket_manager.set_transcription_status(False, reason="ptt")
+            message = self.websocket_manager.set_transcription_status(
+                self.speech_enabled, reason="ptt"
+            )
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
         self.send_state_update()
@@ -456,9 +491,19 @@ class StateManager:
                 message = self.websocket_manager.set_transcription_status(False, reason="manual")
                 self.loop.create_task(self.websocket_manager.broadcast(message))
 
-        # Persist to config
+        # Persist to config. Nothing waits for this write, so a failure would
+        # otherwise pass without a trace: report it here or the next start
+        # silently comes back in the previous mode.
         self.config_service.set("speech.interaction_mode", mode)
-        self.loop.create_task(self.config_service.save())
+
+        async def save_and_report():
+            if not await self.config_service.save():
+                logger.error(
+                    f"[MODE] Interaction mode {mode} was NOT saved; the next "
+                    "start will use the previous mode"
+                )
+
+        self.loop.create_task(save_and_report())
 
         logger.info(f"[MODE] Speech interaction mode changed: {old_mode} -> {mode}")
         self.send_state_update()
@@ -530,12 +575,47 @@ class StateManager:
         is_visible = self.config_service.get('FLOATING_BUTTON_VISIBLE', True)
         await self.set_config_value('FLOATING_BUTTON_VISIBLE', not is_visible)
 
-    async def set_config_value(self, key: str, value: Any):
-        """Updates a configuration value and saves it."""
+    async def set_config_value(self, key: str, value: Any) -> bool:
+        """Updates a configuration value and saves it.
+
+        Returns whether the new value reached the disk. The GUI still gets the
+        update either way, because the running program really did change, but a
+        caller that goes on to restart or report success needs to know the next
+        start will not have this value.
+        """
         logger.debug(f"Updating config: '{key}' = {value}")
         self.config_service.set(key, value)
-        await self.config_service.save()
+        saved = await self.config_service.save()
+        if not saved:
+            logger.error(f"Config '{key}' changed in memory but was NOT saved to disk")
         self.send_state_update()
+        return saved
+
+    async def set_config_values(self, values: dict[str, Any]) -> bool:
+        """Updates several configuration values and saves them together.
+
+        For settings that only make sense as a group. The floating button's
+        size and position are the case this exists for: a resize changes both
+        at once, because the button grows around its centre and so its stored
+        corner moves with its diameter. Sending them as two separate changes
+        would let one survive without the other, which puts a differently
+        sized button at a corner belonging to the old size on the next start.
+
+        Returns whether the group reached the disk, for the same reason
+        set_config_value does.
+        """
+        if not values:
+            return True
+        logger.debug(f"Updating config group: {values}")
+        for key, value in values.items():
+            self.config_service.set(key, value)
+        saved = await self.config_service.save()
+        if not saved:
+            logger.error(
+                f"Config group {sorted(values)} changed in memory but was NOT saved to disk"
+            )
+        self.send_state_update()
+        return saved
 
     def register_stt_connection(self, connection: Any):
         """Registers the active STT WebSocket connection."""
@@ -728,8 +808,16 @@ class StateManager:
             # menu item (finding wh-ay6h.6.7).
             return ["__ai_disabled__"]
 
-        kind = self.config_service.get("ai.server.kind", "local")
-        if kind == "local":
+        # Read through the same normalizer AIService uses, so the menu and the
+        # inference path cannot disagree about what an unreadable value means.
+        # They used to: this site asked "is it local?" and the provider-building
+        # site asked "is it cloud?", so "remote" showed the cloud menu while the
+        # provider was built as a local one (wh-ai-kind-validation). The
+        # complaint is discarded here on purpose -- this method runs on every
+        # tray-menu rebuild, and AIService says it once at startup.
+        kind, _ = normalize_server_kind(
+            self.config_service.get("ai.server.kind", None))
+        if kind == LOCAL:
             live: list[str] = []
             if self._ai_service is not None and hasattr(self._ai_service, "cached_models"):
                 live = list(self._ai_service.cached_models())

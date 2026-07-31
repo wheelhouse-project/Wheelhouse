@@ -5,6 +5,77 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] - 2026-07-31
+
+### Added
+
+- Wheelhouse can now run an AI model on your own machine, with no account,
+  no API key, and no text leaving the computer. Run the command-line
+  installer with `-AiMode local` and it downloads a language model and the
+  program that runs it, then configures Wheelhouse to start and stop that
+  program for you. Setup measures the machine first: a graphics card with
+  4 GB or more of video memory runs the model on the card, a machine with
+  16 GB or more of system memory runs it on the processor, and anything
+  less is told why and left with the AI features off rather than having
+  several gigabytes downloaded that would not run. Any graphics card brand
+  qualifies. The graphical installer still offers only the cloud option and
+  skipping; the local option is command-line only in this release.
+- New rewriting commands change the wording of text you have highlighted:
+  "x-ray simplify", "x-ray shorten", "x-ray make formal", "x-ray pirate",
+  and "x-ray translate to <language>" for any language you name. The style
+  is written as an ordinary sentence inside the pattern file, so you can
+  add your own rewriting command in the Pattern Manager without any
+  programming.
+- Setting up the Google Cloud speech engine no longer requires creating a
+  Windows environment variable by hand. A new "Google Cloud Credentials"
+  item on the tray menu opens a file dialog, checks that the file you pick
+  is a valid service-account key, saves it, and restarts the Google engine
+  if it is the one running. The menu item appears only when the Google
+  engine is installed. Existing setups that use the environment variable
+  keep working.
+- The floating button can be resized by dragging its edge, and it now
+  remembers the size and position you left it at.
+- The notification-area icon is now the Wheelhouse icon and no longer
+  changes colour with the listening state. Its right-click menu, shared
+  with the floating button, gained Help and About entries.
+- When setup fails, the installer now tells you what went wrong and what
+  to try, shows the full path to the setup log, gives the help address,
+  and offers to open the log for you. Previously it said only that details
+  were in the log.
+- The graphical installer now shows notices on its finish page. If your
+  graphics card cannot run the Distil-Whisper speech engine, setup installs
+  Parakeet instead and says so, rather than substituting it silently.
+
+### Changed
+
+- The website and the help document have been rewritten as an
+  administration guide, and the website's page structure, headings, and
+  links were made consistent with it.
+- Setup mentions microphone permission only when the permission is
+  actually turned off. Both the graphical installer and the command-line
+  installer now read the Windows setting and stay quiet when nothing is
+  wrong.
+- Setup no longer looks for an existing Ollama installation.
+- The Pattern Manager explains letter-and-space captures in plain words.
+
+### Fixed
+
+- A command interrupted by a gap in the audio no longer resumes as if it
+  were fresh speech, which could join two unrelated phrases into one
+  command. Stalls in audio capture and dropped audio now count as gaps for
+  this purpose.
+- The Google Cloud speech engine is more reliable when it restarts:
+  Wheelhouse now waits for the old process to exit, checks that the
+  restart succeeded, and no longer leaves the engine stopped when it
+  cannot pick a replacement.
+- The About box no longer shuts Wheelhouse down when you close it.
+- Rewriting a selection that was already a fenced code block keeps its
+  fences.
+- Microphone diagnostics survive a speech-engine restart instead of being
+  lost.
+- The local AI server is stopped when Wheelhouse exits, and is replaced if
+  it stops answering while still running.
+
 ## [1.0.5] - 2026-07-24
 
 ### Added

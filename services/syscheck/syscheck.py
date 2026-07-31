@@ -19,6 +19,8 @@ import os
 import sys
 from ctypes import wintypes
 
+from recommendations import get_local_ai_decision
+
 # ========================= Optional deps =========================
 missing = []
 try:
@@ -757,6 +759,31 @@ def main():
             "gpu_diagnostics": gpu_diag,
         },
     }
+
+    # Where -- or whether -- the local AI model runs on this machine
+    # (wh-ai-installer-local-mode). Carried in the snapshot rather than behind
+    # a second flag so the installer keeps making ONE `uv run` call: it already
+    # parses this document for the CUDA speech-engine offer. It also means a
+    # snapshot a user sends in says, in a sentence, why the AI features were or
+    # were not installed, beside the hardware that decided it.
+    #
+    # get_local_ai_decision does not raise by contract. The guard is for the
+    # contract being broken later: syscheck is a support tool, and a hardware
+    # report that fails to come out because of an AI question is a worse
+    # failure than an AI question that goes unanswered.
+    try:
+        data["local_ai"] = get_local_ai_decision(data)
+    except Exception as e:  # noqa: BLE001
+        data["local_ai"] = {
+            "install": False,
+            "model": None,
+            "gpu_layers": None,
+            "reason": (
+                "The local AI decision could not be made on this machine "
+                f"({type(e).__name__}), so the local AI model was not "
+                "installed."
+            ),
+        }
 
     # --- build metadata marker (add this) ---
 

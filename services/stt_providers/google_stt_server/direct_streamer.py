@@ -87,6 +87,7 @@ class GoogleDirectStreamer:
                  debug_cfg: Optional["DebugConfig"] = None,
                  keepalive_gap: float = 1.2,
                  single_utterance: bool = False,
+                 credentials_file: str = "",
                  transcription_enabled_event: Optional[threading.Event] = None) -> None:
         # Configuration
         self.language = language
@@ -100,7 +101,14 @@ class GoogleDirectStreamer:
         if client is None:
             _mod = importlib.import_module('google.cloud.speech_v1')
             _SpeechClient = getattr(_mod, 'SpeechClient')
-            self._client: "SpeechClient" = _SpeechClient()
+            if credentials_file:
+                # A key file configured in WheelHouse (picked in the tray
+                # menu's file dialog). Without one, the bare constructor
+                # uses Application Default Credentials, i.e. the
+                # GOOGLE_APPLICATION_CREDENTIALS environment variable.
+                self._client: "SpeechClient" = _SpeechClient.from_service_account_file(credentials_file)
+            else:
+                self._client = _SpeechClient()
         else:
             self._client = client
         
