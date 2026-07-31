@@ -641,29 +641,10 @@ ACTION_CATALOG = (
         ),
         "audience": "advanced",
     },
-    {
-        "name": "wheelhouse_help",
-        "label": "Open help chat",
-        "summary": (
-            "Opens the local Wheelhouse help chat window, optionally "
-            "submitting a spoken question immediately."
-        ),
-        "params": [
-            {
-                "name": "question",
-                "summary": (
-                    "Optional question to submit as the window opens; "
-                    "usually the capture group g1."
-                ),
-                "kind": "text",
-            },
-        ],
-        "example": (
-            'Trigger "^wheelhouse help (.+)$" with params ["g1"]: opens '
-            "the help window and asks the spoken question."
-        ),
-        "audience": "advanced",
-    },
+    # The in-app help chat action (wheelhouse_help) is deliberately absent.
+    # Its registration in actions.py is commented out while the help chat is
+    # disabled, so offering it here would let the Pattern Manager build a
+    # pattern that names a function the router cannot call.
     {
         "name": "wheelhouse_help_online",
         "label": "Open online help",
@@ -672,8 +653,8 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^wheelhouse help online$" with no params: saying '
-            '"x-ray wheelhouse help online" opens the help page.'
+            'Trigger "^help$" with no params: saying "x-ray help" opens '
+            "the help page."
         ),
         "audience": "advanced",
     },

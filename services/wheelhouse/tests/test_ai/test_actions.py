@@ -448,49 +448,29 @@ class TestCancelFix:
 # wheelhouse_help
 # =========================================================================
 
-class TestWheelhouseHelp:
-    """Tests for the wheelhouse_help action -- opens help chat window."""
+class TestWheelhouseHelpDisabled:
+    """The in-app help chat is disabled, so its action must stay unreachable.
 
-    @pytest.mark.asyncio
-    async def test_sends_show_help_chat_to_gui(self):
-        """wheelhouse_help sends show_help_chat action to GUI."""
+    The action body in actions.py is commented out and its registration
+    line with it. These tests replace the three that exercised the action
+    while it was live; they fail if a later change registers it again
+    without also re-enabling the help chat patterns, which
+    tests/test_help_patterns_disabled.py at the repository root guards.
+    """
+
+    def test_action_is_not_registered(self):
+        """The router cannot reach an action the help chat no longer has."""
         ai = _make_ai_service()
         actions = _make_actions(ai_service=ai)
 
-        # Mock the _send_gui_action method
-        actions._send_gui_action = MagicMock()
+        assert "wheelhouse_help" not in actions.get_functions()
 
-        await actions.wheelhouse_help()
+    def test_action_is_not_offered_by_the_catalog(self):
+        """The Pattern Manager must not offer an action nothing registers."""
+        from speech.action_catalog import ACTION_CATALOG
 
-        actions._send_gui_action.assert_called_once_with(
-            {"action": "show_help_chat"}
-        )
-
-    @pytest.mark.asyncio
-    async def test_sends_question_when_provided(self):
-        """wheelhouse_help with question includes it in the payload."""
-        ai = _make_ai_service()
-        actions = _make_actions(ai_service=ai)
-        actions._send_gui_action = MagicMock()
-
-        await actions.wheelhouse_help("how do I move a window")
-
-        actions._send_gui_action.assert_called_once_with(
-            {"action": "show_help_chat", "question": "how do I move a window"}
-        )
-
-    @pytest.mark.asyncio
-    async def test_no_question_opens_empty(self):
-        """wheelhouse_help without question opens chat with no question."""
-        ai = _make_ai_service()
-        actions = _make_actions(ai_service=ai)
-        actions._send_gui_action = MagicMock()
-
-        await actions.wheelhouse_help("")
-
-        actions._send_gui_action.assert_called_once_with(
-            {"action": "show_help_chat"}
-        )
+        names = {entry["name"] for entry in ACTION_CATALOG}
+        assert "wheelhouse_help" not in names
 
 
 class TestWheelhouseHelpOnline:
@@ -549,6 +529,6 @@ class TestRegistration:
 
         assert "fix_text_ai" in funcs
         assert "cancel_fix" in funcs
-        assert "wheelhouse_help" in funcs
         assert "wheelhouse_help_online" in funcs
+        assert "wheelhouse_help" not in funcs  # help chat disabled
         assert "wheelhouse_help_new" not in funcs  # Removed
