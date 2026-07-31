@@ -83,7 +83,7 @@ Complete these steps before reading the rest of this document. They verify that 
 3. Open Notepad.
 4. Say **"hello world"** -- the words "hello world" appear.
 5. Say **"new line"** -- the cursor moves to a new line.
-6. Say **"undo"** -- the text is undone.
+6. Say **"undo"** -- the new line from step 5 is reversed.
 7. Say **"select all"** -- the text is highlighted.
 
 If steps 4 to 7 produce the results described, the installation is working.
@@ -119,7 +119,7 @@ https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelh
 If Windows shows a "Windows protected your PC" screen, see [Security warnings](#security-warnings) below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 1 GB in total). The wizard:
 
 1. Asks its questions up front: which speech engine to use (the pre-selected answer suits most installations -- see [Speech Engines](#speech-engines)), whether to set up the optional AI helper (the wizard offers one AI choice, a cloud model from Google, and skipping; the model that runs on your own machine is set up from the command line instead, described below), and whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected). It also asks you to turn on microphone access for desktop apps, but only when that Windows setting is currently off; when it is already on, setup says nothing about it.
-2. Checks the requirements listed under [What you need](#what-you-need). Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and the memory floor. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count, a connected microphone, and the Windows tool that unpacks the speech model -- produce a notice and setup continues.
+2. Checks the requirements listed under [What you need](#what-you-need). Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and the memory floor. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count and a connected microphone -- produce a notice and setup continues.
 3. Installs uv, the environment manager Wheelhouse uses, into the user profile. Nothing is installed system-wide.
 4. Downloads the Wheelhouse application, verifies the download against its published fingerprint, and creates Wheelhouse's own Python environments. Those environments are self-contained and separate from any other Python installation on the computer.
 5. Downloads the offline speech model if the default engine was kept (650 MB; this is the longest step).
@@ -128,7 +128,7 @@ If Windows shows a "Windows protected your PC" screen, see [Security warnings](#
 
 Wheelhouse installs for one user account. Administrator rights are not required, and no other program on the computer is modified.
 
-**Command-line installation.** The same install runs as one PowerShell line, asking only the speech-engine, start-at-login (defaults to no), and start-now questions as text prompts. It asks nothing about the AI helper: the AI choice is given as an argument instead, or left out to install without AI.
+**Command-line installation.** The same install runs as one PowerShell line, asking only the speech-engine, start-at-login (defaults to no), and start-now questions as text prompts. It asks nothing about the AI helper: the AI choice is given as an argument instead, or left out to install without AI. The one-line command cannot carry arguments; to pass one, download install-wheelhouse.ps1 from the release page and run it as a file, for example `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode local`.
 
 ```
 irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
@@ -156,7 +156,7 @@ Installer failure messages contain no personal data and can be included in a hel
 - **"Wheelhouse appears to be running"** (during an update): the installer refuses to replace an application that is running. Exit Wheelhouse first (right-click the floating button or the tray icon -- both open the same menu -- and choose Exit), then run the installer again. If it reports that it could not check, restart the computer and try again.
 - **"This computer has N GB of memory"**: your machine is below the 8 GB minimum. This check stops the install for every speech engine, including the cloud one, so adding memory is the only fix.
 - **"Not enough free disk space"**: free up 10 GB on the Windows drive and run the installer again.
-- **"tar.exe was not found"**: only affects Windows 10 versions from before 2018, which lack the tool that unpacks the speech model. Install tar yourself, or choose the Google Cloud engine (which needs no model download).
+- **"Unpacking the speech model failed"**: the extraction stopped, and the message includes the extractor's own error text. Run the installer again -- the downloaded archive is kept and the download does not repeat. If it fails the same way twice, include the message in a help request.
 - **"Could not install uv"**: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.
 - **"... failed its integrity check"**: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; a changed release asset is the other. Add an exception or try a different network, and if it keeps failing, file an issue on the GitHub page.
 - **"Downloading ... failed twice"**: network trouble. Run the installer again -- downloads resume where they left off.
@@ -195,7 +195,7 @@ An update replaces the application and preserves user data:
 The Wheelhouse installer is digitally signed by the project's author, David Chesley Hite III, which allows Windows to verify that the download came from the project unaltered. Windows may still warn about each new release until it has seen that file often enough. The source code is public at https://github.com/wheelhouse-project/Wheelhouse.
 
 - **SmartScreen ("Windows protected your PC")**: appears when running a recently released Wheelhouse-Setup.exe. Click "More info", check that the publisher reads David Chesley Hite III, then click "Run anyway". If the setup wizard fails, its failure window names the setup log when it can find the file, and in most cases offers to open it; the file is at `%TEMP%\Setup Log <date> #<number>.txt`. Attach it to a help request.
-- **Antivirus flags or rewrites the download**: some antivirus products quarantine downloads or alter them as they arrive. The installer verifies every download against a published fingerprint and refuses anything altered (the "failed its integrity check" message). Add an exception for Wheelhouse, or install on a different network, then run the installer again.
+- **Antivirus flags or rewrites the download**: some antivirus products quarantine downloads or alter them as they arrive. The installer verifies its own downloads -- the application, the speech model, and the AI files -- against published fingerprints and refuses anything altered (the "failed its integrity check" message); uv arrives through winget or uv's own installer and is the one download not checked this way. Add an exception for Wheelhouse, or install on a different network, then run the installer again.
 - **A downloaded script will not run**: Windows marks a saved install-wheelhouse.ps1 as coming from the internet, and PowerShell may refuse to run it. Remove the mark once with `Unblock-File .\install-wheelhouse.ps1`, or start it with `powershell -ExecutionPolicy Bypass -File .\install-wheelhouse.ps1`.
 
 Installing from source avoids these warnings. CONTRIBUTING.md in the GitHub repository has the development setup steps.
@@ -221,7 +221,7 @@ Removed through Windows instead, after a Setup.exe install, only the second ques
 
 What each answer does:
 
-- **Keeping personal data:** the application, all its shortcuts, and its bookkeeping folder are removed. The settings file, personal voice patterns, and the speech model remain in `%LOCALAPPDATA%\Wheelhouse`, with the settings and patterns gathered into a subfolder there named preserved-user-data. A later reinstall starts from defaults; copy files back from that folder to restore the previous settings and patterns.
+- **Keeping personal data:** the application, all its shortcuts, and its bookkeeping folder are removed. The settings file, personal voice patterns, and the speech model remain in `%LOCALAPPDATA%\Wheelhouse`, with the settings and patterns gathered into a subfolder there named preserved-user-data. On a machine where the local AI helper was set up, the AI model and the program that runs it -- several gigabytes -- also remain there. A later reinstall starts from defaults; copy files back from that folder to restore the previous settings and patterns.
 - **Keeping nothing:** the entire `%LOCALAPPDATA%\Wheelhouse` folder, the `%APPDATA%\Wheelhouse` folder, and all shortcuts (Start menu, desktop, and the start-at-login entry) are removed. A configured cloud AI access key is also cleared from the user environment.
 
 Those two folders, plus a small `WheelhouseSetup` folder used by the graphical installer's uninstaller, hold everything Wheelhouse itself stores. Setup writes in three further places. It removes two of them: the shortcuts it created and the start-at-login entry. The third it leaves, deliberately -- uv, the environment manager, installed in the user profile, which other programs may also be using. The graphical installer additionally leaves its own log in the Windows temporary folder. `%APPDATA%\Wheelhouse` holds no personal data -- only bookkeeping such as helper-process ID files -- and is removed under either answer. Run from the command line, the uninstaller prints both folder paths when it finishes; removed through Windows, it runs hidden and prints nothing you can see.
@@ -269,7 +269,7 @@ Some commands would have destructive effects if they fired during dictation -- c
 
 ### The wake word ("computer")
 
-After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input to the computer, not silence, so a film watched without touching either will trigger the pause. Saying "computer" resumes it, without keyboard or mouse. The wake word and the hotword serve different purposes: "computer" resumes listening after an idle pause, and "x-ray" runs a protected command. Wake-word behavior is configurable in the wake_word section of the settings file; it is enabled by default.
+After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input to the computer, not silence, so a film watched without touching either will trigger the pause. Saying "computer" resumes it, without keyboard or mouse. The wake word and the hotword serve different purposes: "computer" resumes listening after an idle pause, and "x-ray" runs a protected command. Wake-word behavior is configurable in the wake_word section of the settings file; it is enabled by default. The idle pause itself comes from the Idle Monitor plugin ([Plugins](#plugins)), also enabled by default; if that plugin is disabled, listening does not pause when idle.
 
 ---
 
@@ -319,7 +319,7 @@ The older method still works as an alternative: set an environment variable name
 
 To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open **STT Provider**, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. If the new engine fails to start, the choice is not recorded and the next start returns to the previous engine. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.
 
-To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up whatever that engine requires. For example, moving from Google Cloud to Parakeet requires the re-run, because that is what downloads Parakeet's speech model; selecting it from the menu alone is not sufficient. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.
+To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up what that engine requires, except that Distil-Whisper's model is downloaded by the engine itself the first time it starts. For example, moving from Google Cloud to Parakeet requires the re-run, because that is what downloads Parakeet's speech model; selecting it from the menu alone is not sufficient. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.
 
 The same re-run repairs a missing or incomplete speech model, for example after an interrupted download. The installer detects an incomplete model and reinstalls it. Re-running the installer is safe at any time, and the speech-engine question defaults to the engine already installed, so pressing Enter keeps it. If the current engine is no longer available on this hardware, the PowerShell installer reports that before asking; the setup wizard does not.
 
@@ -462,7 +462,7 @@ If the recognizer regularly mishears another word, add a personal correction in 
 
 #### Application Switching and System
 
-"x-ray activate [app name]" brings the named application's window forward. When a pattern's target is a program file (.exe) and no window is open for it, that program is started; the built-in "x-ray notepad" and "x-ray browser" work this way, and "x-ray browser" resolves to the Windows default browser at the time the command is spoken. The System commands operate on windows and on Windows itself. Four need no hotword: "zoom in", "zoom out", "create tab", and "create window", and "windows settings" opens the Windows Settings application. Four require it: "x-ray close window", "x-ray maximize", "x-ray minimize", and "x-ray desktop", which shows the desktop. In most browsers "create tab" (Ctrl+N) opens a new window rather than a tab, and "create window" (Ctrl+Shift+N) opens a private or incognito window.
+"x-ray activate [app name]" brings the named application's window forward. When a pattern's target is a program file (.exe) and no window is open for it, that program is started; the built-in "x-ray notepad" and "x-ray browser" work this way, and "x-ray browser" resolves to the Windows default browser at the time the command is spoken. The System commands operate on windows and on Windows itself. Five need no hotword: "zoom in", "zoom out", "create tab", "create window", and "windows settings", which opens the Windows Settings application. Four require it: "x-ray close window", "x-ray maximize", "x-ray minimize", and "x-ray desktop", which shows the desktop. In most browsers "create tab" (Ctrl+N) opens a new window rather than a tab, and "create window" (Ctrl+Shift+N) opens a private or incognito window.
 
 #### Mouse Control
 
@@ -500,7 +500,7 @@ Say "literal" followed by the text to be typed, and those words are inserted wit
 
 When the speech recognizer repeatedly mishears a specific word -- typically a name, a product, a place, or a technical term -- select that word anywhere on screen, with the mouse or with "select word", and say **"x-ray boost"**. The selection is copied and saved as a recognition hint in a shared hints file, which persists across restarts, so each word needs to be boosted once. Hints are capped at 100 characters; boost individual words or short phrases rather than sentences.
 
-**Saving a hint and applying it are separate.** **Parakeet, the default engine, saves the hint but does not apply it.** Hint biasing is disabled by default because applying hints slowed recognition by roughly 25 percent per utterance in the project's measurements. To make Parakeet apply saved hints, set enabled = true under [hotwords] in the Parakeet engine's own config file and restart Wheelhouse, accepting the slower recognition. Until that setting is changed, boosting does not affect what Parakeet recognizes. **Google Cloud Speech-to-Text** applies saved hints without further configuration. **Distil-Whisper** saves hints but never applies them, because hint biasing degrades that engine's recognition.
+**Saving a hint and applying it are separate.** **Parakeet, the default engine, saves the hint but does not apply it.** Hint biasing is disabled by default because applying hints slowed recognition by roughly 25 percent per utterance in the project's measurements. To make Parakeet apply saved hints, set enabled = true under [hotwords] in the Parakeet engine's own config file and restart Wheelhouse, accepting the slower recognition. Until that setting is changed, boosting does not affect what Parakeet recognizes. **Google Cloud Speech-to-Text** applies saved hints without further configuration. **Distil-Whisper** saves hints and, as shipped, does not apply them, because hint biasing degrades that engine's recognition; its own config file has the same [hotwords] switch as Parakeet, marked for experiments only.
 
 **"x-ray patterns" (the Pattern Manager)**
 
@@ -575,11 +575,11 @@ In toggle mode, pressing and holding the floating button for about a fifth of a 
 
 ### Push-to-talk mode
 
-Wheelhouse listens only while the floating button is held down. Press and hold to speak; releasing stops listening. During the hold, the computer's speakers are muted, so that sound from a video or from music cannot reach the microphone and be transcribed; the previous volume is restored on release. In this mode a single left-click on the tray icon has no effect; the hold operates on the floating button.
+Wheelhouse listens only while the floating button is held down. Press and hold to speak; releasing stops listening. During the hold, the computer's speakers are muted, so that sound from a video or from music cannot reach the microphone and be transcribed; the previous volume is restored on release. The System Volume plugin performs this muting ([Plugins](#plugins)); it is enabled by default, and disabling it also disables the muting. In this mode a single left-click on the tray icon has no effect; the hold operates on the floating button.
 
 Three constraints apply:
 
-- **Audio already playing takes precedence.** Listening is suspended while the computer is playing sound, and starting a hold does not override that. A hold begun while a video or music is playing receives no audio, and the button shows that listening is off. Pause the audio first; listening resumes shortly after it stops. The speaker mute described above keeps subsequent audio out of a hold begun in silence, and does not enable a hold begun while audio is playing.
+- **Audio already playing takes precedence.** Listening is suspended while the computer is playing sound, and starting a hold does not override that. A hold begun while a video or music is playing receives no audio, and the button shows that listening is off. Pause the audio first; listening resumes once the sound-level check notices the silence, which can take up to ten seconds after the audio stops ([Plugins](#plugins) describes the check). The speaker mute described above keeps subsequent audio out of a hold begun in silence, and does not enable a hold begun while audio is playing.
 - **Safety release.** If a release is never registered, listening stops after 30 seconds and the previous audio state is restored, so the microphone is not left open and the speakers are not left muted. If that cutoff interrupts long dictations, raise ptt_safety_timeout_seconds in the [speech] section of the settings file.
 - Push-to-talk requires a hand on the mouse or a finger on a touchscreen, so it is not hands-free.
 
@@ -832,7 +832,7 @@ If all five pass, the installation is working, and any remaining problem is spec
 
 - *Symptom:* Speech is recognized but no text appears in the application. A notice may appear stating that the focused location could not be confirmed to accept text.
 - *Likely cause:* Either the text field is not focused, or the focused control could not be confirmed to be a text field. Typing into a non-text control in some applications, particularly web browsers, triggers keyboard shortcuts instead of entering text, so the insertion is refused rather than attempted.
-- *Action:* Click inside the text field and try again. If a notice appears with a "Try it anyway" button, use it; after the text lands correctly several times, that control is added to the approved list and the notice stops appearing. If dictation works in Notepad, the problem is specific to that application's text field.
+- *Action:* Click inside the text field and try again. If a notice appears with a "Try it anyway" button, use it; after the text lands correctly several times, Wheelhouse asks whether it should always type there, and answering Yes adds that control to the approved list so the notice stops appearing. If dictation works in Notepad, the problem is specific to that application's text field.
 
 **Real speech ignored, or short dictations dropped**
 
@@ -878,5 +878,5 @@ Include the Wheelhouse version from **About Wheelhouse** in the right-click menu
 
 ---
 
-Generated: 2026-07-30 for the v1.0.6 release
-Wheelhouse version: 1.0.6
+Generated: 2026-07-31 for the v1.0.7 release
+Wheelhouse version: 1.0.7

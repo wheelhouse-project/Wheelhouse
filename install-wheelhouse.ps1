@@ -103,7 +103,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.6"
+$AppVersion = "1.0.7"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -199,9 +199,40 @@ $IssuesUrl = "https://github.com/wheelhouse-project/Wheelhouse/issues"
 
 # --- Output helpers ----------------------------------------------------------
 
+function Hide-UserProfilePath {
+    param([string]$Text)
+    # The help document promises that installer failure messages contain no
+    # personal data and can be included in a help request -- and the profile
+    # path carries the Windows account name. Failure text can quote Python
+    # exceptions and native tool output, which name absolute paths under the
+    # profile; Python's repr form doubles the backslashes. Each separator in
+    # the profile path therefore matches one or more of either slash, so
+    # C:\Users\name, C:\\Users\\name, and C:/Users/name all become the
+    # placeholder. LOCALAPPDATA and APPDATA get their own placeholders so a
+    # launcher that unset USERPROFILE but left the others cannot reopen the
+    # leak; when USERPROFILE is set it is replaced first and already covers
+    # both.
+    foreach ($pair in @(
+        @{ Value = $env:USERPROFILE; Placeholder = '%USERPROFILE%' },
+        @{ Value = $env:LOCALAPPDATA; Placeholder = '%LOCALAPPDATA%' },
+        @{ Value = $env:APPDATA; Placeholder = '%APPDATA%' }
+    )) {
+        if (-not $pair.Value) { continue }
+        $pattern = [regex]::Escape($pair.Value) -replace '\\\\', '[\\/]+'
+        $Text = $Text -replace $pattern, $pair.Placeholder
+    }
+    return $Text
+}
+
+# Write-Warn and Write-Fail sanitize because they are the writers every
+# failure and warning surface goes through -- including the top-level
+# unexpected-error handler, which interpolates raw exception text and does
+# not pass through Stop-Install. Write-Status stays unsanitized: success
+# messages that name a path (a created shortcut, the install folder) name
+# one the installer built itself and the user may need verbatim.
 function Write-Status { param([string]$Message) Write-Host "[+] $Message" -ForegroundColor Green }
-function Write-Warn { param([string]$Message) Write-Host "[!] $Message" -ForegroundColor Yellow }
-function Write-Fail { param([string]$Message) Write-Host "[x] $Message" -ForegroundColor Red }
+function Write-Warn { param([string]$Message) Write-Host "[!] $(Hide-UserProfilePath -Text $Message)" -ForegroundColor Yellow }
+function Write-Fail { param([string]$Message) Write-Host "[x] $(Hide-UserProfilePath -Text $Message)" -ForegroundColor Red }
 
 # The single choke point for every yes/no question the installer asks, so the
 # graphical installer can answer each one non-interactively. When -Specified
@@ -242,8 +273,13 @@ function Write-InstallHeartbeat {
 # folded to a space before it is written (wh-wizard-failure-guidance).
 function Write-InstallFailure {
     param([string]$Reason, [string]$WhatToTry = "")
+    # Sanitized here as well as in Write-Fail: the wizard's failure dialog is
+    # built from these tagged lines, and the unexpected-error handler feeds
+    # them raw exception text directly.
+    $Reason = Hide-UserProfilePath -Text $Reason
     [Console]::Out.WriteLine("FAILURE " + ($Reason -replace '\s+', ' '))
     if ($WhatToTry) {
+        $WhatToTry = Hide-UserProfilePath -Text $WhatToTry
         [Console]::Out.WriteLine("FAILHINT " + ($WhatToTry -replace '\s+', ' '))
     }
 }
@@ -265,6 +301,9 @@ function Write-InstallFailure {
 # end.
 function Write-InstallNotice {
     param([string]$Message)
+    # Sanitized before the tagged copy too: notices carry exception text
+    # (shortcut and AI-helper failures) and reach the wizard's finish page.
+    $Message = Hide-UserProfilePath -Text $Message
     Write-Warn $Message
     if ($TaggedOutput) {
         [Console]::Out.WriteLine("NOTICE " + ($Message -replace '\s+', ' '))
@@ -353,6 +392,10 @@ function ConvertTo-TomlBasicString {
 
 function Stop-Install {
     param([string]$Message, [string]$WhatToTry = "")
+    # Write-Fail and Write-InstallFailure sanitize their own text; the
+    # what-to-try console line below goes through Write-Host directly, so it
+    # is sanitized here.
+    if ($WhatToTry) { $WhatToTry = Hide-UserProfilePath -Text $WhatToTry }
     Write-Fail $Message
     if ($WhatToTry) { Write-Host "    What to try: $WhatToTry" }
     Write-Host "    If you are stuck, please file an issue: $IssuesUrl"
@@ -440,14 +483,6 @@ function Test-Preflights {
     } catch { $micCount = -1 }
     if ($micCount -eq 0) {
         Write-InstallNotice "No active microphone was found. Wheelhouse needs one to hear you -- plug one in before the first run."
-    }
-
-    # tar.exe ships with Windows 10 1803+ but is absent on some older/LTSC
-    # images. It is needed to unpack the speech model archive; enforced hard
-    # only if the Parakeet download actually runs.
-    $script:HasTar = [bool](Get-Command tar.exe -ErrorAction SilentlyContinue)
-    if (-not $script:HasTar) {
-        Write-InstallNotice "tar.exe was not found. It is needed to unpack the offline speech model; the installer will stop at that step if you choose the default engine."
     }
 
     Write-Status "Requirement checks passed."
@@ -737,6 +772,143 @@ function Get-WebResponseStatusCode {
     return 0
 }
 
+function Test-ResidueOwnerAlive {
+    param([string]$Name)
+    # Working files and directories carry the process id of the installer
+    # run that created them (<name>-<pid>, plus an optional .meta suffix).
+    # A LIVE owner means the item is a concurrent run's work in progress
+    # -- possibly the machine's only complete copy mid-move -- so it must
+    # never be treated as residue. A dead owner's leavings are removable.
+    # This run's own id counts as removable: by the time a sweep runs,
+    # this run is finished with its own working files. Process id reuse
+    # can make a dead run's file survive one sweep (an unrelated live
+    # process holds the number); a later sweep removes it.
+    if ($Name -match '-(\d+)(\.meta)?$') {
+        $owner = 0
+        if ([int]::TryParse($Matches[1], [ref]$owner) -and $owner -ne $PID) {
+            return ($null -ne (Get-Process -Id $owner -ErrorAction SilentlyContinue))
+        }
+    }
+    return $false
+}
+
+function Remove-DownloadResidue {
+    param([string]$Destination)
+    # Best-effort sweep of one destination's download working files: dead
+    # runs' per-run partials and their resume side files, the bare
+    # .partial/.partial.meta names an older installer version used, and
+    # moved-aside invalid copies. Files named with a live process id are
+    # another run's download in progress and are skipped. A failure to
+    # delete must not turn a finished download into a false failure: warn
+    # and continue.
+    $dir = Split-Path -Parent $Destination
+    $leaf = Split-Path -Leaf $Destination
+    # The .NET probe, not Test-Path: it returns false instead of throwing,
+    # so an unreadable directory skips the sweep rather than turning a
+    # finished download into a terminating error under the script-wide
+    # ErrorActionPreference Stop.
+    if (-not [System.IO.Directory]::Exists($dir)) { return }
+    foreach ($pattern in @("$leaf.partial*", "$leaf.invalid-*")) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $dir -Filter $pattern -ErrorAction SilentlyContinue)) {
+            if (Test-ResidueOwnerAlive -Name $item.Name) { continue }
+            try {
+                # -Recurse: a moved-aside occupier can be a folder.
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Warn "Could not remove a leftover download file ($($item.Name)); it will be removed on the next run."
+            }
+        }
+    }
+}
+
+function Get-FileSha256IfReadable {
+    param([string]$Path)
+    # A hash probe that cannot abort the install: overlapping runs move
+    # and replace these files, so the file can vanish or be locked between
+    # a Test-Path and the hash read. $null means "could not be hashed",
+    # and every caller treats that as "not verified" rather than a crash.
+    try {
+        return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    } catch {
+        return $null
+    }
+}
+
+function Complete-VerifiedDownload {
+    param(
+        [string]$Partial,
+        [string]$Meta,
+        [string]$Destination,
+        [string]$ExpectedSha256,
+        [string]$Description
+    )
+    # Promotion of a verified per-run partial to the shared destination.
+    # An exclusive rename, not Move-Item -Force: overlapping installer
+    # runs share the destination, and a blind overwrite would race the
+    # other run's own promotion. On a conflict, a destination that
+    # verifies against the expected checksum is another run's finished
+    # download -- accept it and discard this run's identical copy. An
+    # occupier that does NOT verify (the invalid cached file left in
+    # place by the entry check, a corrupt copy, or a FOLDER left at the
+    # cache filename by filesystem damage or a manual repair) is moved
+    # aside -- never deleted in place from a hash snapshot -- and the
+    # promotion is retried once. The occupier is classified with the
+    # .NET Exists probes (they return false instead of throwing, so an
+    # unreadable path cannot abort the install here) and a folder is
+    # moved with the directory move; the file-only move cannot move a
+    # folder, and swallowing that failure made a folder occupier a
+    # permanent trap: every rerun downloaded the asset and stopped again.
+    $accepted = $false
+    try {
+        [System.IO.File]::Move($Partial, $Destination)
+    } catch {
+        $destHash = Get-FileSha256IfReadable -Path $Destination
+        if ($destHash -and $destHash -ieq $ExpectedSha256) {
+            $accepted = $true
+        } elseif ([System.IO.File]::Exists($Destination) -or [System.IO.Directory]::Exists($Destination)) {
+            $aside = "$Destination.invalid-$PID"
+            Remove-Item -LiteralPath $aside -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                if ([System.IO.Directory]::Exists($Destination)) {
+                    [System.IO.Directory]::Move($Destination, $aside)
+                } else {
+                    [System.IO.File]::Move($Destination, $aside)
+                }
+            } catch { }
+            try {
+                [System.IO.File]::Move($Partial, $Destination)
+            } catch {
+                $retryHash = Get-FileSha256IfReadable -Path $Destination
+                if ($retryHash -and $retryHash -ieq $ExpectedSha256) {
+                    $accepted = $true
+                } else {
+                    Stop-Install "Placing the downloaded $Description failed: $($_.Exception.Message)" `
+                        "Run the installer again."
+                }
+            }
+        } else {
+            # The destination is free yet the rename failed (this run's
+            # partial is locked or gone). Nothing to accept; stop with
+            # the cause.
+            Stop-Install "Placing the downloaded $Description failed: $($_.Exception.Message)" `
+                "Run the installer again."
+        }
+    }
+    if ($accepted) {
+        Remove-Item -LiteralPath $Partial -Force -ErrorAction SilentlyContinue
+        Write-Status "$Description was downloaded by another setup running at the same time."
+    } else {
+        Write-Status "$Description downloaded and verified."
+    }
+    # No existence probe before the removal: the download already
+    # succeeded, and under the script-wide ErrorActionPreference Stop a
+    # bare Test-Path that cannot read the path would be a terminating
+    # error -- failing a finished download over its cleanup. Remove-Item
+    # with SilentlyContinue is a no-op on a missing file.
+    Remove-Item -LiteralPath $Meta -Force -ErrorAction SilentlyContinue
+    Remove-DownloadResidue -Destination $Destination
+}
+
 function Invoke-VerifiedDownload {
     param(
         [string]$Url,
@@ -752,16 +924,54 @@ function Invoke-VerifiedDownload {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     if (Test-Path -LiteralPath $Destination) {
-        $existing = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
-        if ($existing -ieq $ExpectedSha256) {
+        $existing = Get-FileSha256IfReadable -Path $Destination
+        if ($existing -and $existing -ieq $ExpectedSha256) {
             Write-Status "$Description is already downloaded and verified."
+            Remove-DownloadResidue -Destination $Destination
             return
         }
-        Remove-Item -LiteralPath $Destination -Force
+        # An invalid cached copy is NOT deleted here: deleting from this
+        # hash snapshot would race a concurrent run promoting a verified
+        # copy to the same path (the same stale-snapshot class as the
+        # model-tree cleanup). Promotion replaces it with an exclusive
+        # move once this run's own copy verifies.
+        Write-Warn "The cached $Description does not match the expected checksum; downloading it again."
     }
 
-    $partial = "$Destination.partial"
-    $meta = "$Destination.partial.meta"
+    # Per-run working files: the process id in the names keeps overlapping
+    # installer runs (the script takes no lock) from writing or deleting
+    # each other's download in progress.
+    $partial = "$Destination.partial-$PID"
+    $meta = "$Destination.partial-$PID.meta"
+
+    if (-not (Test-Path -LiteralPath $partial)) {
+        # Adopt a partial left by a run that is no longer alive, so "run
+        # the installer again -- it resumes where it left off" stays true
+        # across runs. The exclusive rename is the claim: two live runs
+        # cannot both adopt the same file, and the loser of the rename
+        # simply starts fresh. The bare .partial name an older installer
+        # version used has no process id and is treated as dead.
+        $downloadDir = Split-Path -Parent $Destination
+        $downloadLeaf = Split-Path -Leaf $Destination
+        $orphans = @()
+        if (Test-Path -LiteralPath $downloadDir) {
+            $orphans = @(Get-ChildItem -LiteralPath $downloadDir -Filter "$downloadLeaf.partial*" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notlike "*.meta" -and -not (Test-ResidueOwnerAlive -Name $_.Name) })
+        }
+        foreach ($orphan in $orphans) {
+            try { [System.IO.File]::Move($orphan.FullName, $partial) } catch { continue }
+            $orphanMeta = "$($orphan.FullName).meta"
+            if (Test-Path -LiteralPath $meta) {
+                Remove-Item -LiteralPath $meta -Force -ErrorAction SilentlyContinue
+            }
+            if (Test-Path -LiteralPath $orphanMeta) {
+                # Best-effort: without its meta the resume validators are
+                # gone and Get-ResumeState starts the download fresh.
+                try { [System.IO.File]::Move($orphanMeta, $meta) } catch { }
+            }
+            break
+        }
+    }
 
     $attempt = 0
     while ($true) {
@@ -797,11 +1007,17 @@ function Invoke-VerifiedDownload {
             continue
         }
 
-        $hash = (Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash
+        $hash = Get-FileSha256IfReadable -Path $partial
+        if ($null -eq $hash) {
+            # This run's own partial cannot be read back (an antivirus
+            # scan holding it open is the common cause). It is kept: the
+            # rerun resumes or re-verifies it.
+            Stop-Install "The downloaded $Description could not be read for verification." `
+                "Close other programs (an antivirus scan can hold files open) and run the installer again -- it resumes where it left off."
+        }
         if ($hash -ieq $ExpectedSha256) {
-            Move-Item -LiteralPath $partial -Destination $Destination -Force
-            if (Test-Path -LiteralPath $meta) { Remove-Item -LiteralPath $meta -Force }
-            Write-Status "$Description downloaded and verified."
+            Complete-VerifiedDownload -Partial $partial -Meta $meta -Destination $Destination `
+                -ExpectedSha256 $ExpectedSha256 -Description $Description
             return
         }
 
@@ -1078,26 +1294,26 @@ function Invoke-UvSync {
     param([string]$Uv, [string]$ServiceRelPath, [switch]$Fatal)
     $serviceDir = Join-Path $AppDir $ServiceRelPath
     Write-Status "Setting up $ServiceRelPath..."
-    # A missing or non-directory service path (interrupted extraction,
-    # antivirus quarantine) must follow the same fatal/non-fatal contract
-    # as a failed sync -- an unguarded Push-Location would crash the whole
+    # Every filesystem step below -- the path probe, the push, the native
+    # call -- follows the same fatal/non-fatal contract. The probe lives
+    # INSIDE the try: under the script-wide ErrorActionPreference Stop, an
+    # access-denied or filesystem error from Test-Path itself is a
+    # terminating error, and outside the try it would abort the whole
     # install even for the optional components. -PathType Container:
-    # plain Test-Path is also true for a FILE left at the path.
-    if (-not (Test-Path -LiteralPath $serviceDir -PathType Container)) {
-        if ($Fatal) {
-            Stop-Install "Setting up $ServiceRelPath failed: that path in the unpacked application is missing or is not a folder." `
-                "Run the installer again (it re-downloads and re-unpacks the application). An antivirus quarantining files can also cause this."
-        }
-        Write-InstallNotice "Setting up $ServiceRelPath failed (the path is missing or is not a folder); this optional component will be disabled."
-        return $false
-    }
-    # The guard above is only a snapshot: the folder can still vanish
-    # (antivirus quarantine, manual deletion) between the check and the
-    # push, and an unhandled Push-Location failure would abort the whole
-    # install even for the optional components. Same fatal/non-fatal
-    # contract as the guard.
+    # plain Test-Path is also true for a FILE left at the path. The probe
+    # is still only a snapshot: the folder can vanish (antivirus
+    # quarantine, manual deletion) between the check and the push, which
+    # the same catch handles.
     $stackDepth = (Get-Location -Stack).Count
     try {
+        if (-not (Test-Path -LiteralPath $serviceDir -PathType Container)) {
+            if ($Fatal) {
+                Stop-Install "Setting up $ServiceRelPath failed: that path in the unpacked application is missing or is not a folder." `
+                    "Run the installer again (it re-downloads and re-unpacks the application). An antivirus quarantining files can also cause this."
+            }
+            Write-InstallNotice "Setting up $ServiceRelPath failed (the path is missing or is not a folder); this optional component will be disabled."
+            return $false
+        }
         Push-Location -LiteralPath $serviceDir
         $result = Invoke-Native -Exe $Uv -Arguments @("sync", "--locked", "--no-dev")
         $code = $result.ExitCode
@@ -1121,9 +1337,12 @@ function Invoke-UvSync {
     }
     if ($code -ne 0) {
         # Show the tail of uv's output so a failed install is diagnosable
-        # from the console (and from an issue report).
+        # from the console (and from an issue report). These are raw native
+        # diagnostics that routinely name paths under the user's profile,
+        # and they do not pass through the sanitizing writers -- hide the
+        # profile here.
         $tail = @($result.Output | Select-Object -Last 5)
-        foreach ($line in $tail) { Write-Host "    uv: $line" }
+        foreach ($line in $tail) { Write-Host "    uv: $(Hide-UserProfilePath -Text $line)" }
         if ($Fatal) {
             Stop-Install "Setting up $ServiceRelPath failed (uv sync exit code $code)." `
                 "Check your internet connection and run the installer again. Corporate proxies can also block package downloads."
@@ -1288,42 +1507,238 @@ function Select-SttProvider {
 
 # --- Model download + extraction (step e) -------------------------------------------
 
-function Test-ModelComplete {
+function Get-ModelFileState {
+    param([string]$Path)
+    # A required model entry counts only as a regular file with at least one
+    # byte. Existence alone is not proof: opening an archive member creates
+    # its filename before any bytes are written, so a disk-full or killed
+    # extraction can leave a required name present and empty, and antivirus
+    # can do the same after the fact. Three answers, because 'the entry is
+    # proven unusable' ('bad': absent, empty, or a directory) and 'the
+    # entry could not be READ' ('unreadable': access denied, a filter
+    # driver holding it, a transient I/O failure) must not collapse into
+    # one value -- a read refusal is not evidence the model is incomplete,
+    # and treating it as one let a complete model be deleted as residue.
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return 'bad'
+    } catch {
+        return 'unreadable'
+    }
+    if ($item.PSIsContainer -or $item.Length -eq 0) { return 'bad' }
+    return 'ok'
+}
+
+function Get-ModelState {
     param([string]$ModelDir)
     # Mirrors sherpa_engine.py's required-file check: tokens.txt plus the
     # encoder/decoder/joiner trio in either int8 or full-precision naming.
     # tokens.txt alone is NOT proof of a finished extraction -- an
-    # interrupted tar can leave it behind without the much larger ONNX
-    # files, and the app then fails at startup with nothing to repair it.
-    if (-not (Test-Path -LiteralPath (Join-Path $ModelDir "tokens.txt"))) { return $false }
-    foreach ($suffix in @(".int8.onnx", ".onnx")) {
-        $allPresent = $true
-        foreach ($part in @("encoder", "decoder", "joiner")) {
-            if (-not (Test-Path -LiteralPath (Join-Path $ModelDir "$part$suffix"))) {
-                $allPresent = $false
-                break
+    # interrupted extraction can leave it behind without the much larger
+    # ONNX files, and the app then fails at startup with nothing to repair
+    # it. Returns 'complete', 'incomplete' (every gap is a PROVEN bad
+    # entry), or 'unreadable' (at least one required entry could not be
+    # read, so incompleteness is not proven). Only 'incomplete' ever
+    # authorizes deleting a tree.
+    $sawUnreadable = $false
+    $tokens = Get-ModelFileState -Path (Join-Path $ModelDir "tokens.txt")
+    if ($tokens -eq 'unreadable') { $sawUnreadable = $true }
+    if ($tokens -eq 'ok') {
+        foreach ($suffix in @(".int8.onnx", ".onnx")) {
+            $allPresent = $true
+            foreach ($part in @("encoder", "decoder", "joiner")) {
+                $state = Get-ModelFileState -Path (Join-Path $ModelDir "$part$suffix")
+                if ($state -eq 'unreadable') { $sawUnreadable = $true }
+                if ($state -ne 'ok') {
+                    $allPresent = $false
+                    break
+                }
+            }
+            if ($allPresent) { return 'complete' }
+        }
+    }
+    if ($sawUnreadable) { return 'unreadable' }
+    return 'incomplete'
+}
+
+function Test-ModelComplete {
+    param([string]$ModelDir)
+    # The yes/no view for the accept-winner checks: only a PROVEN complete
+    # model is accepted, and neither 'incomplete' nor 'unreadable' leads
+    # those callers to delete anything.
+    return ((Get-ModelState -ModelDir $ModelDir) -eq 'complete')
+}
+
+function Expand-ModelArchive {
+    param([string]$Python, [string]$Archive, [string]$Destination)
+    # NOT tar.exe: Windows 10's bundled bsdtar (libarchive 3.3.2) is built
+    # with zlib only -- no bz2lib -- so it cannot decompress this .tar.bz2
+    # and exits 1 instantly on an otherwise healthy machine (observed on
+    # build 19045; Windows 11's build does link bz2lib, which is why the
+    # failure never showed in testing). The app venv's Python is guaranteed
+    # by the earlier fatal uv sync, and its tarfile module decompresses
+    # bzip2 on every supported Windows build. filter="data" refuses
+    # absolute paths and parent-directory escapes inside the archive.
+    # Through Invoke-Native like every other native call: anything the
+    # child writes to stderr is a landmine under $ErrorActionPreference =
+    # 'Stop' whenever the process stderr is redirected.
+    # Single-quoted Python strings on purpose: PowerShell 5.1 does not
+    # escape double quotes inside a native-process argument, so a " in
+    # this code would be stripped in transit and break the Python syntax.
+    $code = @'
+import sys, tarfile
+with tarfile.open(sys.argv[1], 'r:bz2') as tf:
+    tf.extractall(sys.argv[2], filter='data')
+'@
+    Invoke-Native -Exe $Python -Arguments @("-c", $code, $Archive, $Destination)
+}
+
+function Remove-ModelResidue {
+    # Best-effort cleanup of extraction leftovers: every working directory
+    # under the models directory and the cached archive. Called after a
+    # successful promotion AND on the already-installed path, so an
+    # interruption between promotion and cleanup cannot strand the 650 MB
+    # archive forever -- the next run retries. A failure here (a file held
+    # open by antivirus or indexing) must not turn a correct install into a
+    # false failure: warn and continue.
+    # Trees and files named with a LIVE process id are another run's work
+    # in progress -- a working tree mid-extraction, or a moved-aside tree
+    # that may be the machine's only complete model mid-restore -- and
+    # must never be swept. Dead owners' leavings are removed as before.
+    # Both directory probes use the .NET call, not Test-Path: it returns
+    # false instead of throwing, so an unreadable directory skips the
+    # sweep rather than turning a correct install into a terminating
+    # error under the script-wide ErrorActionPreference Stop.
+    if ([System.IO.Directory]::Exists($ModelsDir)) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $ModelsDir -Filter "$ModelDirName.extracting*" -ErrorAction SilentlyContinue)) {
+            if (Test-ResidueOwnerAlive -Name $item.Name) { continue }
+            try {
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Warn "Could not remove a leftover working folder ($($item.Name)); it will be removed on the next run."
             }
         }
-        if ($allPresent) { return $true }
     }
-    return $false
+    # The archive glob also catches the per-run download working files
+    # (<archive>.partial-<pid>, .invalid-<pid>) a crashed run left behind.
+    if ([System.IO.Directory]::Exists($DownloadsDir)) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $DownloadsDir -Filter "$ModelDirName.tar.bz2*" -ErrorAction SilentlyContinue)) {
+            if (Test-ResidueOwnerAlive -Name $item.Name) { continue }
+            try {
+                # -Recurse: a moved-aside occupier can be a folder.
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Warn "Could not remove a leftover download file ($($item.Name)); it will be removed on the next run."
+            }
+        }
+    }
 }
 
 function Install-ParakeetModel {
-    if (-not $script:HasTar) {
-        Stop-Install "tar.exe is needed to unpack the speech model, but it was not found on this system." `
-            "tar.exe ships with Windows 10 version 1803 and later. On older editions, install it or choose the Google Cloud engine instead."
+    $python = Join-Path $AppDir "services\wheelhouse\.venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python)) {
+        # Unreachable in a normal run (the services\wheelhouse sync is fatal
+        # and runs first); antivirus quarantine or a hand-deleted venv gets
+        # a clear stop instead of a confusing extraction error.
+        Stop-Install "The application environment needed to unpack the speech model is missing." `
+            "Run the installer again (it repairs the application environment)."
     }
     $extractedDir = Join-Path $ModelsDir $ModelDirName
-    if (Test-ModelComplete -ModelDir $extractedDir) {
+    $modelState = Get-ModelState -ModelDir $extractedDir
+    if ($modelState -eq 'complete') {
         Write-Status "The speech model is already installed."
+        Remove-ModelResidue
         return
     }
+    if ($modelState -eq 'unreadable') {
+        # A required entry could not be READ. That is not proof the model
+        # is incomplete, and everything below this gate treats the tree as
+        # replaceable -- acting on a read refusal could delete a complete
+        # model. Leave the tree exactly as it is.
+        Stop-Install "A file in the existing speech model could not be read, so the model cannot be verified." `
+            "Close other programs (an antivirus scan can hold files open) and run the installer again."
+    }
     if (Test-Path -LiteralPath $extractedDir) {
-        # Leftover from an interrupted extraction. Remove it so the fresh
-        # extraction cannot mix old and new files.
-        Write-Warn "An incomplete speech model was found from an earlier run; reinstalling it."
-        Remove-Item -LiteralPath $extractedDir -Recurse -Force
+        # A tree the completeness check rejects: an old partial extraction
+        # or damage after the fact. It must go so the promoted fresh tree
+        # cannot mix old and new files -- but deleting it in place would
+        # act on a stale snapshot: a concurrent installer run can promote
+        # a COMPLETE model to this exact path between the check above and
+        # the delete, and the delete would then destroy the other run's
+        # finished install. Move the observed tree aside with an exclusive
+        # rename and re-verify the exact tree that was moved; only a tree
+        # this run owns and has re-checked is ever deleted. The aside name
+        # matches the residue sweep's pattern, so a leftover cannot strand.
+        $staleDir = Join-Path $ModelsDir "$ModelDirName.extracting-stale-$PID"
+        if (Test-Path -LiteralPath $staleDir) {
+            Remove-Item -LiteralPath $staleDir -Recurse -Force
+        }
+        $movedAside = $false
+        try {
+            [System.IO.Directory]::Move($extractedDir, $staleDir)
+            $movedAside = $true
+        } catch {
+            if (Test-ModelComplete -ModelDir $extractedDir) {
+                # The rename lost to a concurrent run that promoted a
+                # complete model here. The machine has what it needs.
+                Write-Status "The speech model was installed by another setup running at the same time."
+                Remove-ModelResidue
+                return
+            }
+            if (Test-Path -LiteralPath $extractedDir) {
+                # Still present, still incomplete, and it cannot be moved
+                # (a file inside is held open). Extracting fresh would end
+                # at a promotion this same lock defeats; stop with the
+                # cause instead.
+                Stop-Install "An incomplete speech model from an earlier run could not be moved aside: $($_.Exception.Message)" `
+                    "Close other programs (an antivirus scan can hold the folder open) and run the installer again."
+            }
+            # The tree vanished (a concurrent run removed it): the path is
+            # free, continue with a fresh install.
+        }
+        if ($movedAside) {
+            $staleState = Get-ModelState -ModelDir $staleDir
+            if ($staleState -ne 'incomplete') {
+                # 'complete': the completeness check above was a stale
+                # snapshot -- the tree this run moved aside is a complete
+                # model a concurrent run promoted after that check.
+                # 'unreadable': incompleteness is not proven, so the tree
+                # must not be deleted. Either way, put it back.
+                try {
+                    [System.IO.Directory]::Move($staleDir, $extractedDir)
+                } catch {
+                    if (Test-ModelComplete -ModelDir $extractedDir) {
+                        # Yet another run promoted a complete model while
+                        # the restore was in flight; the moved-aside tree
+                        # is redundant residue and is swept below.
+                        Write-Status "The speech model was installed by another setup running at the same time."
+                        Remove-ModelResidue
+                        return
+                    }
+                    # The tree is stranded at the aside name. The next
+                    # run re-downloads, and its residue sweep removes the
+                    # stranded tree once its owner is gone.
+                    Stop-Install "Putting the speech model back in place failed: $($_.Exception.Message)" `
+                        "Run the installer again."
+                }
+                if ($staleState -eq 'complete') {
+                    Write-Status "The speech model was installed by another setup running at the same time."
+                    Remove-ModelResidue
+                    return
+                }
+                Stop-Install "A file in the existing speech model could not be read, so the model cannot be verified." `
+                    "Close other programs (an antivirus scan can hold files open) and run the installer again."
+            }
+            Write-Warn "An incomplete speech model was found from an earlier run; reinstalling it."
+            try {
+                Remove-Item -LiteralPath $staleDir -Recurse -Force -ErrorAction Stop
+            } catch {
+                # Best-effort: the tree is out of the final path, so the
+                # install can proceed; any run's residue sweep retries.
+                Write-Warn "Could not remove a leftover working folder ($ModelDirName.extracting-stale-$PID); it will be removed on the next run."
+            }
+        }
     }
     New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
     New-Item -ItemType Directory -Force -Path $DownloadsDir | Out-Null
@@ -1332,15 +1747,52 @@ function Install-ParakeetModel {
     Invoke-VerifiedDownload -Url $ModelUrl -Destination $archive -ExpectedSha256 $ModelSha256 -Description "the speech model"
 
     Write-Status "Unpacking the speech model..."
-    # Through Invoke-Native like every other native call: bsdtar warnings on
-    # stderr are the same under-Stop landmine as uv's progress output
-    # whenever the process stderr is redirected.
-    $tar = Invoke-Native -Exe "tar.exe" -Arguments @("-xjf", $archive, "-C", $ModelsDir)
-    if ($tar.ExitCode -ne 0 -or -not (Test-ModelComplete -ModelDir $extractedDir)) {
-        Stop-Install "Unpacking the speech model failed (tar exit code $($tar.ExitCode))." `
+    # Extract into a per-run working directory and promote only a verified
+    # tree, so the final directory exists only when a completed extraction
+    # put it there. Extracting straight into $ModelsDir would leave a
+    # partial tree at the exact path the entry gate above reads on the next
+    # run, and a disk-full or killed extraction can leave every required
+    # filename present there with the last one incomplete. The process id
+    # in the name keeps two overlapping installer runs (the script takes no
+    # lock) out of each other's working trees.
+    $stagingRoot = Join-Path $ModelsDir "$ModelDirName.extracting-$PID"
+    if (Test-Path -LiteralPath $stagingRoot) {
+        Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+    }
+    $extract = Expand-ModelArchive -Python $python -Archive $archive -Destination $stagingRoot
+    $stagedDir = Join-Path $stagingRoot $ModelDirName
+    if ($extract.ExitCode -ne 0 -or -not (Test-ModelComplete -ModelDir $stagedDir)) {
+        if (Test-ModelComplete -ModelDir $extractedDir) {
+            # Another installer running at the same time finished the model
+            # while this extraction failed (it may even have removed this
+            # run's working tree as residue). The machine has what it needs.
+            Write-Status "The speech model was installed by another setup running at the same time."
+            Remove-ModelResidue
+            return
+        }
+        # The extractor's own last lines go into the message: the shipped
+        # 'tar exit code 1' failure left the setup log with no diagnosis.
+        Stop-Install "Unpacking the speech model failed (exit code $($extract.ExitCode)): $((@($extract.Output) | Select-Object -Last 3) -join ' / ')" `
             "Run the installer again; the download itself is kept and will not repeat."
     }
-    Remove-Item -LiteralPath $archive -Force
+    # A rename that refuses an existing destination. Move-Item would treat a
+    # directory that reappeared here (a second installer run, or restore
+    # software) as a container and silently nest the verified tree inside
+    # it, then report success with no usable model at the required paths.
+    try {
+        [System.IO.Directory]::Move($stagedDir, $extractedDir)
+    } catch {
+        if (Test-ModelComplete -ModelDir $extractedDir) {
+            # Another writer promoted a complete model first; this run's
+            # tree is residue and is swept below.
+            Write-Status "The speech model was installed by another setup running at the same time."
+            Remove-ModelResidue
+            return
+        }
+        Stop-Install "Placing the unpacked speech model failed: $($_.Exception.Message)" `
+            "Run the installer again; the download itself is kept and will not repeat."
+    }
+    Remove-ModelResidue
     Write-Status "Speech model installed."
 }
 
@@ -1745,7 +2197,7 @@ function Remove-LocalAiRuntimeResidue {
         try {
             if (Test-Path -LiteralPath $residue) { Remove-Item -LiteralPath $residue -Recurse -Force }
         } catch {
-            Write-Warning ("The leftover AI runtime at $residue could not " +
+            Write-Warn ("The leftover AI runtime at $residue could not " +
                 "be removed. It is not in use and is safe to delete by hand. " +
                 "This installer tries again each time it runs.")
         }
@@ -1859,7 +2311,7 @@ function Move-DirectoryIntoPlace {
                 if (Test-Path -LiteralPath $Final) { Remove-Item -LiteralPath $Final -Recurse -Force }
                 Move-Item -LiteralPath $backup -Destination $Final
             } catch {
-                Write-Warning ("The previous AI runtime could not be put " +
+                Write-Warn ("The previous AI runtime could not be put " +
                     "back. It is at $backup; rename it to $Final to restore " +
                     "it, or rerun this installer.")
             }

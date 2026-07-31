@@ -395,4 +395,4 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ---
 
-Generated: 2026-07-30 for the v1.0.6 release
+Generated: 2026-07-31 for the v1.0.7 release

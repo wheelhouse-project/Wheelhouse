@@ -5,6 +5,26 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.7] - 2026-07-31
+
+### Fixed
+
+- Installing on Windows 10 no longer fails while unpacking the speech
+  model. The installer had used the tar program that ships with Windows,
+  and the Windows 10 version of that program cannot open the model's
+  compression format. The installer now unpacks the model with
+  Wheelhouse's own Python instead, which works the same on Windows 10
+  and 11. Interrupted or overlapping installer runs were also hardened:
+  a half-finished download resumes on the next run, two installers
+  running at the same time no longer damage each other's files, and a
+  failure message now includes the actual error instead of a bare exit
+  code.
+- The Pattern Manager no longer offers an "Open help chat" action. The
+  in-app help chat is turned off in this release, so a pattern built on
+  that action did nothing when spoken. The action list now shows only
+  actions that work, and the "Open online help" example uses the shipped
+  "wheelhouse help online" command.
+
 ## [1.0.6] - 2026-07-31
 
 ### Added
