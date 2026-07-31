@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lost.
 - The local AI server is stopped when Wheelhouse exits, and is replaced if
   it stops answering while still running.
+- Four values in the shipped settings template did not match the values
+  the program itself uses when a setting is absent. On a fresh install the
+  floating button was hidden, too small to click comfortably, and placed
+  off the edge of the screen, and logging was set to its most detailed
+  level. All four now match: the button starts visible at 50 pixels near
+  the top-left corner, and logging starts at the ordinary level.
 
 ## [1.0.5] - 2026-07-24
 
