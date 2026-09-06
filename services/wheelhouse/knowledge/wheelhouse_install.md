@@ -1,17 +1,61 @@
-# Installing WheelHouse
+# Wheelhouse Installation Guide
 
-<!-- GENERATED FILE -- do not edit by hand. This file is extracted from
-     the WheelHouse help document
-     (services/wheelhouse/knowledge/wheelhouse_help.md) by
-     scripts/release/extract_install_md.py in the private repository.
-     Edit the help document and re-run the extractor; a release test
-     keeps this file in sync. -->
+## Instructions for AI Assistant
 
-> This guide is extracted from the [WheelHouse help
-> document](services/wheelhouse/knowledge/wheelhouse_help.md), the
-> project's source of truth for using and installing WheelHouse. It
-> covers what you need, installing, updating, switching speech engines,
-> security warnings you may see, and uninstalling.
+You are a friendly, patient Wheelhouse support assistant. You help two kinds
+of people: current users of Wheelhouse, and people who have not installed it
+yet and are deciding whether to try it. Wheelhouse is a voice-controlled
+desktop automation system for Windows.
+
+Behavior rules:
+- Match your depth to the question. Simple question = simple answer. Technical
+  question = technical answer.
+- If the user seems non-technical, avoid jargon. Use analogies.
+- If unsure whether the user wants a quick or detailed answer, ask:
+  "Would you like a quick answer or a deeper explanation?"
+- For someone deciding whether to install: answer accurately from the
+  "Overview", "System Requirements", "Speech Engines", and "Installation and
+  Setup" sections. Be candid about hardware limits and rough edges. Never
+  oversell.
+- For Wheelhouse-specific questions: answer only from the Wheelhouse documents
+  provided to you -- this help document, the installation guide, and the separate Wheelhouse
+  command and configuration reference when they are provided. Never invent features,
+  commands, or settings that none of the provided documents describe. For the
+  exact wording of a voice command, or a configuration setting and its default
+  value, use the command and configuration reference when it is available: this
+  help document explains the features in prose, but the complete list of every
+  command and setting now lives in that reference.
+- For installation, updates, removal, or installer troubleshooting, use the
+  separate installation guide (wheelhouse_install.md), fetched by getInstallGuide.
+- For general computing questions (microphone setup, Windows settings,
+  PowerShell basics): help freely using your general knowledge.
+- If the answer isn't in any of the documents provided to you: "I don't have
+  information about that feature. You can reach the developer at the Wheelhouse
+  GitHub page: https://github.com/wheelhouse-project/Wheelhouse (open an issue
+  or start a discussion)."
+- This document contains HTML comment lines such as <!-- install-doc:start -->.
+  They are structural markers for tooling. Ignore them and never mention them.
+- If an answer could depend on the Wheelhouse version (behavior that changed,
+  download sizes, feature availability), tell the user which release this
+  document describes -- read it from the "Generated" line in the footer at
+  the very end ("for the vX.Y.Z release"). Ignore the footer's "Wheelhouse
+  version" line; it is an internal build identifier. The separate command and
+  configuration reference names its own release in its own "Generated" footer
+  line the same way.
+- When describing voice commands, always give an example of what to say.
+- When a user seems overwhelmed, direct them to the "Quick Start" section
+  and tell them to ignore everything else until they're comfortable.
+- When a user asks about hardware or performance, be direct about limitations.
+  Don't promise it will work on every machine.
+- Greet the user and ask what they need help with.
+
+---
+
+## Installation and Setup
+
+Installing Wheelhouse, updating it, removing it, and the checks to perform after the first start.
+
+<!-- install-doc:start -->
 
 ### Running the installer
 
@@ -70,6 +114,12 @@ Installer failure messages contain no personal data and can be included in a hel
 
 **Re-running the installer is safe at any time.** It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your user data; the list of what is preserved is under [Updating Wheelhouse](#updating-wheelhouse).
 
+<!-- install-doc:end -->
+
+If none of these apply, the Wheelhouse Assistant can read an installer message and identify the cause; see [Getting Help](wheelhouse_help.md#getting-help). Reports can also be filed at https://github.com/wheelhouse-project/Wheelhouse or sent to `help@wheelhouse-project.org` -- include the installer's output or the setup log.
+
+<!-- install-doc:start -->
+
 ### Updating Wheelhouse
 
 There is no separate update procedure: **updating is re-running the installer.** Download and run the newest Wheelhouse-Setup.exe, or run the same PowerShell line, from [Running the installer](#running-the-installer). The installer fetches the newest release, and when it finds Wheelhouse already present, it updates it in place. Exit Wheelhouse first -- right-click the floating button or the tray icon, both of which open the same menu, and choose Exit. The installer refuses to replace an application that is running.
@@ -84,6 +134,10 @@ An update replaces the application and preserves user data:
 
 **If an update is interrupted** -- a power cut, a closed window, a crash -- user files are preserved. Before replacing anything, the installer copies them into a holding folder next to the application, and the next run restores whatever it finds there. Recovery is running the same command again; no manual step is required.
 
+<!-- install-doc:end -->
+
+<!-- install-doc:start -->
+
 ### Security warnings
 
 The Wheelhouse installer is digitally signed by the project's author, David Chesley Hite III, which allows Windows to verify that the download came from the project unaltered. Windows may still warn about each new release until it has seen that file often enough. The source code is public at https://github.com/wheelhouse-project/Wheelhouse.
@@ -93,6 +147,10 @@ The Wheelhouse installer is digitally signed by the project's author, David Ches
 - **A downloaded script will not run**: Windows marks a saved install-wheelhouse.ps1 as coming from the internet, and PowerShell may refuse to run it. Remove the mark once with `Unblock-File .\install-wheelhouse.ps1`, or start it with `powershell -ExecutionPolicy Bypass -File .\install-wheelhouse.ps1`.
 
 Installing from source avoids these warnings. CONTRIBUTING.md in the GitHub repository has the development setup steps.
+
+<!-- install-doc:end -->
+
+<!-- install-doc:start -->
 
 ### Uninstalling Wheelhouse
 
@@ -116,6 +174,10 @@ What each answer does:
 
 Those two folders, plus a small `WheelhouseSetup` folder used by the graphical installer's uninstaller, hold everything Wheelhouse itself stores. Setup writes in three further places. It removes two of them: the shortcuts it created and the start-at-login entry. The third it leaves, deliberately -- uv, the environment manager, installed in the user profile, which other programs may also be using. The graphical installer additionally leaves its own log in the Windows temporary folder. `%APPDATA%\Wheelhouse` holds no personal data -- only bookkeeping such as helper-process ID files -- and is removed under either answer. Run from the command line, the uninstaller prints both folder paths when it finishes; removed through Windows, it runs hidden and prints nothing you can see.
 
+<!-- install-doc:end -->
+
+<!-- install-doc:start -->
+
 ### Administrator windows and UAC prompts
 
 Wheelhouse installs for a single user account and runs without administrator rights. A program without administrator rights cannot change system files or settings, and anything it types or clicks is confined to what that user account is permitted to do.
@@ -134,6 +196,32 @@ One Windows rule follows from this. Windows does not allow a program to send key
 - If the program does not require administrator rights, start it normally. Wheelhouse can then type into it as it does any other program. Some tools require administrator rights and will not run without them; for those, use the two options above.
 
 No Wheelhouse setting removes this limit. Windows enforces it, and the UAC screen remains protected in all cases.
+
+<!-- install-doc:end -->
+
+### First run
+
+Starting Wheelhouse starts five programs: **the launcher** (started from the shortcut; supervises the others and restarts any that crash), **the logic process** (interprets recognized speech and routes it to an action), **the input process** (types text, presses keys, performs clicks), **the GUI process** (the tray icon and the floating status button), and **the speech engine** (a separate helper that converts audio to text). Within a few seconds the Wheelhouse icon appears in the system tray, near the clock; if it does not, see [Troubleshooting](wheelhouse_help.md#troubleshooting).
+
+### Microphone verification
+
+Confirm Windows itself receives audio before diagnosing recognition problems. Three checks, in order:
+
+1. **The privacy setting.** Open Settings > Privacy and security > Microphone: "Let desktop apps access your microphone" must be on. With it off, no audio reaches Wheelhouse and no error is reported.
+2. **The input meter.** Right-click the taskbar speaker icon, choose Sound settings, scroll to Input. The intended microphone should be selected and the level meter should move while you speak; if it stays flat, select a different input device.
+3. **A dictation test.** Open Notepad, confirm Wheelhouse is listening, and say "hello world". On current hardware the words appear within about two seconds.
+
+### The hotword ("x-ray")
+
+Commands that would have destructive effects if they fired during dictation -- closing a window, for example -- run only when the utterance begins with "x-ray": "close window" is transcribed as ordinary dictation, "x-ray close window" closes the active window. Common commands such as "undo", "copy", and "select all" need no hotword. Throughout this document a command that requires it is written with the "x-ray" prefix; the command reference states the requirement for every command.
+
+### The wake word ("computer")
+
+After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input, not silence, so a film watched without touching either triggers the pause. Saying "computer" resumes it, no keyboard or mouse needed. The wake word and the hotword differ: "computer" resumes listening after an idle pause, "x-ray" runs a protected command. Wake-word behavior is configurable in the wake_word section of the settings file, enabled by default. The idle pause comes from the Idle Monitor plugin ([Plugins](wheelhouse_help.md#plugins)), also enabled by default; with that plugin disabled, listening does not pause when idle.
+
+---
+
+<!-- install-doc:start -->
 
 ## Speech Engines
 
@@ -178,6 +266,10 @@ credentials_file = "C:\\Users\\yourname\\keys\\wheelhouse-speech.json"
 
 There is a second method, and it needs no file editing: set an environment variable named GOOGLE_APPLICATION_CREDENTIALS to the full path of the key file (press the Windows key, type "environment variables", open "Edit environment variables for your account"), then close Wheelhouse and start it again from the Start menu. The menu item "Restart Wheelhouse" is not enough for this method: part of the program keeps running across it, and that part still holds the environment from before you set the variable. Google's own software reads that variable automatically. Wheelhouse uses the variable whenever `credentials_file` is empty, so set one or the other, not both.
 
+<!-- install-doc:end -->
+
+<!-- install-doc:start -->
+
 ### Adding or switching engines later
 
 To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open **STT Provider**, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. If the new engine fails to start, the choice is not recorded and the next start returns to the previous engine. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.
@@ -186,15 +278,19 @@ To add an engine that was never set up on this machine, re-run the installer and
 
 The same re-run repairs a missing or incomplete speech model, for example after an interrupted download. The installer detects an incomplete model and reinstalls it. Re-running the installer is safe at any time, and the speech-engine question defaults to the engine already installed, so pressing Enter keeps it. If the current engine is no longer available on this hardware, the PowerShell installer reports that before asking; the setup wizard does not.
 
+<!-- install-doc:end -->
+
+<!-- install-doc:start -->
+
 ### Installer troubleshooting
 
 **Installer failures**
 
 Each installer failure message and its action is listed under [Installation failure messages](#installation-failure-messages); re-running the installer is safe and interrupted downloads resume.
 
+<!-- install-doc:end -->
+
 ---
 
-Need help with something this guide does not cover? Open an issue at
-https://github.com/wheelhouse-project/Wheelhouse/issues and paste the
-installer's output -- every message the installer prints is designed to
-be safe to share.
+Generated: 2026-07-31 for the v1.0.7 release
+Wheelhouse version: 1.0.7

@@ -21,10 +21,11 @@ account, no subscription, no telemetry.
 - **Voice commands.** Switch windows, press keys, launch programs — driven
   by a pattern catalog you can extend with your own commands through the
   built-in Pattern Manager.
-- **Click by voice.** Say `click cancel` or `click the submit button` and
-  Wheelhouse finds the control in the focused window and clicks it. When
-  names are ambiguous or unlabeled, say `apply numbers` to badge every
-  clickable control with a number and `click 5` to pick one.
+- **Click by voice.** Say `x-ray click cancel` or `x-ray click the submit
+  button` and Wheelhouse finds the control in the focused window and clicks
+  it. The `x-ray` hotword is what separates the command from dictation. When
+  names are ambiguous or unlabeled, say `show numbers` to badge every
+  clickable control with a number and `x-ray click 5` to pick one.
 - **Offline by default.** The default speech engine (NVIDIA Parakeet,
   running locally on your CPU) never sends audio or text anywhere.
 - **Careful about where text goes.** Before typing a word, Wheelhouse
@@ -87,7 +88,8 @@ include passwords and medical text. The short version:
 | Document | What's in it |
 |----------|--------------|
 | [INSTALL.md](./INSTALL.md) | Installation in detail, optional engines, troubleshooting, uninstall |
-| [User help](./services/wheelhouse/knowledge/wheelhouse_help.md) | Every voice command and feature, for daily use |
+| [User help](./services/wheelhouse/knowledge/wheelhouse_help.md) | What Wheelhouse is and how each feature works, for daily use |
+| [Command and setting reference](./services/wheelhouse/knowledge/wheelhouse_reference.md) | Every voice command and configuration setting, one row each |
 | [llm/README.md](./llm/README.md) | Load the user help into your own AI chat (ChatGPT, Gemini, Claude, Perplexity) |
 | [PRIVACY.md](./PRIVACY.md) | Data flow, logging, and the capability disclosure |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | Process model, IPC, and the speech pipeline |
@@ -103,14 +105,21 @@ is enough — if ChatGPT says you "do not have access to GPT interactions",
 click **Sign up for free** in the upper right corner (no credit card
 required).
 
-Prefer your own AI service? The user help is written so any AI chat
-service can answer questions from it. If you already use ChatGPT, Gemini,
-Claude, or Perplexity, you can turn the help document into a personal
-Wheelhouse support assistant: you need only one file — the
-[help document](./services/wheelhouse/knowledge/wheelhouse_help.md) to
-upload. Its assistant rules are embedded at the top, so there is nothing
-to paste. The [llm/ folder](./llm/README.md) explains the setup, and the
-steps for each service live on the project site:
+Prefer your own AI service? The user documentation is written so any AI
+chat service can answer questions from it. If you already use ChatGPT,
+Gemini, Claude, or Perplexity, you can turn it into a personal Wheelhouse
+support assistant. Upload three files: the
+[help document](./services/wheelhouse/knowledge/wheelhouse_help.md), which
+covers what Wheelhouse is and how each feature works, the
+[installation guide](./services/wheelhouse/knowledge/wheelhouse_install.md),
+which covers installation, updates, and removal, and the
+[command and setting reference](./services/wheelhouse/knowledge/wheelhouse_reference.md),
+which is the exhaustive list of every voice command and configuration
+setting. Upload all three, or the assistant cannot answer exact command and
+setting questions. The assistant rules are embedded at the top of the help
+document, so there is nothing to paste. The
+[llm/ folder](./llm/README.md) explains the setup, and the steps for each
+service live on the project site:
 [ChatGPT](https://wheelhouse-project.org/#llm-chatgpt) ·
 [Gemini](https://wheelhouse-project.org/#llm-gemini) ·
 [Claude](https://wheelhouse-project.org/#llm-claude) ·

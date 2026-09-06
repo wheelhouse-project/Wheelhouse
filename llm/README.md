@@ -17,12 +17,13 @@ in plain language.
 
 | File | What it is | What you do with it |
 |------|------------|---------------------|
-| [`wheelhouse_help.md`](../services/wheelhouse/knowledge/wheelhouse_help.md) | The complete Wheelhouse user guide | Upload it to your AI service as a knowledge file |
+| [`wheelhouse_help.md`](../services/wheelhouse/knowledge/wheelhouse_help.md) | The Wheelhouse daily-use guide | Upload it to your AI service as a knowledge file |
+| [`wheelhouse_install.md`](../services/wheelhouse/knowledge/wheelhouse_install.md) | Installation, updates, removal, and engine setup | Upload it alongside the guide and reference |
 | [`wheelhouse_reference.md`](../services/wheelhouse/knowledge/wheelhouse_reference.md) | The full voice-command and configuration reference | Upload it alongside the guide so the assistant can answer detailed command and setting questions |
 
 The guide covers what Wheelhouse is, getting started, and how each feature
 works; the reference is the exhaustive list of every voice command and
-configuration setting. Upload both so your assistant can answer both kinds
+configuration setting. Upload all three so your assistant can answer all kinds
 of question. The assistant behavior rules are embedded at the top of the
 guide (its "Instructions for AI Assistant" section), so there is nothing to
 paste. If a service refuses a `.md` upload, rename the file to `.txt` — the
@@ -52,8 +53,9 @@ instead of using an uploaded copy:
   command and configuration questions, the guide otherwise), and refuse
   to answer from memory when the fetch fails.
 - [`gpt-action-openapi.json`](./gpt-action-openapi.json) — the GPT Action
-  schema: two GETs of raw GitHub URLs, `getHelpDocument` for the guide and
-  `getCommandReference` for the command-and-configuration reference.
+  schema: three GETs of raw GitHub URLs, `getHelpDocument` for the guide and
+  `getCommandReference` for the command-and-configuration reference, and
+  `getInstallGuide` for installation, updates, and removal.
 
 You can reuse both to build your own live-fetching assistant on any
 platform that can fetch a URL while answering.

@@ -42,6 +42,7 @@
       <li><a href="#application-switching">Application Switching</a></li>
       <li><a href="#system">System</a></li>
       <li><a href="#voice-element-clicking">Voice Element Clicking</a></li>
+      <li><a href="#mouse-grid">Mouse Grid</a></li>
       <li><a href="#wheelhouse-control">Wheelhouse Control</a></li>
     </ul>
   </li>
@@ -63,18 +64,18 @@
       <li><a href="#speech">[speech]</a></li>
       <li><a href="#stt">[stt]</a></li>
       <li><a href="#sttgoogle">[stt.google]</a></li>
-      <li><a href="#sttazure">[stt.azure]</a></li>
       <li><a href="#ai">[ai]</a></li>
       <li><a href="#aiserver">[ai.server]</a></li>
       <li><a href="#airuntime">[ai.runtime]</a></li>
       <li><a href="#aihelp">[ai.help]</a></li>
       <li><a href="#click">[click]</a></li>
+      <li><a href="#actions">[actions]</a></li>
     </ul>
   </li>
 </ul>
 </nav>
 <main id="main">
-<p>This is the complete, automatically generated reference for every Wheelhouse voice command and configuration setting. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using and installing Wheelhouse, see the help document (wheelhouse_help.md).</p>
+<p>This is the complete, automatically generated reference for every Wheelhouse voice command and configuration setting. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using and installing Wheelhouse, see the installation guide (wheelhouse_install.md).</p>
 <h2 id="voice-command-reference">Voice Command Reference</h2>
 <h3 id="dictation-control">Dictation Control</h3>
 <table>
@@ -88,7 +89,7 @@
 <tbody>
 <tr>
 <td>literal [words]</td>
-<td>Types the words after "literal" exactly, skipping all command and replacement processing Takes effect wherever it appears in an utterance, not only as the first word.</td>
+<td>Types the words after "literal" exactly, skipping all command and replacement processing. Takes effect wherever it appears in an utterance, not only as the first word.</td>
 <td>The escape hatch -- see the detailed explanation in "Special Commands"</td>
 </tr>
 <tr>
@@ -103,8 +104,18 @@
 </tr>
 <tr>
 <td>submit</td>
-<td>Presses Enter Recognized at the trailing position of an utterance.</td>
+<td>Presses Enter. Recognized at the trailing position of an utterance.</td>
 <td>Also works as the last word of a sentence: "hello world submit" types "hello world" and then presses Enter. To type the word itself, say "literal submit"</td>
+</tr>
+<tr>
+<td>type [words] / dictate [words]</td>
+<td>Types the words that follow as ordinary dictation, so a phrase that would otherwise run as a command is written out instead</td>
+<td>e.g. "type delete all" writes those words rather than clearing the field</td>
+</tr>
+<tr>
+<td>enter</td>
+<td>Presses the Enter key. Fires only when it is the whole utterance.</td>
+<td>"submit" does the same and also works as the last word of a sentence</td>
 </tr>
 </tbody>
 </table>
@@ -121,12 +132,12 @@
 <tr>
 <td>backspace [number]</td>
 <td>Deletes one character to the left, or that many with a number</td>
-<td>e.g. "backspace 5"; the number is optional, counts capped at 50</td>
+<td>e.g. "backspace 5" or "backspace twenty three" -- say the count as digits or as words; the number is optional, counts capped at 50.</td>
 </tr>
 <tr>
 <td>delete [number]</td>
-<td>Deletes one character (or that many) to the right</td>
-<td>e.g. "delete 5"; counts capped at 50</td>
+<td>Deletes one character (or that many) to the right. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>e.g. "delete 5" or "delete twenty three" -- say the count as digits or as words; counts capped at 50</td>
 </tr>
 <tr>
 <td>delete word</td>
@@ -135,12 +146,12 @@
 </tr>
 <tr>
 <td>undo [number]</td>
-<td>Undoes the last action, or several</td>
+<td>Undoes the last action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Ctrl+Z; e.g. "undo 3". Common mishearings "undue" and "undu" also fire</td>
 </tr>
 <tr>
 <td>redo [number]</td>
-<td>Redoes the last undone action, or several</td>
+<td>Redoes the last undone action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Ctrl+Y; the common mishearing "redu" also fires</td>
 </tr>
 <tr>
@@ -156,7 +167,7 @@
 <tr>
 <td>tab [number]</td>
 <td>Presses Tab that many times</td>
-<td>e.g. "tab 3"; "indent 3" does the same. The number is required -- "tab" alone is typed as the word</td>
+<td>e.g. "tab 3" or "tab eleven" -- say the count as digits or as words; "indent 3" does the same. The number is required here; a bare "tab" spoken on its own presses Tab once, and "tab" inside a longer sentence is typed as the word</td>
 </tr>
 <tr>
 <td>shift tab</td>
@@ -165,8 +176,8 @@
 </tr>
 <tr>
 <td>escape</td>
-<td>Presses the Escape key</td>
-<td></td>
+<td>Presses the Escape key. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"dismiss" also works. "dismiss the meeting invite" on its own is typed as ordinary text, not treated as this command.</td>
 </tr>
 <tr>
 <td>press [keys]</td>
@@ -175,7 +186,7 @@
 </tr>
 <tr>
 <td>copy</td>
-<td>Copies the current selection</td>
+<td>Copies the current selection. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
@@ -194,13 +205,13 @@
 <td></td>
 </tr>
 <tr>
-<td>x-ray cut</td>
-<td>Cuts the current selection</td>
-<td>Requires the hotword for safety</td>
+<td>cut</td>
+<td>Cuts the current selection. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"cut that" also works. Say it as the whole sentence; "cut the vegetables" on its own is typed as ordinary text, not treated as this command.</td>
 </tr>
 <tr>
 <td>paste</td>
-<td>Pastes the clipboard contents</td>
+<td>Pastes the clipboard contents. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
@@ -214,23 +225,33 @@
 <td></td>
 </tr>
 <tr>
+<td>delete all</td>
+<td>Selects everything in the current field and deletes it</td>
+<td>Say it as the whole sentence. "delete all the files" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
 <td>select word</td>
 <td>Selects the word under the cursor</td>
-<td></td>
+<td>"select this word" also works. "select word by word until it looks right" on its own is typed as ordinary text, not treated as this command.</td>
 </tr>
 <tr>
 <td>select line</td>
 <td>Selects the line under the cursor</td>
-<td></td>
+<td>"select this line" also works. "select line six and copy it" on its own is typed as ordinary text, not treated as this command.</td>
 </tr>
 <tr>
 <td>select paragraph</td>
 <td>Selects the paragraph under the cursor</td>
-<td></td>
+<td>"select this paragraph" also works. "select paragraph three of the contract" on its own is typed as ordinary text, not treated as this command.</td>
 </tr>
 <tr>
-<td>x-ray save</td>
-<td>Saves the current document (Ctrl+S)</td>
+<td>x-ray select [words]</td>
+<td>Selects the first place those words appear in the document. The words must match the document exactly, apart from capital letters.</td>
+<td>Wheelhouse shows a Windows notification when it selects nothing, so a screen reader can read the reason.</td>
+</tr>
+<tr>
+<td>save</td>
+<td>Saves the current document (Ctrl+S). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
@@ -239,14 +260,199 @@
 <td>e.g. "x-ray find invoice"</td>
 </tr>
 <tr>
-<td>x-ray replace</td>
-<td>Opens find-and-replace (Ctrl+H)</td>
+<td>replace</td>
+<td>Opens find-and-replace (Ctrl+H). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
-<td>x-ray search</td>
-<td>Copies the current selection and runs a web search for it</td>
+<td>search</td>
+<td>Copies the current selection and runs a web search for it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Select the text first</td>
+</tr>
+<tr>
+<td>delete next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete next [number] words</td>
+<td>Selects that many words to the right of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete next [number] lines</td>
+<td>Moves to the start of the line, selects down that many lines, and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete previous / last [number] lines</td>
+<td>Moves to the start of the line, selects up that many lines, and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>delete this word</td>
+<td>Moves to the start of the word under the cursor, selects the whole word, and deletes it. Fires only when it is the whole utterance.</td>
+<td>"delete word" runs the same three keystrokes</td>
+</tr>
+<tr>
+<td>delete line</td>
+<td>Selects the whole line the cursor is on and deletes its text. Fires only when it is the whole utterance.</td>
+<td>"delete this line" does the same; the line break stays, so the line is left empty</td>
+</tr>
+<tr>
+<td>delete paragraph</td>
+<td>Moves to the start of the paragraph the cursor is in, selects the whole paragraph, and deletes it. Fires only when it is the whole utterance.</td>
+<td>"delete this paragraph" does the same</td>
+</tr>
+<tr>
+<td>cut next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut next [number] words</td>
+<td>Selects that many words to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut next [number] lines</td>
+<td>Moves to the start of the line, selects down that many lines, and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] lines</td>
+<td>Moves to the start of the line, selects up that many lines, and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] words</td>
+<td>Selects that many words to the right of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] lines</td>
+<td>Moves to the start of the line, selects down that many lines, and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] lines</td>
+<td>Moves to the start of the line, selects up that many lines, and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>select next [number] characters</td>
+<td>Selects that many characters to the right of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>select next [number] words</td>
+<td>Selects that many words to the right of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>select next [number] lines</td>
+<td>Selects down that many lines from the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>select next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>select previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>select previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>select previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>select previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>unselect that / clear selection</td>
+<td>Drops the selection with a Right Arrow key press, leaving the cursor at the right-hand end of what was selected. Fires only when it is the whole utterance.</td>
+<td>Nothing is deleted; with nothing selected the cursor simply moves one character right</td>
+</tr>
+<tr>
+<td>tab</td>
+<td>Presses the Tab key once. Fires only when it is the whole utterance.</td>
+<td>"tab [number]" presses it that many times</td>
 </tr>
 </tbody>
 </table>
@@ -262,17 +468,32 @@
 <tbody>
 <tr>
 <td>uppercase</td>
-<td>Converts the selection to UPPERCASE</td>
+<td>Converts the selection to UPPERCASE. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"upper case" and "uppercase that" also work</td>
+</tr>
+<tr>
+<td>all caps that</td>
+<td>Converts the selection to UPPERCASE. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
 <td></td>
 </tr>
 <tr>
 <td>lowercase</td>
-<td>Converts the selection to lowercase</td>
+<td>Converts the selection to lowercase. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"lower case" and "lowercase that" also work</td>
+</tr>
+<tr>
+<td>no caps that</td>
+<td>Converts the selection to lowercase. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
 <td></td>
 </tr>
 <tr>
 <td>capitalize</td>
-<td>Capitalizes the first letter of the selection and lowercases the rest</td>
+<td>Capitalizes the first letter of the selection and lowercases the rest. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"capitalize that" also works</td>
+</tr>
+<tr>
+<td>cap that</td>
+<td>Capitalizes the first letter of the selection and lowercases the rest. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
 <td></td>
 </tr>
 <tr>
@@ -302,23 +523,23 @@
 </tr>
 <tr>
 <td>compress</td>
-<td>Removes the spaces from the selection, joining the words together</td>
+<td>Removes the spaces from the selection, joining the words together. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
-<td>x-ray bold text</td>
+<td>bold text</td>
 <td>Bolds the selection (Ctrl+B)</td>
-<td>Works in apps that support rich text</td>
+<td>"bold that" also works. Works in apps that support rich text</td>
 </tr>
 <tr>
-<td>x-ray italics</td>
-<td>Italicizes the selection (Ctrl+I)</td>
-<td>Works in apps that support rich text</td>
+<td>italics</td>
+<td>Italicizes the selection (Ctrl+I). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"italicize that" also works. Works in apps that support rich text</td>
 </tr>
 <tr>
-<td>x-ray underline</td>
-<td>Underlines the selection (Ctrl+U)</td>
-<td>Works in apps that support rich text</td>
+<td>underline</td>
+<td>Underlines the selection (Ctrl+U). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"underline that" also works. Works in apps that support rich text</td>
 </tr>
 <tr>
 <td>parentheses [text]</td>
@@ -350,6 +571,246 @@
 <td>Wraps the selection in single quotes, inserts an empty pair, or wraps the spoken text</td>
 <td></td>
 </tr>
+<tr>
+<td>bold next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold next [number] words</td>
+<td>Selects that many words to the right of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold next [number] lines</td>
+<td>Selects down that many lines from the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] words</td>
+<td>Selects that many words to the right of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] lines</td>
+<td>Selects down that many lines from the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] words</td>
+<td>Selects that many words to the right of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] lines</td>
+<td>Selects down that many lines from the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>uppercase next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase next [number] words</td>
+<td>Selects that many words to the right of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase next [number] lines</td>
+<td>Selects down that many lines from the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "upper case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] words</td>
+<td>Selects that many words to the right of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] lines</td>
+<td>Selects down that many lines from the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50. "lower case" also works</td>
+</tr>
+<tr>
+<td>capitalize next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>capitalize next [number] words</td>
+<td>Selects that many words to the right of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>capitalize next [number] lines</td>
+<td>Selects down that many lines from the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>capitalize next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
 </tbody>
 </table>
 <h3 id="navigation">Navigation</h3>
@@ -367,6 +828,141 @@
 <td>Moves the cursor without touching the keyboard: go home / go end / go top / go bottom / go left / go right, with counts, word and paragraph units, and "then"-chained "grab" steps that select along the way</td>
 <td>See the Navigation subsection of the Voice Commands section for the full move list</td>
 </tr>
+<tr>
+<td>go up [number] lines / move up [number] lines</td>
+<td>Moves the cursor up that many lines. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go down [number] lines / move down [number] lines</td>
+<td>Moves the cursor down that many lines. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go up [number] paragraphs / move up [number] paragraphs</td>
+<td>Moves the cursor back that many paragraphs (Ctrl and Up Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go down [number] paragraphs / move down [number] paragraphs</td>
+<td>Moves the cursor forward that many paragraphs (Ctrl and Down Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go left [number] characters / move left [number] characters</td>
+<td>Moves the cursor left that many characters. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go right [number] characters / move right [number] characters</td>
+<td>Moves the cursor right that many characters. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go left [number] words / move left [number] words</td>
+<td>Moves the cursor back that many words (Ctrl and Left Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go right [number] words / move right [number] words</td>
+<td>Moves the cursor forward that many words (Ctrl and Right Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 50</td>
+</tr>
+<tr>
+<td>go to home / go to the beginning of the line</td>
+<td>Moves the cursor to the start of the current line (Home). Fires only when it is the whole utterance.</td>
+<td>"go to the start of the line" also works</td>
+</tr>
+<tr>
+<td>go to the top / go to the top of the document</td>
+<td>Moves the cursor to the very start of the document (Ctrl+Home). Fires only when it is the whole utterance.</td>
+<td>"go to the beginning of the document" and "go to the start of the document" also work</td>
+</tr>
+<tr>
+<td>go to the bottom / go to the bottom of the document</td>
+<td>Moves the cursor to the very end of the document (Ctrl+End). Fires only when it is the whole utterance.</td>
+<td>"go to the end of the document" also works</td>
+</tr>
+<tr>
+<td>go to the end of the line / go to the end</td>
+<td>Moves the cursor to the end of the current line (End). Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>go to the beginning of the word</td>
+<td>Moves the cursor back one word (Ctrl and Left Arrow). Fires only when it is the whole utterance.</td>
+<td>"go to the start of the word" also works; each app decides where a word boundary falls</td>
+</tr>
+<tr>
+<td>go to the end of the word</td>
+<td>Moves the cursor forward one word (Ctrl and Right Arrow). Fires only when it is the whole utterance.</td>
+<td>Each app decides where a word boundary falls, so the cursor may land at the start of the next word</td>
+</tr>
+<tr>
+<td>go to the beginning of the paragraph</td>
+<td>Moves the cursor back one paragraph (Ctrl and Up Arrow). Fires only when it is the whole utterance.</td>
+<td>"go to the start of the paragraph" also works</td>
+</tr>
+<tr>
+<td>go to the end of the paragraph</td>
+<td>Moves the cursor forward one paragraph (Ctrl and Down Arrow). Fires only when it is the whole utterance.</td>
+<td>Each app decides where a paragraph boundary falls, so the cursor may land at the start of the next paragraph</td>
+</tr>
+<tr>
+<td>move to the beginning of the selection</td>
+<td>Presses Left Arrow, which drops the selection and leaves the cursor at its left-hand end. Fires only when it is the whole utterance.</td>
+<td>With nothing selected the cursor simply moves one character left</td>
+</tr>
+<tr>
+<td>move to the end of the selection</td>
+<td>Presses Right Arrow, which drops the selection and leaves the cursor at its right-hand end. Fires only when it is the whole utterance.</td>
+<td>With nothing selected the cursor simply moves one character right</td>
+</tr>
+<tr>
+<td>scroll down [number]</td>
+<td>Turns the mouse wheel down, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The number is how many wheel notches to send, up to 50; e.g. "scroll down 3". The count can be digits or spoken words, so "scroll down eleven" works whether your speech provider writes numbers as digits or as words. The command turns the wheel without moving the pointer, so it scrolls whatever a real wheel turn would scroll from where the pointer already sits</td>
+</tr>
+<tr>
+<td>scroll up [number]</td>
+<td>Turns the mouse wheel up, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The number is how many wheel notches to send, up to 50; e.g. "scroll up 3". The count can be digits or spoken words, so "scroll up eleven" works whether your speech provider writes numbers as digits or as words.</td>
+</tr>
+<tr>
+<td>scroll left [number]</td>
+<td>Turns the sideways mouse wheel left, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. The number is how many wheel notches to send, up to 50. The count can be digits or spoken words, so "scroll left eleven" works whether your speech provider writes numbers as digits or as words.</td>
+</tr>
+<tr>
+<td>scroll right [number]</td>
+<td>Turns the sideways mouse wheel right, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. The number is how many wheel notches to send, up to 50. The count can be digits or spoken words, so "scroll right eleven" works whether your speech provider writes numbers as digits or as words.</td>
+</tr>
+<tr>
+<td>start scrolling down</td>
+<td>Keeps turning the mouse wheel down until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The scroll keeps going with no further speech, so you can read a long page hands-free. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so, in case the stop command is not heard. If Windows refuses to move the wheel, which can happen over a window that runs as administrator, the scroll stops early and shows a different notification. Any scroll command you say while it runs replaces it, so only one scroll is ever going.</td>
+</tr>
+<tr>
+<td>start scrolling up</td>
+<td>Keeps turning the mouse wheel up until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The scroll keeps going with no further speech. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so.</td>
+</tr>
+<tr>
+<td>start scrolling left</td>
+<td>Keeps turning the sideways mouse wheel left until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so.</td>
+</tr>
+<tr>
+<td>start scrolling right</td>
+<td>Keeps turning the sideways mouse wheel right until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so.</td>
+</tr>
+<tr>
+<td>stop scrolling</td>
+<td>Stops a scroll that was started with "start scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The words are "stop scrolling" and not "stop" on its own. A command for the single word "stop" would take that word out of everything you dictate. Saying it when nothing is scrolling does nothing at all.</td>
+</tr>
 </tbody>
 </table>
 <h3 id="punctuation-and-symbols">Punctuation and Symbols</h3>
@@ -382,7 +978,7 @@
 <tr>
 <td>period</td>
 <td>Types . inline during dictation</td>
-<td></td>
+<td>"full stop" also works</td>
 </tr>
 <tr>
 <td>comma</td>
@@ -417,7 +1013,7 @@
 <tr>
 <td>hyphen</td>
 <td>Types - inline during dictation</td>
-<td></td>
+<td>"minus sign" also works</td>
 </tr>
 <tr>
 <td>dash</td>
@@ -427,7 +1023,7 @@
 <tr>
 <td>slash</td>
 <td>Types / inline during dictation</td>
-<td></td>
+<td>"forward slash" also works</td>
 </tr>
 <tr>
 <td>backslash</td>
@@ -447,7 +1043,7 @@
 <tr>
 <td>hashtag</td>
 <td>Types # inline during dictation</td>
-<td></td>
+<td>"number sign" and "pound sign" also work</td>
 </tr>
 <tr>
 <td>dollar sign</td>
@@ -497,12 +1093,12 @@
 <tr>
 <td>vertical bar</td>
 <td>Types the pipe character inline during dictation</td>
-<td></td>
+<td>"pipe character" also works</td>
 </tr>
 <tr>
 <td>ellipsis</td>
 <td>Types ... inline during dictation</td>
-<td></td>
+<td>"dot dot dot" also works</td>
 </tr>
 <tr>
 <td>space bar</td>
@@ -510,13 +1106,123 @@
 <td></td>
 </tr>
 <tr>
+<td>open bracket</td>
+<td>Types [ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>close bracket</td>
+<td>Types ] inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>open brace</td>
+<td>Types { inline during dictation</td>
+<td>"left brace" also works</td>
+</tr>
+<tr>
+<td>close brace</td>
+<td>Types } inline during dictation</td>
+<td>"right brace" also works</td>
+</tr>
+<tr>
+<td>open parentheses</td>
+<td>Types ( inline during dictation</td>
+<td>"left parentheses" also works</td>
+</tr>
+<tr>
+<td>close parentheses</td>
+<td>Types ) inline during dictation</td>
+<td>"right parentheses" also works</td>
+</tr>
+<tr>
+<td>open quotes</td>
+<td>Types a double quote inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>close quotes</td>
+<td>Types a double quote inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>open single quote</td>
+<td>Types a single quote inline during dictation</td>
+<td>"begin single quote" also works</td>
+</tr>
+<tr>
+<td>close single quote</td>
+<td>Types a single quote inline during dictation</td>
+<td>"end single quote" also works</td>
+</tr>
+<tr>
+<td>less than sign</td>
+<td>Types &lt; inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>greater than sign</td>
+<td>Types &gt; inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>euro sign</td>
+<td>Types € inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>yen sign</td>
+<td>Types ¥ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>pound sterling sign</td>
+<td>Types £ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>copyright sign</td>
+<td>Types © inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>registered sign</td>
+<td>Types ® inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>section sign</td>
+<td>Types § inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>paragraph sign</td>
+<td>Types ¶ inline during dictation</td>
+<td>"paragraph mark" also works</td>
+</tr>
+<tr>
+<td>degree symbol</td>
+<td>Types ° inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>multiplication sign</td>
+<td>Types × inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>division sign</td>
+<td>Types ÷ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
 <td>colin</td>
-<td>Mishear tolerance: inserts : when "colin" is the entire utterance Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Mishear tolerance: inserts : when "colin" is the entire utterance. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
 <td>come</td>
-<td>Mishear tolerance: inserts , when "come", "kama", "commer", or "come on" is the entire utterance Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Mishear tolerance: inserts , when "come", "kama", "commer", or "come on" is the entire utterance. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 </tbody>
@@ -533,17 +1239,37 @@
 <tbody>
 <tr>
 <td>x-ray activate [app name]</td>
-<td>Brings the named application's window forward; when a pattern's target is a program file (.exe) and it has no window, Wheelhouse starts it</td>
-<td>e.g. "x-ray activate outlook"</td>
+<td>Brings the named application's window forward; when nothing by that name is open, Wheelhouse looks the name up among your installed programs and starts it</td>
+<td>e.g. "x-ray activate outlook"; when more than one installed program matches the name, Wheelhouse starts none of them and lists them, so you can say the full name</td>
 </tr>
 <tr>
-<td>x-ray browser</td>
-<td>Brings your default web browser to the front</td>
+<td>browser</td>
+<td>Brings your default web browser to the front. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Wheelhouse looks up which browser is your Windows default at the moment you speak</td>
 </tr>
 <tr>
-<td>x-ray notepad</td>
-<td>Brings Notepad to the front</td>
+<td>notepad</td>
+<td>Brings Notepad to the front. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>switch to [app name] / go to [app name] / show [app name]</td>
+<td>Brings the named application's window forward, starting it when nothing by that name is open. Needs the hotword first.</td>
+<td>e.g. "x-ray switch to outlook"; the same action as "x-ray activate [app name]", including the program lookup</td>
+</tr>
+<tr>
+<td>close [app name] / exit [app name] / quit [app name]</td>
+<td>Brings the named application's window forward and then closes it (Alt+F4). Needs the hotword first.</td>
+<td>Destructive -- requires the hotword</td>
+</tr>
+<tr>
+<td>minimize [app name]</td>
+<td>Brings the named application's window forward and then sends Windows and Down Arrow. Needs the hotword first.</td>
+<td>That one keystroke has two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size.</td>
+</tr>
+<tr>
+<td>maximize [app name]</td>
+<td>Brings the named application's window forward and then maximizes it (Windows and Up Arrow). Needs the hotword first.</td>
 <td></td>
 </tr>
 </tbody>
@@ -584,24 +1310,89 @@
 <td>Requires the hotword for safety</td>
 </tr>
 <tr>
-<td>x-ray maximize</td>
-<td>Maximizes the active window</td>
+<td>maximize</td>
+<td>Maximizes the active window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
-<td>x-ray minimize</td>
-<td>Minimizes the active window</td>
-<td></td>
+<td>minimize</td>
+<td>Sends Windows and Down Arrow to the active window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>That one keystroke has two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size. "restore window" sends the same keystroke.</td>
 </tr>
 <tr>
-<td>x-ray desktop</td>
-<td>Shows the desktop (Windows+D)</td>
+<td>desktop</td>
+<td>Shows the desktop (Windows+D). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td></td>
 </tr>
 <tr>
 <td>Windows settings</td>
 <td>Opens the Windows Settings app</td>
 <td>Also fires if heard as "Window settings"</td>
+</tr>
+<tr>
+<td>close tab</td>
+<td>Closes the current tab (Ctrl+W). Needs the hotword first.</td>
+<td>What Ctrl+W closes is decided by the app</td>
+</tr>
+<tr>
+<td>restore window</td>
+<td>Sends Windows and Down Arrow to the active window. Fires only when it is the whole utterance.</td>
+<td>The same keystroke as "minimize", so it has the same two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size.</td>
+</tr>
+<tr>
+<td>snap window to the left</td>
+<td>Snaps the active window to the left half of the screen (Windows and Left Arrow). Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>snap window to the right</td>
+<td>Snaps the active window to the right half of the screen (Windows and Right Arrow). Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>snap window to the top</td>
+<td>Snaps the active window to the top of the screen (Windows, Alt and Up Arrow). Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>snap window to the bottom</td>
+<td>Snaps the active window to the bottom of the screen (Windows, Alt and Down Arrow). Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>minimize all windows</td>
+<td>Minimizes every open window (Windows+M). Fires only when it is the whole utterance.</td>
+<td>"minimize all" does the same</td>
+</tr>
+<tr>
+<td>show task switcher / list all windows / show all windows</td>
+<td>Opens Task View, the Windows overview of every open window (Windows+Tab). Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>keyboard</td>
+<td>Toggles the Windows on-screen touch keyboard (Windows, Ctrl and O). Fires only when it is the whole utterance.</td>
+<td>One word, both directions: it opens the keyboard when closed and closes it when open. The earlier show and hide phrasings were removed because they promised a direction the toggle cannot deliver</td>
+</tr>
+<tr>
+<td>search windows for [words]</td>
+<td>Opens Windows Search and types what you say into it. Needs the hotword first.</td>
+<td></td>
+</tr>
+<tr>
+<td>search on google for [words] / search for [words]</td>
+<td>Opens a Google search for the words you say in your default browser. Needs the hotword first.</td>
+<td>"search [words]" without "for" does the same</td>
+</tr>
+<tr>
+<td>search on bing for [words]</td>
+<td>Opens a Bing search for the words you say in your default browser. Needs the hotword first.</td>
+<td></td>
+</tr>
+<tr>
+<td>search on youtube for [words]</td>
+<td>Opens a YouTube search for the words you say in your default browser. Needs the hotword first.</td>
+<td></td>
 </tr>
 </tbody>
 </table>
@@ -617,17 +1408,79 @@
 <tbody>
 <tr>
 <td>click [name]</td>
-<td>Clicks the button, link, menu item, or other control with that name; add a role word to narrow the search, or say a number while the numbered overlay is showing</td>
+<td>Clicks the button, link, menu item, or other control with that name; add a role word to narrow the search, or give the overlay number instead of a name while the numbered overlay is showing. Needs the hotword first, as "x-ray click cancel".</td>
 <td>See the Voice Element Clicking subsection of the Voice Commands section</td>
 </tr>
 <tr>
-<td>apply numbers</td>
+<td>show numbers</td>
 <td>Paints a number on every clickable control in the front window</td>
-<td>Numbers stay up until you dismiss them</td>
+<td>Numbers stay up until you say "hide numbers". "apply numbers" also works. "show numbers in the report" on its own is typed as ordinary text, not treated as this command.</td>
 </tr>
 <tr>
-<td>dismiss numbers</td>
+<td>hide numbers</td>
 <td>Removes the numbers</td>
+<td>"dismiss numbers" also works. "hide numbers on the chart" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>right click [name] / double click [name]</td>
+<td>Clicks the named control with a right click or a double click instead of a normal click; also works with a number while the numbered overlay is showing ("right click 3"). Presses a real mouse click at the control's center, with the same checks as a normal click. Useful where a normal click is not enough: File Explorer items open on a double click, and a right click opens the context menu.</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h3 id="mouse-grid">Mouse Grid</h3>
+<table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>show grid</td>
+<td>Lays a numbered three-by-three grid over the screen the front window is on, for moving the pointer by voice</td>
+<td>Opening the grid removes the numbered overlay; the two are never on screen together. "apply grid" also works. "show grid lines on the chart" on its own is typed as ordinary text, not treated as this command. See the Mouse Control subsection of the Voice Commands section</td>
+</tr>
+<tr>
+<td>hide grid</td>
+<td>Closes the grid without clicking anything</td>
+<td>"dismiss grid" also works. "hide grid lines before printing" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>grid next screen</td>
+<td>Moves the open grid to the next monitor, restarted at full size</td>
+<td></td>
+</tr>
+<tr>
+<td>[number 1-9]</td>
+<td>Redraws the open grid inside that cell, narrowing the target. With the grid closed, numbers are ordinary dictation and are typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>number [1-9]</td>
+<td>Same cell narrowing with the word "number" first ("number five"), which speech engines hear more reliably than a single word. With the grid closed, the phrase is ordinary dictation and is typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>click / right click / double click</td>
+<td>Clicks at the center of the grid's current cell and closes the grid; a number in the same utterance narrows first ("x-ray click 5")</td>
+<td></td>
+</tr>
+<tr>
+<td>mark</td>
+<td>Pins the start point of a drag at the current cell center and restarts the grid so you can navigate to the destination</td>
+<td></td>
+</tr>
+<tr>
+<td>drag</td>
+<td>Holds the left button at the marked point, moves gradually to the current cell center, and releases -- a complete drag and drop</td>
+<td>Requires a "mark" first; without one, a notice explains the step</td>
+</tr>
+<tr>
+<td>move here</td>
+<td>Moves the pointer to the current cell center without pressing anything, for hover menus and tooltips</td>
 <td></td>
 </tr>
 </tbody>
@@ -653,14 +1506,19 @@
 <td></td>
 </tr>
 <tr>
-<td>x-ray help</td>
-<td>Opens the Wheelhouse Assistant (the official online help) in your browser</td>
+<td>help</td>
+<td>Opens the Wheelhouse Assistant (the official online help) in your browser. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Uses the gem_url setting under [ai.help]; if blanked, Wheelhouse says out loud that online help is not configured</td>
 </tr>
 <tr>
-<td>x-ray patterns</td>
-<td>Opens the Pattern Manager</td>
-<td>"x-ray pattern manager" also works; see "Special Commands"</td>
+<td>patterns</td>
+<td>Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"pattern manager" also works; see "Special Commands"</td>
+</tr>
+<tr>
+<td>learn my voice</td>
+<td>Opens the voice-teaching window, where Wheelhouse learns how you sound so it stops missing short words</td>
+<td>"calibrate my voice" also works; only the Distil-Whisper speech engine uses it; See "Teaching Wheelhouse your voice" in the Speech Engines section</td>
 </tr>
 <tr>
 <td>x-ray fix</td>
@@ -668,13 +1526,13 @@
 <td>Requires the AI server to be configured and reachable; Wheelhouse speaks its progress and always preserves your original text on any failure</td>
 </tr>
 <tr>
-<td>x-ray simplify</td>
-<td>Rewrites the selected text in plain language, using shorter sentences and simpler words Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged.</td>
+<td>simplify</td>
+<td>Rewrites the selected text in plain language, using shorter sentences and simpler words. Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Same AI server and same safeguards as "x-ray fix"; the selection comes back as plain text, so formatting applied in a word processor is lost</td>
 </tr>
 <tr>
-<td>x-ray shorten</td>
-<td>Rewrites the selected text more briefly, cutting repetition and padding</td>
+<td>shorten</td>
+<td>Rewrites the selected text more briefly, cutting repetition and padding. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Same AI server and same safeguards as "x-ray fix"</td>
 </tr>
 <tr>
@@ -683,13 +1541,13 @@
 <td>Same AI server and same safeguards as "x-ray fix"</td>
 </tr>
 <tr>
-<td>x-ray pirate</td>
-<td>Rewrites the selected text the way a pirate would say it</td>
+<td>pirate</td>
+<td>Rewrites the selected text the way a pirate would say it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Special Commands" for writing your own.</td>
 </tr>
 <tr>
 <td>x-ray translate to [language]</td>
-<td>Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese" Keeps every fact and leaves names and numbers as they are.</td>
+<td>Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese". Keeps every fact and leaves names and numbers as they are.</td>
 <td>Same AI server and same safeguards as "x-ray fix"; say the language in English and in lower case, as one or more plain words with no punctuation. How good the translation is depends on the model you have configured.</td>
 </tr>
 <tr>
@@ -698,8 +1556,8 @@
 <td></td>
 </tr>
 <tr>
-<td>x-ray boost</td>
-<td>Adds the selected text to the speech recognition hints</td>
+<td>boost</td>
+<td>Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>See "Special Commands" -- on the default engine this saves the hint but does not apply it until you opt in</td>
 </tr>
 </tbody>
@@ -740,7 +1598,7 @@
 <p><strong>polling_interval</strong> <em>(default: <code>2</code>)</em> -- How often, in seconds, to check whether music is playing.</p>
 <h3 id="pluginssystem_volume">[plugins.system_volume]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the System Volume plugin on or off; it controls the normal Windows volume from the volume scroll zone and quiets system audio during push-to-talk holds.</p>
-<p><strong>device_type</strong> <em>(default: <code>"default"</code>)</em> -- Which audio device to control. Valid values: "default" (the usual choice), "communications", or a specific device name.</p>
+<p><strong>device_type</strong> <em>(default: <code>"default"</code>)</em> -- Which audio device to control. Valid values: "default" (the usual choice) or "communications".</p>
 <p><strong>volume_step_db</strong> <em>(default: <code>1.5</code>)</em> -- Loudness change per wheel step, in decibels.</p>
 <p><strong>min_volume_db</strong> <em>(default: <code>-96.0</code>)</em> -- The volume floor, in decibels.</p>
 <p><strong>max_volume_db</strong> <em>(default: <code>0.0</code>)</em> -- The volume ceiling, in decibels.</p>
@@ -790,10 +1648,7 @@
 <h3 id="stt">[stt]</h3>
 <p><strong>last_provider</strong> <em>(default: <code>"parakeet_tdt"</code>)</em> -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the tray menu, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account), "distil_medium_en" (local, runs on an NVIDIA graphics card), or "google_stt" (Google Cloud; needs an account, sends audio to Google).</p>
 <h3 id="sttgoogle">[stt.google]</h3>
-<p><strong>credentials_file</strong> <em>(default: <code>""</code>)</em> -- Full path to the Google service-account key file (the JSON file downloaded during Google Cloud setup). Wheelhouse writes this when you pick the file from the tray menu's Google Cloud Credentials item; when it is empty, the GOOGLE_APPLICATION_CREDENTIALS environment variable is used instead.</p>
-<h3 id="sttazure">[stt.azure]</h3>
-<p><strong>subscription_key</strong> <em>(default: <code>""</code>)</em> -- Credential for the Azure cloud speech option; only matters if you deliberately set up Azure, which most people never do.</p>
-<p><strong>region</strong> <em>(default: <code>"eastus"</code>)</em> -- Azure service region for the Azure cloud speech option.</p>
+<p><strong>credentials_file</strong> <em>(default: <code>""</code>)</em> -- Full path to the Google service-account key file (the JSON file downloaded during Google Cloud setup). Type the path here yourself, doubling each backslash, and restart Wheelhouse; when this is empty, the GOOGLE_APPLICATION_CREDENTIALS environment variable is used instead.</p>
 <h3 id="ai">[ai]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- The master switch for all AI features; today this means dictation text correction (it also gates the in-app help chat, which is currently disabled). New installs leave it off unless you chose the AI helper during setup.</p>
 <p><strong>knowledge_base</strong> <em>(default: <code>"knowledge/wheelhouse_help.md"</code>)</em> -- The document the in-app help assistant would consult; because the in-app help chat is currently disabled, this setting has no effect today.</p>
@@ -817,13 +1672,21 @@
 <p><strong>min_confidence</strong> <em>(default: <code>0.4</code>)</em> -- How sure Wheelhouse must be before clicking something by name. Raise it if it clicks the wrong thing; lower it if it too often finds no match.</p>
 <p><strong>clear_winner_margin</strong> <em>(default: <code>0.15</code>)</em> -- How clearly one candidate must beat the runner-up before Wheelhouse clicks it by name; with no clear winner it shows the numbered overlay instead of guessing.</p>
 <p><strong>notice_max_names</strong> <em>(default: <code>3</code>)</em> -- How many candidate names appear in the did-you-mean style notice.</p>
-<p><strong>overlay_badge_font_pt</strong> <em>(default: <code>12</code>)</em> -- The size of the painted overlay numbers. Raise it if the numbers are hard to read.</p>
+<p><strong>overlay_badge_font_pt</strong> <em>(default: <code>8</code>)</em> -- The size of the painted overlay numbers. Raise it if the numbers are hard to read.</p>
+<p><strong>overlay_badge_shadow</strong> <em>(default: <code>false</code>)</em> -- Whether each overlay number casts a drop shadow. Off by default; the bubble's border already separates it from the background. Turn it on if the numbers blend into busy screen content.</p>
+<p><strong>overlay_badge_theme</strong> <em>(default: <code>"auto"</code>)</em> -- The color of the numbered overlay's speech bubbles. The value names the bubble's own color, not the system theme: light is a white bubble with a black number, dark is a near-black bubble with a white number, and auto picks the opposite of the Windows theme so the bubbles stand out. Valid values: "auto" (follow the Windows theme, inverted for contrast), "light" (white bubble), or "dark" (near-black bubble). Pin it to light or dark if the automatic choice blends into the apps you use most.</p>
 <p><strong>response_timeout_ms</strong> <em>(default: <code>3000</code>)</em> -- How long, in milliseconds, Wheelhouse waits for a click command's search before giving up. Raise it on a slow machine if clicks time out in complex windows.</p>
-<p><strong>walk_deadline_ms</strong> <em>(default: <code>2500</code>)</em> -- How long, in milliseconds, Wheelhouse searches a window for clickable things before giving up. Raise it on a slow machine if clicks time out in complex windows.</p>
+<p><strong>walk_deadline_ms</strong> <em>(default: <code>2500</code>)</em> -- How long, in milliseconds, Wheelhouse searches a window for the control a spoken click names before giving up. Raise it on a slow machine if clicks time out in complex windows.</p>
+<p><strong>screen_read_timeout_ms</strong> <em>(default: <code>10000</code>)</em> -- How long, in milliseconds, Wheelhouse waits for a read of the window's clickable things (show numbers, the refresh after a focus change, and the re-read after a click) before giving up. Separate from response_timeout_ms, which limits a click reply. Raise it if the numbered overlay reports that it could not draw the numbers in windows that take several seconds to answer.</p>
 <p><strong>snapshot_ttl_seconds</strong> <em>(default: <code>30</code>)</em> -- How long the numbered overlay's snapshot stays valid, in seconds.</p>
 <p><strong>browser_processes</strong> <em>(default: <code>["brave.exe", "chrome.exe", "msedge.exe", "vivaldi.exe", "slack.exe", "discord.exe", "code.exe", "ms-teams.exe", "Teams.exe", "spotify.exe", "notion.exe", "obsidian.exe", "ChatGPT.exe"]</code>)</em> -- The browser-like apps (browsers, Slack, Discord, and similar) that need a deeper search for clickable elements.</p>
 <p><strong>browser_processes_extend</strong> <em>(default: <code>[]</code>)</em> -- Adds a browser-like app to the deeper-search list without retyping the built-ins. Add an app here if voice clicking cannot see controls inside it.</p>
 <p><strong>enable_screen_reader_flag</strong> <em>(default: <code>false</code>)</em> -- Tells apps a screen reader is present, which makes some expose more clickable elements. Try true if an app hides its buttons; note some apps change their appearance when this is on.</p>
+<p><strong>grid_min_cell_px</strong> <em>(default: <code>24</code>)</em> -- The smallest a mouse-grid cell may become, in pixels; spoken numbers stop narrowing the grid past that size. Lower it for finer pointer placement on a very high resolution screen; a cell this small already places the pointer within a click's precision.</p>
+<p><strong>drag_duration_ms</strong> <em>(default: <code>250</code>)</em> -- How long, in milliseconds, a mouse-grid drag takes to move from the marked point to the destination. Raise it if an application does not register the drag; many ignore a pointer that moves too fast.</p>
+<h3 id="actions">[actions]</h3>
+<p><strong>output_cap_chars</strong> <em>(default: <code>10000</code>)</em> -- The most characters a pattern step's captured text may hold -- the output a run_capture program prints or the reply an ask_ai step receives; longer output makes the step fail rather than insert an incomplete piece of it. Raise it (up to the 15360 ceiling) if a legitimate script prints more; lower it for a tighter guard against a runaway program filling your document.</p>
+<p><strong>run_capture_timeout_default_s</strong> <em>(default: <code>10</code>)</em> -- How many seconds a run_capture pattern step waits for its program to finish when the pattern gives no timeout number of its own. Raise it if your scripts legitimately run longer; 60 seconds is the most any waiting step will wait, because voice commands wait their turn while a step runs.</p>
 <hr />
 <p>Generated: 2026-07-31 for the v1.0.7 release</p>
 </main>

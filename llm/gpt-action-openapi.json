@@ -1,9 +1,9 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Wheelhouse Help Document and Command Reference",
-    "description": "Fetches the current Wheelhouse user guide and the separate command-and-configuration reference from the project's GitHub repository so the assistant always answers from the latest published documentation.",
-    "version": "1.1.0"
+    "title": "Wheelhouse Help, Installation Guide and Command Reference",
+    "description": "Fetches the current Wheelhouse daily-use guide, installation guide, and command-and-configuration reference from the project repository.",
+    "version": "1.2.0"
   },
   "servers": [
     {
@@ -17,7 +17,7 @@
         "summary": "Fetch the current Wheelhouse user guide as markdown text.",
         "responses": {
           "200": {
-            "description": "The complete Wheelhouse user guide (markdown).",
+            "description": "The Wheelhouse daily-use guide (markdown); installation is fetched separately with getInstallGuide.",
             "content": {
               "text/plain": {
                 "schema": {
@@ -36,6 +36,24 @@
         "responses": {
           "200": {
             "description": "The complete Wheelhouse voice-command and configuration reference (markdown).",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/wheelhouse-project/Wheelhouse/main/services/wheelhouse/knowledge/wheelhouse_install.md": {
+      "get": {
+        "operationId": "getInstallGuide",
+        "summary": "Fetch installation, updating, uninstalling, and speech-engine setup instructions.",
+        "responses": {
+          "200": {
+            "description": "The current Wheelhouse installation guide (markdown).",
             "content": {
               "text/plain": {
                 "schema": {

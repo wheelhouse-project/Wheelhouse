@@ -331,9 +331,11 @@
           Wheelhouse ships with a catalog of commands, for example
           <span class="say">select all</span>,
           <span class="say">x-ray activate chrome</span>, and
-          <span class="say">x-ray notepad</span>. Commands that launch or switch
-          programs require the spoken prefix <span class="say">x-ray</span>,
-          which separates them from dictation. The Pattern Manager adds
+          <span class="say">notepad</span>. Calling a program up by name needs
+          the spoken prefix <span class="say">x-ray</span>, which separates the
+          command from dictation; the two built-ins,
+          <span class="say">notepad</span> and
+          <span class="say">browser</span>, fire without it. The Pattern Manager adds
           user-defined phrases without editing code. Every shipped command is
           listed in the
           <a href="reference.html">command and configuration reference</a>.
@@ -342,11 +344,15 @@
       <li>
         <h3>Clicking controls by name</h3>
         <p>
-          <span class="say">click cancel</span> and
-          <span class="say">click the submit button</span> locate that control in
-          the focused window and invoke it. For a control with no usable name,
-          <span class="say">apply numbers</span> labels every clickable control
-          with a number, and <span class="say">click 5</span> invokes the control
+          <span class="say">x-ray click cancel</span> and
+          <span class="say">x-ray click the submit button</span> locate that
+          control in the focused window and invoke it. The prefix is what
+          separates the command from dictation; the gesture forms
+          <span class="say">right click cancel</span> and
+          <span class="say">double click cancel</span> need no prefix. For a
+          control with no usable name, <span class="say">show numbers</span>
+          labels every clickable control with a number, and
+          <span class="say">x-ray click 5</span> invokes the control
           labelled 5.
         </p>
       </li>
@@ -427,7 +433,7 @@
       </p>
       <img src="smartscreen-warning.png" alt="The SmartScreen warning dialog: a blue window titled 'Windows protected your PC' saying Microsoft Defender SmartScreen prevented an unrecognized app from starting, with a More info link and a Don't run button." width="676" height="631">
       <p>
-        The source code is public. <a href="#security-warnings">Security
+        The source code is public. <a href="install.html#security-warnings">Security
         warnings</a> below documents each warning and the response to it.
       </p>
     </div>
@@ -440,7 +446,7 @@
     <p>
       Updating, engine selection, credentials, troubleshooting and removal are
       documented in the user guide below, under
-      <a href="#installation-and-setup">Installation and Setup</a> and
+      <a href="install.html#installation-and-setup">Installation and Setup</a> and
       <a href="#speech-engines">Speech Engines</a>. For a question the guide
       does not answer directly, the
       <a href="#llm-help">Wheelhouse Assistant</a> answers from the same
@@ -463,15 +469,20 @@
     </div>
     <p>
       The same documentation can be loaded into another AI service. Wheelhouse's
-      user documentation is published as two files, formatted so that a chat
+      user documentation is published as three files, formatted so that a chat
       service can answer questions from them: for example "how do I make my
       microphone work?" or "what do I say to select a whole line?". The
       procedures below cover ChatGPT, Gemini, Claude and Perplexity. Each works
       on that service's free plan, with one exception for Perplexity noted
       below.
     </p>
-    <p><strong>You need two files:</strong></p>
+    <p><strong>You need three files:</strong></p>
     <ul class="features">
+      <li>
+        <h3>wheelhouse_install.md — the installation guide</h3>
+        <p>Installation, updates, removal, and speech-engine setup.</p>
+        <p><a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/services/wheelhouse/knowledge/wheelhouse_install.md">wheelhouse_install.md on GitHub</a></p>
+      </li>
       <li>
         <h3>wheelhouse_help.md — the help document</h3>
         <p>
@@ -488,7 +499,7 @@
           Open
           <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/services/wheelhouse/knowledge/wheelhouse_reference.md">wheelhouse_reference.md on GitHub</a>
           and save it the same way. This file lists every voice command and
-          every configuration setting. Upload both files so your assistant
+          every configuration setting. Upload all three files so your assistant
           can answer both how-to questions and exact command or setting
           questions.
         </p>
@@ -497,7 +508,7 @@
     <div class="note">
       <p>
         No instruction text needs to be pasted: the assistant's behavior rules
-        are contained in the top of the help document, so the two uploaded files
+        are contained in the top of the help document, so the three uploaded files
         are sufficient. If a service refuses a <code>.md</code> upload, rename
         each file to end in <code>.txt</code> (for example
         <code>wheelhouse_help.txt</code>). The content is plain text.
@@ -512,7 +523,7 @@
     <h3 id="llm-chatgpt">ChatGPT — use a Project</h3>
     <ol class="steps">
       <li>Sign in at chatgpt.com and click <strong>New project</strong> in the sidebar. Give the project a name like "Wheelhouse Help". (Projects are available on every plan, including Free. Custom GPTs are not the right tool here — creating one requires a paid plan.)</li>
-      <li>Inside the project, add both <code>wheelhouse_help.md</code> and <code>wheelhouse_reference.md</code> in the project's files area.</li>
+      <li>Inside the project, add <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code> in the project's files area.</li>
       <li>Start a new chat inside the project and ask your question. To come back later, click the project's name in the sidebar.</li>
     </ol>
 
@@ -520,21 +531,21 @@
     <ol class="steps">
       <li>Go to gemini.google.com, open the sidebar, and click <strong>Gems</strong>, then <strong>New Gem</strong>. (Some accounts word it "Explore Gems" then "New Gem". Gems are available without a paid plan.)</li>
       <li>Give the Gem a name. In the instructions box, a single line like "Answer Wheelhouse questions from the uploaded files" is enough — the help document itself carries the assistant's rules.</li>
-      <li>Scroll down to <strong>Knowledge</strong>, click <strong>Add files</strong> then <strong>Upload files</strong>, and upload both <code>wheelhouse_help.md</code> and <code>wheelhouse_reference.md</code>.</li>
+      <li>Scroll down to <strong>Knowledge</strong>, click <strong>Add files</strong> then <strong>Upload files</strong>, and upload <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code>.</li>
       <li>Click <strong>Save</strong>. To use it later: sidebar, <strong>Gems</strong>, pick your Gem under "My Gems", and ask away.</li>
     </ol>
 
     <h3 id="llm-claude">Claude — use a Project</h3>
     <ol class="steps">
       <li>Sign in at claude.ai and open <strong>Projects</strong> from the sidebar, then click <strong>New Project</strong> and name it. (The free plan includes up to five projects.)</li>
-      <li>On the project page, find the knowledge section and use its <strong>+</strong> button to upload both <code>wheelhouse_help.md</code> and <code>wheelhouse_reference.md</code>.</li>
+      <li>On the project page, find the knowledge section and use its <strong>+</strong> button to upload <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code>.</li>
       <li>Start a chat from the project page — every chat in the project uses the uploaded file automatically.</li>
     </ol>
 
     <h3 id="llm-perplexity">Perplexity — use a Project</h3>
     <ol class="steps">
       <li>Sign in at perplexity.ai and click the projects icon in the left panel, then <strong>New Project</strong>. (Perplexity renamed this feature — older guides call it "Spaces". One caveat: Perplexity documents per-project file uploads only for its paid plans, so on the free plan you may not be able to upload the help file into a project.)</li>
-      <li>Upload both <code>wheelhouse_help.md</code> and <code>wheelhouse_reference.md</code> as project files.</li>
+      <li>Upload <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code> as project files.</li>
       <li>Ask questions inside the project — answers draw on the uploaded file in every thread in the project.</li>
     </ol>
 
@@ -591,7 +602,7 @@
       <p>
         The installer is also the uninstaller, and can either keep or remove
         your personal settings. See
-        <a href="#uninstalling-wheelhouse">Uninstalling Wheelhouse</a> for the
+        <a href="install.html#uninstalling-wheelhouse">Uninstalling Wheelhouse</a> for the
         procedure.
       </p>
     </details>
@@ -654,119 +665,8 @@
 <ul>
 <li><strong>Dictating text into email, documents and chat:</strong> <a href="#voice-commands">Voice Commands</a>, in particular the dictation and punctuation subsections, then <a href="#speech-modes">Speech Modes</a>.</li>
 <li><strong>Using the full command set:</strong> the complete <a href="#voice-commands">Voice Commands</a> reference, covering commands, formatting and navigation, then <a href="#configuration">Configuration</a>. Every shipped command and every setting is also listed in the <a href="https://wheelhouse-project.org/reference.html">command and configuration reference</a>.</li>
-<li><strong>Installing, configuring or diagnosing a fault:</strong> <a href="#installation-and-setup">Installation and Setup</a>, then <a href="#configuration">Configuration</a>, then <a href="#troubleshooting">Troubleshooting</a>. For a question that none of those answer directly, the Wheelhouse Assistant answers from this document in plain language; see <a href="#getting-help">Getting Help</a>.</li>
+<li><strong>Installing, configuring or diagnosing a fault:</strong> <a href="install.html#installation-and-setup">Installation and Setup</a>, then <a href="#configuration">Configuration</a>, then <a href="#troubleshooting">Troubleshooting</a>. For a question that none of those answer directly, the Wheelhouse Assistant answers from this document in plain language; see <a href="#getting-help">Getting Help</a>.</li>
 </ul>
-<hr />
-<h2 id="installation-and-setup">Installation and Setup</h2>
-<p>Installing Wheelhouse, updating it, removing it, and the checks to perform after the first start.</p>
-<h3 id="running-the-installer">Running the installer</h3>
-<p>The installer is a standard Windows setup wizard. Download it and run it -- nothing needs to be installed ahead of time:</p>
-<p>https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe</p>
-<p>If Windows shows a "Windows protected your PC" screen, see <a href="#security-warnings">Security warnings</a> below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 1 GB in total). The wizard:</p>
-<ol>
-<li>Asks its questions up front: which speech engine to use (the pre-selected answer suits most installations -- see <a href="#speech-engines">Speech Engines</a>), whether to set up the optional AI helper (the wizard offers one AI choice, a cloud model from Google, and skipping; the model that runs on your own machine is set up from the command line instead, described below), and whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected). It also asks you to turn on microphone access for desktop apps, but only when that Windows setting is currently off; when it is already on, setup says nothing about it.</li>
-<li>Checks the requirements listed under <a href="#what-you-need">What you need</a>. Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and the memory floor. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count and a connected microphone -- produce a notice and setup continues.</li>
-<li>Installs uv, the environment manager Wheelhouse uses, into the user profile. Nothing is installed system-wide.</li>
-<li>Downloads the Wheelhouse application, verifies the download against its published fingerprint, and creates Wheelhouse's own Python environments. Those environments are self-contained and separate from any other Python installation on the computer.</li>
-<li>Downloads the offline speech model if the default engine was kept (650 MB; this is the longest step).</li>
-<li>Creates Start-menu and desktop shortcuts.</li>
-<li>Reports anything worth knowing on its final page. Setup can complete and still have had to change something -- installing Parakeet because the graphics card cannot run Distil-Whisper, for example -- and those notices appear there rather than only in the setup log.</li>
-</ol>
-<p>Wheelhouse installs for one user account. Administrator rights are not required, and no other program on the computer is modified.</p>
-<p><strong>Command-line installation.</strong> The same install runs as one PowerShell line, asking only the speech-engine, start-at-login (defaults to no), and start-now questions as text prompts. It asks nothing about the AI helper: the AI choice is given as an argument instead, or left out to install without AI. The one-line command cannot carry arguments; to pass one, download install-wheelhouse.ps1 from the release page and run it as a file, for example <code>powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode local</code>.</p>
-<pre><code>irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
-</code></pre>
-<p><strong>Setting up the AI helper on this machine.</strong> Adding <code>-AiMode local</code> to the command-line installer sets up an AI model that runs on your own computer, with no account, no key, and no text leaving the machine. Setup measures the hardware before downloading anything: a graphics card of any make with 4 GB or more of video memory runs the model on the card, a machine with 16 GB or more of system memory runs it on the processor instead, which works but is slow -- about 3 seconds for a short correction and about 12 seconds for a long one -- and a machine with less than both is told why and left with the AI features switched off rather than having several gigabytes downloaded that could not run. <code>-AiMode cloud</code> selects the Google cloud model the wizard offers, <code>-AiMode off</code> installs without AI, and <code>-AiMode keep</code> leaves an existing AI configuration alone on a re-run.</p>
-<h3 id="what-you-need">What you need</h3>
-<ul>
-<li>Windows 10 or Windows 11, 64-bit. Any Windows 11 edition; most Windows 10 editions.</li>
-<li>10 GB of free disk space.</li>
-<li>8 GB of memory (RAM), a hard minimum; 16 GB recommended. Below 8 GB the installer stops and cannot proceed with any speech engine, including the cloud one.</li>
-<li>4 or more CPU cores recommended. With fewer, Wheelhouse installs and runs, but speech recognition may respond slowly.</li>
-<li>A microphone. One can be connected after installing.</li>
-<li>An internet connection during installation. The default speech engine operates offline afterward.</li>
-</ul>
-<h3 id="successful-installation">Successful installation</h3>
-<p>The wizard reports its progress step by step, and the PowerShell installer reports the same steps as text. Installation is complete when it reaches the end without stopping on an error. Wheelhouse then appears in the Start menu under W and as a desktop shortcut.</p>
-<h3 id="installation-failure-messages">Installation failure messages</h3>
-<p>Installer failure messages contain no personal data and can be included in a help request. When the wizard stops, a window states what went wrong and what to try. If the setup log can be found, the same window names the file and in most cases offers to open it; when the log cannot be found, the window omits any reference to a log. Either way it gives an address to write to, help@wheelhouse-project.org. The PowerShell installer prints the same two lines as text. The common messages:</p>
-<ul>
-<li><strong>"Wheelhouse appears to be running"</strong> (during an update): the installer refuses to replace an application that is running. Exit Wheelhouse first (right-click the floating button or the tray icon -- both open the same menu -- and choose Exit), then run the installer again. If it reports that it could not check, restart the computer and try again.</li>
-<li><strong>"This computer has N GB of memory"</strong>: your machine is below the 8 GB minimum. This check stops the install for every speech engine, including the cloud one, so adding memory is the only fix.</li>
-<li><strong>"Not enough free disk space"</strong>: free up 10 GB on the Windows drive and run the installer again.</li>
-<li><strong>"Unpacking the speech model failed"</strong>: the extraction stopped, and the message includes the extractor's own error text. Run the installer again -- the downloaded archive is kept and the download does not repeat. If it fails the same way twice, include the message in a help request.</li>
-<li><strong>"Could not install uv"</strong>: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.</li>
-<li><strong>"... failed its integrity check"</strong>: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; a changed release asset is the other. Add an exception or try a different network, and if it keeps failing, file an issue on the GitHub page.</li>
-<li><strong>"Downloading ... failed twice"</strong>: network trouble. Run the installer again -- downloads resume where they left off.</li>
-<li><strong>"Setting up services/... failed"</strong>: a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again. If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.</li>
-<li><strong>"An incomplete speech model was found"</strong>: informational, not an error. A previous unpacking was interrupted; the installer removes the incomplete files and unpacks again from the archive it already has. The 650 MB download only repeats if the archive itself is damaged.</li>
-<li><strong>No Wheelhouse entry in the Start menu</strong>: check Start &gt; All apps under W first -- new entries are not pinned to the front page. If it is truly absent, the desktop shortcut works the same; the installer log records a "Shortcut created" or "Could not create" line for a help request.</li>
-</ul>
-<p><strong>Re-running the installer is safe at any time.</strong> It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your user data; the list of what is preserved is under <a href="#updating-wheelhouse">Updating Wheelhouse</a>.</p>
-<p>If none of these apply, the Wheelhouse Assistant can read an installer message and identify the cause; see <a href="#getting-help">Getting Help</a>. Reports can also be filed at https://github.com/wheelhouse-project/Wheelhouse or sent to help@wheelhouse-project.org -- include the installer's output, or attach the setup log.</p>
-<h3 id="updating-wheelhouse">Updating Wheelhouse</h3>
-<p>There is no separate update procedure: <strong>updating is re-running the installer.</strong> Download and run the newest Wheelhouse-Setup.exe, or run the same PowerShell line, from <a href="#running-the-installer">Running the installer</a>. The installer fetches the newest release, and when it finds Wheelhouse already present, it updates it in place. Exit Wheelhouse first -- right-click the floating button or the tray icon, both of which open the same menu, and choose Exit. The installer refuses to replace an application that is running.</p>
-<p>An update replaces the application and preserves user data:</p>
-<ul>
-<li>The settings file (config.toml)</li>
-<li>Personal voice patterns</li>
-<li>Approved and declined dictation targets</li>
-<li>Saved speech hints</li>
-<li>The downloaded speech model -- it is stored outside the part an update replaces, so the 650 MB download does not repeat</li>
-</ul>
-<p><strong>If an update is interrupted</strong> -- a power cut, a closed window, a crash -- user files are preserved. Before replacing anything, the installer copies them into a holding folder next to the application, and the next run restores whatever it finds there. Recovery is running the same command again; no manual step is required.</p>
-<h3 id="security-warnings">Security warnings</h3>
-<p>The Wheelhouse installer is digitally signed by the project's author, David Chesley Hite III, which allows Windows to verify that the download came from the project unaltered. Windows may still warn about each new release until it has seen that file often enough. The source code is public at https://github.com/wheelhouse-project/Wheelhouse.</p>
-<ul>
-<li><strong>SmartScreen ("Windows protected your PC")</strong>: appears when running a recently released Wheelhouse-Setup.exe. Click "More info", check that the publisher reads David Chesley Hite III, then click "Run anyway". If the setup wizard fails, its failure window names the setup log when it can find the file, and in most cases offers to open it; the file is at <code>%TEMP%\Setup Log &lt;date&gt; #&lt;number&gt;.txt</code>. Attach it to a help request.</li>
-<li><strong>Antivirus flags or rewrites the download</strong>: some antivirus products quarantine downloads or alter them as they arrive. The installer verifies its own downloads -- the application, the speech model, and the AI files -- against published fingerprints and refuses anything altered (the "failed its integrity check" message); uv arrives through winget or uv's own installer and is the one download not checked this way. Add an exception for Wheelhouse, or install on a different network, then run the installer again.</li>
-<li><strong>A downloaded script will not run</strong>: Windows marks a saved install-wheelhouse.ps1 as coming from the internet, and PowerShell may refuse to run it. Remove the mark once with <code>Unblock-File .\install-wheelhouse.ps1</code>, or start it with <code>powershell -ExecutionPolicy Bypass -File .\install-wheelhouse.ps1</code>.</li>
-</ul>
-<p>Installing from source avoids these warnings. CONTRIBUTING.md in the GitHub repository has the development setup steps.</p>
-<h3 id="uninstalling-wheelhouse">Uninstalling Wheelhouse</h3>
-<p>If you installed with Wheelhouse-Setup.exe, uninstall it like any Windows program: Settings &gt; Apps &gt; Installed apps &gt; Wheelhouse &gt; Uninstall. If you installed with the PowerShell one-liner instead, you need the script as an actual file: download install-wheelhouse.ps1 from the releases page, open PowerShell in that folder, and run:</p>
-<pre><code>powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -Uninstall
-</code></pre>
-<p>The uninstaller will not run while Wheelhouse is running -- exit it first by right-clicking the floating button or the tray icon and choosing Exit. Run from the command line as above, it asks two questions before removing anything:</p>
-<ol>
-<li><strong>"Remove Wheelhouse from this computer?"</strong> -- nothing is removed until this is answered yes.</li>
-<li><strong>"Keep your personal data?"</strong> -- the settings file, voice patterns, and the downloaded speech model.</li>
-</ol>
-<p>Removed through Windows instead, after a Setup.exe install, only the second question is asked: Windows has already asked whether to uninstall, so the wizard puts the keep-or-remove choice to you and then runs the same uninstaller without repeating the first question.</p>
-<p>What each answer does:</p>
-<ul>
-<li><strong>Keeping personal data:</strong> the application, all its shortcuts, and its bookkeeping folder are removed. The settings file, personal voice patterns, and the speech model remain in <code>%LOCALAPPDATA%\Wheelhouse</code>, with the settings and patterns gathered into a subfolder there named preserved-user-data. On a machine where the local AI helper was set up, the AI model and the program that runs it -- several gigabytes -- also remain there. A later reinstall starts from defaults; copy files back from that folder to restore the previous settings and patterns.</li>
-<li><strong>Keeping nothing:</strong> the entire <code>%LOCALAPPDATA%\Wheelhouse</code> folder, the <code>%APPDATA%\Wheelhouse</code> folder, and all shortcuts (Start menu, desktop, and the start-at-login entry) are removed. A configured cloud AI access key is also cleared from the user environment.</li>
-</ul>
-<p>Those two folders, plus a small <code>WheelhouseSetup</code> folder used by the graphical installer's uninstaller, hold everything Wheelhouse itself stores. Setup writes in three further places. It removes two of them: the shortcuts it created and the start-at-login entry. The third it leaves, deliberately -- uv, the environment manager, installed in the user profile, which other programs may also be using. The graphical installer additionally leaves its own log in the Windows temporary folder. <code>%APPDATA%\Wheelhouse</code> holds no personal data -- only bookkeeping such as helper-process ID files -- and is removed under either answer. Run from the command line, the uninstaller prints both folder paths when it finishes; removed through Windows, it runs hidden and prints nothing you can see.</p>
-<h3 id="administrator-windows-and-uac-prompts">Administrator windows and UAC prompts</h3>
-<p>Wheelhouse installs for a single user account and runs without administrator rights. A program without administrator rights cannot change system files or settings, and anything it types or clicks is confined to what that user account is permitted to do.</p>
-<p>One Windows rule follows from this. Windows does not allow a program to send keystrokes or clicks into a program running as administrator, and applies that rule to all non-administrator software. Two consequences:</p>
-<ul>
-<li><strong>Programs running as administrator.</strong> A program started with "Run as administrator", or one that elevated itself as some system tools do, cannot receive typed text, key presses, or clicks from Wheelhouse.</li>
-<li><strong>UAC prompts.</strong> The dimmed "Do you want to allow this app to make changes to your device?" screen is more restricted still: Windows displays it on a separate secure desktop that no ordinary program can reach or observe.</li>
-</ul>
-<p><strong>Observed behavior:</strong> dictation into an administrator window is detected before any keystroke is sent, and a notice appears in the corner of the screen: "Wheelhouse can't type into administrator apps." Nothing is typed. The same notice appears for a terminal running as administrator. Click commands produce their own notice: the contents of a protected window are not visible to Wheelhouse, so "click cancel" reports no match. Spoken key presses such as "press enter" produce no notice -- Windows discards them silently.</p>
-<p><strong>Available options:</strong></p>
-<ul>
-<li>To dictate into administrator programs, start Wheelhouse as administrator: exit it, right-click its Start menu entry, and choose "Run as administrator".</li>
-<li>Use the physical keyboard and mouse for the administrator window or the UAC prompt, and voice for everything else.</li>
-<li>If the program does not require administrator rights, start it normally. Wheelhouse can then type into it as it does any other program. Some tools require administrator rights and will not run without them; for those, use the two options above.</li>
-</ul>
-<p>No Wheelhouse setting removes this limit. Windows enforces it, and the UAC screen remains protected in all cases.</p>
-<h3 id="first-run">First run</h3>
-<p>Starting Wheelhouse starts five programs together: <strong>the launcher</strong> (the program started from the shortcut; it supervises the others and restarts any that crash), <strong>the logic process</strong> (interprets recognized speech and routes it to an action), <strong>the input process</strong> (types text, presses keys, and performs clicks), <strong>the GUI process</strong> (the tray icon and the floating status button), and <strong>the speech engine</strong> (a separate helper program that converts audio to text). Within a few seconds the Wheelhouse icon appears in the system tray, the area near the clock. If it does not appear, see <a href="#troubleshooting">Troubleshooting</a>.</p>
-<h3 id="microphone-verification">Microphone verification</h3>
-<p>Confirm that Windows itself receives audio from the microphone before diagnosing recognition problems. Three checks, in order:</p>
-<ol>
-<li><strong>The privacy setting.</strong> Open Settings &gt; Privacy and security &gt; Microphone and confirm that "Let desktop apps access your microphone" is on. With this setting off, no audio reaches Wheelhouse and no error is reported.</li>
-<li><strong>The input meter.</strong> Right-click the taskbar speaker icon, choose Sound settings, and scroll to Input. The intended microphone should be selected, and the level meter should move while you speak. If the meter stays flat, select a different input device.</li>
-<li><strong>A dictation test.</strong> Open Notepad, confirm that Wheelhouse is listening, and say "hello world". On current hardware the words appear within about two seconds.</li>
-</ol>
-<h3 id="the-hotword-x-ray">The hotword ("x-ray")</h3>
-<p>Some commands would have destructive effects if they fired during dictation -- closing a window, for example. Those commands run only when the utterance begins with the word "x-ray". "close window" is transcribed as ordinary dictation; "x-ray close window" closes the active window. Common commands such as "undo", "copy", and "select all" do not require the hotword. Throughout this document a command that requires it is written with the "x-ray" prefix and one that does not is written without it; the command reference states the requirement for every command individually.</p>
-<h3 id="the-wake-word-computer">The wake word ("computer")</h3>
-<p>After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input to the computer, not silence, so a film watched without touching either will trigger the pause. Saying "computer" resumes it, without keyboard or mouse. The wake word and the hotword serve different purposes: "computer" resumes listening after an idle pause, and "x-ray" runs a protected command. Wake-word behavior is configurable in the wake_word section of the settings file; it is enabled by default. The idle pause itself comes from the Idle Monitor plugin (<a href="#plugins">Plugins</a>), also enabled by default; if that plugin is disabled, listening does not pause when idle.</p>
 <hr />
 <h2 id="speech-engines">Speech Engines</h2>
 <h3 id="account-requirements">Account requirements</h3>
@@ -824,13 +724,23 @@
 <li>Create a service account (under IAM &amp; Admin &gt; Service Accounts) and give it the Cloud Speech Client role.</li>
 <li>Create a JSON key for that service account; a small file downloads.</li>
 <li>Move the file somewhere permanent on your computer.</li>
-<li>Right-click either the floating button or the tray icon -- both open the same menu -- choose <strong>Google Cloud Credentials</strong>, and select the file. Wheelhouse checks that the file is a service-account key, saves its location in the settings, and restarts the Google engine if it is the one running, so the key takes effect without a restart.</li>
+<li>Open the settings file, <code>%LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml</code>, in Notepad. Find the <code>[stt.google]</code> section and put the full path to your key file in <code>credentials_file</code>, between the quotation marks. Write each backslash twice, because TOML reads a single backslash as an escape character:</li>
 </ol>
-<p>The older method still works as an alternative: set an environment variable named GOOGLE_APPLICATION_CREDENTIALS to the full path of the file (press the Windows key, type "environment variables", open "Edit environment variables for your account"), then restart Wheelhouse. Google's own software reads that variable automatically; Wheelhouse uses it whenever no file has been chosen from the menu.</p>
+<pre><code>[stt.google]
+credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
+</code></pre>
+<ol>
+<li>Save the file and restart Wheelhouse. The engine reads the key when it starts.</li>
+</ol>
+<p>There is a second method, and it needs no file editing: set an environment variable named GOOGLE_APPLICATION_CREDENTIALS to the full path of the key file (press the Windows key, type "environment variables", open "Edit environment variables for your account"), then close Wheelhouse and start it again from the Start menu. The menu item "Restart Wheelhouse" is not enough for this method: part of the program keeps running across it, and that part still holds the environment from before you set the variable. Google's own software reads that variable automatically. Wheelhouse uses the variable whenever <code>credentials_file</code> is empty, so set one or the other, not both.</p>
 <h3 id="adding-or-switching-engines-later">Adding or switching engines later</h3>
 <p>To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open <strong>STT Provider</strong>, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. If the new engine fails to start, the choice is not recorded and the next start returns to the previous engine. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.</p>
 <p>To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up what that engine requires, except that Distil-Whisper's model is downloaded by the engine itself the first time it starts. For example, moving from Google Cloud to Parakeet requires the re-run, because that is what downloads Parakeet's speech model; selecting it from the menu alone is not sufficient. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.</p>
 <p>The same re-run repairs a missing or incomplete speech model, for example after an interrupted download. The installer detects an incomplete model and reinstalls it. Re-running the installer is safe at any time, and the speech-engine question defaults to the engine already installed, so pressing Enter keeps it. If the current engine is no longer available on this hardware, the PowerShell installer reports that before asking; the setup wizard does not.</p>
+<h3 id="teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</h3>
+<p>The Distil-Whisper engine sometimes misses short words spoken alone, such as "comma". A short session teaches Wheelhouse how you sound so it stops missing them. Start it by saying "learn my voice" or "calibrate my voice", or right-click either the floating button or the tray icon -- both open the same menu -- and choose <strong>Teach WheelHouse your voice...</strong>.</p>
+<p>The session shows four words, one at a time, and asks you to say each word five times. It then asks for a cough or a throat clear, three separate times, to tell your words apart from your other sounds; this part can be skipped. No step has a time limit -- go at your own pace. While the session is open, spoken words are used for the session only; nothing is typed into any window. Clicking by voice still works: say the hotword, "click", and the button name -- "x-ray click cancel", "x-ray click skip this part".</p>
+<p><strong>Apply</strong> saves what the session learned and restarts the listening, which takes about ten seconds. Only the Distil-Whisper engine uses this teaching; the other engines do not need it. If a different engine is active, the window says so and changes nothing.</p>
 <hr />
 <h2 id="system-requirements">System Requirements</h2>
 <p>The hardware Wheelhouse requires, the hardware it performs well on, and the response times to expect between the two.</p>
@@ -873,7 +783,7 @@
 </ul>
 <p>If none of these produces acceptable response times, the Wheelhouse Assistant can help identify which setting to change for a specific machine; see <a href="#getting-help">Getting Help</a>.</p>
 <h2 id="voice-commands">Voice Commands</h2>
-<p>Wheelhouse converts speech into keystrokes, text, and system actions. Most commands require no prefix. Commands with destructive or far-reaching effects require the hotword <strong>"x-ray"</strong> first, so that they cannot fire during dictation; those commands are written here with the "x-ray" prefix.</p>
+<p>Wheelhouse converts speech into keystrokes, text, and system actions. Most commands require no prefix. Commands with destructive or far-reaching effects require the hotword <strong>"x-ray"</strong> first, so they cannot fire during dictation; they are written here with the "x-ray" prefix.</p>
 <p>There are two kinds of voice pattern. <strong>Commands</strong> perform an action -- press a key, switch a window, click a button -- and are normally spoken as a complete utterance: say the command, then pause. <strong>Replacements</strong> apply inline during dictation: spoken mid-sentence, the recognized word is replaced with a symbol or corrected text as the text is typed. All punctuation words ("period", "comma", "question mark") are replacements, so dictation does not have to stop to insert punctuation.</p>
 <h3 id="common-commands">Common Commands</h3>
 <table>
@@ -931,78 +841,127 @@
 <ol>
 <li>Dictate the body of the message, speaking the punctuation inline: "hi team comma new paragraph the release is ready period"</li>
 <li>To correct a mistyped word, say <strong>"backspace 2"</strong> to remove the last two characters, then dictate the word again.</li>
-<li>To correct grammar across a paragraph, select it with <strong>"select paragraph"</strong>, then say <strong>"x-ray fix"</strong>, which sends the selection to the configured AI server and replaces it with the corrected version.</li>
-<li>Say <strong>"x-ray activate outlook"</strong>, substituting the name of the mail application, to bring its window forward, then <strong>"submit"</strong> to press Enter.</li>
+<li>To correct grammar across a paragraph, select it with <strong>"select paragraph"</strong>, then say <strong>"x-ray fix"</strong>, which sends it to the AI server and replaces it with the corrected version.</li>
+<li>Say <strong>"x-ray activate outlook"</strong> (substitute your mail application) to bring its window forward, starting it if it is not already open, then <strong>"submit"</strong> to press Enter.</li>
 </ol>
 <p><strong>Example 2 -- Searching for copied text</strong></p>
 <ol>
 <li>Select a phrase with the mouse, or say "select word".</li>
 <li>Say <strong>"copy"</strong>.</li>
-<li>Say <strong>"x-ray browser"</strong> to bring the default browser forward.</li>
+<li>Say <strong>"browser"</strong>, as the whole utterance, to bring the default browser forward.</li>
 <li>Say <strong>"paste"</strong> with the address bar focused, then <strong>"submit"</strong> to press Enter.</li>
 </ol>
 <h3 id="full-voice-command-reference">Full Voice Command Reference</h3>
 <p>Every voice command and replacement is listed, one row each, in the <a href="https://wheelhouse-project.org/reference.html">command and configuration reference</a>. This section covers the behavior a table cannot express: how to dictate a word that is also a command, the key names accepted by "press", and how navigation, punctuation, and clicking behave.</p>
 <h4 id="dictation-control">Dictation Control</h4>
-<p>These commands control what is typed and provide a way to dictate a word that collides with a command. "literal [words]" types the words that follow exactly, bypassing all command and replacement processing. "insert [text]" inserts raw text with no capitalization, spacing, or formatting. "submit" presses Enter, and is also recognized as the last word of a sentence: "hello world submit" types "hello world" and then presses Enter. To type the word itself, say "literal submit".</p>
-<p>Utterances beginning with "okay Google", "ok Google", or "hey Google" are discarded, so speech directed at a nearby voice assistant is not transcribed.</p>
+<p>These commands control what is typed and let you dictate a word that collides with a command. "literal [words]" types the words that follow exactly, bypassing all command and replacement processing. "insert [text]" inserts raw text with no capitalization, spacing, or formatting. "submit" presses Enter, and is also recognized as the last word of a sentence: "hello world submit" types "hello world" and then presses Enter. To type the word itself, say "literal submit".</p>
+<p>Utterances beginning with "okay Google", "ok Google", or "hey Google" are discarded, so speech aimed at a nearby voice assistant is not transcribed.</p>
 <h4 id="text-editing">Text Editing</h4>
-<p>Common mishearings of "undo" and "redo" ("undue", "undu", "redu") are accepted, so the command still fires when the recognizer returns one of those spellings. Deletion counts for "backspace" and "delete" are capped at 50. "tab [number]" requires the number; "tab" alone is typed as the word.</p>
+<p>Common mishearings of "undo" and "redo" ("undue", "undu", "redu") are accepted, so the command still fires on those spellings. Deletion counts for "backspace" and "delete" are capped at 50. "tab [number]" requires the number. A bare "tab" spoken on its own presses Tab once; "tab" inside a longer sentence is typed as the word.</p>
+<p>Wherever a command takes <strong>[number]</strong>, say the count either way: as digits ("backspace 15") or as words ("backspace fifteen", "delete twenty three"). Words up to "nine hundred ninety nine" are read, and each command still applies its own limit afterwards.</p>
+<p>A count of two or more words needs the command to wait for the end of the sentence. Every count command waits except "backspace", which fires as soon as the words spoken so far form the command, so it uses only the first word of the count. "backspace fifteen" deletes fifteen characters, because that count is one word. "backspace twenty three" deletes twenty characters and then types "three". Say "backspace 23", or use "delete twenty three", which does wait for the whole sentence.</p>
 <h5 id="the-press-keys-command-in-detail">The "press [keys]" Command in Detail</h5>
-<p>"press [keys]" sends any keyboard shortcut. Modifiers are held down first regardless of the order they are spoken, so "press delete control" is equivalent to "press control delete". If any word in the phrase is unrecognized, nothing is pressed and the phrase is discarded rather than typed as text. Hyphenated tokens from the speech engine, such as "f-11" or "control-alt", are split automatically.</p>
+<p>"press [keys]" sends any keyboard shortcut. Modifiers are held down first regardless of spoken order, so "press delete control" equals "press control delete". If any word in the phrase is unrecognized, nothing is pressed and the phrase is discarded rather than typed. Hyphenated tokens from the speech engine, such as "f-11" or "control-alt", are split automatically.</p>
 <p><strong>Modifier keys</strong>: control (or ctrl), alt, shift, windows (or win).</p>
 <p><strong>Navigation and editing keys</strong>: enter (or return), escape, tab, backspace, delete (or del), insert, space, home, end, page up, page down, up, down, left, right, caps lock, print screen, pause.</p>
 <p><strong>Function keys</strong>: f1 through f12.</p>
 <p><strong>Letters</strong>: any single letter a through z.</p>
 <p><strong>Digits</strong>: a digit is recognized only when another key name follows it. A digit at the end of the phrase is read as a repeat count, so "press control 2" presses Ctrl twice rather than Ctrl+2.</p>
-<p><strong>Symbols by spoken name</strong>: the following are pressed correctly -- backtick, semicolon, slash (forward slash), backslash (back slash), comma, period (dot), single quote (apostrophe), left/right bracket (open/close bracket), equals (equal), minus (hyphen, dash), right parenthesis (close paren). Other symbol names are not reliable in "press": the shifted symbols (colon, tilde, pipe, question mark, double quote, braces, less than, greater than, plus, underscore) produce the wrong character, and left parenthesis, hash, at, ampersand, asterisk, caret, percent, dollar, and exclamation press nothing. To type any of those characters, dictate them as punctuation words instead; see <a href="#punctuation-and-symbols">Punctuation and Symbols</a> below, which handles every symbol.</p>
+<p><strong>Symbols by spoken name</strong>: the following are pressed correctly -- backtick, semicolon, slash (forward slash), backslash (back slash), comma, period (dot), single quote (apostrophe), left/right bracket (open/close bracket), equals (equal), minus (hyphen, dash), right parenthesis (close paren). Other symbol names are not reliable in "press": the shifted symbols (colon, tilde, pipe, question mark, double quote, braces, less than, greater than, plus, underscore) produce the wrong character, and left parenthesis, hash, at, ampersand, asterisk, caret, percent, dollar, and exclamation press nothing. To type any of those, dictate them as punctuation words instead; <a href="#punctuation-and-symbols">Punctuation and Symbols</a> below handles every symbol.</p>
 <p><strong>Examples</strong>: "press control shift t", "press f5", "press alt f4", "press windows d", "press left bracket".</p>
 <h4 id="text-formatting">Text Formatting</h4>
-<p>Formatting commands apply to the current selection. Select first, with the mouse or with "select word" / "select line", then say the command. The case and shape transforms cover UPPERCASE, lowercase, capitalize, title case, and the programming styles snake_case, camelCase, PascalCase, and kebab-case. The wrapping commands ("parentheses", "brackets", "braces", "angle brackets", "quotes", "single quotes") enclose the selection in those characters; spoken with no selection, they insert an empty pair and place the cursor between the two characters. Words spoken after a wrapping word in the same utterance are wrapped verbatim: symbol words such as "colon" are typed literally rather than converted. Three commands apply character formatting to the selection through the host application's own keyboard shortcuts: "x-ray bold text", "x-ray italics", and "x-ray underline".</p>
+<p>Formatting commands apply to the current selection: select first, with the mouse or "select word" / "select line", then say the command. The case and shape transforms cover UPPERCASE, lowercase, capitalize, title case, and the programming styles snake_case, camelCase, PascalCase, and kebab-case. The wrapping commands ("parentheses", "brackets", "braces", "angle brackets", "quotes", "single quotes") enclose the selection in those characters; spoken with no selection, they insert an empty pair with the cursor between them. Words spoken after a wrapping word in the same utterance are wrapped verbatim: symbol words such as "colon" are typed literally rather than converted. Three commands apply character formatting through the host application's own keyboard shortcuts: "x-ray bold text", "x-ray italics", and "x-ray underline".</p>
 <h4 id="navigation">Navigation</h4>
-<p>"go" moves the cursor; "grab" moves it while extending the selection. Several moves can be chained in one utterance with "then". The utterance must begin with "go": "grab" is valid only as a step chained after a "go" move, for example "go home then grab to end". Spoken on its own, "grab ..." is typed as dictation.</p>
-<p>Counts can be digits ("3") or spoken words ("one" through "ten"; digits are accepted up to 50). "to", "too", and "for" are accepted as sound-alikes for 2 and 4, so "go right to words" moves two words. If any part of a "go" utterance cannot be parsed, the whole phrase is typed as dictation instead, so an unrecognized phrase does not move the cursor.</p>
+<p>"go" moves the cursor; "grab" moves it while extending the selection. Several moves chain in one utterance with "then". The utterance must begin with "go": "grab" is valid only chained after a "go" move -- "go home then grab to end". Spoken on its own, "grab ..." is typed as dictation.</p>
+<p>Counts can be digits ("3") or spoken words ("one", "fifteen", "twenty-three"). A count is one word here, so say "twenty-three" as a single hyphenated word rather than two separate words. Counts above 50 move 50. A digit count above 999 is typed as dictation instead of moving the cursor; leading zeroes do not count, so "0001" still moves one. "to", "too", and "for" are accepted as sound-alikes for 2 and 4, so "go right to words" moves two words. If any part of a "go" utterance cannot be parsed, the whole phrase is typed as dictation instead, so an unrecognized phrase does not move the cursor.</p>
 <h4 id="punctuation-and-symbols">Punctuation and Symbols</h4>
-<p>Punctuation and symbol words are replacements: they apply inline during dictation. Spoken as part of a sentence, the symbol is typed in place of the word, with no pause required. Every punctuation and symbol word -- period, comma, colon, question mark, and the rest -- behaves this way.</p>
-<p>Two mishearing tolerances are built in, because the default local engine frequently mishears "comma" and "colon". Spoken as an entire utterance, <strong>"colin"</strong> inserts ":" and <strong>"come"</strong>, <strong>"kama"</strong>, <strong>"commer"</strong>, or <strong>"come on"</strong> inserts ",". Within a longer sentence these words are dictated normally; the tolerance applies only to a whole utterance. To type one as a standalone word, use "literal come" or "literal colin".</p>
-<p>If the recognizer regularly mishears another word, add a personal correction in the Pattern Manager ("x-ray patterns"). It applies inline during dictation like the built-in punctuation words.</p>
+<p>Punctuation and symbol words are replacements: spoken as part of a sentence, the symbol is typed in place of the word, no pause required. Every punctuation and symbol word -- period, comma, colon, question mark, and the rest -- behaves this way.</p>
+<p>Two mishearing tolerances are built in, because the default local engine frequently mishears "comma" and "colon": spoken as an entire utterance, <strong>"colin"</strong> inserts ":" and <strong>"come"</strong>, <strong>"kama"</strong>, <strong>"commer"</strong>, or <strong>"come on"</strong> inserts ",". Within a longer sentence these words are dictated normally. To type one as a standalone word, use "literal come" or "literal colin".</p>
+<p>If the recognizer regularly mishears another word, add a personal correction in the Pattern Manager ("patterns"); it applies inline like the built-in punctuation words.</p>
 <h4 id="application-switching-and-system">Application Switching and System</h4>
-<p>"x-ray activate [app name]" brings the named application's window forward. When a pattern's target is a program file (.exe) and no window is open for it, that program is started; the built-in "x-ray notepad" and "x-ray browser" work this way, and "x-ray browser" resolves to the Windows default browser at the time the command is spoken. The System commands operate on windows and on Windows itself. Five need no hotword: "zoom in", "zoom out", "create tab", "create window", and "windows settings", which opens the Windows Settings application. Four require it: "x-ray close window", "x-ray maximize", "x-ray minimize", and "x-ray desktop", which shows the desktop. In most browsers "create tab" (Ctrl+N) opens a new window rather than a tab, and "create window" (Ctrl+Shift+N) opens a private or incognito window.</p>
+<p>"x-ray activate [app name]" brings the named application's window forward. When nothing by that name has a window open, Wheelhouse starts the program instead of doing nothing: a pattern whose target is a program file (.exe) is run directly, and a spoken name is looked up among your installed programs, by Start menu shortcut and by the names Windows itself resolves. An exact name is preferred; failing that, a name that begins with the words you said. If more than one installed program matches, Wheelhouse starts none of them and lists the names, so you can say the full name of the one you meant; if none matches, it says so. The built-in "notepad" and "browser" take the program-file path, and "browser" resolves to the Windows default browser when spoken. The System commands operate on windows and on Windows itself. Seven need the hotword: "x-ray close window", because it discards unsaved work; "x-ray close tab"; the four searches, "x-ray search windows for [text]", "x-ray search on google for [text]", "x-ray search on bing for [text]", and "x-ray search on youtube for [text]"; and the short Google form "x-ray search for [text]", in which the word "for" is optional. Every other System command works without the hotword, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed. Those include "zoom in", "zoom out", "create tab", "create window", "windows settings", which opens Windows Settings, "maximize", "minimize", and "desktop", which shows the desktop. In most browsers "create tab" (Ctrl+N) opens a new window rather than a tab, and "create window" (Ctrl+Shift+N) opens a private or incognito window.</p>
 <h4 id="mouse-control">Mouse Control</h4>
-<p><strong>This release has no voice commands that move the mouse pointer.</strong> There is no "mouse up" command and no grid overlay for pointer positioning. Controls are clicked by name or by number instead; see <a href="#voice-element-clicking">Voice Element Clicking</a> below. Volume and screen brightness are mapped to the thumb wheel of a Logitech MX-series mouse; see <a href="#plugins">Plugins</a>. For pointer-by-voice control, run a separate pointer-control program alongside Wheelhouse, which continues to handle dictation, commands, and clicking by name.</p>
+<p>The <strong>mouse grid</strong> moves the pointer to any point on screen by voice, including points clicking by name cannot reach: applications that hide their controls from accessibility tools, drawing canvases, maps, games. Say <strong>"show grid"</strong> to lay a numbered three-by-three grid over the screen the front window is on. Saying a cell's number, <strong>1 through 9</strong>, redraws the grid inside that cell; repeat until the center sits on the target. The word "number" may precede each number -- engines hear "number five" more reliably than a single word. Then say the action:</p>
+<table>
+<thead>
+<tr>
+<th>Say</th>
+<th>What happens</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>click</td>
+<td>left click at the center of the current cell</td>
+</tr>
+<tr>
+<td>double click</td>
+<td>double click there</td>
+</tr>
+<tr>
+<td>right click</td>
+<td>right click there</td>
+</tr>
+<tr>
+<td>move here</td>
+<td>moves the pointer there without clicking</td>
+</tr>
+<tr>
+<td>mark</td>
+<td>pins the start point of a drag and restarts the grid</td>
+</tr>
+<tr>
+<td>drag</td>
+<td>drags from the pinned point to the current cell center</td>
+</tr>
+<tr>
+<td>hide grid</td>
+<td>closes the grid without clicking</td>
+</tr>
+<tr>
+<td>grid next screen</td>
+<td>moves the grid to the next monitor</td>
+</tr>
+</tbody>
+</table>
+<p>A number in the same utterance narrows first: "x-ray click 5" narrows into cell 5, then clicks its center. All actions close the grid except "mark", "grid next screen", and a "drag" with no mark.</p>
+<p><strong>Dragging</strong> is two steps. Navigate to the point to drag from and say <strong>"mark"</strong> -- a pin appears and the grid restarts at full size. Navigate to the destination and say <strong>"drag"</strong>: the left button is pressed at the pin, the pointer moves gradually -- many applications ignore a pointer that jumps instantly -- and the button is released. No button is held while you navigate, so a pause or a misheard word between the steps cannot drop anything in the wrong place. "drag" without a "mark" shows a notice and presses nothing; the pin is forgotten when the grid closes.</p>
+<p>While the grid is open, a spoken number on its own belongs to the grid and is not typed; grid closed, the same words are ordinary dictation. The grid and the numbered overlay are never open together: "show grid" removes the numbers, "show numbers" closes the grid. Narrowing stops once cells reach <code>grid_min_cell_px</code> (click section of the settings file) -- a cell that small is already within a click's precision -- and drag speed is <code>drag_duration_ms</code> next to it.</p>
+<p>No commands move the pointer continuously (no "mouse up" / "mouse down"); the grid places it at a chosen point instead. Volume and screen brightness are mapped to the thumb wheel of a Logitech MX-series mouse; see <a href="#plugins">Plugins</a>.</p>
 <h4 id="voice-element-clicking">Voice Element Clicking</h4>
-<p>Wheelhouse can click buttons, links, menu items, and other on-screen controls. A control is selected in one of two ways: by its <strong>name</strong>, or by displaying a <strong>number</strong> on every clickable control and saying that number. The numbered overlay covers controls with no spoken name, such as icon-only toolbar buttons, and cases where several controls share a name.</p>
-<p><strong>Clicking by name</strong>: say "click", then the name of the control. "the" may precede the name and is ignored, and a role word may follow it to restrict the search to one kind of control. The "x-ray" hotword prefix is optional on all clicking commands: "click cancel" and "x-ray click cancel" are equivalent. <strong>Role words</strong>: <strong>button</strong>, <strong>link</strong> (a hyperlink), <strong>menu</strong> (a menu item), <strong>tab</strong>, <strong>checkbox</strong> (or <strong>check box</strong>), and <strong>box</strong> / <strong>field</strong> / <strong>input</strong> (a text entry field). With no role word, any clickable control matching the name is considered. A role word spoken with no name, for example "click button", is treated as a name rather than a role, and searches for a control named "button".</p>
-<p><strong>The numbered overlay</strong>: "apply numbers" displays a number on every clickable control in the front window, "click 3" clicks the control labelled 3, and "dismiss numbers" removes the numbers. The numbers remain on screen until "dismiss numbers" is spoken: clicking a numbered control repaints them in place, and they follow whichever window is in front. When "click [name]" matches more than one control closely, the numbers are displayed on those candidates only. While numbers are displayed, a bare spoken number always selects the numbered label, so a control whose own name is a digit -- a calculator "7" -- is reached by adding a role word: "click 7 button" clicks the calculator key, while "click 7" clicks whatever control carries the number 7. If the numbers no longer align after a page scrolls or replaces its content, say "apply numbers" again to repaint them.</p>
-<p><strong>Outcomes</strong>: a successful click produces no notice. A failure produces a brief notice near the floating button and the tray icon: <strong>not found</strong> ("No match for [name]"; nothing matched, and the numbered overlay is the alternative), <strong>ambiguous</strong> (the numbered overlay opens on the candidates; the "Found [A] and [B] -- be more specific" notice appears only when the overlay cannot open), and <strong>could not complete the click</strong> (the wording states the reason: the control is disabled, the click timed out, or the overlay is stale and must be reapplied). Notices are rate-limited, so repeated failures do not produce repeated notices.</p>
+<p>Wheelhouse can click buttons, links, menu items, and other on-screen controls. A control is selected in one of two ways: by its <strong>name</strong>, or by displaying a <strong>number</strong> on every clickable control and clicking that number -- "x-ray click 5". The numbered overlay covers controls with no spoken name, such as icon-only toolbar buttons, and cases where several controls share a name.</p>
+<p><strong>Clicking by name</strong>: say "click", then the name of the control. "the" may precede the name and is ignored; a role word may follow to restrict the search to one kind of control. Plain "click [name]" needs the "x-ray" hotword first -- say "x-ray click cancel" -- because otherwise any sentence opening with "click" or "tap" would be taken as a command. "right click [name]" and "double click [name]" need no hotword. <strong>Role words</strong>: <strong>button</strong>, <strong>link</strong> (a hyperlink), <strong>menu</strong> (a menu item), <strong>tab</strong>, <strong>checkbox</strong> (or <strong>check box</strong>), and <strong>box</strong> / <strong>field</strong> / <strong>input</strong> (a text entry field). With no role word, any clickable control matching the name is considered. A role word spoken with no name -- "x-ray click button" -- is treated as a name and searches for a control named "button".</p>
+<p><strong>Right click and double click</strong>: "right click [name]" and "double click [name]" work wherever "click [name]" works, and "right click 3" / "double click 3" work while the numbered overlay is showing. These press a real mouse click at the control's center, with the same safety checks as a normal click. They cover what a normal click cannot: a right click opens a control's context menu, and File Explorer items open on a double click.</p>
+<p><strong>The numbered overlay</strong>: "show numbers" displays a number on every clickable control in the front window, "x-ray click 3" clicks the control labelled 3, and "hide numbers" removes the numbers. Until then they stay up: clicking a numbered control repaints them in place, and they follow whichever window is in front. When "click [name]" matches more than one control closely, the numbers appear on those candidates only. A bare spoken number belongs to the mouse grid, not to the numbered overlay, so pick a numbered control with the click form. A control whose own name is a digit -- a calculator "7" -- needs a role word: "x-ray click 7 button" clicks the calculator key rather than the control labelled 7. If the numbers no longer align after a page scrolls or changes, say "show numbers" again.</p>
+<p><strong>Outcomes</strong>: a successful click produces no notice. A failure produces a brief notice near the floating button and the tray icon: <strong>not found</strong> ("No match for [name]"; the numbered overlay is the alternative), <strong>ambiguous</strong> (the numbered overlay opens on the candidates; the "Found [A] and [B] -- be more specific" notice appears only when the overlay cannot open), and <strong>could not complete the click</strong> (the wording states the reason: control disabled, click timed out, or overlay stale and must be reapplied). Notices are rate-limited, so repeated failures do not produce repeated notices.</p>
 <h4 id="wheelhouse-control">Wheelhouse Control</h4>
-<p>These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for grammar correction and replaces the selection with the result; it requires the AI server to be configured and reachable, announces its progress ("Correcting", "Done"), and leaves the original text in place if the request fails. Five further commands rewrite the selection rather than correcting it: "x-ray simplify", "x-ray shorten", "x-ray make formal", "x-ray pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under <a href="#selected-commands-in-detail">Selected Commands in Detail</a>, which also covers adding others. "x-ray boost" adds the selected text to the speech recognition hints. "x-ray patterns" opens the Pattern Manager, and "x-ray help" opens the Wheelhouse Assistant in the default browser. "x-ray cancel fix" stops a correction or rewrite that is still running.</p>
-<p>Three further commands act on text through the host application: "x-ray find [text]" opens its find box and searches for the words spoken, "x-ray replace" opens its find-and-replace box, and "x-ray search" copies the selection and searches the web for it in the default browser.</p>
-<p>Switching the microphone on and off is not a voice command. In toggle mode it is done by clicking either the floating button or the tray icon. In push-to-talk mode listening lasts only as long as the floating button is held; the hold gesture works on the floating button alone, and a click on either surface has no effect. A microphone switch that responded to speech could be switched off by a phrase spoken in passing, leaving no voice route back.</p>
+<p>These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for grammar correction and replaces the selection with the result; it requires that server to be configured and reachable, announces its progress ("Correcting", "Done"), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under <a href="#selected-commands-in-detail">Selected Commands in Detail</a>, which also covers adding others. "boost" adds the selected text to the speech recognition hints, "patterns" opens the Pattern Manager, "x-ray help" opens the Wheelhouse Assistant in the default browser, and "x-ray cancel fix" stops a correction or rewrite still running.</p>
+<p>Three further commands act on text through the host application: "x-ray find [text]" opens its find box and searches for the words spoken, "replace" opens its find-and-replace box, and "search" copies the selection and searches the web for it in the default browser.</p>
+<p>Switching the microphone on and off is not a voice command: a switch that responded to speech could be turned off by a phrase spoken in passing, leaving no voice route back. In toggle mode, click either the floating button or the tray icon. In push-to-talk mode, listening lasts only as long as the floating button is held; the hold works on the floating button alone, and a click on either surface has no effect.</p>
 <p>The in-app help chat window is disabled in this release, and the voice patterns that opened it are switched off. "x-ray help" opens the Wheelhouse Assistant in the browser; see <a href="#getting-help">Getting Help</a>.</p>
 <h3 id="selected-commands-in-detail">Selected Commands in Detail</h3>
 <p><strong>"literal [words]"</strong></p>
-<p>Say "literal" followed by the text to be typed, and those words are inserted without being processed against any command or replacement pattern. This is how to dictate a phrase that would otherwise trigger a command: "literal copy" types the word "copy" instead of copying, "literal period" types the word instead of a full stop, and "literal new line" types the phrase instead of inserting a line break.</p>
+<p>Say "literal" followed by the text to be typed, and those words are inserted without being matched against any command or replacement pattern. This is how to dictate a phrase that would otherwise trigger a command: "literal copy" types the word "copy" instead of copying, "literal period" types the word instead of a full stop, and "literal new line" types the phrase instead of a line break.</p>
 <p>"literal" takes effect wherever it appears in an utterance: everything after it is typed exactly as spoken, and "literal" itself is not typed. To type the word "literal", say "literal literal".</p>
-<p><strong>"x-ray boost"</strong></p>
-<p>When the speech recognizer repeatedly mishears a specific word -- typically a name, a product, a place, or a technical term -- select that word anywhere on screen, with the mouse or with "select word", and say <strong>"x-ray boost"</strong>. The selection is copied and saved as a recognition hint in a shared hints file, which persists across restarts, so each word needs to be boosted once. Hints are capped at 100 characters; boost individual words or short phrases rather than sentences.</p>
-<p><strong>Saving a hint and applying it are separate.</strong> <strong>Parakeet, the default engine, saves the hint but does not apply it.</strong> Hint biasing is disabled by default because applying hints slowed recognition by roughly 25 percent per utterance in the project's measurements. To make Parakeet apply saved hints, set enabled = true under [hotwords] in the Parakeet engine's own config file and restart Wheelhouse, accepting the slower recognition. Until that setting is changed, boosting does not affect what Parakeet recognizes. <strong>Google Cloud Speech-to-Text</strong> applies saved hints without further configuration. <strong>Distil-Whisper</strong> saves hints and, as shipped, does not apply them, because hint biasing degrades that engine's recognition; its own config file has the same [hotwords] switch as Parakeet, marked for experiments only.</p>
-<p><strong>"x-ray patterns" (the Pattern Manager)</strong></p>
-<p>This opens the <strong>Pattern Manager</strong>, which lists every voice command and text replacement, grouped by category. Selecting an entry shows its trigger phrase, the action it performs, and whether it requires the hotword.</p>
-<p>The Pattern Manager can <strong>view</strong> any pattern, including every built-in one; <strong>create</strong> personal patterns, such as a shortcut that types an email address, a correction for a word the engine mishears, or a command that opens a program; <strong>edit</strong> and <strong>delete</strong> user-created patterns; <strong>customize</strong> a built-in pattern, where a personal copy with the same trigger overrides it and deleting that copy restores the shipped behavior; and <strong>change the command hotword</strong> from "x-ray" to another word.</p>
-<p>Personal patterns are stored in a separate per-machine file, so they are preserved across upgrades, and the shipped patterns file is not modified.</p>
+<p><strong>"boost"</strong></p>
+<p>When the recognizer repeatedly mishears a specific word -- typically a name, a product, or a technical term -- select it, with the mouse or with "select word", and say <strong>"boost"</strong>, by itself. The selection is saved as a recognition hint in a shared hints file that persists across restarts, so each word needs boosting once. Hints are capped at 100 characters; boost words or short phrases, not sentences.</p>
+<p><strong>Saving a hint and applying it are separate.</strong> <strong>Parakeet, the default engine, saves the hint but does not apply it</strong>: hint biasing is off by default because it slowed recognition by roughly 25 percent per utterance in the project's measurements. To apply saved hints, set enabled = true under [hotwords] in Parakeet's own config file and restart Wheelhouse, accepting the slower recognition. <strong>Google Cloud Speech-to-Text</strong> applies saved hints without further configuration. <strong>Distil-Whisper</strong> saves hints but does not apply them as shipped, because biasing degrades its recognition; its config file has the same [hotwords] switch, marked for experiments only.</p>
+<p><strong>"patterns" (the Pattern Manager)</strong></p>
+<p>This opens the <strong>Pattern Manager</strong>, which lists every voice command and text replacement, grouped by category. Selecting an entry shows its trigger phrase, its action, and whether it requires the hotword.</p>
+<p>The Pattern Manager can <strong>view</strong> any pattern, including every built-in one; <strong>create</strong> personal patterns, such as a shortcut that types an email address, a correction for a misheard word, or a command that opens a program; <strong>edit</strong> and <strong>delete</strong> user-created patterns; <strong>customize</strong> a built-in pattern, where a personal copy with the same trigger overrides it and deleting that copy restores the shipped behavior; and <strong>change the command hotword</strong> from "x-ray" to another word.</p>
+<p>Personal patterns live in a separate per-machine file, preserved across upgrades; the shipped patterns file is never modified.</p>
 <p><strong>Rewriting the selected text</strong></p>
-<p>With text selected, <strong>"x-ray simplify"</strong> sends it to the AI server to be rewritten in plain language and replaces the selection with the result. <strong>"x-ray shorten"</strong> removes repetition and padding, <strong>"x-ray make formal"</strong> removes contractions and casual wording, and <strong>"x-ray pirate"</strong> rewrites the text in pirate speech. <strong>"x-ray translate to [language]"</strong> translates the selection into the language named, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese"; names of more than one word are recognised. All five use the same AI server as "x-ray fix" and leave the original text in place if the request fails. They announce themselves as "Rewriting" where "x-ray fix" announces "Correcting"; both then say "Done".</p>
-<p>A rewrite pastes back plain text, so character formatting applied in a word processor -- bold, italics, a font, a colour -- is lost on the rewritten part. Layout is preserved: line breaks, blank lines, indentation, bullets, numbering, and lines that are not sentences, such as a code line or a postal address, are returned unchanged.</p>
-<p><strong>Adding a rewrite command.</strong> The five commands above are one action carrying a different instruction each, so further rewrite commands can be added from the Pattern Manager without changing program code. Create a pattern, choose the <strong>Rewrite text with AI</strong> action, and set its single parameter to a sentence addressed to the AI describing the style required.</p>
+<p>With text selected, <strong>"simplify"</strong> sends it to the AI server to be rewritten in plain language and replaces the selection with the result. <strong>"shorten"</strong> removes repetition and padding, <strong>"x-ray make formal"</strong> removes contractions and casual wording, and <strong>"pirate"</strong> rewrites the text in pirate speech. <strong>"x-ray translate to [language]"</strong> translates the selection into the language named -- "x-ray translate to spanish", "x-ray translate to brazilian portuguese"; multi-word names are recognised. All five use the same AI server as "x-ray fix" and leave the original in place if the request fails; they announce "Rewriting" where "x-ray fix" announces "Correcting", then "Done".</p>
+<p>A rewrite pastes back plain text, so word-processor character formatting -- bold, italics, a font, a colour -- is lost on the rewritten part. Layout is preserved: line breaks, blank lines, indentation, bullets, numbering, and non-sentence lines such as a code line or a postal address return unchanged.</p>
+<p><strong>Adding a rewrite command.</strong> The five commands are one action carrying a different instruction each, so more can be added from the Pattern Manager without changing program code: create a pattern, choose the <strong>Rewrite text with AI</strong> action, and set its parameter to a sentence telling the AI the style required.</p>
 <p>For example, to rewrite text at a reading level a younger reader can follow, create a pattern with the trigger <strong>reading level</strong> and this instruction:</p>
 <blockquote>
 <p>Rewrite this text so a ten-year-old could read it. Use short sentences and everyday words, and explain any term a ten-year-old would not know. Keep every fact. Return only the rewritten text.</p>
 </blockquote>
-<p>Selecting a paragraph and saying "x-ray reading level" then rewrites it. Two constraints apply to that instruction. <strong>Describe the style only</strong>: Wheelhouse supplies the wording that preserves layout, and the wording that prevents instructions inside the selected text from redirecting the AI. Neither needs to be written into the instruction, and duplicating them degrades the result. <strong>End with "Return only the rewritten text."</strong> Without it, the AI is liable to prefix its answer with a sentence of commentary, which is then pasted into the document.</p>
+<p>Selecting a paragraph and saying "x-ray reading level" then rewrites it. Two constraints on that instruction: <strong>describe the style only</strong> -- Wheelhouse itself supplies the wording that preserves layout and keeps instructions inside the selected text from redirecting the AI, and duplicating either degrades the result -- and <strong>end with "Return only the rewritten text."</strong>, without which the AI is liable to prefix a sentence of commentary that is then pasted into the document.</p>
 <p><strong>"x-ray cancel fix"</strong> stops a request that is still running -- a correction or any of the rewrites -- and nothing is pasted.</p>
 <p><strong>"x-ray help"</strong></p>
-<p>Opens the Wheelhouse Assistant, the project's online help, in the default browser, where questions can be asked in plain language. The address is the gem_url setting in the [ai.help] section, which points at the assistant by default.</p>
+<p>Opens the Wheelhouse Assistant, the project's online help, in the default browser, where questions can be asked in plain language. The address is the gem_url setting in [ai.help], which points at the assistant by default.</p>
 <h2 id="speech-modes">Speech Modes</h2>
 <p>Wheelhouse has no command mode and no dictation mode to switch between. Each utterance is classified as it arrives, using the position of the words within the phrase.</p>
 <h3 id="classification-of-spoken-input">Classification of spoken input</h3>
@@ -1092,14 +1051,13 @@
 <li><strong>Interim Results</strong> -- selects whether words are typed as they are recognized and corrected afterwards, or held until the phrase ends. The first is the streaming insertion described under <a href="#speech-modes">Speech Modes</a>; switching this off trades the immediate feedback for text that arrives already settled.</li>
 <li><strong>Push-to-Talk Mode</strong> -- switch between the two interaction modes. The checkmark shows when push-to-talk is active.</li>
 <li><strong>STT Provider</strong> -- select the speech engine. Only engines set up on this computer are listed. See <a href="#speech-engines">Speech Engines</a>.</li>
-<li><strong>Google Cloud Credentials</strong> -- choose the Google service-account key file. Shown only when the Google Cloud engine is set up on this computer. See <a href="#speech-engines">Speech Engines</a>.</li>
 <li><strong>AI Model</strong> -- select the AI model, when AI features are configured. If the model named in the settings file is no longer offered by the server, the menu reports that rather than substituting another model.</li>
 <li><strong>Pattern Manager</strong> -- open the editor for personal voice patterns. See <a href="#voice-commands">Voice Commands</a>.</li>
+<li><strong>Teach WheelHouse your voice...</strong> -- open the voice-teaching session for the Distil-Whisper engine. See <a href="#teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</a>.</li>
 <li><strong>Debug</strong> -- switch detailed logging on or off. Leave it off except when diagnosing or reporting a problem.</li>
 <li><strong>Help</strong> -- open the Wheelhouse Assistant in the browser. This is the same page the spoken command "x-ray help" opens.</li>
 <li><strong>About Wheelhouse</strong> -- show the program name and the running version. Include the version in any problem report.</li>
-<li><strong>Restart Transcription Service</strong> -- restart the speech engine without restarting the rest of Wheelhouse. This is the first step when speech recognition stops responding.</li>
-<li><strong>Restart Wheelhouse</strong> -- restart the whole program.</li>
+<li><strong>Restart Wheelhouse</strong> -- restart the whole program. This is the first step when speech recognition stops responding.</li>
 <li><strong>Exit</strong> -- close Wheelhouse. Required before running the installer to update, and before uninstalling.</li>
 </ul>
 <h2 id="configuration">Configuration</h2>
@@ -1107,26 +1065,26 @@
 <p><strong>Where the settings file is.</strong> Wheelhouse keeps its settings in a plain text file named config.toml, which opens in Notepad. It is at:</p>
 <pre><code>%LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml
 </code></pre>
-<p>To open the folder, press the Windows key and R together, paste <code>%LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse</code> into the box, and press Enter. <code>%LOCALAPPDATA%</code> expands to <code>C:\Users\&lt;your user name&gt;\AppData\Local</code>, a folder Windows hides by default, which is why pasting the path is easier than browsing to it. The installer creates config.toml from the template <code>config.toml.example</code> in the same folder. Your copy is personal to your machine and is never transmitted. Lines starting with a number sign are comments, and the file documents many of its own settings inline.</p>
+<p>To open the folder, press the Windows key and R together, paste that folder path, and press Enter (<code>%LOCALAPPDATA%</code> expands to a folder Windows hides by default, so paste rather than browse). The installer creates config.toml from the template <code>config.toml.example</code> beside it. Your copy is personal to your machine and is never transmitted. Lines starting with a number sign are comments, and the file documents many of its own settings inline.</p>
 <p>A few practical notes:</p>
 <ul>
 <li>Change one setting at a time, then restart Wheelhouse so the change takes effect.</li>
 <li>To restore the defaults, copy <code>config.toml.example</code> over <code>config.toml</code> in that same folder.</li>
 <li>Settings marked "device-specific" are off by default and apply only if you own that hardware.</li>
 </ul>
-<p><strong>The complete per-setting reference</strong> -- every configuration key, its default, and what it does -- is in the <a href="https://wheelhouse-project.org/reference.html">command and configuration reference</a>. Two settings are worth knowing before opening it. Transcript logging (LOG_TRANSCRIPTS) is off by default, which keeps dictated words and clipboard contents out of the log files; turn it on only while diagnosing a recognition problem, then turn it back off. The AI server's API key is never stored in config.toml: if your server requires one, set the WHEELHOUSE_AI_API_KEY environment variable instead, so the key is not held in a settings file that could be copied or shared.</p>
+<p><strong>The complete per-setting reference</strong> -- every configuration key, its default, and what it does -- is in the <a href="https://wheelhouse-project.org/reference.html">command and configuration reference</a>. Two settings are worth knowing before opening it. Transcript logging (LOG_TRANSCRIPTS) is off by default, which keeps dictated words and clipboard contents out of the log files; turn it on only while diagnosing a recognition problem, then turn it back off. The AI server's API key is never stored in config.toml: if your server requires one, set the WHEELHOUSE_AI_API_KEY environment variable instead, keeping the key out of a file that could be copied or shared.</p>
 <p>The rest of this section covers the two most common adjustments: performance on slower hardware, and recognition quality. For a setting not covered here, the Wheelhouse Assistant answers questions about any key in the reference; see <a href="#getting-help">Getting Help</a>.</p>
 <h3 id="settings-for-slower-hardware">Settings for slower hardware</h3>
 <p>If Wheelhouse feels laggy or unreliable on an older computer, these changes help, roughly in order of impact:</p>
 <ol>
-<li><strong>Use the default speech engine.</strong> "parakeet_tdt" ([stt] last_provider) is the lightest local engine and runs on any CPU; do not switch to "distil_medium_en" without a capable recent graphics card. If even the default struggles, "google_stt" moves the work to the cloud -- at the cost of an account and an internet connection.</li>
+<li><strong>Pick the right speech engine.</strong> The default "parakeet_tdt" ([stt] last_provider) runs on any CPU; do not switch to "distil_medium_en" without a capable recent graphics card. "google_stt" moves the work to the cloud -- at the cost of an account and an internet connection.</li>
 <li><strong>Give yourself more speaking time.</strong> Raise REPLACEMENT_TIMEOUT_MS and COMMAND_TIMEOUT_MS from 700 to 900-1000, and COMMAND_COMPLETION_WAIT_MS from 1000 to 1500 if quick back-to-back commands collide.</li>
 <li><strong>Slow down text insertion.</strong> Under [ui_actions.timing], raise post_paste_delay_ms (30 to 60), clipboard_operation_delay_ms (50 to 100), and clipboard_verification_timeout_ms (250 to 500) if dictated text arrives incomplete or garbled.</li>
-<li><strong>Give voice clicking more time.</strong> Under [click], raise response_timeout_ms (3000 to 5000) and walk_deadline_ms (2500 to 4000) if clicks time out in complex windows.</li>
+<li><strong>Give voice clicking more time.</strong> Under [click], raise response_timeout_ms (3000 to 5000) and walk_deadline_ms (2500 to 4000) if clicks time out in complex windows. Raise screen_read_timeout_ms (10000 to 15000) if the numbered overlay says it could not draw the numbers in windows that take several seconds to answer.</li>
 <li><strong>Allow a local AI server longer to answer.</strong> Raise [ai.server] timeout_s from 30 to 60 if corrections time out -- or leave AI off; nothing else depends on it.</li>
 </ol>
 <h3 id="speech-recognition-quality-settings">Speech recognition quality settings</h3>
-<p><strong>The hallucination filter (Distil-Whisper engine only).</strong> Whisper-family speech engines have a well-known quirk: fed a cough, a throat-clear, or background noise, they sometimes invent polite filler -- a stray "thank you" or "okay" you never said. The Distil-Whisper engine ships with a confidence filter that discards such low-confidence utterances instead of typing them. Its threshold is <strong>hallucination_logprob_threshold</strong> (default -0.55) in the Distil-Whisper provider's own config file, not the main config.toml. That default was calibrated on a single male voice with a studio microphone, so it may be too strict for other voices: if real speech is sometimes silently ignored -- more likely with a strong accent, quiet speech, or a laptop microphone -- lower it to -0.7 or -0.8. More negative means more permissive: fewer real words discarded, the occasional phantom "thank you" let through; a very large negative number turns the filter off entirely. If no threshold produces acceptable results, switch to the Google engine from the menu on the floating button or the tray icon; it is less affected by background noise and by variation between voices. It is a cloud service: it requires an account and sends audio to Google. The filter does not apply to the default Parakeet engine, which neither produces the confidence signal it relies on nor shares the quirk to the same degree.</p>
+<p><strong>The hallucination filter (Distil-Whisper engine only).</strong> Whisper-family engines have a well-known quirk: fed a cough or background noise, they sometimes invent polite filler -- a stray "thank you" you never said. The Distil-Whisper engine ships with a confidence filter that discards such low-confidence utterances. Its threshold is <strong>hallucination_logprob_threshold</strong> (default -0.6) in the Distil-Whisper provider's own config file, not the main config.toml. The default was calibrated on one male voice with a studio microphone and may be too strict: if real speech is sometimes silently ignored -- more likely with a strong accent, quiet speech, or a laptop microphone -- lower it to -0.7 or -0.8. More negative is more permissive; a very large negative number turns the filter off. If no threshold works, switch to the Google engine from the floating button or tray icon menu: less affected by noise and voice variation, but a cloud service needing an account, and audio goes to Google. The filter does not apply to the default Parakeet engine, which neither produces the confidence signal nor shares the quirk to the same degree.</p>
 <h2 id="plugins">Plugins</h2>
 <p>Plugins are optional add-ons that connect Wheelhouse to extra hardware and services: your laptop screen, Sonos speakers, a Sony TV, and a few Windows features. Every plugin has its own <code>[plugins.*]</code> section in config.toml with an <code>enabled</code> switch, so you can turn each one on or off without deleting anything. You do not need any of them for dictation and voice commands to work. A plugin that cannot find its hardware at startup turns itself off for the session and reports the reason in the log; the rest of Wheelhouse runs unaffected. Hardware that is present but unreachable is a different case: the Sonos plugin keeps polling a speaker whose address it resolved at startup, so a speaker that comes back on the network is picked up again without a restart.</p>
 <p>Four of these plugins respond to the mouse thumb wheel -- the small horizontal wheel on the side of the mouse, under your thumb. This is not the main scroll wheel: that one keeps its normal scrolling job. Wheelhouse reads the thumb wheel directly from the device, which currently works only with Logitech MX-series mice. Screen zones pick what the thumb wheel controls: pointer at the left edge of the screen, it adjusts brightness; anywhere else, volume -- no command or click needed. Step size and zone width are adjustable in the configuration reference.</p>
@@ -1146,7 +1104,7 @@
 <h3 id="system-volume">System Volume</h3>
 <p>Controls the normal Windows volume (the same one as the taskbar speaker icon) from the volume scroll zone, and quiets system audio while you hold the push-to-talk button. Enable with <code>plugins.system_volume.enabled</code> (default: enabled). Settings:</p>
 <ul>
-<li><code>device_type</code> -- which audio device to control: <code>"default"</code> (the usual choice), <code>"communications"</code>, or a specific device name.</li>
+<li><code>device_type</code> -- which audio device to control: <code>"default"</code> (the usual choice) or <code>"communications"</code>.</li>
 <li><code>volume_step_db</code> -- loudness change per wheel step, in decibels (default 1.5).</li>
 <li><code>min_volume_db</code> / <code>max_volume_db</code> -- the volume floor and ceiling (defaults -96.0 and 0.0).</li>
 </ul>
@@ -1195,17 +1153,17 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 <li>If the mouse wheel does nothing, check the scroll zones: pointer on the left side of the screen adjusts brightness, anywhere else adjusts volume -- and at least one plugin for that control type must be enabled.</li>
 </ul>
 <h2 id="troubleshooting">Troubleshooting</h2>
-<p>Run the verification checks below first, then read the entry matching the check that failed. The Wheelhouse Assistant can also read an error message or a log excerpt and identify the cause; see <a href="#getting-help">Getting Help</a>.</p>
+<p>Start with the verification checks below. The Wheelhouse Assistant can also read an error message or a log excerpt and identify the cause; see <a href="#getting-help">Getting Help</a>.</p>
 <h3 id="setup-verification">Setup verification</h3>
 <p>Run these five checks in order. Stop at the first that fails and read the entry it names.</p>
 <ol>
 <li><strong>Did the installer finish without error lines?</strong> If not, see "Installer failures" below.</li>
 <li><strong>Do Windows Sound settings show the microphone receiving sound?</strong> Right-click the speaker icon on the taskbar, open Sound settings, open Input, and speak. If the input meter does not move, see "Microphone not detected."</li>
-<li><strong>Is the Wheelhouse icon present in the system tray?</strong> The tray icon is the check that matters here. The floating button can be switched off from the menu on either the button or the tray icon, so a missing floating button does not mean the program failed to start. If the tray icon is missing, see "Wheelhouse does not start and neither the tray icon nor the floating button appears."</li>
+<li><strong>Is the Wheelhouse icon present in the system tray?</strong> The tray icon is the check that matters: the floating button can be switched off from the menu on either surface, so its absence does not mean the program failed to start. If the tray icon is missing, see "Wheelhouse does not start and neither the tray icon nor the floating button appears."</li>
 <li><strong>Open Notepad, click in the empty page, and say "hello".</strong> If the word does not appear, see "Dictation not appearing in text fields."</li>
 <li><strong>Say "undo".</strong> If the word does not disappear, see "Commands not recognized."</li>
 </ol>
-<p>If all five pass, the installation is working, and any remaining problem is specific to one application or one feature. The entries below cover the common cases.</p>
+<p>If all five pass, the installation is working; any remaining problem is specific to one application or feature. The entries below cover the common cases.</p>
 <h3 id="common-problems">Common Problems</h3>
 <p><strong>Microphone not detected</strong></p>
 <ul>
@@ -1215,7 +1173,7 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 </ul>
 <p><strong>Wheelhouse does not start and neither the tray icon nor the floating button appears</strong></p>
 <ul>
-<li><em>Symptom:</em> Wheelhouse is started and nothing appears. The tray icon is the one to judge by, because the floating button is hidden whenever "Show Floating Button" is switched off.</li>
+<li><em>Symptom:</em> Wheelhouse is started and nothing appears. Judge by the tray icon; the floating button is hidden whenever "Show Floating Button" is off.</li>
 <li><em>Likely cause:</em> One of the background processes failed during startup, most often because a speech model is missing or an earlier install was interrupted.</li>
 <li><em>Action:</em> Re-run the installer. It repairs a broken install and preserves settings and personal data. If it still does not start, restart the computer and try once more before filing a report.</li>
 </ul>
@@ -1223,13 +1181,13 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 <ul>
 <li><em>Symptom:</em> The speech engine is reported as disconnected, or Wheelhouse remains in a waiting state without recognizing speech.</li>
 <li><em>Likely cause:</em> The speech engine failed to start. Common reasons: its model was never downloaded, the Google Cloud engine has no credentials, or the computer is low on memory.</li>
-<li><em>Action:</em> Switch engines from the menu on the floating button or the tray icon. Parakeet is the built-in offline engine and requires no account. If the required engine was never set up, re-run the installer and select it at the engine question. For the Google Cloud engine, check the credentials: open the menu on the floating button or the tray icon, choose <strong>Google Cloud Credentials</strong>, and select the key file. That setting takes precedence, and the older GOOGLE_APPLICATION_CREDENTIALS environment variable is consulted only when no file has been chosen from the menu. See <a href="#speech-engines">Speech Engines</a>. If the engine will not start immediately after an install or update, open a new PowerShell window and run "uv --version". If uv is not found, the installer's tooling is not on the PATH; re-running the installer corrects that.</li>
+<li><em>Action:</em> Switch engines from the menu on the floating button or the tray icon; Parakeet, the built-in offline engine, needs no account. If the required engine was never set up, re-run the installer and select it at the engine question. For Google Cloud, set the key file's path in the settings file, or set the GOOGLE_APPLICATION_CREDENTIALS environment variable; the variable is consulted only when the settings file names no key. See <a href="#speech-engines">Speech Engines</a>. If the engine will not start right after an install or update, run "uv --version" in a new PowerShell window; uv not found means the installer's tooling is not on the PATH; re-running the installer corrects that.</li>
 </ul>
 <p><strong>Commands not recognized</strong></p>
 <ul>
 <li><em>Symptom:</em> A command such as "maximize" has no effect, or is typed as text.</li>
 <li><em>Likely cause:</em> The speech engine returned a different word, for example "maximum" instead of "maximize", or the utterance overlapped with playing audio.</li>
-<li><em>Action:</em> Speak the command as a separate utterance, with a brief pause before it. Speak at normal conversational volume; raised volume reduces recognition accuracy. If one word is misheard repeatedly, select a correctly spelled copy of it and say "x-ray boost". See its entry in <a href="#voice-commands">Voice Commands</a>; on the default engine the hint is saved but is applied only after hint biasing is enabled.</li>
+<li><em>Action:</em> Speak the command as a separate utterance, with a brief pause before it, at normal conversational volume; raised volume reduces accuracy. If one word is misheard repeatedly, select a correctly spelled copy and say "boost" -- see its entry in <a href="#voice-commands">Voice Commands</a>; on the default engine the hint is saved but applied only after hint biasing is enabled.</li>
 </ul>
 <p><strong>Command words are typed as text instead of running</strong></p>
 <ul>
@@ -1239,26 +1197,26 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 </ul>
 <p><strong>Dictation not appearing in text fields</strong></p>
 <ul>
-<li><em>Symptom:</em> Speech is recognized but no text appears in the application. A notice may appear stating that the focused location could not be confirmed to accept text.</li>
-<li><em>Likely cause:</em> Either the text field is not focused, or the focused control could not be confirmed to be a text field. Typing into a non-text control in some applications, particularly web browsers, triggers keyboard shortcuts instead of entering text, so the insertion is refused rather than attempted.</li>
-<li><em>Action:</em> Click inside the text field and try again. If a notice appears with a "Try it anyway" button, use it; after the text lands correctly several times, Wheelhouse asks whether it should always type there, and answering Yes adds that control to the approved list so the notice stops appearing. If dictation works in Notepad, the problem is specific to that application's text field.</li>
+<li><em>Symptom:</em> Speech is recognized but no text appears in the application. A notice may state that the focused location could not be confirmed to accept text.</li>
+<li><em>Likely cause:</em> The text field is not focused, or the focused control could not be confirmed to be one. In some applications, particularly web browsers, typing into a non-text control triggers keyboard shortcuts, so the insertion is refused rather than attempted.</li>
+<li><em>Action:</em> Click inside the text field and try again. If a notice appears with a "Try it anyway" button, use it; after the text lands correctly several times, Wheelhouse asks whether it should always type there, and answering Yes approves the control and the notice stops appearing. If dictation works in Notepad, the problem is specific to that application's text field.</li>
 </ul>
 <p><strong>Real speech ignored, or short dictations dropped</strong></p>
 <ul>
 <li><em>Symptom:</em> With the Distil-Whisper (graphics card) engine, short phrases -- or for some voices a substantial part of normal speech -- produce no text and no error.</li>
 <li><em>Likely cause:</em> That engine's confidence filter, calibrated on one voice with a studio microphone, classifies real speech as noise and discards it. This is more likely with a strong accent, quiet speech, or a laptop's built-in microphone.</li>
-<li><em>Action:</em> Lower the threshold: in the Distil-Whisper engine's own config file, change hallucination_logprob_threshold from -0.55 to -0.7 or -0.8, where more negative is more permissive, then restart Wheelhouse. If no threshold produces acceptable results, switch engines from the menu on the floating button or the tray icon; the Google Cloud engine does not use this filter.</li>
+<li><em>Action:</em> If the missed words are short ones spoken alone, such as "comma", run the voice-teaching session first: see <a href="#teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</a>. If longer speech is still ignored, lower hallucination_logprob_threshold in that engine's own config file from -0.6 to -0.7 or -0.8 (more negative is more permissive) and restart Wheelhouse. If no threshold works, switch engines from the menu on the floating button or the tray icon; the Google Cloud engine does not use this filter.</li>
 </ul>
 <p><strong>AI text correction does nothing or times out</strong></p>
 <ul>
 <li><em>Symptom:</em> Selected text is not corrected although AI is enabled. Text correction and rewriting are the AI features in this release; the in-app help chat is currently disabled.</li>
-<li><em>Likely cause:</em> Wheelhouse sends requests to an AI server rather than running the model inside itself. That server is either one you point it at, or one it starts on this machine when [ai.runtime] enabled is true and the command-line installer was run with <code>-AiMode local</code>. If the server is absent, unreachable, slow, or does not provide the requested model, the AI features disable themselves and the rest of the program continues to run.</li>
-<li><em>Action, in order:</em> confirm that [ai] enabled = true and that [ai.server] base_url is set, since an empty base_url disables AI by design; confirm the server is reachable at that address and that the [ai.server] model name is one it provides; raise [ai.server] timeout_s if the server is slow to respond; and for a remote server requiring a key, set the WHEELHOUSE_AI_API_KEY environment variable -- the key is never stored in the settings file -- and restart Wheelhouse.</li>
+<li><em>Likely cause:</em> Wheelhouse sends requests to an AI server rather than running the model inside itself -- either one you point it at, or one it starts on this machine when [ai.runtime] enabled is true and the command-line installer was run with <code>-AiMode local</code>. If that server is absent, unreachable, slow, or lacks the requested model, the AI features disable themselves and the rest of the program continues to run.</li>
+<li><em>Action, in order:</em> confirm [ai] enabled = true and [ai.server] base_url is set (an empty base_url disables AI by design); confirm the server is reachable at that address and that the [ai.server] model name is one it provides; raise [ai.server] timeout_s if the server is slow to respond; and for a remote server requiring a key, set the WHEELHOUSE_AI_API_KEY environment variable -- the key is never stored in the settings file -- and restart Wheelhouse.</li>
 <li><em>Note:</em> An unreachable AI server does not affect dictation, voice commands, or any other feature.</li>
 </ul>
 <h3 id="installer-troubleshooting">Installer troubleshooting</h3>
 <p><strong>Installer failures</strong></p>
-<p>Each installer failure message, and the action for it, is listed under <a href="#installation-failure-messages">Installation failure messages</a>. Re-running the installer is safe, interrupted downloads resume, and the messages contain no personal data and can be included in a help request.</p>
+<p>Each installer failure message and its action is listed under <a href="install.html#installation-failure-messages">Installation failure messages</a>; re-running the installer is safe and interrupted downloads resume.</p>
 <hr />
 <h2 id="getting-help">Getting Help</h2>
 <p><strong>The Wheelhouse Assistant is the first place to ask.</strong> It is a ChatGPT assistant holding this entire document, the full command and configuration reference, and the project's own notes on how each part behaves. It answers questions in plain language, reads an error message or a log excerpt and identifies the likely cause, and names the specific setting to change and the file it belongs in. It covers material this document summarizes, so it can answer questions no section here addresses.</p>
@@ -1268,7 +1226,7 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 <p><strong>Reporting a defect.</strong> A problem in Wheelhouse itself -- something that behaves incorrectly rather than something that needs explaining -- goes to the project:</p>
 <ul>
 <li>Open an issue or start a discussion at https://github.com/wheelhouse-project/Wheelhouse.</li>
-<li>Or email help@wheelhouse-project.org.</li>
+<li>Or email <code>help@wheelhouse-project.org</code>.</li>
 </ul>
 <p>Include the Wheelhouse version from <strong>About Wheelhouse</strong> in the right-click menu, what was done, what was expected, and what happened instead. Paste any error message in full, and attach the installer's setup log if the installer failed. Installer messages and log lines contain no dictated text unless transcript logging was switched on; see <a href="#configuration">Configuration</a>.</p>
     </div>
@@ -1311,7 +1269,6 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
   <li><a href="#overview">Overview</a></li>
   <li><a href="#quick-start">Quick Start</a></li>
   <li><a href="#where-to-go-next">Where to Go Next</a></li>
-  <li><a href="#installation-and-setup">Installation and Setup</a></li>
   <li><a href="#speech-engines">Speech Engines</a></li>
   <li><a href="#system-requirements">System Requirements</a></li>
   <li><a href="#voice-commands">Voice Commands</a></li>
@@ -1328,6 +1285,7 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
       <a class="btn btn-primary" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe">Get Wheelhouse</a>
       <a class="btn btn-secondary" href="https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse" target="_blank" rel="noopener">Ask the Assistant</a>
       <a class="btn btn-secondary" href="https://github.com/wheelhouse-project/Wheelhouse">View on GitHub</a>
+      <a class="btn btn-secondary" href="install.html">Installation guide</a>
       <a class="btn btn-secondary" href="reference.html">Command and configuration reference</a>
     </div>
   </div>
