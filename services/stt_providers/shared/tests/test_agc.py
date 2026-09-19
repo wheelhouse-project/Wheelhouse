@@ -8,6 +8,8 @@ These tests verify that:
 5. Gain is applied with clipping prevention
 """
 import struct
+import math
+import random
 import sys
 from pathlib import Path
 
@@ -248,3 +250,90 @@ class TestDiagnostics:
         assert "failure_gain_cap" in diag
         assert "effective_gain" in diag
         assert "consecutive_failures" in diag
+
+
+def _original_rms(pcm):
+    """Scalar reference from af720ab6, before hot-path vectorization."""
+    if len(pcm) < 2:
+        return 0.0
+    count = len(pcm) // 2
+    samples = struct.unpack(f'<{count}h', pcm)
+    return math.sqrt(sum(s * s for s in samples) / count) / 32768.0
+
+
+def _original_gain(pcm, gain):
+    if abs(gain - 1.0) < 0.01:
+        return pcm
+    count = len(pcm) // 2
+    samples = struct.unpack(f'<{count}h', pcm)
+    return struct.pack(f'<{count}h', *[
+        max(-32768, min(32767, int(s * gain))) for s in samples
+    ])
+
+
+def _outcome(call):
+    try:
+        return ('value', call())
+    except (ValueError, OverflowError, TypeError, BufferError, struct.error) as exc:
+        return (type(exc), str(exc))
+
+
+class TestScalarEquivalence:
+    @pytest.mark.parametrize('gain', [
+        -10.0, -0.5, -0.0, 0.1, 0.99, 1.0, 1.009, 1.01, 1.5, 10.0, 1e100,
+    ])
+    def test_every_int16_value_preserves_gain_bytes(self, gain):
+        pcm = make_pcm(range(-32768, 32768))
+        assert SmartAGC()._apply_gain(pcm, gain) == _original_gain(pcm, gain)
+
+    def test_random_frames_preserve_exact_rms_and_gain(self):
+        randomizer = random.Random(20260908)
+        agc = SmartAGC()
+        for _ in range(80):
+            pcm = make_pcm([randomizer.randrange(-32768, 32768)
+                            for _ in range(randomizer.choice([1, 160, 480, 960, 1920]))])
+            gain = randomizer.uniform(-12, 12)
+            assert agc._calculate_rms(pcm) == _original_rms(pcm)
+            assert agc._apply_gain(pcm, gain) == _original_gain(pcm, gain)
+
+    def test_rms_full_scale_and_long_input_remain_exact(self):
+        for pcm in [make_pcm([-32768]), make_pcm(range(-32768, 32768)),
+                    make_pcm([-32768]) * (2**20 + 1)]:
+            assert SmartAGC()._calculate_rms(pcm) == _original_rms(pcm)
+
+    @pytest.mark.parametrize('pcm', [b'', b'x', b'abc', b'abcde'])
+    @pytest.mark.parametrize('gain', [0.0, 1.0, 2.0, float('nan'), float('inf')])
+    def test_empty_and_odd_buffers_keep_existing_results_or_errors(self, pcm, gain):
+        agc = SmartAGC()
+        assert _outcome(lambda: agc._calculate_rms(pcm)) == _outcome(lambda: _original_rms(pcm))
+        assert _outcome(lambda: agc._apply_gain(pcm, gain)) == _outcome(lambda: _original_gain(pcm, gain))
+
+    @pytest.mark.parametrize('samples', [[0, 1], [1, 0], [-1, 0], [1, 32767], [32767, 1]])
+    @pytest.mark.parametrize('gain', [float('nan'), float('inf'), -float('inf'), 1e308])
+    def test_nonfinite_product_keeps_first_scalar_conversion_error(self, samples, gain):
+        pcm = make_pcm(samples)
+        assert _outcome(lambda: SmartAGC()._apply_gain(pcm, gain)) == _outcome(lambda: _original_gain(pcm, gain))
+
+    def test_buffer_protocol_and_non_builtin_gain_compatibility(self):
+        from fractions import Fraction
+        import numpy as np
+
+        pcm = make_pcm([-32768, -21, 0, 21, 32767])
+        agc = SmartAGC()
+        for buffer in [pcm, bytearray(pcm), memoryview(pcm), memoryview(pcm).cast('h')]:
+            assert _outcome(lambda: agc._calculate_rms(buffer)) == _outcome(lambda: _original_rms(buffer))
+            for gain in [2, True, np.float32(0.1), Fraction(1, 10)]:
+                assert _outcome(lambda: agc._apply_gain(buffer, gain)) == _outcome(lambda: _original_gain(buffer, gain))
+        assert agc._apply_gain(bytearray(pcm), 1.0).__class__ is bytearray
+
+    def test_process_keeps_scalar_gain_and_noise_tracking(self):
+        reference = SmartAGC()
+        reference._calculate_rms = _original_rms
+        reference._apply_gain = _original_gain
+        actual = SmartAGC()
+        randomizer = random.Random(32768)
+        for index in range(40):
+            pcm = make_pcm([randomizer.randrange(-3000, 3000) for _ in range(480)])
+            speech = index % 3 != 0
+            assert actual.process(pcm, speech) == reference.process(pcm, speech)
+            assert actual.diagnostics == reference.diagnostics

@@ -136,17 +136,24 @@ class TestTrailingCommandMotivating:
         assert hotkeys[0].params.get("repeat") == 1
 
     @pytest.mark.asyncio
-    async def test_hello_world_submit_in_process_path_same_outcome(
+    async def test_hello_world_submit_with_the_end_flag_on_the_last_word(
         self, trailing_harness,
     ):
-        """In-process STT also delivers the end-marker; same outcome."""
+        """The end-marker decides, even when the last word claims the end.
+
+        Named for the in-process STT path until
+        wh-in-process-capture-removal deleted it. The word shape it sends
+        is what this test is about and it did not go anywhere: a provider
+        may set end_of_utterance on the last real word, and the trailing
+        intercept must still wait for the marker.
+        """
         await _send_utterance_with_end_marker(
             trailing_harness,
             [
                 ("hello", True, False),
                 ("world", False, False),
-                # In-process STT path: end_of_utterance=True on the
-                # last real word. The trailing intercept must NOT
+                # end_of_utterance=True on the last real word. The
+                # trailing intercept must NOT
                 # depend on this flag; the end-marker that follows is
                 # the trigger.
                 ("submit", False, True),

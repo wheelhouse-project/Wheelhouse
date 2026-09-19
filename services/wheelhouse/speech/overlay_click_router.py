@@ -32,12 +32,15 @@ text resolves to a positive integer N or to ``None``:
   * ``WALK_IN_FLIGHT`` / ``PAINT_IN_FLIGHT`` / ``PAUSED`` + N -> ``HELD``
     ("queue or drop", up to 200 ms). The real hold timer is owned by the
     integration bead; this resolver only flags the HELD decision.
+  * ``POST_CLICK_SETTLING`` + N -> ``NOTICE`` (``numbers_updating``). The
+    badges are cleared and the next list is not built yet
+    (wh-overlay-slow-uia-stale-badges.1). NEVER click, NEVER ``BY_NAME``.
   * ``ERROR`` + N -> ``NOTICE`` (``numbers_not_showing``). NEVER click,
     NEVER ``BY_NAME``.
 
-The ``reason`` tags (``no_badge_numbered`` / ``numbers_not_showing``) are
-open notice tags; wh-g4oma owns the user-facing wording. This module is the
-EMIT SITE for the tag, not the wording.
+The ``reason`` tags (``no_badge_numbered`` / ``numbers_not_showing`` /
+``numbers_updating``) are open notice tags; wh-g4oma owns the user-facing
+wording. This module is the EMIT SITE for the tag, not the wording.
 """
 
 from __future__ import annotations
@@ -57,10 +60,23 @@ from services.wheelhouse.click_snapshot_summary_cache import (
 # Notice reason tags this resolver may emit (open set; wh-g4oma owns wording).
 NO_BADGE_NUMBERED = "no_badge_numbered"
 NUMBERS_NOT_SHOWING = "numbers_not_showing"
+# wh-overlay-slow-uia-stale-badges.1: emitted for POST_CLICK_SETTLING, the gap
+# after a badge click where the old badges are cleared and the new ones are
+# not built yet. Distinct from NUMBERS_NOT_SHOWING, which reports a machine in
+# ERROR. As of child .1 nothing rebuilds the list: the state ends at its
+# timeout, or when the user speaks. Child .2 is the half that reads the screen
+# and repaints, and only then does waiting bring the numbers back on their own.
+NUMBERS_UPDATING = "numbers_updating"
 # wh-overlay-fixqueue-review.2: emitted by the integration's renumber guard
 # (not by route_click_n itself) when a "click N" lands inside the grace
 # window after a PROACTIVE refresh swap and badge N changed identity.
 OVERLAY_NUMBERS_CHANGED = "overlay_numbers_changed"
+# wh-overlay-slow-uia-stale-badges.8: emitted by the integration's in-flight
+# guard (not by route_click_n itself) when a second "click N" resolves while
+# a previous badge click still awaits its Input-process reply. Only one badge
+# click runs at a time; the second would target the list the first click is
+# about to invalidate.
+OVERLAY_CLICK_IN_FLIGHT = "overlay_click_in_flight"
 
 
 class RoutingKind(enum.Enum):
@@ -73,8 +89,9 @@ class RoutingKind(enum.Enum):
       decision carries ``snapshot_id`` and ``item_id`` for the
       ``click_snapshot_item`` dispatch.
     NOTICE: surface a notice (``reason`` carries the tag) and do NOT click;
-      used for a numbered-overlay miss (``no_badge_numbered``) and the
-      ``ERROR`` reject (``numbers_not_showing``).
+      used for a numbered-overlay miss (``no_badge_numbered``), the
+      ``ERROR`` reject (``numbers_not_showing``) and the settling-gap reject
+      (``numbers_updating``).
     HELD: nothing is reliably visible yet (``walk_in_flight`` /
       ``paint_in_flight`` / ``paused``); hold under the "queue or drop" rule.
     """
@@ -173,6 +190,16 @@ def route_click_n(
         # Nothing reliably visible yet (walk/paint) or paused: hold.
         return RoutingDecision(RoutingKind.HELD)
 
+    if state is OverlayState.POST_CLICK_SETTLING:
+        # wh-overlay-slow-uia-stale-badges.1. A badge click succeeded and the
+        # badges are cleared. Child .1 builds no replacement list; child .2
+        # adds the read that does. The state machine still
+        # holds the old pin, so resolve_display_number WOULD answer -- but it
+        # would answer with a number the user can no longer see. Reject, and
+        # carry no snapshot id. HELD is wrong here: the hold window is 200 ms
+        # and this state can last seconds.
+        return RoutingDecision(RoutingKind.NOTICE, reason=NUMBERS_UPDATING)
+
     if state is OverlayState.PAINTED:
         return _resolve_visible(cache, pinned_snapshot_id, parsed_number)
 
@@ -249,14 +276,20 @@ def renumber_click_is_safe(
     current_summary,
     number: int,
 ) -> bool:
-    """Decide whether "click N" is safe right after a proactive refresh swap.
+    """Decide whether "click N" is safe right after a repaint swapped the list.
 
-    wh-overlay-fixqueue-review.2: a timer-driven (proactive) refresh can
-    renumber badges between the user reading badge N and their "click N"
-    transcript arriving. N then resolves against the NEW snapshot with fresh
-    bounds, so the executor's stale-position refusal never fires and the
-    click silently lands on the wrong control. This pure check compares the
-    identity (accessible name, case-folded and stripped) of the item numbered
+    wh-overlay-fixqueue-review.2: a repaint can renumber badges between the
+    user reading badge N and their "click N" transcript arriving. N then
+    resolves against the NEW snapshot with fresh bounds, so the executor's
+    stale-position refusal never fires and the click silently lands on the
+    wrong control. The caller
+    (``LogicController._overlay_renumber_click_safe``) arms this check for
+    every repaint that replaces the pinned list -- a focus- or menu-triggered
+    refresh, the post-click settle re-read, a re-said "show numbers", and the
+    browser timer's proactive tick -- on every application
+    (wh-overlay-slow-uia-stale-badges.4; the proactive refresh was the only
+    armed case before that). This pure check compares the identity
+    (accessible name, case-folded and stripped) of the item numbered
     ``number`` in the prior (pre-swap) and current summaries:
 
       * Prior or current summary unavailable -> True (best-effort guard,

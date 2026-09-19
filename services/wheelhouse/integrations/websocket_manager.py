@@ -48,9 +48,13 @@ import asyncio
 import json
 import logging
 import struct
+import sys
+import uuid
+from datetime import datetime
 from typing import Set, Dict, Any, Callable, Optional
 import websockets
 from multiprocessing import shared_memory
+from shared.dialog_owner import launch_owner_token
 from speech.word_event import WordEvent
 from utils.trace_context import set_trace
 from utils.redact import redact_transcript
@@ -61,6 +65,25 @@ logger = logging.getLogger(__name__)
 # Everything else (type, flags, log levels, ids) stays verbatim so the
 # payload remains diagnosable with redaction on (wh-797.17.3).
 _CONTENT_KEYS = frozenset({"hint", "text", "word", "words", "message", "transcript"})
+
+# Per-target bound on a calibration mode-off send (wh-7ou.7.6.14). A
+# stalled client's send can block on backpressure indefinitely, and the
+# mode-off fan-out consumes its binding set before sending -- nothing
+# ever retries a target this call abandons -- so a stall must cost at
+# most this long, not forever. Generous next to a healthy send (which
+# completes in milliseconds) and far below the 600-second engine-side
+# lazy timeout that backstops an undelivered off.
+_CAL_MODE_OFF_SEND_TIMEOUT_S = 2.0
+
+# Notification kinds that are exempt from the startup-toast
+# suppression: a real failure is the only signal the engine is not
+# coming up, so it must reach the user even while a provider is
+# starting (wh-google-creds-file-picker.1.5). Both kinds are equally
+# wrong to show for a launch the user has already replaced, so the
+# currency check and the suppression read this ONE tuple. Writing the
+# two lists separately is exactly how the check came to cover only
+# "startup_failed" (wh-launch-generation.2.12).
+_STARTUP_SUPPRESSION_EXEMPT_KINDS = ("startup_failed", "error")
 
 
 def _redact_content_fields(payload: dict) -> dict:
@@ -131,6 +154,45 @@ class WebSocketManager:
         # the pipeline (older clients stay connected but DISABLED). Only
         # this client's capabilities declaration is honored (wh-nvyh.1.1).
         self._active_stt_client: Optional[Any] = None
+        # The launch generation each STT connection belongs to, stamped
+        # when the connection became the active stream. A provider
+        # connects as part of the launch that spawned it, so this is the
+        # identity of the sender of anything that arrives on it. The
+        # provider being replaced keeps an active connection until the
+        # replacement connects, so its startup_failed would otherwise
+        # end the replacement's own startup monitor and blank the
+        # display for an engine that is starting normally
+        # (wh-launch-generation).
+        self._stt_client_generations: dict[Any, Optional[int]] = {}
+        # Connections whose stamp is still the connect-time guess. A
+        # provider connects seconds after its own spawn, so the newest
+        # launch is only a guess until the connection says which
+        # provider it is (wh-launch-generation.1.2).
+        self._stt_client_provisional: "set[Any]" = set()
+        # The client the last apply_engine_settings was sent to, and
+        # that command's correlation id. The reply is accepted only from
+        # that client (even if a newer connect has promoted another
+        # client in the meantime, wh-7ou.7.6.6 round 4) AND only when it
+        # echoes this id -- client identity alone cannot distinguish two
+        # applies on the same live connection, so a delayed reply from
+        # an abandoned apply must not be read as the current one's
+        # answer (wh-7ou.7.6.9). Both cleared when the reply is
+        # consumed or the send fails.
+        self._engine_settings_reply_client: Optional[Any] = None
+        self._engine_settings_reply_id: Optional[str] = None
+        # Every client that received set_calibration_mode enabled=true
+        # since the last off -- the providers whose suppression bypass is
+        # on. A session-ending mode-off targets these clients, not "the
+        # active client": on a provider-switch end, add_client has
+        # already promoted the NEW client before the controller ends the
+        # session, and the off must follow the bypass (wh-7ou.7.6.11). A
+        # set, not the most recent client: a same-provider reconnect
+        # mid-capture enables the bypass on the new client while the old
+        # one is still live, and the off must reach both
+        # (wh-7ou.7.6.12). Consumed when an off is sent; a disconnecting
+        # client is discarded (its engine clears the bypass itself on
+        # disconnect).
+        self._calibration_mode_clients: set = set()
         # Threshold for the one-shot EOS_NOT_RECEIVED warning. Three is
         # enough to skip a single anomalous startup utterance.
         self._eos_missing_warning_threshold: int = 3
@@ -496,6 +558,13 @@ class WebSocketManager:
         the newest client as active; remove_client clears the record when
         the active client leaves.
         """
+        # The provider field is read from EVERY connection, active or
+        # not: it is the only thing on the wire that says which launch a
+        # connection belongs to, and the connection that needs
+        # correcting is exactly the non-active one from an earlier
+        # launch (wh-launch-generation.1.2). Every other field stays
+        # gated below.
+        self._rebind_launch_stamp(websocket, data.get("provider"))
         if websocket is not self._active_stt_client:
             logger.debug(
                 "[CAPABILITIES] ignored declaration from non-active client %s",
@@ -510,6 +579,83 @@ class WebSocketManager:
             f"emits_eos={declared_emits_eos}"
         )
 
+        # wh-audio-suppression-control: whether this provider loaded a wake
+        # word detector. One of the sound-pause notices tells the user to
+        # say the wake word to get a command through, and that sentence
+        # must never appear on a machine whose detector never loaded.
+        # Gated on key PRESENCE, not on a default: a provider from before
+        # the field existed declares nothing, and the last real answer must
+        # stand rather than being overwritten with a guess. Inside the
+        # active-client gate above with every other field, so an orphaned
+        # provider reconnecting from its backoff loop cannot answer for the
+        # live stream.
+        if (
+            "wake_word_available" in data
+            and self.state_manager
+            and hasattr(self.state_manager, "set_wake_word_available")
+        ):
+            declared_wake_word = bool(data.get("wake_word_available"))
+            logger.info(
+                f"[CAPABILITIES] provider={declared_provider} "
+                f"wake_word_available={declared_wake_word}"
+            )
+            self.state_manager.set_wake_word_available(declared_wake_word)
+
+    def _rebind_launch_stamp(self, websocket: Any, provider_name: Any) -> None:
+        """Replace a connection's provisional stamp with its own launch.
+
+        The launcher knows the latest launch of each provider by name,
+        so naming the provider is enough to move the stamp off the
+        newest launch and onto the one that spawned this connection.
+
+        crewcut: two launches of the SAME provider still collapse -- a
+        late connection from an earlier launch of a provider is bound to
+        that provider's newest launch, because the name is all the
+        capabilities message carries. Removing this needs the provider
+        to echo its own launch id on the wire, which changes what every
+        provider must send and is a decision for the user, not this
+        change (wh-launch-generation.1.2). It also makes the
+        capabilities message load-bearing. A provider that never sends
+        one keeps its provisional stamp, so its startup failure is
+        dropped as a signal and recorded against that stamp instead
+        (RemoteSTTLauncher.record_undeclared_startup_failure). Its
+        ready is now dropped as well, for the same reason and with no
+        record, since a launch whose provider never reported ready is
+        ended by that launch's own monitor at its deadline
+        (wh-ready-connection-stamp.2); the dialog dismiss that ready
+        used to carry is dropped with it, because it named the same
+        guessed launch (wh-ready-connection-stamp.2.1.1). The
+        launch that was starting at the time then reports the stop when
+        its own monitor gives up. That attribution is by timing rather
+        than identity, so a failure from an undeclared connection that
+        really belonged to an OLDER launch ends the current launch's
+        startup early: the provider is reported stopped while it may
+        still have been warming up. The wire echo removes this too
+        (wh-launch-generation.2.3).
+        """
+        if not provider_name or websocket not in self._stt_client_generations:
+            return
+        launcher = self.remote_stt_launcher
+        if launcher is None:
+            return
+        try:
+            generation = launcher.launch_generation(provider_name)
+        except Exception:
+            logger.exception("Launch generation lookup failed")
+            return
+        if generation is None:
+            # This launcher never started that provider, so there is no
+            # launch to bind to and the stamp stays provisional.
+            return
+        previous = self._stt_client_generations.get(websocket)
+        self._stt_client_generations[websocket] = generation
+        self._stt_client_provisional.discard(websocket)
+        if previous != generation:
+            logger.info(
+                f"[CAPABILITIES] provider={provider_name} connection rebound "
+                f"from launch {previous} to launch {generation}"
+            )
+
     def _provider_should_emit_eos(self) -> bool:
         """Return True if the active STT provider declared that it emits eos.
 
@@ -521,6 +667,156 @@ class WebSocketManager:
         defaults to False, the safe silent-gate default.
         """
         return self._provider_emits_eos
+
+    def _current_launch_generation(self) -> Optional[int]:
+        """The launch a connection registering right now belongs to.
+
+        A provider connects as part of the launch that spawned it, and
+        start_provider runs on the event loop under the switch lock, so
+        no other launch can have started between that spawn and this
+        connection. Every failure degrades to None, which restores the
+        earlier behaviour of attributing a notification to whichever
+        launch is current (wh-launch-generation).
+        """
+        launcher = self.remote_stt_launcher
+        if launcher is None:
+            return None
+        try:
+            return launcher.current_launch_generation()
+        except Exception:
+            logger.exception("Launch generation lookup failed")
+            return None
+
+    def _sending_launch_is_current(self, websocket: Any) -> bool:
+        """True unless a later launch has replaced this frame's sender.
+
+        The working dialog and the failure toast are shared by every
+        provider, and a `startup_failed` frame can arrive from a launch
+        the user has already replaced: the provider being replaced keeps
+        the active connection until the replacement connects, so its
+        failure passes the non-active-client gate. Acting on the shared
+        display then blanks the REPLACEMENT'S loading dialog and
+        announces an error for a provider that is starting normally.
+        The startup monitor asks this same question before touching the
+        same display (wh-launch-generation.2.7); this is the second path
+        to it (wh-launch-generation.2.8).
+
+        A connection with no stamp, no launcher to ask, or a launcher
+        that raises answers True, which is the behaviour every one of
+        those cases had before the comparison existed.
+        """
+        launcher = self.remote_stt_launcher
+        if launcher is None:
+            return True
+        try:
+            return bool(
+                launcher.launch_is_current(
+                    self._stt_client_generations.get(websocket)
+                )
+            )
+        except Exception:
+            logger.exception("Launch currency check failed")
+            return True
+
+    def _calibration_controller(self) -> Optional[Any]:
+        """Return the voice-calibration session controller, or None.
+
+        wh-7ou.7.2.3: the controller lives on the LogicController
+        (_get_calibration_controller), reached through the speech_handler
+        reference main.py wires in after startup. Every failure in the
+        lookup degrades to None -- gate inert, transcripts flow -- because
+        silently blocking all dictation would be a worse failure for this
+        accessibility-first system than a missed calibration measurement.
+        """
+        logic = getattr(self.speech_handler, "logic_controller", None)
+        getter = getattr(logic, "_get_calibration_controller", None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception:
+            logger.exception("Calibration controller lookup failed")
+            return None
+
+    def _calibration_session_active(self) -> bool:
+        """True from the intro screen through the apply wait.
+
+        The stable/interim side of the typing gate (spec Section 6.2):
+        while a session is active -- not merely while a capture stage
+        runs -- provisional transcript text must not reach the speech
+        pipeline (wh-7ou.7.6.3: the session promises measurement-only
+        speech from start to finish, and click commands fire from
+        finals, so dropping stables costs nothing). Finals go through
+        _divert_final_to_calibration instead, so the controller itself
+        makes the consumption decision.
+        """
+        controller = self._calibration_controller()
+        return controller is not None and bool(controller.session_active)
+
+    def _divert_final_to_calibration(
+        self, text: str, confidence: Optional[dict],
+    ) -> bool:
+        """Offer a final transcript to the calibration session.
+
+        Returns True when the controller consumed it -- a measurement in
+        the word/noise stages, swallowed on any other active screen
+        (wh-7ou.7.6.3); the caller must then forward nothing into the
+        speech pipeline. Returns False -- the final flows normally --
+        when no session is active, for voice-click utterances ("click
+        <target>", the allowlisted channel that keeps every screen's
+        buttons hands-free, spec Section 3.7), and on any hand-off
+        failure (fail-open: dictation must survive a broken calibration
+        session).
+        """
+        controller = self._calibration_controller()
+        if controller is None:
+            return False
+        try:
+            consumed = controller.handle_final(text, confidence)
+        except Exception:
+            logger.exception(
+                "Calibration final hand-off failed; forwarding final normally"
+            )
+            return False
+        return bool(consumed)
+
+    def _log_forwarded(
+        self, level: int, message: str, source_iso: str
+    ) -> None:
+        """Log a provider-forwarded record at its source time.
+
+        The provider stamps each forwarded record with the time it was
+        written (shared_stt/ws_forwarder.py sends it as a naive local
+        isoformat string). After a disconnect the provider's queue
+        drains late on reconnect, so stamping on arrival dates every
+        drained line by the whole reconnect delay -- and the
+        load-diagnostic reading guide subtracts start_s_ago/end_s_ago
+        from the line's own timestamp
+        (wh-forwarded-log-time-order defect 1). Only created and msecs
+        feed %(asctime)s; relativeCreated keeps the arrival value
+        because no formatter reads it.
+        """
+        if not logger.isEnabledFor(level):
+            return
+        record = logger.makeRecord(
+            logger.name,
+            level,
+            __file__,
+            sys._getframe().f_lineno,
+            message,
+            (),
+            None,
+        )
+        try:
+            created = datetime.fromisoformat(source_iso).timestamp()
+        except (TypeError, ValueError):
+            # Missing or unparseable source time: keep the arrival
+            # stamp rather than drop the record.
+            pass
+        else:
+            record.created = created
+            record.msecs = (created - int(created)) * 1000
+        logger.handle(record)
 
     async def handle_connection(self, websocket: Any):
         """Handles a new client connection.
@@ -572,6 +868,33 @@ class WebSocketManager:
                     trace_id = data.get("trace_id", "")
                     set_trace(trace_id)
 
+                    # Sender binding while a calibration session is
+                    # active (wh-7ou.7.6.6): a transcript or lifecycle
+                    # frame from a client that is not the active stream
+                    # -- a superseded or orphaned provider delivering
+                    # queued frames -- must not become a measurement,
+                    # type, touch the shared watchdog or activity state,
+                    # steer the retraction policy, or publish a wake
+                    # event. Dropped here, before ANY side effect. With
+                    # no session, stale frames keep their pre-existing
+                    # behavior. notification / capabilities /
+                    # engine_settings_result keep their own
+                    # unconditional active-client gates below.
+                    if (
+                        msg_type in (
+                            "vad_start", "eos", "stable",
+                            "final", "wake_word_detected",
+                        )
+                        and self._calibration_session_active()
+                        and websocket is not self._active_stt_client
+                    ):
+                        logger.info(
+                            f"[CALIBRATION] dropping {msg_type} from "
+                            "non-active STT client "
+                            f"{getattr(websocket, 'remote_address', None)}"
+                        )
+                        continue
+
                     # Handle notification messages
                     if msg_type == "notification":
                         title = data.get("title", "Wheelhouse Notification")
@@ -580,8 +903,23 @@ class WebSocketManager:
                         # (shared_stt/ws_forwarder.py:send_notification):
                         # "ready", "startup_failed", "error", or "" for a
                         # plain notice (wh-google-creds-file-picker.1.5).
-                        # Only the google_stt provider sends it today.
+                        # All three shipped providers send it; the ready
+                        # branch below records where each one does.
                         kind = data.get("kind", "")
+
+                        # Which capture path the provider's factory
+                        # actually built, in the provider's own words
+                        # (shared_audio/capture/factory.py, constant
+                        # CAPTURE_BACKEND_NAME). Only a ready carries a
+                        # value: a provider whose capture never opened
+                        # has no true answer, and one whose credentials
+                        # failed never asked. Absent for a provider
+                        # built before this field existed, which is why
+                        # the log line below distinguishes "did not
+                        # report" from a named path rather than
+                        # supplying a default (wh-capture-winrt-required
+                        # A4).
+                        capture_backend = data.get("capture_backend", "")
 
                         # Same gate as _apply_capabilities (wh-nvyh.1.1):
                         # add_client keeps older connections open (merely
@@ -613,34 +951,216 @@ class WebSocketManager:
                         # (wh-google-creds-file-picker.1.5).
                         if kind == "startup_failed":
                             if self.remote_stt_launcher:
-                                self.remote_stt_launcher.signal_provider_startup_failed()
-                            if self.state_manager and hasattr(self.state_manager, 'state_to_gui_queue'):
+                                if websocket in self._stt_client_provisional:
+                                    # This connection never said which
+                                    # provider it is, so its stamp is
+                                    # still the connect-time guess.
+                                    # Attributing the failure to that
+                                    # guess is the defect this change
+                                    # removes, and guessing by name
+                                    # would put name identity back. The
+                                    # owning launch's own monitor still
+                                    # reports it when it times out; the
+                                    # provisional stamp is logged so the
+                                    # two can be matched up in the log
+                                    # (wh-launch-generation.1.2).
+                                    logger.warning(
+                                        "Dropping a startup failure from a "
+                                        "connection that never declared its "
+                                        "provider (provisional launch stamp "
+                                        f"{self._stt_client_generations.get(websocket)})"
+                                    )
+                                    # Dropped as a SIGNAL, kept as
+                                    # evidence. The launch that was
+                                    # starting when this connection
+                                    # arrived reads it instead of
+                                    # treating its own provider's
+                                    # silence as a slow cold start
+                                    # (wh-launch-generation.2.3).
+                                    self.remote_stt_launcher.record_undeclared_startup_failure(
+                                        self._stt_client_generations.get(websocket)
+                                    )
+                                else:
+                                    # Stamped with the launch that owns
+                                    # THIS connection, not the current
+                                    # one: the gate above passes a frame
+                                    # from the provider being replaced
+                                    # while its connection is still the
+                                    # active one (wh-launch-generation).
+                                    self.remote_stt_launcher.signal_provider_startup_failed(
+                                        self._stt_client_generations.get(websocket)
+                                    )
+                            # Only the launch that owns the display may
+                            # close it (wh-launch-generation.2.8). The
+                            # dismiss also names that launch, so a
+                            # replacement landing between this answer
+                            # and the GUI reading the message is caught
+                            # there (wh-launch-addressed-notices).
+                            if (
+                                self._sending_launch_is_current(websocket)
+                                and self.state_manager
+                                and hasattr(self.state_manager, 'state_to_gui_queue')
+                            ):
                                 try:
-                                    self.state_manager.state_to_gui_queue.put_nowait({"action": "hide_working"})
+                                    self.state_manager.state_to_gui_queue.put_nowait({
+                                        "action": "hide_working",
+                                        "owner": launch_owner_token(
+                                            self._stt_client_generations.get(websocket)
+                                        ),
+                                    })
                                 except Exception:
                                     pass
                         # Check if this is a "ready" notification from STT provider
                         # Signal the launcher to cancel the startup timeout monitor.
-                        # wh-v0q follow-up: substring match is brittle (matches "already",
-                        # "not ready", "Ready to retry"). The structured kind above is the
-                        # replacement; the substring path stays until every provider
-                        # sends kind="ready" (only google_stt does today).
-                        elif self.remote_stt_launcher and "ready" in notification_message.lower():
-                            self.remote_stt_launcher.signal_provider_ready()
-                            # Close the working dialog
+                        # kind="ready" is the whole test. google_stt_server sends
+                        # it, and it once passed only by matching "Ready." in its
+                        # own message, so the structured path worked by accident;
+                        # naming it made that a contract (wh-launch-generation.2.13).
+                        # The substring fallback beside it is GONE
+                        # (wh-ready-connection-stamp.2.2.1). It accepted any
+                        # kind-less notice whose text contained "ready", which also
+                        # matches "already", "not ready" and "Ready to retry", so
+                        # every provider's "Hint '<word>' already exists" notice
+                        # completed the launch, closed the working dialog, and never
+                        # reached the user -- and so did a failed hint save whose
+                        # word contained "ready". The condition the wh-v0q follow-up
+                        # named for its removal is now met: all three shipped
+                        # providers send kind="ready"
+                        # (google_stt_server/main.py:198 and 215,
+                        # distil_medium_en/main.py:535,
+                        # sherpa_offline_parakeet_stt_server/main.py:596). A
+                        # provider that sends no kind now completes no launch by
+                        # any route: the structured branch is the only one left.
+                        # If this launcher never started it, its connection also
+                        # stays provisional and its ready is dropped above
+                        # (344c6782).
+                        elif self.remote_stt_launcher and kind == "ready":
+                            # Stamped with the launch that owns THIS
+                            # connection, not the current one -- the
+                            # same stamp the startup_failed branch
+                            # above reads, and for the same reason: the
+                            # gate at the top of this block passes a
+                            # frame from the provider being replaced
+                            # while its connection is still the active
+                            # one. Unstamped, this ready completed
+                            # whichever launch happened to be starting
+                            # (wh-ready-connection-stamp).
+                            #
+                            # A connection that never declared its
+                            # provider keeps its connect-time stamp, so
+                            # its ready names whichever launch was
+                            # starting when it arrived rather than the
+                            # launch it belongs to. The signal is
+                            # dropped, the same shape the startup_failed
+                            # branch above uses: a provider left running
+                            # by a previous run of WheelHouse reconnects
+                            # into a launch this launcher never started,
+                            # becomes the active client, and its ready
+                            # would end the CURRENT launch's starting
+                            # state -- for a launch whose own provider
+                            # may never have reported ready
+                            # (wh-ready-connection-stamp.2).
+                            #
+                            # The cost this comment used to name for
+                            # dropping it -- a healthy launch left to
+                            # reach the slow-start branch, which never
+                            # ended the starting state, so the
+                            # suppression below swallowed every later
+                            # notice from that provider for the rest of
+                            # the session -- is paid by that branch now
+                            # calling _end_starting_state for its own
+                            # launch. Dropping the ready is only safe
+                            # together with that call
+                            # (RemoteSTTLauncher._monitor_startup_body).
+                            #
+                            # The dialog dismiss is dropped with the
+                            # signal. It travels with the same stamp,
+                            # and the GUI applies a dismiss that names
+                            # the dialog's owner or names no launch at
+                            # all, so a dismiss addressed with the guess
+                            # closed the CURRENT launch's loading display
+                            # on a ready this branch had just declared
+                            # un-attributable, while that launch's own
+                            # provider was still warming up. That
+                            # launch's monitor hides the dialog at its
+                            # deadline (wh-ready-connection-stamp.2.1.1).
+                            if websocket in self._stt_client_provisional:
+                                logger.info(
+                                    "Dropping a ready from a connection that "
+                                    "never declared its provider (provisional "
+                                    "launch stamp "
+                                    f"{self._stt_client_generations.get(websocket)})"
+                                )
+                                continue
+                            # The one line in wheelhouse.log that answers
+                            # "which capture path did this run use?".
+                            # Before it, nothing on either side of the
+                            # socket said: on 2026-09-05 a provider
+                            # captured through PortAudio for hours and
+                            # the log was silent, because a working
+                            # capture and a wrong capture look the same
+                            # from here. It is written on the accepted
+                            # ready only -- a dropped ready belongs to a
+                            # launch this launcher does not own, and a
+                            # line about it would name a capture path
+                            # nothing in this session is using
+                            # (wh-capture-winrt-required A4).
+                            logger.info(
+                                "STT provider ready: %s -- capture backend "
+                                "%s (launch %s)",
+                                title,
+                                capture_backend or "not reported",
+                                self._stt_client_generations.get(websocket),
+                            )
+                            self.remote_stt_launcher.signal_provider_ready(
+                                self._stt_client_generations.get(websocket)
+                            )
+                            # Close the working dialog, naming the
+                            # launch that owns this connection. A ready
+                            # from a launch the user has already
+                            # replaced must not close the replacement's
+                            # dialog, and the GUI is where that can be
+                            # decided against the order the two messages
+                            # were sent in (wh-launch-addressed-notices).
                             if self.state_manager and hasattr(self.state_manager, 'state_to_gui_queue'):
                                 try:
-                                    self.state_manager.state_to_gui_queue.put_nowait({"action": "hide_working"})
+                                    self.state_manager.state_to_gui_queue.put_nowait({
+                                        "action": "hide_working",
+                                        "owner": launch_owner_token(
+                                            self._stt_client_generations.get(websocket)
+                                        ),
+                                    })
                                 except Exception:
                                     pass
                             continue  # Working dialog dismissal is sufficient; skip toast
+
+                        # A failure from a launch the user has already
+                        # replaced is not news: the replacement is
+                        # starting, and the toast names the provider
+                        # being replaced. The exemption below would
+                        # otherwise carry it straight past the startup
+                        # suppression, which is exactly what makes this
+                        # a second path to the shared feedback the
+                        # monitor already guards
+                        # (wh-launch-generation.2.7, .2.8). Every exempt
+                        # kind is checked, not only the startup one
+                        # (wh-launch-generation.2.12).
+                        if kind in _STARTUP_SUPPRESSION_EXEMPT_KINDS and not (
+                            self._sending_launch_is_current(websocket)
+                        ):
+                            logger.debug(
+                                "Suppressing a failure toast from a replaced "
+                                f"launch (stamp "
+                                f"{self._stt_client_generations.get(websocket)})"
+                            )
+                            continue
 
                         # Suppress toast during provider startup -- working dialog is
                         # sufficient. Failure notices are exempt: they are the only
                         # signal the engine is not coming up
                         # (wh-google-creds-file-picker.1.5).
                         if (
-                            kind not in ("startup_failed", "error")
+                            kind not in _STARTUP_SUPPRESSION_EXEMPT_KINDS
                             and self.remote_stt_launcher
                             and self.remote_stt_launcher.is_starting
                         ):
@@ -673,7 +1193,7 @@ class WebSocketManager:
                             "CRITICAL": logging.CRITICAL
                         }
                         level = level_map.get(log_level, logging.INFO)
-                        logger.log(level, formatted_msg)
+                        self._log_forwarded(level, formatted_msg, log_timestamp)
                         continue
 
                     # Handle "capabilities" messages -- the provider declares
@@ -686,7 +1206,69 @@ class WebSocketManager:
                     if msg_type == "capabilities":
                         self._apply_capabilities(websocket, data)
                         continue
-                    
+
+                    # The provider's answer to apply_engine_settings
+                    # (wh-7ou.7.2.3, calibration message contract). Routed
+                    # to the calibration controller, which ignores it
+                    # outside the applying stage. While an apply is in
+                    # flight the reply belongs to the client the apply was
+                    # SENT to, active or not (wh-7ou.7.6.6 round 4: an
+                    # orphan connect can promote a new client between the
+                    # send and the reply, and dropping the reply as
+                    # non-active strands the session in the applying
+                    # state). With no apply in flight, the active-client
+                    # gate applies as for notifications: a superseded
+                    # provider's late frames describe an old generation,
+                    # not the save the user is waiting on.
+                    if msg_type == "engine_settings_result":
+                        expected = self._engine_settings_reply_client
+                        if expected is not None:
+                            if websocket is not expected:
+                                logger.info(
+                                    "[CALIBRATION] ignoring engine_settings_result "
+                                    "from a client the apply was not sent to "
+                                    f"{getattr(websocket, 'remote_address', None)}"
+                                )
+                                continue
+                            if data.get("apply_id") != self._engine_settings_reply_id:
+                                # A delayed reply from an EARLIER apply on
+                                # the same connection -- a cancelled
+                                # session's apply, or a provider write
+                                # that hung and answered late. Client
+                                # identity cannot tell two applies apart;
+                                # only the echoed id can (wh-7ou.7.6.9).
+                                # Keep waiting for the current apply's
+                                # reply.
+                                logger.info(
+                                    "[CALIBRATION] ignoring engine_settings_result "
+                                    "echoing a different apply than the one "
+                                    "in flight"
+                                )
+                                continue
+                            self._engine_settings_reply_client = None
+                            self._engine_settings_reply_id = None
+                        elif (
+                            self._active_stt_client is not None
+                            and websocket is not self._active_stt_client
+                        ):
+                            logger.info(
+                                "[CALIBRATION] ignoring engine_settings_result "
+                                "from non-active STT client "
+                                f"{getattr(websocket, 'remote_address', None)}"
+                            )
+                            continue
+                        ok = data.get("ok") is True
+                        controller = self._calibration_controller()
+                        if controller is None:
+                            logger.warning(
+                                "engine_settings_result received but no "
+                                "calibration controller is available; dropped"
+                            )
+                            continue
+                        controller.on_engine_settings_result(ok, data.get("error"))
+                        continue
+
+
                     # ================================================================
                     # OVERLAY MODE MESSAGE TYPES (from STT overlay_mode=true)
                     # ================================================================
@@ -734,6 +1316,21 @@ class WebSocketManager:
                         # so long utterances with pauses do not trip it.
                         self._arm_idle_watchdog(utterance_id)
 
+                        # wh-7ou.7.2.3 typing gate (spec Section 6.2): while
+                        # a calibration session is ACTIVE -- any screen, not
+                        # only the capture stages (wh-7ou.7.6.3) --
+                        # provisional text must not type or claim 'settling'.
+                        # Drop it here; the final carries the measurement or
+                        # the allowlisted click command to the controller.
+                        # Status messages (vad_start, wake word) keep
+                        # flowing normally.
+                        if self._calibration_session_active():
+                            logger.debug(
+                                f"[CALIBRATION] UTT-{utterance_id}: stable "
+                                "diverted during calibration session"
+                            )
+                            continue
+
                         # Extract delta (new words since last stable)
                         delta = self._extract_delta(text, utterance_id)
 
@@ -769,6 +1366,14 @@ class WebSocketManager:
                             # Calculate if this is the start of the utterance
                             # We just added len(delta_words) to the count in _extract_delta
                             previous_count = self._processed_word_count - len(delta_words)
+                            # wh-spaced-punctuation-names-unresolved
+                            # .3.1.5: read the count the send above
+                            # bumped. Nothing between that send and
+                            # this line awaits, so the number names
+                            # exactly that start_utterance.
+                            start_generation = getattr(
+                                self._app, 'utterance_start_generation', None,
+                            ) if self._app else None
 
                             for i, word in enumerate(delta_words):
                                 is_first = (i == 0 and previous_count == 0)  # First word of utterance
@@ -778,6 +1383,9 @@ class WebSocketManager:
                                     end_of_utterance=False,
                                     utterance_id=utterance_id,
                                     trace_id=trace_id,
+                                    utterance_start_generation=(
+                                        start_generation if is_first else None
+                                    ),
                                 )
                                 await self.word_queue.put(word_event)
                             logger.debug(f"Queued {len(delta_words)} words from stable delta")
@@ -790,6 +1398,37 @@ class WebSocketManager:
                             f"[FINAL] UTT-{utterance_id}: '{redact_transcript(text)}'"
                             + (f" (final_reason={final_reason})" if final_reason else "")
                         )
+
+                        # wh-7ou.7.6.13: a bypassed final from a client
+                        # that is NOT the active stream must not touch
+                        # shared pipeline state at all. The session-
+                        # scoped sender gate at the top of the loop
+                        # stops running the moment the session ends,
+                        # and utterance ids are per-provider counters,
+                        # so this stale final's id can collide with the
+                        # ACTIVE stream's live utterance -- the verdict
+                        # cleanup below would close the wrong stream's
+                        # utterance and reset its delta state, and the
+                        # 'confirmed' flash / watchdog cancel would
+                        # misreport a stream that produced nothing.
+                        # Dropped before every side effect; only the
+                        # bypassed shape (suppressed=true WITH text) is
+                        # touched -- clean non-active finals keep their
+                        # pre-existing flow.
+                        _stale_conf = data.get("confidence")
+                        if (
+                            text
+                            and isinstance(_stale_conf, dict)
+                            and _stale_conf.get("suppressed") is True
+                            and websocket is not self._active_stt_client
+                        ):
+                            logger.info(
+                                f"[CALIBRATION] UTT-{utterance_id}: "
+                                "dropping bypassed final from non-active "
+                                "STT client "
+                                f"{getattr(websocket, 'remote_address', None)}"
+                            )
+                            continue
 
                         # Stream-level diagnostic: warn once if a Google STT
                         # provider produces several utterances with finals and
@@ -819,6 +1458,79 @@ class WebSocketManager:
                         # Signal GUI to show confirmed state (green flash)
                         self._write_activity_state('confirmed', utterance_id)
                         self._cancel_idle_watchdog()
+
+                        # wh-7ou.7.2.3 typing gate (spec Section 6.2): every
+                        # final is offered to the calibration controller
+                        # first, which consumes it -- a measurement in the
+                        # word/noise stages, swallowed on any other active
+                        # screen -- unless it is an allowlisted voice-click
+                        # utterance, which flows normally so the window's
+                        # buttons stay hands-free on every screen (spec
+                        # Section 3.7, wh-7ou.7.6.3). The 'confirmed' flash
+                        # and watchdog cancel above already ran: status
+                        # stays live. Stale-client finals never get here
+                        # during a session -- the sender-binding gate at
+                        # the top of the loop dropped them before any
+                        # side effect (wh-7ou.7.6.6).
+                        if self._divert_final_to_calibration(text, data.get("confidence")):
+                            if utterance_id == self.current_utterance_id:
+                                # Capture began mid-utterance: stables had
+                                # already queued words downstream, so close
+                                # the open utterance with an end marker
+                                # (never the diverted text) and reset delta
+                                # tracking, mirroring the normal final path.
+                                end_marker = WordEvent(
+                                    word="",
+                                    start_of_utterance=False,
+                                    end_of_utterance=True,
+                                    utterance_id=utterance_id,
+                                    is_utterance_end_marker=True,
+                                    trace_id=trace_id,
+                                )
+                                await self.word_queue.put(end_marker)
+                                self._processed_word_count = 0
+                                self._last_stable_utterance_id = None
+                                self._sent_stable_text = ""
+                            continue
+
+                        # wh-7ou.7.6.11 verdict gate: a final carrying the
+                        # provider filter's own suppressed=true verdict
+                        # WITH text present can only be a calibration-
+                        # bypass final -- outside the bypass the provider
+                        # empties the transcript before sending. Reaching
+                        # here means no session consumed it (the session
+                        # just ended and mode-off is still in flight, or a
+                        # stale provider never received mode-off), so
+                        # apply the verdict at this boundary: the text
+                        # must not type or execute. Runs AFTER the divert
+                        # above -- during capture these finals ARE the
+                        # noise measurements. Same open-utterance closure
+                        # as the diverted path.
+                        _final_conf = data.get("confidence")
+                        if (
+                            text
+                            and isinstance(_final_conf, dict)
+                            and _final_conf.get("suppressed") is True
+                        ):
+                            logger.info(
+                                f"[CALIBRATION] UTT-{utterance_id}: dropping "
+                                "bypassed final carrying a suppressed verdict "
+                                "with no session to consume it"
+                            )
+                            if utterance_id == self.current_utterance_id:
+                                end_marker = WordEvent(
+                                    word="",
+                                    start_of_utterance=False,
+                                    end_of_utterance=True,
+                                    utterance_id=utterance_id,
+                                    is_utterance_end_marker=True,
+                                    trace_id=trace_id,
+                                )
+                                await self.word_queue.put(end_marker)
+                                self._processed_word_count = 0
+                                self._last_stable_utterance_id = None
+                                self._sent_stable_text = ""
+                            continue
 
                         # Extract any remaining delta (words not sent via stables)
                         delta = self._extract_delta(text, utterance_id) if text else ""
@@ -892,6 +1604,13 @@ class WebSocketManager:
                         # Queue any remaining words from the delta
                         if delta:
                             delta_words = delta.split()
+                            # wh-spaced-punctuation-names-unresolved
+                            # .3.1.5: same read as the stable path
+                            # above, for the start_utterance this
+                            # branch may have just sent.
+                            start_generation = getattr(
+                                self._app, 'utterance_start_generation', None,
+                            ) if self._app else None
                             for i, word in enumerate(delta_words):
                                 # First word of a new utterance needs start_of_utterance=True
                                 # so speech processor treats it as a potential command
@@ -902,6 +1621,9 @@ class WebSocketManager:
                                     end_of_utterance=False,
                                     utterance_id=utterance_id,
                                     trace_id=trace_id,
+                                    utterance_start_generation=(
+                                        start_generation if is_first else None
+                                    ),
                                 )
                                 await self.word_queue.put(word_event)
                             logger.debug(f"Queued {len(delta_words)} remaining words from final")
@@ -973,6 +1695,16 @@ class WebSocketManager:
         # active client must re-declare, and until it does the gate stays
         # at the safe silent default.
         self._provider_emits_eos = False
+        # The wake word declaration is per-stream for the same reason, but
+        # StateManager owns the value, so clear it there. A provider that
+        # disconnects and never returns would otherwise leave True behind,
+        # and the sound-pause notice would name a wake word that no running
+        # process can hear; a provider built without openWakeWord can also
+        # replace one that had it (wh-audio-suppression-control).
+        if self.state_manager and hasattr(
+            self.state_manager, "set_wake_word_available"
+        ):
+            self.state_manager.set_wake_word_available(False)
 
     async def add_client(self, websocket: Any):
         """Registers a new client connection, disabling existing clients.
@@ -1002,6 +1734,32 @@ class WebSocketManager:
         # The newest client is the active stream; only its capabilities
         # declaration may set the per-stream flags (wh-nvyh.1.1).
         self._active_stt_client = websocket
+        # Stamp the connection before any await, so a notification
+        # arriving on it can be attributed to the launch that sent it
+        # rather than to whichever launch is current when it arrives
+        # (wh-launch-generation). The stamp is PROVISIONAL: nothing the
+        # client has sent yet says which provider this is, and a slow
+        # provider from an earlier launch can connect while a later
+        # launch is starting. _apply_capabilities corrects it from the
+        # provider's own declaration (wh-launch-generation.1.2).
+        self._stt_client_generations[websocket] = self._current_launch_generation()
+        self._stt_client_provisional.add(websocket)
+
+        # A provider (re)connect matters to a live calibration session
+        # (wh-7ou.7.2.3): mid-capture it means the provider reset
+        # calibration mode on disconnect and must be told to turn it
+        # back on (spec Section 5.2); post-apply it means the settings
+        # restart completed. The controller ignores the call in every
+        # other state. Guarded so a controller failure can never break
+        # client registration.
+        controller = self._calibration_controller()
+        if controller is not None:
+            try:
+                controller.on_provider_connected()
+            except Exception:
+                logger.exception(
+                    "Calibration provider-connect handling failed"
+                )
 
         # Disable existing clients (but keep them connected)
         if existing_clients:
@@ -1025,9 +1783,21 @@ class WebSocketManager:
             logger.info(f"STT client disconnected: {websocket.remote_address}")
             self._clients.remove(websocket)
 
+            # Its engine clears the suppression bypass itself on
+            # disconnect; a dangling binding would misdirect a later
+            # session's mode-off (wh-7ou.7.6.11).
+            self._calibration_mode_clients.discard(websocket)
+
             # If the active client left, no client is active until the next
             # add_client -- a lingering DISABLED client must not become able
             # to set per-stream capabilities by default (wh-nvyh.1.1).
+            # The launch stamp leaves with the connection it identified;
+            # nothing can arrive on a closed connection, and the map
+            # would otherwise grow for the life of the process
+            # (wh-launch-generation).
+            self._stt_client_generations.pop(websocket, None)
+            self._stt_client_provisional.discard(websocket)
+
             if websocket is self._active_stt_client:
                 self._active_stt_client = None
                 # The departed stream's declared capability and diagnostic
@@ -1172,3 +1942,120 @@ class WebSocketManager:
         message = {"type": command_type, **params}
         logger.info(f"Sending command to STT clients: {command_type} with params: {_redact_content_fields(params)}")
         await self.broadcast(message)
+
+    async def send_command_to_active_stt(self, command_type: str, **params):
+        """Send a command to the ACTIVE STT client only (wh-7ou.7.6.6).
+
+        add_client keeps superseded providers connected in DISABLED
+        state, so send_command_to_stt's broadcast would also reach them.
+        Calibration commands (set_calibration_mode /
+        apply_engine_settings) concern exactly one provider generation
+        -- a stale whisper provider honoring them would act on a session
+        that is not its own -- so they target the active stream. Returns
+        True when the command was sent, False when there was no active
+        client or the send failed; the apply path turns False into an
+        ok=false settings result so the window never waits on a command
+        that never left this process (wh-7ou.7.6.7).
+        """
+        client = self._active_stt_client
+        if command_type == "set_calibration_mode" and not params.get("enabled"):
+            # Mode-off must reach every provider whose suppression
+            # bypass is actually on. On a provider-switch session end,
+            # add_client has already promoted the NEW client by the time
+            # the controller ends the session, so "active" would aim the
+            # off at a provider that never had mode on and leave the old
+            # one bypassing its filter until disconnect or the 10-minute
+            # lazy timeout (wh-7ou.7.6.11); a same-provider reconnect
+            # mid-capture leaves TWO live enabled clients, so the off
+            # fans out to all of them (wh-7ou.7.6.12). The bindings are
+            # consumed before any send and whether or not the sends
+            # succeed -- on failure the provider's own disconnect reset
+            # and lazy timeout are the backstops, same as before the
+            # binding existed. When no bound client is still connected,
+            # fall through to the active client (an idempotent no-op
+            # there).
+            bound = {c for c in self._calibration_mode_clients
+                     if c in self._clients}
+            self._calibration_mode_clients.clear()
+            if bound:
+                message_json = json.dumps({"type": command_type, **params})
+                logger.info(
+                    f"Sending command to {len(bound)} calibration-enabled "
+                    f"STT client(s): {command_type} "
+                    f"with params: {_redact_content_fields(params)}"
+                )
+
+                # Concurrent and bounded per target (wh-7ou.7.6.14): a
+                # serial unbounded loop let one stalled client's
+                # backpressured send starve every later target -- with
+                # the set already consumed, the healthy active provider
+                # then stayed in calibration mode until its 600-second
+                # engine timeout. The cancel a timeout fires may break
+                # the stalled client's connection state; acceptable,
+                # its engine clears the bypass itself on disconnect.
+                async def _send_off(target):
+                    try:
+                        await asyncio.wait_for(
+                            target.send(message_json),
+                            timeout=_CAL_MODE_OFF_SEND_TIMEOUT_S,
+                        )
+                        return True
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to send {command_type} to STT client "
+                            f"{getattr(target, 'remote_address', None)}: {e}"
+                        )
+                        return False
+
+                results = await asyncio.gather(
+                    *(_send_off(target) for target in bound)
+                )
+                return all(results)
+        if client is None:
+            logger.warning(
+                f"No active STT client; dropping command: {command_type} "
+                f"with params: {_redact_content_fields(params)}"
+            )
+            return False
+        message = {"type": command_type, **params}
+        if command_type == "set_calibration_mode" and params.get("enabled"):
+            # Remember who is getting the bypass turned on, so the off
+            # can follow it after another client is promoted
+            # (wh-7ou.7.6.11). Accumulated, never overwritten: an
+            # earlier enabled client stays bound until an off consumes
+            # the set or it disconnects (wh-7ou.7.6.12). Recorded
+            # before the send for the same reason as the apply binding
+            # below; deliberately left in place when a send fails -- a
+            # failed 300-second REFRESH send means the bypass is still
+            # on from the earlier successful send, and a failed first
+            # send costs only a harmless idempotent off later.
+            self._calibration_mode_clients.add(client)
+        if command_type == "apply_engine_settings":
+            # Bind the reply to this client AND this operation BEFORE
+            # the send completes: the provider can answer while this
+            # coroutine is still suspended in send(), and a connect
+            # promoting another client in that window must not orphan
+            # the reply (wh-7ou.7.6.6 round 4). The id rides the
+            # command and comes back in the reply, so a delayed reply
+            # from an earlier apply on the same connection cannot be
+            # read as this one's answer (wh-7ou.7.6.9).
+            self._engine_settings_reply_client = client
+            self._engine_settings_reply_id = uuid.uuid4().hex
+            message["apply_id"] = self._engine_settings_reply_id
+        message_json = json.dumps(message)
+        logger.info(
+            f"Sending command to active STT client: {command_type} "
+            f"with params: {_redact_content_fields(params)}"
+        )
+        try:
+            await client.send(message_json)
+        except Exception as e:
+            if command_type == "apply_engine_settings":
+                self._engine_settings_reply_client = None
+                self._engine_settings_reply_id = None
+            logger.warning(
+                f"Failed to send {command_type} to active STT client "
+                f"{getattr(client, 'remote_address', None)}: {e}"
+            )
+            return False
+        return True

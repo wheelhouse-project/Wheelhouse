@@ -14,13 +14,31 @@ import threading
 import time
 from pathlib import Path
 
-from shared_stt.ws_forwarder import WSForwarder, WebSocketLogHandler
-from shared_stt.audio_processor import AudioProcessor
+from shared_stt.ws_forwarder import (
+    WSForwarder,
+    WebSocketLogHandler,
+    RateLimitedWebSocketLogHandler,
+)
+from shared_stt.audio_processor import (
+    AudioProcessor,
+    LOAD_METRICS_LOGGER_NAME,
+)
 from shared_stt.redact import redact_transcript
+from shared_stt.startup_refusal import (
+    REFUSAL_EXIT_CODE,
+    send_startup_failed_notice,
+    wait_for_notice_connection,
+)
+from shared_audio import CAPTURE_LOGGER_NAME
 from shared_audio.agc import AGCConfig
-from shared_audio.capture import get_audio_provider, AudioConfig
+from shared_audio.capture import (
+    get_audio_provider,
+    AudioConfig,
+    CAPTURE_BACKEND_NAME,
+)
+from shared_audio.diagnostics import CaptureLoadReporter
 
-from sherpa_engine import SherpaOfflineEngine
+from sherpa_engine import SherpaOfflineEngine, read_token_pieces
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,15 +71,15 @@ def _import_hints_updater():
 def _vocab_charset(tokens_path: Path) -> set[str] | None:
     """Character set of the model vocab, or None when unavailable.
 
-    tokens.txt lines are '<piece> <id>'; the piece may itself contain
-    the BPE space marker but never a plain space, so rsplit on the last
-    whitespace isolates it."""
+    The pieces come from the same reader the engine's vocabulary check
+    uses, which reads tokens.txt the way sherpa does. Reading it with
+    str.splitlines and str.rsplit left a character the loader keeps
+    inside a token -- U+2028, U+0085, a trailing U+00A0 -- out of this
+    set, so a hint holding one was dropped as outside the model
+    (wh-parakeet-hotword-vocab.2.6)."""
     try:
         chars: set[str] = set()
-        for line in tokens_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            piece = line.rsplit(None, 1)[0]
+        for piece in read_token_pieces(tokens_path):
             chars.update(piece)
         return chars or None
     except Exception as e:
@@ -73,8 +91,9 @@ def prepare_hotwords_file(tokens_path: Path | None = None) -> str | None:
     """Write runtime/parakeet-hotwords.txt from the shared hints.txt.
 
     Plain phrases, one per line -- sherpa-onnx does the BPE segmentation
-    internally when the engine passes modeling_unit='bpe' plus
-    bpe_vocab=tokens.txt (wh-q3nrw spike, case A). Returns the file path,
+    internally when the engine passes modeling_unit='bpe' plus a
+    sentencepiece bpe_vocab (wh-q3nrw spike, case A; the vocabulary is
+    bpe.vocab, not tokens.txt -- wh-parakeet-hotword-vocab). Returns the file path,
     or None when there are no usable hints (removing any stale file so
     the engine cannot pick up hints that were deleted).
 
@@ -132,6 +151,14 @@ class ParakeetServer:
     DISCONNECT_TIMEOUT_S = 5.0
     DISPLAY_NAME = "Parakeet v3 ({mode})"
 
+    # Whether the capture handshake reported a microphone that never
+    # opened, which start() turns into a nonzero exit
+    # (wh-capture-winrt-required A9). A class attribute rather than an
+    # __init__ assignment so a test that builds the server with __new__
+    # -- the shell this service's own test files use -- reads the
+    # shipped default instead of AttributeError.
+    _capture_failed = False
+
     def __init__(
         self,
         model_config: dict,
@@ -151,6 +178,7 @@ class ParakeetServer:
         hotwords_file: str | None = None,
         hotwords_score: float = 2.0,
         hotwords_enabled: bool = False,
+        log_load_diagnostics: bool = False,
     ):
         self.sample_rate = sample_rate
         self.chunk_ms = chunk_ms
@@ -160,12 +188,43 @@ class ParakeetServer:
 
         # Resolve display name with CPU/GPU mode
         use_gpu = model_config.get("use_gpu", False)
-        self.display_name = self.DISPLAY_NAME.replace(
-            "{mode}", "GPU" if use_gpu else "CPU"
-        )
+        self.display_name = resolve_display_name(model_config)
 
         audio_config = AudioConfig(rate=sample_rate, channels=1, chunk_ms=chunk_ms)
-        self.audio_capture = get_audio_provider(config=audio_config)
+        try:
+            self.audio_capture = get_audio_provider(config=audio_config)
+        except RuntimeError as exc:
+            # The factory refuses when winsdk is missing and there is no
+            # second capture path to fall back to
+            # (wh-capture-winrt-required). Starting anyway would leave a
+            # provider that looks healthy and transcribes silence.
+            #
+            # The notice goes out over a forwarder that lives only for
+            # it: self.forwarder is built a few lines below and does not
+            # exist yet, and moving that construction above the capture
+            # would reorder this whole __init__.
+            #
+            # str(exc) rather than a second copy of the wording: the
+            # message is user-visible and belongs to the factory that
+            # owns the rule.
+            send_startup_failed_notice(
+                self.display_name,
+                str(exc),
+                ws_host,
+                ws_port,
+                provider_name="parakeet_tdt",
+            )
+            # SystemExit, not a re-raise: the __main__ block constructs
+            # this server outside its try, so a RuntimeError here would
+            # reach the user as a traceback on top of the notice that
+            # already said the same thing in words they can act on.
+            #
+            # REFUSAL_EXIT_CODE, not 1: a normal WheelHouse launch runs
+            # launcher.py, whose supervisor restarts any nonzero exit
+            # reached inside its fifteen-second crash window, and this
+            # refusal is reached in well under a second
+            # (wh-capture-winrt-required.1.5).
+            sys.exit(REFUSAL_EXIT_CODE)
 
         self.transcription_enabled = threading.Event()
         self.transcription_enabled.set()
@@ -178,7 +237,6 @@ class ParakeetServer:
             port=ws_port,
             transcription_enabled_event=self.transcription_enabled,
             restart_callback=self._handle_restart_service,
-            hard_restart_callback=self._handle_hard_restart_service,
             on_disconnect_callback=self._handle_wheelhouse_disconnect,
             on_reconnect_callback=self._handle_wheelhouse_reconnect,
             shutdown_callback=self._handle_shutdown,
@@ -187,7 +245,7 @@ class ParakeetServer:
             add_hint_callback=self._handle_add_hint,
             wake_word_activate_callback=self._handle_wake_word_activate,
             debug=True,
-            provider_name="sherpa_offline_parakeet",
+            provider_name="parakeet_tdt",
             emits_eos=False,
         )
 
@@ -212,9 +270,73 @@ class ParakeetServer:
             vad_lead_in_ms=vad_lead_in_ms,
             agc_config=agc_config,
             force_endpoint_silence_ms=engine_config.get("endpoint_silence_ms", 800),
+            # wh-stt-load-metrics: without this the per-utterance [load-diag]
+            # line still prints, with "n/a" for every capture number.
+            capture_stats=self.audio_capture.get_stats,
+            # wh-audit13-preengine-load-review.1: the ten-second silence
+            # line follows the same [debug] flag as the window line below.
+            log_load_diagnostics=log_load_diagnostics,
+        )
+
+        # The periodic window line, which shows a struggling machine between
+        # utterances and reports consumer-loop stalls. Gated, following the
+        # google provider's [debug] log_overflow_diagnostics flag: one line
+        # every ten seconds runs forever, unlike the per-utterance line.
+        # busy_seconds is what keeps the stall field honest. This loop
+        # calls the reporter at the top and then works to the end of the
+        # iteration, so the gap the reporter measures holds that work as well
+        # as any time the thread was not scheduled, and without this reader an
+        # idle machine reported "likely whole-machine CPU starvation" for time
+        # the loop spent working (wh-stt-load-metrics.1.12).
+        #
+        # The loop times its two branches itself rather than asking the
+        # recognizer for its seconds. The recognizer is not the only thing
+        # here that can pass the one-second threshold: the Silero VAD and the
+        # AGC run on every chunk, a keep_warm decode runs during silence, and
+        # the idle branch runs the wake-word model without touching
+        # AudioProcessor at all. Timing the branches end to end is what makes
+        # this complete rather than a list of sites -- work added inside
+        # process_chunk later cannot escape it (wh-stt-load-metrics.1.14).
+        self._load_work_s = 0.0
+        self._load_reporter = (
+            CaptureLoadReporter(
+                capture_stats=self.audio_capture.get_stats,
+                busy_seconds=lambda: self._load_work_s,
+                # timeout=0 so the loop never waits on this. Both providers
+                # answer immediately once setup has finished either way, and
+                # a WinRT setup still in flight answers False, which is the
+                # right answer for a window whose capture is not yet running
+                # (wh-stt-load-metrics.1.13).
+                capture_ready=lambda: self.audio_capture.wait_ready(
+                    timeout=0.0),
+            )
+            if log_load_diagnostics else None
         )
 
         self.running = False
+        # Held by the announcement thread across its read of
+        # self.running and the send that follows, and by stop() and
+        # cleanup() around the write, so no stop can land between that
+        # read and the moment the notice is decided and handed to the
+        # forwarder's loop (wh-provider-ready-handshake.1.2). The
+        # hand-off is the boundary, not queue acceptance:
+        # send_notification schedules the queue put with
+        # asyncio.run_coroutine_threadsafe and never waits on the
+        # future (shared_stt/ws_forwarder.py:848-874), so the lock does
+        # not order that put at all: the forwarder's loop can run it
+        # before or after this lock is released
+        # (wh-provider-ready-handshake.1.3, .1.4).
+        # A notice handed over in that window is delivered rather than
+        # discarded: WSForwarder.stop() gives already-queued frames a
+        # bounded 2.0 second chance to deliver before it stops its loop
+        # (shared_stt/ws_forwarder.py:912-953).
+        #
+        # The wait_ready() call stays OUTSIDE this lock. cleanup() sets
+        # the flag before it stops capture, and stopping capture is what
+        # releases that wait, so a lock held across the wait would block
+        # cleanup() on its first statement while the call that releases
+        # the wait is one cleanup() has not reached.
+        self._notification_lock = threading.Lock()
 
         # Wake word detection
         self._wake_word_detector = None
@@ -226,11 +348,21 @@ class ParakeetServer:
                 keyword=wake_word_keyword,
                 model_dir=wake_word_model_dir,
                 sensitivity=wake_word_sensitivity,
+                log_load_diagnostics=log_load_diagnostics,
             )
             logger.info(
                 f"Wake word detector initialized: keyword='{wake_word_keyword}', "
                 f"mode='{wake_word_mode}', loaded={self._wake_word_detector.is_loaded}"
             )
+
+        # Declared in the capabilities frame on every connect
+        # (wh-audio-suppression-control C3). Set here rather than passed to
+        # the constructor because the forwarder is built above, before the
+        # detector exists, and a model that failed to load must not leave
+        # WheelHouse telling the user to say a wake word.
+        self.forwarder.wake_word_available = bool(
+            self._wake_word_detector and self._wake_word_detector.is_loaded
+        )
 
     # -- Command handlers --
 
@@ -288,19 +420,6 @@ class ParakeetServer:
         except Exception as e:
             logger.error(f"Failed to create restart flag, staying up: {e}")
             return False
-
-    def _handle_hard_restart_service(self):
-        logger.info("Hard restart requested - creating flag file and exiting")
-        # A failed flag write converts to a deferred apply: keep
-        # running, the change lands at the next successful restart.
-        if not self._write_restart_flag():
-            self.forwarder.send_notification(
-                self.display_name,
-                "Restart failed - change saved, will apply at next restart",
-            )
-            return
-        self.forwarder.send_notification(self.display_name, "Full restart in progress...")
-        self.stop()
 
     def _handle_set_interim_results(self, enabled: bool):
         self.audio_processor.send_interim_results = enabled
@@ -383,11 +502,14 @@ class ParakeetServer:
             return
         if not self._wake_word_detector or not self._wake_word_detector.is_loaded:
             return
-        should_activate = False
-        if self._wake_word_mode == "idle_recovery":
-            should_activate = (reason == "idle")
-        elif self._wake_word_mode == "push_to_talk":
-            should_activate = (reason in ("idle", "audio", "sonos"))
+        # Imported here, the way the detector itself is (__init__ above):
+        # the module pulls in openwakeword, and a run with the wake word
+        # switched off must not pay for it. Past the is_loaded check the
+        # module is already imported, so this costs a sys.modules lookup.
+        from shared_stt.wake_word_detector import should_listen_for_wake_word
+        should_activate = should_listen_for_wake_word(
+            self._wake_word_mode, reason
+        )
         if should_activate:
             self._wake_word_detector.reset()
             self._wake_word_listening = True
@@ -421,11 +543,24 @@ class ParakeetServer:
         logger.info("Starting audio processing loop...")
         try:
             while self.running:
+                if self._load_reporter is not None:
+                    # Before the read, not after a chunk arrives: a starved
+                    # loop is exactly the case being measured, and read()
+                    # returning None is what that looks like from here.
+                    for line in self._load_reporter.record_iteration():
+                        logger.info(line)
                 chunk = self.audio_capture.read(timeout=0.02)
                 if chunk is None:
                     continue
                 if not self.running:
                     break
+                # Everything from here to the end of the iteration is work
+                # this loop does, and the reporter subtracts it from the gap
+                # it measures. The read above is deliberately outside: a
+                # starved loop sits in that wait, so those seconds are the
+                # stall signal itself and counting them would erase it
+                # (wh-stt-load-metrics.1.14).
+                _load_t0 = time.perf_counter()
                 if not self.transcription_enabled.is_set():
                     if self._wake_word_detector and self._wake_word_listening:
                         result = self._wake_word_detector.process(chunk)
@@ -434,17 +569,191 @@ class ParakeetServer:
                             self._wake_word_listening = False
                             self.transcription_enabled.set()
                             logger.info(f"Wake word '{result}' detected - resuming transcription")
+                    self._load_work_s += time.perf_counter() - _load_t0
                     continue
                 self.audio_processor.process_chunk(chunk)
+                self._load_work_s += time.perf_counter() - _load_t0
         except Exception as e:
             logger.error(f"Audio processing error: {e}", exc_info=True)
 
+    def _announce_capture_outcome(self):
+        """Tell Wheelhouse whether the microphone actually opened.
+
+        wh-provider-ready-handshake, wh-parakeet-ready-notice-preflight.
+        This used to sleep 3.0 seconds and then announce a working
+        service with nothing in between that could know whether the
+        microphone opened. A denied or missing device logged an error
+        and the user was still told transcription works, while every
+        spoken word was discarded. David measured the window on
+        2026-09-03: Wheelhouse received the ready notice at 19:32:51.038
+        while capture stayed unavailable until 19:32:58.
+
+        wait_ready() is the capture provider's own answer, defined at
+        shared_audio/capture/base.py. It is called with no argument so
+        the 15 second default stays in one place: a number here could
+        disagree with the provider's own.
+
+        The deleted Kroko provider is the reference for this handshake
+        (git show 15262e7d:services/stt_providers/
+        sherpa_streaming_kroko_stt_server/main.py line 678). It logs
+        "Audio capture started" BEFORE the handshake; that line moved
+        after it here, because the line is what an operator reads in
+        wheelhouse.log to decide whether the microphone worked.
+
+        The 3.0 second sleep is gone and nothing replaces it. It was
+        described as waiting for the WebSocket to connect, and it is not
+        needed for that: WSForwarder.start() creates its loop and queue
+        synchronously before starting its thread
+        (shared_stt/ws_forwarder.py:163-164), the queue is unbounded,
+        and the disconnect clear runs only after a connection that had
+        already succeeded is lost (:474 and :496, both inside
+        "if was_connected"). A notice queued before the first connection
+        is delivered when that connection opens.
+
+        A stop that lands while the wait is still running sends no
+        notice at all. audio_capture.stop() clears _capture_alive and
+        joins the capture thread (shared_audio/capture/winrt_capture.py:
+        260-298), that thread sets _setup_done on every exit path
+        (:620), and wait_ready() then returns False with setup_error
+        still None (:356) -- the same answer a dead microphone gives.
+        cleanup() stops capture before it stops the forwarder, so the
+        failure notice would still reach the user.
+
+        self.running is re-read AFTER the wait, not before it, because
+        the wait is the window the stop lands in: a check taken before
+        it answers a question about a moment that has already passed
+        when the answer arrives. Both branches are suppressed, not only
+        the failure branch -- "Transcription service ready" for a
+        service that is stopping is as wrong as the failure notice.
+
+        The read and the send happen under _notification_lock, which
+        stop() and cleanup() also take around their write
+        (wh-provider-ready-handshake.1.2). A one-time read followed by
+        an unlocked send left a window: a stop landing in it still
+        reached the user, because WSForwarder.stop() gives
+        already-queued frames a bounded 2.0 second chance to deliver
+        before it stops its loop (ws_forwarder.py:912-953). The window
+        is real work rather than a theoretical instant -- the two
+        logger.info calls below go through WebSocketLogHandler to the
+        forwarder.
+
+        The wait is taken before the lock, never under it: cleanup()
+        sets the flag before it stops capture, and stopping capture is
+        what releases the wait, so a lock held across the wait would
+        deadlock the shutdown.
+        """
+        ready = self.audio_capture.wait_ready()
+        with self._notification_lock:
+            if not self.running:
+                logger.info(
+                    "Server is stopping - no startup notification "
+                    "will be sent")
+                return
+
+            if ready:
+                logger.info("Audio capture started")
+                logger.info("Sending 'ready' notification to Wheelhouse...")
+                # kind="ready" is what WheelHouse routes on. It used to
+                # accept any kind-less notice whose text contained
+                # "ready", which also matched this provider's own
+                # "Hint '<word>' already exists" notice and swallowed it
+                # (wh-ready-connection-stamp.2.2.1).
+                # capture_backend names the path this run actually took
+                # (wh-capture-winrt-required A4). It goes on the ready
+                # notice only: the failure notice below reports a
+                # provider with no microphone, and naming a capture
+                # backend there would state that WinRT is in use when
+                # nothing is.
+                self.forwarder.send_notification(
+                    self.display_name,
+                    "Transcription service ready" + self._hotwords_notice(),
+                    kind="ready",
+                    capture_backend=CAPTURE_BACKEND_NAME)
+                return
+
+            detail = (
+                getattr(self.audio_capture, "setup_error", None)
+                or "audio capture did not become ready in time"
+            )
+            logger.error(f"Audio capture is not ready: {detail}")
+            self.forwarder.send_notification(
+                self.display_name,
+                f"Failed to start - transcription will not work: {detail}",
+                kind="startup_failed",
+            )
+            # The send only QUEUED that notice
+            # (wh-capture-winrt-required.1.4). WSForwarder.stop() drains
+            # the queue only when a connection is already live; with no
+            # connection it sets its stop event at once and the sender
+            # loop never reads the queue again. Ending the run here
+            # takes cleanup() to forwarder.stop() with nothing in
+            # between, so a capture failure that landed before the first
+            # handshake finished discarded the one message the user
+            # could act on -- even when WheelHouse accepted the
+            # connection a moment later.
+            #
+            # The same bounded wait the constructor refusal uses, not a
+            # second copy of it. Under _notification_lock, which
+            # cleanup() takes before it stops the forwarder, so the
+            # teardown cannot begin while the notice is still waiting.
+            # That is safe here and would not be around wait_ready()
+            # above: this waits on the forwarder's own thread, which
+            # nothing in the shutdown has to reach first.
+            wait_for_notice_connection(self.forwarder, self.forwarder.uri)
+            # AFTER the send, never before (wh-capture-winrt-required
+            # A9). The notice is the only thing that tells the user why,
+            # and a flag written first would put the send in the state
+            # the shutdown guard above suppresses, so the user would
+            # read nothing at all.
+            #
+            # Until this, the failure branch returned with self.running
+            # still True and process_audio_loop kept turning
+            # `while self.running:` on a capture that will never produce
+            # a chunk. The provider then ran deaf for as long as the
+            # machine stayed up: a live process, a service that looks
+            # healthy to WheelHouse, and every spoken word discarded.
+            # A3 covers the capture that is never BUILT; this is the one
+            # that builds and then fails to start -- an AudioGraph that
+            # will not open, a device another process holds, a
+            # permission denied after the model is already in memory.
+            logger.error(
+                "Audio capture never became ready - stopping the service")
+            self._capture_failed = True
+            self.running = False
+
+    def _hotwords_notice(self) -> str:
+        """The part of the ready notice that reports hint boosting.
+
+        Empty when boosting was never requested, so a user who set no
+        hints reads the same notice as before. When it WAS requested,
+        the notice says whether it started, and on failure it carries
+        the engine's reason -- a rejected vocabulary otherwise leaves
+        only a warning in a log file the user never opens, and the
+        ready notice looks identical to a run where boosting works
+        (wh-parakeet-hotword-vocab).
+
+        Every read is `is True`, not truthiness: a test that stubs the
+        engine with a MagicMock hands back a truthy mock for any
+        attribute, and a mock must not be able to make this claim
+        either way.
+        """
+        status = getattr(self.engine, "hotwords_status", None)
+        if getattr(status, "requested", False) is not True:
+            return ""
+        if getattr(status, "active", False) is True:
+            return " Word boosting is on."
+        detail = getattr(status, "detail", "") or "the reason was not recorded"
+        return f" Word boosting is off: {detail}."
+
     def _send_startup_notification(self):
-        def send_ready():
-            time.sleep(3.0)
-            logger.info("Sending 'ready' notification to Wheelhouse...")
-            self.forwarder.send_notification(self.display_name, "Transcription service ready")
-        threading.Thread(target=send_ready, daemon=True).start()
+        """Run the announcement on its own thread.
+
+        The wait belongs off the command loop so a slow microphone open
+        delays only the notice: process_audio_loop starts at once and
+        the forwarder keeps answering Wheelhouse.
+        """
+        threading.Thread(
+            target=self._announce_capture_outcome, daemon=True).start()
 
     def start(self):
         self.running = True
@@ -458,10 +767,59 @@ class ParakeetServer:
         self._ws_log_handler = ws_log_handler
         logging.getLogger("shared_stt").propagate = False
 
-        self._send_startup_notification()
+        # That propagate = False discards every shared_stt record, including
+        # the per-utterance [load-diag] line. Attach the same handler to the
+        # one logger that line uses, so it reaches wheelhouse.log while every
+        # other shared_stt record keeps the visibility it has today
+        # (wh-stt-load-metrics).
+        logging.getLogger(LOAD_METRICS_LOGGER_NAME).addHandler(ws_log_handler)
+
+        # The capture path logs to the shared_audio tree, which nothing
+        # here forwards, so the overflow warning, the device-open error,
+        # and OverflowMonitor's summary reach this console and nothing
+        # else -- a load investigation reading wheelhouse.log cannot
+        # tell a capture drop from an inference stall
+        # (wh-stt-load-metrics.2). Rate-limited, because the failure
+        # that makes those records worth reading also makes them
+        # frequent: a microphone dropping frames writes several a
+        # second, and they share the WebSocket queue with transcripts.
+        #
+        # A SEPARATE handler instance from the one above, for the reason
+        # the google provider records at google_stt_server/main.py:1188
+        # -- _handle_set_log_level() raises the level of
+        # self._ws_log_handler, so one shared object would let a
+        # set_log_level("WARNING") command silently stop forwarding
+        # OverflowMonitor's INFO summary. On the capture tree's own root
+        # and not a broader parent, so WSForwarder's records of its own
+        # sends stay out: forwarding one would produce another to
+        # forward.
+        capture_log_handler = RateLimitedWebSocketLogHandler(
+            self.forwarder, source=self.display_name)
+        capture_log_handler.setLevel(logging.INFO)
+        logging.getLogger(CAPTURE_LOGGER_NAME).addHandler(capture_log_handler)
+        self._capture_log_handler = capture_log_handler
+
+        # The processor was built in __init__, when this capture provider
+        # had no stream and could not report the two callback counters,
+        # so its own baseline withheld them (wh-stt-load-metrics.1.9).
+        # Take the baseline here rather than after the line below: the
+        # callback starts filling the queue the moment the stream opens,
+        # nothing discards that queue, and under CPU starvation this
+        # thread can be preempted for an unbounded time before it runs
+        # again -- so a baseline taken after start() can already contain
+        # the loss from audio the first utterance is about to be given
+        # (wh-stt-load-metrics.1.10). Here the counters are provably
+        # zero: start() builds the capture stream itself.
+        self.audio_processor.seed_capture_baseline_before_capture_starts()
 
         self.audio_capture.start()
-        logger.info("Audio capture started")
+
+        # After start(), never before: wait_ready() is an answer about
+        # a capture provider that has been asked to open. The
+        # "Audio capture started" log line moved inside the
+        # announcement, so it is written only once the handshake proves
+        # the microphone works (wh-provider-ready-handshake criterion 3).
+        self._send_startup_notification()
 
         def handle_signal(signum, frame):
             logger.info(f"Received signal {signum}, stopping...")
@@ -475,11 +833,48 @@ class ParakeetServer:
         finally:
             self.cleanup()
 
+        # wh-capture-winrt-required A9. On the main thread, after
+        # cleanup, and never from _announce_capture_outcome: that runs
+        # on a daemon thread, where SystemExit kills only that thread
+        # and leaves the process exactly as deaf as before.
+        #
+        # sys.exit rather than a returned code, for the same reason A3
+        # uses it in __init__ above: the module's `if __name__ ==
+        # "__main__"` block cannot be imported, so a code returned to it
+        # would be handled by the one part of this file no test can
+        # reach.
+        #
+        # REFUSAL_EXIT_CODE, not 1: the supervisor in
+        # shared_stt/launcher.py restarts any nonzero exit reached
+        # inside its fifteen-second crash window, and a machine whose
+        # model is already in the file cache reaches this refusal well
+        # inside it (wh-capture-winrt-required.1.5).
+        if self._capture_failed:
+            sys.exit(REFUSAL_EXIT_CODE)
+
     def stop(self):
         logger.info("Stopping server...")
-        self.running = False
+        # Under the lock the announcement thread holds across its read
+        # of this flag and its send, so the write cannot land between
+        # the two (wh-provider-ready-handshake.1.2).
+        with self._notification_lock:
+            self.running = False
 
     def cleanup(self):
+        # First statement, and not only in stop(): run() is a try/finally
+        # around process_audio_loop, so a loop that raises reaches
+        # cleanup() with stop() never called and the flag still reading
+        # True. The announcement thread reads that flag.
+        #
+        # Under _notification_lock, and before audio_capture.stop():
+        # this is what stops the write from landing between that
+        # thread's read and its send, and it also means the teardown
+        # below cannot begin while a notice is being decided and
+        # handed to the forwarder's loop
+        # (wh-provider-ready-handshake.1.2). The wait it releases is
+        # taken outside the lock, so this cannot deadlock against it.
+        with self._notification_lock:
+            self.running = False
         logger.info("Cleaning up...")
         self.audio_capture.stop()
         self.engine.cleanup()
@@ -487,16 +882,34 @@ class ParakeetServer:
         logger.info("Server stopped cleanly")
 
 
-# The directory name the v1 installer's model archive extracts to, used as
-# the last-resort model location under %LOCALAPPDATA%\WheelHouse\models.
-# The primary channel is the installer-written override file; this default
-# only has to match the v1 pinned archive.
-DEFAULT_MODEL_DIRNAME = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+# The directory name the installer builds the model in, used as the
+# last-resort model location under %LOCALAPPDATA%\WheelHouse\models. The
+# primary channel is the installer-written override file; this default only
+# has to match the installer's pinned model. It lost its -int8 suffix on
+# 2026-09-07 when the shipped model became Parakeet TDT 0.6b v3 at full
+# precision; scripts/release/tests/test_installer.py holds this name and the
+# installer's $ModelDirName to the same value.
+DEFAULT_MODEL_DIRNAME = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3"
 
 # Per-machine, untracked override file written by the installer (release
 # plan section 5 design notes, wh-797.3.6). Sections are keyed by
 # [provider].name so other providers can adopt the same file later.
 OVERRIDE_FILENAME = "stt_model_overrides.toml"
+
+
+def _load_diagnostics_enabled(config: dict) -> bool:
+    """Read [debug] log_load_diagnostics from the loaded config.
+
+    A named helper rather than an inline config.get chain so the key can be
+    tested against the tracked config.toml (wh-stt-load-metrics). Nothing else
+    would notice a mismatch: a misspelling on either side leaves the flag
+    permanently false, the periodic [load-diag] line never appears, and the
+    load test silently measures nothing.
+
+    Defaults to false. The line is one every ten seconds for the life of the
+    process, so it is turned on for a load test and off again afterwards.
+    """
+    return bool(config.get("debug", {}).get("log_load_diagnostics", False))
 
 
 def _resolve_model_path(config: dict) -> dict:
@@ -606,31 +1019,110 @@ def load_config(config_path: Path | None = None) -> dict:
     return _resolve_model_path(config)
 
 
-if __name__ == "__main__":
-    config = load_config()
-    model_config = config.get("model", {})
-    engine_config = config.get("engine", {})
-    client_config = config.get("client", {})
-    agc_config_data = config.get("agc", {})
+def resolve_display_name(model_config: dict) -> str:
+    """The user-visible provider name, with CPU or GPU filled in.
 
+    ParakeetServer.__init__ is the only caller. It was extracted so
+    --list-devices could name the provider in the notice it sent, and it
+    stayed after that path stopped sending one: the name still belongs
+    in one place, and __init__ needs it before the server exists.
+    """
+    use_gpu = model_config.get("use_gpu", False)
+    return ParakeetServer.DISPLAY_NAME.replace(
+        "{mode}", "GPU" if use_gpu else "CPU"
+    )
+
+
+def run_list_devices() -> int:
+    """Print the audio input devices, or refuse the way a start refuses.
+
+    A module-level function rather than inline __main__ code because
+    __main__ cannot be tested: this path builds the same capture the
+    server builds, so it meets the same refusal when winsdk is missing
+    (wh-capture-winrt-required).
+
+    The refusal goes to stderr and sends NO startup_failed notice, which
+    is the one way this path differs from a start. WheelHouse never
+    launched a --list-devices run, so a notice from one is addressed to
+    nobody -- and WheelHouse cannot simply ignore it either, because the
+    notice names the provider, so it would be read against whatever
+    launch of parakeet_tdt happens to be live and would end a session
+    the person never touched. A person who typed the flag is reading the
+    console, so the console is where the refusal belongs.
+
+    Returns:
+        The process exit code: 0 after listing, 1 after refusing.
+    """
+    audio_config = AudioConfig(rate=16000, channels=1, chunk_ms=30)
+    try:
+        mic = get_audio_provider(config=audio_config)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print("Available audio input devices:")
+    for dev in mic.list_audio_devices():
+        print(f"  [{dev['index']}] {dev['name']}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The command-line arguments this provider accepts.
+
+    A module-level function rather than inline __main__ code for the same
+    reason run_list_devices is one: __main__ cannot be tested, and the
+    --ws-port rule below is a rule, not a declaration
+    (wh-capture-winrt-required.1.2).
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--ws-host", default="localhost")
-    parser.add_argument("--ws-port", type=int, required=True)
+    parser.add_argument("--ws-port", type=int, default=None)
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     parser.add_argument("--wake-word-enabled", action="store_true", default=False)
     parser.add_argument("--wake-word-keyword", default=None)
     parser.add_argument("--wake-word-sensitivity", type=float, default=None)
     parser.add_argument("--wake-word-mode", default=None)
     parser.add_argument("--wake-word-model-dir", default=None)
-    args = parser.parse_args()
+    return parser
+
+
+def parse_provider_args(argv=None):
+    """Read the arguments, demanding --ws-port only for a real start.
+
+    --list-devices lists devices and exits; it opens no forwarder, and
+    the refusal it can meet goes to stderr, so the port is unused on that
+    path. Requiring it there made `python main.py --list-devices` exit 2
+    before printing anything, which is the console invocation the
+    --list-devices help text invites and run_list_devices's own docstring
+    assumes.
+
+    The port stays required for a real start rather than defaulting to
+    None: None would travel into WSForwarder (below, where the server is
+    built) and fail later and less clearly than argparse's own message.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.list_devices and args.ws_port is None:
+        parser.error("the following arguments are required: --ws-port")
+    return args
+
+
+if __name__ == "__main__":
+    from shared_audio.thread_priority import elevate_current_process
+
+    # High process class keeps STT inference scheduled under a saturated
+    # CPU; the Below Normal class the Task Scheduler launch chain hands
+    # down starves it (wh-process-priority-durable).
+    elevate_current_process()
+    config = load_config()
+    model_config = config.get("model", {})
+    engine_config = config.get("engine", {})
+    client_config = config.get("client", {})
+    agc_config_data = config.get("agc", {})
+
+    args = parse_provider_args()
 
     if args.list_devices:
-        audio_config = AudioConfig(rate=16000, channels=1, chunk_ms=30)
-        mic = get_audio_provider(config=audio_config)
-        print("Available audio input devices:")
-        for dev in mic.list_audio_devices():
-            print(f"  [{dev['index']}] {dev['name']}")
-        sys.exit(0)
+        sys.exit(run_list_devices())
 
     agc_config = AGCConfig(
         enabled=agc_config_data.get("enabled", True),
@@ -649,6 +1141,8 @@ if __name__ == "__main__":
 
     # Hotwords: opt-in because enabling forces modified_beam_search, which
     # measured +25% mean inference latency vs greedy (wh-q33mj benchmark).
+    log_load_diagnostics = _load_diagnostics_enabled(config)
+
     hotwords_config = config.get("hotwords", {})
     hotwords_score = float(hotwords_config.get("score", 2.0))
     hotwords_enabled = bool(hotwords_config.get("enabled", False))
@@ -682,6 +1176,7 @@ if __name__ == "__main__":
         hotwords_file=hotwords_file,
         hotwords_score=hotwords_score,
         hotwords_enabled=hotwords_enabled,
+        log_load_diagnostics=log_load_diagnostics,
     )
 
     try:

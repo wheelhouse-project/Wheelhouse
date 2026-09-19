@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.test_ai.test_silent_actions import notifications
+
 from ai.prompts import build_rewrite_system, wrap_selection
 from ai.providers.openai_compat import ChatResult, ChatStatus
 
@@ -49,8 +51,6 @@ def _ai_service(reply="rewritten text"):
         return_value=ChatResult(status=ChatStatus.OK, text=reply)
     )
     service._provider = provider
-    service.speak = AsyncMock()
-    service.speak_brief = AsyncMock()
     service.is_ready = MagicMock(return_value=True)
     service.recheck_ready = AsyncMock(return_value=True)
     return service, provider
@@ -178,11 +178,35 @@ class TestTheShippedPatterns:
         assert len(params) == 1, f"{trigger} should take one instruction"
         assert len(params[0]) > 30, f"{trigger}'s instruction looks like a placeholder"
 
-    @pytest.mark.parametrize("trigger", ["simplify", "shorten", "make formal", "pirate"])
-    def test_it_requires_the_hotword(self, rewrite_entries, trigger):
+    # "simplify", "shorten" and "pirate" are each one ordinary English word
+    # with nothing after it, so on 2026-08-20 they moved from the hotword to
+    # whole_utterance_only, matching Windows Voice Access. "make formal" is
+    # two words, which nobody starts a dictated sentence with, so it keeps
+    # the hotword.
+    @pytest.mark.parametrize(
+        "trigger, flag",
+        [
+            ("simplify", "whole_utterance_only"),
+            ("shorten", "whole_utterance_only"),
+            ("pirate", "whole_utterance_only"),
+            ("make formal", "requires_hotword"),
+        ],
+    )
+    def test_it_cannot_fire_on_stray_speech(
+        self, rewrite_entries, trigger, flag
+    ):
         """These paste over the selection, so they must not fire on stray
-        speech the way a replacement pattern does."""
-        assert self._entry(rewrite_entries, trigger)["requires_hotword"] is True
+        speech the way a replacement pattern does. Each carries exactly one
+        of the two protections, never neither and never both."""
+        entry = self._entry(rewrite_entries, trigger)
+        assert entry.get(flag) is True, f"{trigger} must set {flag}"
+        other = (
+            "requires_hotword" if flag == "whole_utterance_only"
+            else "whole_utterance_only"
+        )
+        assert entry.get(other, False) is False, (
+            f"{trigger} must not also set {other}"
+        )
 
     @pytest.mark.parametrize("trigger", ["simplify", "shorten", "make formal", "pirate"])
     def test_it_has_a_doc_id(self, rewrite_entries, trigger):
@@ -216,7 +240,7 @@ class TestTheShippedPatterns:
         provider.chat.assert_not_awaited()
 
 
-class TestTheSpokenWording:
+class TestTheStatusWording:
 
     @pytest.mark.asyncio
     async def test_it_says_rewriting_not_correcting(self):
@@ -225,9 +249,10 @@ class TestTheSpokenWording:
 
         await actions.rewrite_text_ai("Rewrite this text as a limerick.")
 
-        spoken = [call.args[0] for call in service.speak_brief.await_args_list]  # type: ignore[attr-defined]
-        assert "Rewriting." in spoken
-        assert "Correcting." not in spoken
+        queue = actions.speech_handler.logic_controller.state_manager.state_to_gui_queue
+        messages = [c.args[0].get("message") for c in queue.put_nowait.call_args_list]
+        assert "Rewriting..." in messages
+        assert "Correcting..." not in messages
 
     @pytest.mark.asyncio
     async def test_an_empty_selection_says_there_is_nothing_to_rewrite(self):
@@ -236,7 +261,7 @@ class TestTheSpokenWording:
 
         await actions.rewrite_text_ai("Rewrite this text as a limerick.")
 
-        service.speak.assert_awaited_once_with("No text to rewrite.")  # type: ignore[attr-defined]
+        assert "No text to rewrite." in notifications(actions)
         provider.chat.assert_not_awaited()
 
 

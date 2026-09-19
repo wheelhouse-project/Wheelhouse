@@ -29,17 +29,14 @@ dependencies = [
     "winsdk>=1.0.0b10,<2",
     "WMI>=1.5.1,<2",
     "assemblyai>=0.43.1,<0.44",
-    "sounddevice>=0.4.7,<0.5",
     "numpy>=1.26.4,<2",
     "deepgram-sdk>=3.2.7,<4",
-    "google-cloud-speech>=2.30.0",
     "grpcio>=1.56",
     "protobuf>=4.23",
     "tomli-w>=1.2.0,<2",
     "aiohttp>=3.13.2,<4",
     "pysilero-vad>=3.0.0,<3.3.0",
     "concurrent-log-handler>=0.9.25,<0.10",
-    "pyttsx3>=2.99,<3",
     "markdown>=3.10.2,<4",
 ]
 
@@ -71,4 +68,5 @@ markers = [
     "integration: Integration tests (may have I/O)",
     "slow: Tests that take >1s",
     "windows_only: Tests requiring Windows APIs",
+    "journey: Cross-process voice journeys around the numbered overlay (wh-overlay-slow-uia-stale-badges.12)",
 ]

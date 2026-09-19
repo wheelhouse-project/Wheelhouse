@@ -38,7 +38,10 @@ Typical Usage:
   count = words_to_int("three")  # Returns: 3
 """
 # speech/actions.py — hardened helpers
+import codecs
+import contextlib
 import logging
+import math
 import ntpath
 
 from utils.redact import redact_transcript
@@ -49,8 +52,177 @@ import webbrowser
 from typing import Optional, Any, Dict, Union
 from urllib.parse import quote_plus
 from ai.providers.openai_compat import ChatStatus
+from .actions_config import (
+    RUN_CAPTURE_TIMEOUT_CEILING_S,
+    RUN_CAPTURE_TIMEOUT_FLOOR_S,
+    ActionsConfig,
+)
+from .number_word_parser import parse_number_word
 
 logger = logging.getLogger(__name__)
+
+_RUN_CAPTURE_READ_CHUNK_BYTES = 4 * 1024
+_RUN_CAPTURE_STDERR_LOG_BYTES = 4 * 1024
+
+
+class ActionFailed(Exception):
+    """An action could not run, so the whole matched rule must be abandoned.
+
+    wh-arrow-key-names-missing: an action that returned ``None`` to report
+    failure could not be told apart from the many actions that return
+    ``None`` on success (``run_program``, ``async_sleep``, the grid
+    commands). ``TextParser._execute_rule`` therefore returned ``True`` for
+    a failed ``press_keys`` call, ``parse_and_execute`` reported a match,
+    and ``SpeechProcessor._execute_command`` consumed the spoken words
+    without pressing anything or typing anything.
+
+    Raising instead makes the failure explicit. ``_execute_rule`` catches
+    this exception, abandons the remaining steps, and returns ``False``, so
+    the speech processor sends the utterance to dictation and the words
+    reach the screen.
+    """
+
+
+class _RunCaptureOutputCapExceeded(Exception):
+    """Raised once stdout cannot fit in the configured stored-result cap."""
+
+
+async def _terminate_run_capture_process(process, drain_streams=()) -> None:
+    """Stop a child promptly, then discard supplied pipes while it exits."""
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    # Signal the child before scheduling any discard readers.  Starting the
+    # readers first could unblock a pipe-flooding child long enough for it to
+    # finish successfully instead of observing the cap failure.
+    drain_tasks = [
+        asyncio.create_task(_drain_run_capture_stream(stream))
+        for stream in drain_streams
+        if stream is not None
+    ]
+    try:
+        await asyncio.wait_for(process.wait(), timeout=1.0)
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        await process.wait()
+    finally:
+        await asyncio.gather(*drain_tasks, return_exceptions=True)
+
+
+async def _read_run_capture_stdout(stream, output_cap_chars: int) -> tuple[str, bool]:
+    """Decode stdout incrementally, retaining no more than the stored cap."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    confirmed_parts: list[str] = []
+    pending_trailing: list[str] = []
+    confirmed_characters = 0
+    pending_characters = 0
+    discarded_trailing = False
+
+    def consume(decoded: str) -> bool:
+        """Append decoded text, returning True when stored output is over the cap."""
+        nonlocal confirmed_characters, pending_characters, discarded_trailing
+        for character in decoded:
+            if character in "\r\n":
+                if not discarded_trailing:
+                    if confirmed_characters + pending_characters < output_cap_chars:
+                        pending_trailing.append(character)
+                        pending_characters += 1
+                    else:
+                        # These bytes are stripped at EOF.  Once retaining
+                        # them would exceed the cap, they cannot be stored;
+                        # any later content character must fail instead.
+                        pending_trailing.clear()
+                        pending_characters = 0
+                        discarded_trailing = True
+                continue
+
+            if discarded_trailing:
+                return True
+
+            next_confirmed_characters = (
+                confirmed_characters + pending_characters + 1
+            )
+            if next_confirmed_characters > output_cap_chars:
+                return True
+            if pending_trailing:
+                confirmed_parts.append("".join(pending_trailing))
+                pending_trailing.clear()
+                pending_characters = 0
+            confirmed_parts.append(character)
+            confirmed_characters = next_confirmed_characters
+        return False
+
+    while chunk := await stream.read(_RUN_CAPTURE_READ_CHUNK_BYTES):
+        decoded = decoder.decode(chunk, final=False)
+        if consume(decoded):
+            return "", True
+    decoded = decoder.decode(b"", final=True)
+    if consume(decoded):
+        return "", True
+    return "".join(confirmed_parts), False
+
+
+async def _read_run_capture_stderr(stream) -> tuple[bytes, bool]:
+    """Drain stderr concurrently while retaining only a bounded log sample."""
+    captured = bytearray()
+    truncated = False
+    while chunk := await stream.read(_RUN_CAPTURE_READ_CHUNK_BYTES):
+        remaining = _RUN_CAPTURE_STDERR_LOG_BYTES - len(captured)
+        if remaining > 0:
+            captured.extend(chunk[:remaining])
+        if len(chunk) > remaining:
+            truncated = True
+    return bytes(captured), truncated
+
+
+async def _drain_run_capture_stream(stream) -> None:
+    """Discard remaining pipe data while a terminated child closes cleanly."""
+    while await stream.read(_RUN_CAPTURE_READ_CHUNK_BYTES):
+        pass
+
+
+async def _collect_run_capture_output(
+    process, output_cap_chars: int
+) -> tuple[str, bytes, bool]:
+    """Read both pipes without deadlock and stop as soon as stdout overflows."""
+    stdout_task = asyncio.create_task(
+        _read_run_capture_stdout(process.stdout, output_cap_chars)
+    )
+    stderr_task = asyncio.create_task(_read_run_capture_stderr(process.stderr))
+    wait_task = asyncio.create_task(process.wait())
+    tasks = (stdout_task, stderr_task, wait_task)
+    try:
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stdout_task in done:
+                stdout, over_cap = stdout_task.result()
+                if over_cap:
+                    await _terminate_run_capture_process(
+                        process, drain_streams=(process.stdout,)
+                    )
+                    await asyncio.gather(
+                        stderr_task,
+                        wait_task,
+                        return_exceptions=True,
+                    )
+                    raise _RunCaptureOutputCapExceeded
+        stdout, _over_cap = stdout_task.result()
+        stderr, stderr_truncated = stderr_task.result()
+        return stdout, stderr, stderr_truncated
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 # Reserved activate-target keyword: resolved to the default browser's
 # executable name at command time (see _default_browser_exe).
@@ -132,17 +304,30 @@ def _default_browser_exe() -> str:
         return "msedge.exe"
     return exe
 
-_WORD_TO_INT_MAP = {
-    "zero": 0, "one": 1, "two": 2, "to": 2, "too": 2, "three": 3, "four": 4, "for": 4,
-    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10
-}
-
 def words_to_int(text: Optional[str]) -> Optional[int]:
     """Convert word or digit string to integer for numeric parameter parsing.
 
-    Supports both digit strings ("3") and word strings ("three", "five").
+    Supports both digit strings ("3") and word strings ("three", "five",
+    "fifteen", "twenty three").
     Returns 1 as default if text is None (for commands like "go up" without a count).
     Returns None if text cannot be converted.
+
+    The word reading is parse_number_word, the one word-to-integer
+    implementation in this service (wh-number-words-one-parser). This
+    function used to carry its own one..ten table, which is why a count
+    above ten was refused, the command fired without it, and the count
+    word was dictated. Homophones and the word "zero" come from that
+    parser's documented options, not from a table here.
+
+    This function does NOT cap the value. Each caller applies its own
+    limit after the conversion -- press and hotkey clamp a repeat at 50,
+    scroll clamps at MAX_SCROLL_CLICKS -- and those limits are unchanged.
+
+    A digit string longer than ``sys.get_int_max_str_digits()`` (4300 by
+    default in Python 3.12) cannot be converted either, and is reported as
+    None like any other unreadable count. Python raises ValueError for that
+    case rather than returning a value, and NO caller of this function
+    catches it (wh-voice-access-parity.2.3.2.6).
 
     Args:
         text: String to convert (e.g., "3", "three", "five"), or None for default
@@ -152,9 +337,26 @@ def words_to_int(text: Optional[str]) -> Optional[int]:
     """
     if text is None: return 1
     text = str(text).lower().strip()
-    if text.isdigit(): return int(text)
-    if text in _WORD_TO_INT_MAP: return _WORD_TO_INT_MAP[text]
-    return None
+    if text.isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            # Only the digit-count limit reaches here: str.isdigit has
+            # already ruled out every other way int() can refuse a string.
+            # Letting the exception escape breaks both callers, in
+            # opposite directions. PatternMatcher.validate_numeric catches
+            # ValueError and returns True, so the capture is reported
+            # VALID. CommandEngine._execute_rule's outer handler catches
+            # it, logs a traceback at error level, and abandons the rule.
+            # Log the LENGTH, never the digits: a count is transcribed
+            # speech (wh-voice-access-parity.2.3.2.6).
+            logger.debug(
+                "words_to_int: a %d-digit count is too long to convert; "
+                "reporting it unreadable",
+                len(text),
+            )
+            return None
+    return parse_number_word(text, aliases=True, zero=True)
 
 # Spoken key name aliases - maps speech variations to VK_CODE_MAP keys
 # Single strings map to one key; tuples map to key combinations (e.g., shifted chars)
@@ -168,6 +370,18 @@ SPOKEN_KEY_MAP = {
     "page down": "pagedown",
     "print screen": "printscreen",
     "caps lock": "capslock",
+
+    # Arrow keys. VK_CODE_MAP already holds the bare names up, down, left
+    # and right, but nobody says "press up" -- David reported "press up
+    # arrow" and "press down arrow" doing nothing, because press_keys read
+    # "arrow" as a second key name and gave up on the whole phrase
+    # (wh-arrow-key-names-missing). The two-word lookup in press_keys runs
+    # before the single-word lookup, so these entries also make
+    # "control left arrow" resolve to ctrl plus left.
+    "up arrow": "up",
+    "down arrow": "down",
+    "left arrow": "left",
+    "right arrow": "right",
 
     # Spoken variations
     "escape": "esc",
@@ -275,6 +489,9 @@ class ActionFunctions:
     def _register_functions(self) -> None:
         # UI command builders
         self._functions["hk"] = self.hotkey
+        self._functions["scroll"] = self.scroll
+        self._functions["start_continuous_scroll"] = self.start_continuous_scroll
+        self._functions["stop_continuous_scroll"] = self.stop_continuous_scroll
         self._functions["press"] = self.press
         self._functions["press_keys"] = self.press_keys
         self._functions["activate"] = self.activate_window
@@ -282,6 +499,7 @@ class ActionFunctions:
         self._functions["type_text"] = self.type_text
         self._functions["insert_text"] = self.insert_text
         self._functions["insert_raw"] = self.insert_raw
+        self._functions["select_phrase"] = self.select_phrase
         self._functions["insert_newlines"] = self.insert_newlines
         self._functions["transform_selection"] = self.transform_selection
         self._functions["text"] = self.text  # Wrapper for replacement patterns
@@ -293,20 +511,33 @@ class ActionFunctions:
         self._functions["sleep"] = self.async_sleep
         self._functions["date"] = self.format_date
         self._functions["gs"] = self.GSearch
+        self._functions["open_url"] = self.open_url
+        self._functions["run_capture"] = self.run_capture
         self._functions["capture_clipboard"] = self.capture_clipboard
         self._functions["add_hint_to_stt"] = self.add_hint_to_stt
         self._functions["cursor_navigate"] = self.cursor_navigate
         self._functions["click_element"] = self.click_element
         self._functions["show_overlay_command"] = self.show_overlay_command
         self._functions["hide_overlay_command"] = self.hide_overlay_command
+        # Mouse grid + click gestures (wh-grid-speech-routing)
+        self._functions["click_element_command"] = self.click_element_command
+        self._functions["grid_show_command"] = self.grid_show_command
+        self._functions["grid_dismiss_command"] = self.grid_dismiss_command
+        self._functions["grid_next_screen_command"] = self.grid_next_screen_command
+        self._functions["grid_action_command"] = self.grid_action_command
+        self._functions["grid_number_command"] = self.grid_number_command
+        self._functions["grid_click_command"] = self.grid_click_command
         # AI Service
         self._functions["fix_text_ai"] = self.fix_text_ai
         self._functions["rewrite_text_ai"] = self.rewrite_text_ai
+        self._functions["ask_ai"] = self.ask_ai
         self._functions["cancel_fix"] = self.cancel_fix
         #self._functions["wheelhouse_help"] = self.wheelhouse_help
         self._functions["wheelhouse_help_online"] = self.wheelhouse_help_online
         # Pattern Manager
         self._functions["open_pattern_manager"] = self.open_pattern_manager
+        # Voice calibration (wh-7ou.7.2.4)
+        self._functions["open_calibration"] = self.open_calibration
         # Mode switching
         self._functions["set_speech_interaction_mode"] = self.set_speech_interaction_mode
 
@@ -407,6 +638,34 @@ class ActionFunctions:
             Dictionary payload for raw text insertion via clipboard paste.
         """
         return {"action": "raw_insert_text", "params": {"text": text}}
+
+    def select_phrase(self, phrase):
+        """Select the first match of a spoken phrase in the focused control.
+
+        The search and the selection both happen in the Input process,
+        inside the target application, through the UI Automation text
+        pattern. This function only packages the words. It does not read
+        the document, so no document text crosses a process boundary.
+
+        The match is exact apart from letter case. The UI Automation
+        search ignores case, and nothing here changes the words. A phrase
+        whose written form holds punctuation will not match: the spoken
+        "hello world" does not find the written "hello, world".
+
+        Args:
+            phrase: The words captured after the command word.
+
+        Returns:
+            The payload for the Input process, or None when the capture
+            holds no words. None declines the command and lets the words
+            fall through to dictation, the same way click_element declines.
+        """
+        if not phrase:
+            return None
+        cleaned = phrase.strip()
+        if not cleaned:
+            return None
+        return {"action": "select_phrase", "params": {"phrase": cleaned}}
 
     def insert_newlines(self, count_str):
         """Insert multiple newline characters into text.
@@ -537,7 +796,149 @@ class ActionFunctions:
         
         logger.debug(f"Hotkey: {keys}, repeat: {repeat_count}")
         return {"action": "hotkey_action", "params": {"keys": [str(k) for k in keys], "repeat": repeat_count}}
-    
+
+    def scroll(self, direction, count=None):
+        """Turn the mouse wheel a number of notches (wh-voice-access-parity.2.3).
+
+        :flow: Command and Dictation Routing
+        :step: 4e
+        :produces_for: UI Action Execution
+        :description: Builds the payload for one discrete mouse wheel scroll.
+        :data_in: direction ("up", "down", "left" or "right"), count (optional
+            capture group holding a spoken number as text).
+        :data_out: Dict payload
+            ``{"action": "scroll_wheel", "params": {"direction": str,
+            "clicks": int}}``, or None when the direction is unusable or the
+            count is an explicit zero.
+
+        The count follows the same rules the hotkey repeat count already
+        follows, because it arrives the same way -- from an optional regex
+        group that may not have matched:
+
+        - None, the string "None" and an empty string all mean one notch.
+        - A digit string converts through words_to_int, up to the digit
+          count Python is willing to convert: sys.get_int_max_str_digits(),
+          4300 by default. A longer run is unreadable and takes the
+          one-notch fallback below. It never reaches this function from
+          speech in any event, because the pattern's numeric validation
+          rejects it first and the utterance becomes dictation
+          (wh-voice-access-parity.2.3.2.6).
+        - A spoken number WORD converts too, through the same
+          parse_number_word the rest of the service uses, so "eleven" and
+          "one hundred and twenty three" both arrive here as counts. That
+          helper carried its own one..ten table until
+          wh-number-words-one-parser; a word above ten used to fail the
+          pattern's numeric validation and the utterance became dictation.
+        - An explicit zero sends NOTHING and returns None. Zero is a number
+          the user said on purpose, and the honest answer to "scroll down
+          zero" is to scroll nothing (wh-voice-access-parity.2.3.2.1).
+        - A count this function cannot read falls back to one notch rather
+          than refusing. That is a recognition failure, not an instruction:
+          the user asked to scroll, so scrolling once beats doing nothing.
+          "-4" lands here rather than in the zero case, because words_to_int
+          reads a count with str.isdigit and returns None for a minus sign.
+          A negative cannot arrive from speech in any event: the widened word
+          capture holds no minus sign.
+        - A count above MAX_SCROLL_CLICKS is CLAMPED here rather than refused,
+          matching the hotkey repeat cap. The SendInput primitive still
+          refuses an out-of-range count, because at that layer the value can
+          only have come from a malformed message rather than from speech.
+
+        An unknown direction returns None, which the command engine treats as
+        "nothing to send", so a malformed pattern cannot scroll in some
+        arbitrary default direction.
+        """
+        from utils.win_input_sender import MAX_SCROLL_CLICKS
+
+        if not isinstance(direction, str):
+            logger.warning("scroll: non-text direction %r; sending nothing", direction)
+            return None
+        normalized = direction.strip().lower()
+        if normalized not in ("up", "down", "left", "right"):
+            logger.warning("scroll: unknown direction %r; sending nothing", direction)
+            return None
+
+        clicks = 1
+        if count is not None and str(count) not in ("None", ""):
+            parsed = words_to_int(str(count))
+            if parsed is not None:
+                if parsed <= 0:
+                    logger.debug(
+                        "scroll: count %r means no notches; sending nothing",
+                        count,
+                    )
+                    return None
+                clicks = min(parsed, MAX_SCROLL_CLICKS)
+
+        logger.debug("Scroll: %s, clicks: %d", normalized, clicks)
+        return {
+            "action": "scroll_wheel",
+            "params": {"direction": normalized, "clicks": clicks},
+        }
+
+    def start_continuous_scroll(self, direction):
+        """Start a scroll that keeps going (wh-voice-access-parity.2.3.3).
+
+        :flow: Command and Dictation Routing
+        :step: 4e
+        :produces_for: UI Action Execution
+        :description: Builds the payload that starts the repeating wheel timer.
+        :data_in: direction ("up", "down", "left" or "right").
+        :data_out: Dict payload ``{"action": "start_continuous_scroll",
+            "params": {"direction": str}}``, or None when the direction is
+            unusable.
+
+        No timer runs here. The timer lives in the Input process, which owns
+        SendInput and receives the stop word, so this function only names the
+        direction and returns.
+
+        An unknown direction returns None, which the command engine treats as
+        "nothing to send". That refusal matters more here than it does for a
+        discrete scroll: a timer started in some arbitrary default direction
+        would keep scrolling until the user found the words to stop it.
+        """
+        if not isinstance(direction, str):
+            logger.warning(
+                "start_continuous_scroll: non-text direction %r; sending "
+                "nothing", direction,
+            )
+            return None
+        normalized = direction.strip().lower()
+        if normalized not in ("up", "down", "left", "right"):
+            logger.warning(
+                "start_continuous_scroll: unknown direction %r; sending "
+                "nothing", direction,
+            )
+            return None
+
+        logger.debug("Continuous scroll start: %s", normalized)
+        return {
+            "action": "start_continuous_scroll",
+            "params": {"direction": normalized},
+        }
+
+    def stop_continuous_scroll(self):
+        """Stop the scroll that keeps going (wh-voice-access-parity.2.3.3).
+
+        :flow: Command and Dictation Routing
+        :step: 4e
+        :produces_for: UI Action Execution
+        :description: Builds the payload that stops the repeating wheel timer.
+        :data_in: nothing.
+        :data_out: Dict payload ``{"action": "stop_continuous_scroll",
+            "params": {}}``.
+
+        It takes no direction. Stopping is the same act whichever way the
+        scroll was going, and a stop that carried a direction could refuse to
+        stop a scroll going the other way.
+
+        It never returns None. Stopping a scroll that already stopped changes
+        nothing, and a user who says the words twice must not have the second
+        one refused.
+        """
+        logger.debug("Continuous scroll stop")
+        return {"action": "stop_continuous_scroll", "params": {}}
+
     def press(self, key, repeat_str=None):
         """
         :flow: Command and Dictation Routing
@@ -561,7 +962,9 @@ class ActionFunctions:
 
         Parses spoken key names and executes as hotkey.
         Key order doesn't matter - modifiers are always pressed first.
-        If any key is unrecognized, returns None (phrase treated as dictation).
+        If any key is unrecognized, raises ActionFailed. The rule engine
+        catches it, abandons the rule, and the speech processor sends the
+        spoken words to dictation instead of dropping them.
 
         Tuple entries in SPOKEN_KEY_MAP (e.g., ("shift", "9") for parenthesis)
         are expanded into the key list.
@@ -570,11 +973,15 @@ class ActionFunctions:
             key_sequence: Space-separated key names (e.g., "control alt delete")
 
         Returns:
-            Dictionary payload for hotkey action, or None if unrecognized keys
+            Dictionary payload for hotkey action
+
+        Raises:
+            ActionFailed: the key sequence is empty or names a key this
+                build does not know.
         """
         if not key_sequence:
             logger.warning("press_keys: Empty key sequence")
-            return None
+            raise ActionFailed("press_keys: empty key sequence")
 
         words = key_sequence.lower().strip().split()
 
@@ -619,14 +1026,24 @@ class ActionFunctions:
                 else:
                     normalized_keys.append(normalized)
             else:
-                # Unrecognized key - fail entire command
-                logger.info(f"press_keys: Unrecognized key '{redact_transcript(words[i])}', treating as dictation")
-                return None
+                # Unrecognized key - abandon the whole command. Raising
+                # (rather than returning None) is what makes the rule
+                # engine report failure, so the words really do reach
+                # dictation (wh-arrow-key-names-missing).
+                logger.info(
+                    "press_keys: Unrecognized key '%s'; sending the spoken "
+                    "words to dictation",
+                    redact_transcript(words[i]),
+                )
+                raise ActionFailed(
+                    f"press_keys: unrecognized key "
+                    f"{redact_transcript(words[i])!r}"
+                )
             i += 1
 
         if not normalized_keys:
             logger.warning("press_keys: No keys parsed")
-            return None
+            raise ActionFailed("press_keys: no keys parsed")
 
         # Sort: modifiers first, then other keys (order-independent)
         modifiers = [k for k in normalized_keys if k in _MODIFIER_KEYS]
@@ -634,7 +1051,21 @@ class ActionFunctions:
         sorted_keys = modifiers + non_modifiers
 
         logger.debug(f"press_keys: '{key_sequence}' -> {sorted_keys}")
-        return self.hotkey(*sorted_keys)
+        # Build the payload here rather than calling hotkey(). hotkey()
+        # takes its last argument as a repeat count whenever words_to_int
+        # returns a positive integer, and every digit '0'-'9' is a real
+        # key name in VK_CODE_MAP. Routing through it swallowed the
+        # trailing digit: "press 1" produced an empty key list, "press
+        # control 2" pressed ctrl twice and never pressed 2, and the
+        # ("shift", "9") aliases for "(" pressed shift nine times. Every
+        # token here is already validated as a key name, so the repeat is
+        # always 1 (wh-arrow-key-names-missing.1.2). hotkey() keeps the
+        # heuristic for pattern callers that pass a bare count group, such
+        # as the "undo 3" pattern's hk ctrl z g1.
+        return {
+            "action": "hotkey_action",
+            "params": {"keys": [str(k) for k in sorted_keys], "repeat": 1},
+        }
 
     def activate_window(self, target):
         """Activate a window by process name (e.g., 'brave.exe') or title pattern.
@@ -678,9 +1109,210 @@ class ActionFunctions:
         if query is None or query == "":
             query = ""
         url = "https://www.google.com/search?q=" + quote_plus(str(query))
-        try: await asyncio.to_thread(webbrowser.open, url)
-        except Exception as e: logger.error("GSearch error: %s", e)
+        try:
+            opened = await asyncio.to_thread(webbrowser.open, url)
+            if not opened:
+                # webbrowser.open reports the common failure shape by
+                # returning False (on Windows it catches the OSError from
+                # os.startfile), not by raising (wh-open-url-action.1.2).
+                # The URL carries spoken text, so it goes through
+                # transcript redaction (wh-open-url-action.1.5).
+                logger.error(
+                    "GSearch: browser reported failure opening %s",
+                    redact_transcript(url[:200]),
+                )
+        except Exception as e:
+            logger.error(
+                "GSearch error (%s): %s",
+                type(e).__name__, redact_transcript(str(e)),
+            )
         return None
+    async def open_url(self, url_template=None):
+        """Open a URL in the default browser (wh-open-url-action, spec 5).
+
+        The command engine URL-encodes every value it substitutes into the
+        parameter before this method runs, so the scheme and host must be
+        written in the pattern's template -- spoken text cannot supply them.
+
+        Args:
+            url_template: The URL after substitution. Must start with
+                http:// or https:// (case-insensitive); anything else
+                raises ValueError so the engine stops the pattern's
+                remaining steps (spec rule 2.2). A browser-launch failure
+                only logs (spec 5.3), matching GSearch.
+        """
+        url = "" if url_template is None else str(url_template)
+        if not url.lower().startswith(("http://", "https://")):
+            # The URL may carry spoken or clipboard text and this message
+            # is logged by the engine's rule-failure handler, so the
+            # content goes through transcript redaction
+            # (wh-open-url-action.1.5).
+            raise ValueError(
+                "open_url: URL must start with http:// or https:// after "
+                f"substitution; got {redact_transcript(url[:80])}"
+            )
+        try:
+            opened = await asyncio.to_thread(webbrowser.open, url)
+            if not opened:
+                # Same false-return failure shape as GSearch above
+                # (wh-open-url-action.1.2); spec 5.3 makes launch failure
+                # log-only, not silent. Redacted for the same reason as
+                # the bad-scheme message.
+                logger.error(
+                    "open_url: browser reported failure opening %s",
+                    redact_transcript(url[:200]),
+                )
+        except Exception as e:
+            logger.error(
+                "open_url launch error (%s): %s",
+                type(e).__name__, redact_transcript(str(e)),
+            )
+        return None
+
+    async def run_capture(self, *params: Any) -> str:
+        """Run a program without a shell and return its captured stdout.
+
+        A leading finite TOML number is a timeout in seconds. All remaining
+        parameters are passed to ``create_subprocess_exec`` as distinct
+        arguments, so captured speech cannot alter the executable or invoke a
+        shell. Failures raise so CommandEngine stops later pattern steps.
+        """
+        actions_config = self._get_actions_config()
+        timeout_s = actions_config.run_capture_timeout_default_s
+        command_params = list(params)
+        if command_params and not isinstance(command_params[0], bool):
+            timeout_candidate = command_params[0]
+            if isinstance(timeout_candidate, int):
+                # TOML integers have arbitrary precision, so clamp before
+                # float() to avoid OverflowError on authored huge values.
+                timeout_s = float(
+                    max(
+                        RUN_CAPTURE_TIMEOUT_FLOOR_S,
+                        min(timeout_candidate, RUN_CAPTURE_TIMEOUT_CEILING_S),
+                    )
+                )
+                command_params.pop(0)
+            elif isinstance(timeout_candidate, float) and math.isfinite(
+                timeout_candidate
+            ):
+                timeout_s = max(
+                    RUN_CAPTURE_TIMEOUT_FLOOR_S,
+                    min(timeout_candidate, RUN_CAPTURE_TIMEOUT_CEILING_S),
+                )
+                command_params.pop(0)
+
+        if not command_params:
+            raise ValueError("run_capture: a program path is required")
+        if command_params[0] is None:
+            raise ValueError("run_capture: a program path is required")
+        if any(value is None for value in command_params):
+            raise ValueError(
+                "run_capture: unresolved parameter; refusing to run with a "
+                "missing capture"
+            )
+        if any(
+            not isinstance(value, (str, int, float)) or isinstance(value, bool)
+            for value in command_params
+        ):
+            raise ValueError(
+                "run_capture: parameters must be str, int, or float values"
+            )
+
+        command = [str(value) for value in command_params]
+        redacted_command = redact_transcript(" ".join(command))
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except FileNotFoundError as exc:
+            logger.warning(
+                "run_capture program was not found; command=%s", redacted_command
+            )
+            raise FileNotFoundError(
+                exc.errno,
+                "run_capture: program was not found",
+                redacted_command,
+            ) from None
+        except OSError as exc:
+            logger.warning(
+                "run_capture program could not start (%s); command=%s",
+                type(exc).__name__,
+                redacted_command,
+            )
+            raise RuntimeError("run_capture: program could not start") from None
+
+        try:
+            stdout_text, stderr, stderr_truncated = await asyncio.wait_for(
+                _collect_run_capture_output(
+                    process, actions_config.output_cap_chars
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            await _terminate_run_capture_process(
+                process, drain_streams=(process.stdout, process.stderr)
+            )
+            logger.warning(
+                "run_capture timed out after %.3gs; command=%s",
+                timeout_s,
+                redacted_command,
+            )
+            raise TimeoutError("run_capture: program timed out") from None
+        except _RunCaptureOutputCapExceeded:
+            logger.warning(
+                "run_capture output exceeded output_cap_chars; command=%s",
+                redacted_command,
+            )
+            raise ValueError(
+                "run_capture: output exceeds output_cap_chars; refusing to "
+                "store incomplete output"
+            ) from None
+        except asyncio.CancelledError:
+            await _terminate_run_capture_process(
+                process, drain_streams=(process.stdout, process.stderr)
+            )
+            raise
+        except BaseException:
+            await _terminate_run_capture_process(
+                process, drain_streams=(process.stdout, process.stderr)
+            )
+            raise
+
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        if stderr_truncated:
+            stderr_text += " [stderr output truncated]"
+        if process.returncode != 0:
+            logger.warning(
+                "run_capture exited with code %d; command=%s; stderr=%s",
+                process.returncode,
+                redacted_command,
+                redact_transcript(stderr_text),
+            )
+            raise RuntimeError(
+                f"run_capture: program exited with code {process.returncode}"
+            )
+
+        logger.debug(
+            "run_capture completed; command=%s; stderr=%s",
+            redacted_command,
+            redact_transcript(stderr_text),
+        )
+        return stdout_text.rstrip("\r\n")
+
+    def _get_actions_config(self) -> ActionsConfig:
+        """Read the local [actions] block without allowing config errors to raise."""
+        config_service = getattr(self.speech_handler, "config_service", None)
+        if config_service is None:
+            return ActionsConfig()
+        try:
+            return ActionsConfig.from_raw(config_service.get("actions", {}))
+        except Exception:
+            logger.error("[actions] config could not be read; using defaults")
+            return ActionsConfig()
+
     async def async_sleep(self, duration_str: str):
         try:
             d = float(duration_str); await asyncio.sleep(max(0.0, d))
@@ -739,7 +1371,8 @@ class ActionFunctions:
     async def add_hint_to_stt(self):
         """Add selected text from clipboard to STT hints list via WebSocket command.
         
-        This function is triggered by the "x-ray boost" voice command. It:
+        This function is triggered by the "boost" voice command, spoken
+        as the whole utterance. It:
         1. Captures the current clipboard content (which should contain selected text)
         2. Validates the hint text
         3. Sends a WebSocket command to the STT server to add the hint
@@ -807,8 +1440,44 @@ class ActionFunctions:
 
         commands = NavigationParser.parse(utterance)
         if not commands:
-            # Send directly - command_engine discards return values from async functions
-            await self.speech_handler.app.send_command(self.insert_text(utterance))
+            # wh-overlay-slow-uia-stale-badges.7.1.5: this fallback used
+            # to send its intelligent_insert_text payload straight
+            # through app.send_command, bypassing the screen-read gate,
+            # the editor consult, and sentence tracking. Route it
+            # through the processor helper like the grid dictation
+            # fallback, and mark the parse as dictation so a later STT
+            # revision can still retract the typed words. No raw send
+            # remains: with no processor (partial wiring) the phrase is
+            # dropped rather than typed around the gate.
+            processor = getattr(
+                self.speech_handler, "speech_processor", None,
+            )
+            parser = getattr(processor, "text_parser", None)
+            if parser is not None:
+                parser.dictation_fallback_this_parse = True
+            send = getattr(processor, "_send_to_dictation", None)
+            if send is None:
+                logger.warning(
+                    "cursor_navigate fallback: no speech processor "
+                    "wired; dropping %r rather than bypassing the "
+                    "screen-read gate",
+                    redact_transcript(utterance),
+                )
+                return None
+            try:
+                await send(utterance)
+            except Exception:
+                # Same rationale as the grid dictation fallback
+                # (wh-mouse-grid.1.28): a raise after submission would
+                # turn this matched rule into a parse-level failure,
+                # and the utterance would then dictate a second time.
+                # A pre-enqueue delivery failure has already restored
+                # the sentence event inside the helper.
+                logger.exception(
+                    "cursor_navigate fallback: insert of %r raised "
+                    "after submission; not retrying",
+                    redact_transcript(utterance),
+                )
             return None
 
         actions = NavigationExecutor.to_actions(commands)
@@ -915,10 +1584,276 @@ class ActionFunctions:
         await lc.handle_overlay_command(command, trace_id)
         return None
 
+    async def click_element_command(self, utterance: str):
+        """Execute a gesture click command (wh-grid-speech-routing).
+
+        Handles the full-command forms "right click <target>" /
+        "double click <target>" (and plain "click <target>" if a pattern
+        ever routes it here) via ``ClickCommandParser.parse_command``, which
+        carries the gesture onto the ``ElementQuery``. Mirrors
+        ``click_element``: unparseable input returns None (nothing crosses
+        the process boundary), otherwise delegate to
+        ``LogicController.forward_click_element`` which owns the config
+        gate, the overlay/grid number routing, and every degrade path.
+        """
+        import uuid
+
+        from .click_parser import ClickCommandParser
+        from utils.trace_context import set_trace, get_trace_id
+
+        query = ClickCommandParser.parse_command(utterance)
+        if query is None:
+            logger.info(
+                "click_element_command: unparseable utterance %r; ignoring",
+                redact_transcript(utterance),
+            )
+            return None
+
+        trace_id = get_trace_id() or f"click-{uuid.uuid4().hex[:12]}"
+        set_trace(trace_id)
+
+        lc = getattr(self.speech_handler, "logic_controller", None)
+        if lc is None or not hasattr(lc, "forward_click_element"):
+            logger.error(
+                "click_element_command: no "
+                "logic_controller.forward_click_element available; cannot "
+                "execute (trace_id=%s)", trace_id,
+            )
+            return None
+
+        logger.info(
+            "click_element_command: parsed query name=%r role=%r gesture=%s "
+            "trace_id=%s",
+            query.name, query.role, query.gesture.value, trace_id,
+        )
+        await lc.forward_click_element(query, trace_id)
+        return None
+
+    async def grid_show_command(self):
+        """Handle 'show grid' (wh-grid-speech-routing)."""
+        return await self._delegate_grid_command("open")
+
+    async def grid_dismiss_command(self):
+        """Handle 'hide grid' (wh-grid-speech-routing)."""
+        return await self._delegate_grid_command("dismiss")
+
+    async def grid_next_screen_command(self):
+        """Handle 'grid next screen' (wh-grid-speech-routing)."""
+        return await self._delegate_grid_command("next_screen")
+
+    async def grid_action_command(self, action: str, utterance: str):
+        """Handle a bare grid-open-only word: mark / drag / move_here.
+
+        ``action`` is the fixed command the pattern binds; ``utterance`` is
+        the spoken text (with any trailing punctuation), used verbatim for
+        the dictation fallback when the grid is closed -- these words are
+        ordinary dictation vocabulary and must keep typing normally.
+        """
+        if action not in ("mark", "drag", "move_here"):
+            logger.warning(
+                "grid_action_command: unknown action %r; dictating %r",
+                action, redact_transcript(utterance),
+            )
+            await self._dictate_grid_fallback(utterance)
+            return None
+        return await self._delegate_grid_command(action, utterance=utterance)
+
+    async def grid_number_command(self, utterance: str, number_word: str):
+        """Handle a bare 1..9 number ('five', '5', 'number five').
+
+        With the grid open the number refines the grid. With the grid
+        closed and the numbered overlay showing badges, the number
+        clicks its badge (wh-overlay-count-homophones.1.1) -- the grid
+        is asked first, the overlay only after it refuses. With neither
+        showing, the whole utterance falls back to dictation, so the
+        literal words keep typing. Numbers the parser cannot map to 1..9
+        dictate as well (defensive; the pattern only captures one..nine,
+        the homophones "to", "too" and "for", and a single digit).
+        """
+        from .number_word_parser import parse_number_word
+
+        # wh-overlay-count-homophones: aliases, so the grid reads "too",
+        # "to" and "for" as 2 and 4, matching the two word-form grid
+        # patterns that now capture them. With the grid closed the number
+        # goes to the numbered overlay first; it types only when neither
+        # the grid nor the badges are on screen.
+        number = parse_number_word(number_word, aliases=True)
+        if number is None or not 1 <= number <= 9:
+            await self._dictate_grid_fallback(utterance)
+            return None
+        return await self._delegate_grid_command(
+            "refine", number=number, utterance=utterance,
+            badge_words=utterance,
+        )
+
+    async def grid_click_command(self, utterance: str):
+        """Handle a bare 'click' / 'right click' / 'double click'.
+
+        Acts at the grid's current cell center when the grid is open;
+        dictates the utterance when it is closed.
+        """
+        from .click_parser import ClickGesture
+
+        lowered = utterance.strip().lower()
+        if lowered.startswith("right"):
+            gesture = ClickGesture.RIGHT_CLICK
+        elif lowered.startswith("double"):
+            gesture = ClickGesture.DOUBLE_CLICK
+        else:
+            gesture = ClickGesture.INVOKE
+        return await self._delegate_grid_command(
+            "click", gesture=gesture, utterance=utterance,
+        )
+
+    async def _delegate_grid_command(
+        self, command: str, *, number: int = 0, gesture=None,
+        utterance: Optional[str] = None, badge_words: Optional[str] = None,
+    ):
+        """Shared grid-command delegation (wh-grid-speech-routing).
+
+        Delegates to ``LogicController.handle_grid_command`` and applies
+        the dictation fallback: when the command is NOT consumed (a
+        grid-open-only word with the grid closed) and ``utterance`` is
+        provided, the utterance is inserted as dictation. Explicit grid
+        commands pass no ``utterance`` and are never dictated.
+
+        ``badge_words`` is the spoken number, and only the number
+        commands pass it (wh-overlay-count-homophones.1.1). With it, the
+        not-consumed fallback first offers the number to the numbered
+        overlay: with badges showing, a bare number is a badge click,
+        not text. The grid still gets the number first, so the two
+        overlays keep the precedence they already had. The words type
+        exactly as before when badges are not showing.
+        """
+        import uuid
+
+        from utils.trace_context import set_trace, get_trace_id
+
+        trace_id = get_trace_id() or f"grid-{uuid.uuid4().hex[:12]}"
+        set_trace(trace_id)
+
+        lc = getattr(self.speech_handler, "logic_controller", None)
+        if lc is None or not hasattr(lc, "handle_grid_command"):
+            logger.error(
+                "grid %s: no logic_controller.handle_grid_command "
+                "available (trace_id=%s)", command, trace_id,
+            )
+            if utterance:
+                await self._dictate_grid_fallback(utterance)
+            return None
+
+        consumed = await lc.handle_grid_command(
+            command, trace_id, number=number, gesture=gesture,
+            spoken=utterance or "",
+        )
+        if not consumed and utterance:
+            if badge_words and await self._click_badge_instead_of_dictating(
+                badge_words, trace_id,
+            ):
+                return None
+            logger.info(
+                "grid %s: not consumed (grid closed); dictating %r "
+                "(trace_id=%s)", command, redact_transcript(utterance),
+                trace_id,
+            )
+            await self._dictate_grid_fallback(utterance)
+        return None
+
+    async def _click_badge_instead_of_dictating(
+        self, spoken: str, trace_id: str,
+    ) -> bool:
+        """Click the numbered-overlay badge ``spoken`` names, if showing.
+
+        wh-overlay-count-homophones.1.1, implementing David's ruling of
+        2026-08-27 (wh-click-number-dictation.1.2): while badges are on
+        screen, a bare number is a click, not text. The three grid
+        patterns match the whole utterance for every spoken 1..9, so
+        those words reach this action instead of the speech processor's
+        bare-number hold, and the closed-grid fallback typed them.
+
+        The click itself is NOT built here. The words go to the speech
+        processor's existing bare-number click path
+        (``try_bare_number_badge_click``), which owns the overlay gate,
+        the "click N" command text and the retraction bookkeeping, so
+        there is one click sender for both ways in.
+
+        Returns True when the click ran and the caller must not dictate.
+        """
+        processor = getattr(self.speech_handler, "speech_processor", None)
+        attempt = getattr(processor, "try_bare_number_badge_click", None)
+        if attempt is None:
+            # Partial wiring (no speech processor, or an older stub):
+            # the words type, which is the behaviour before this fix.
+            return False
+        clicked = await attempt(spoken)
+        if clicked:
+            logger.info(
+                "grid number: not consumed (grid closed) but badges are "
+                "showing; clicked badge for %r instead of dictating "
+                "(trace_id=%s)", redact_transcript(spoken), trace_id,
+            )
+        return clicked
+
+    async def _dictate_grid_fallback(self, utterance: str):
+        """Type a closed-grid fallback utterance as ordinary dictation.
+
+        wh-mouse-grid.1.27: the bare grid words are dictation when the
+        grid is closed -- and, for the number commands since
+        wh-overlay-count-homophones.1.1, only when the numbered overlay
+        is not showing badges either -- so they must ride the speech
+        processor's normal dictation path (``_send_to_dictation``) -- which applies the
+        terminal focus-redirect (``maybe_route_to_editor``) and the
+        per-utterance editor bookkeeping the retraction path reads --
+        instead of a raw fire-and-forget insert payload. The text parser
+        is also told this parse ended in a dictation fallback, so
+        ``parse_and_execute`` records the match as 'dictation_fallback'
+        rather than 'command' and a later STT revision can still retract
+        the typed words. Falls back to the raw insert payload only when
+        no speech processor is available (partial wiring).
+        """
+        processor = getattr(self.speech_handler, "speech_processor", None)
+        parser = getattr(processor, "text_parser", None)
+        if parser is not None:
+            parser.dictation_fallback_this_parse = True
+        send = getattr(processor, "_send_to_dictation", None)
+        try:
+            if send is not None:
+                await send(utterance)
+            else:
+                await self.speech_handler.app.send_command(
+                    self.insert_text(utterance)
+                )
+        except Exception:
+            # wh-mouse-grid.1.28: by the time the insert request can
+            # raise (a late acknowledgement past the Logic timeout), it
+            # has already been submitted to Input. Letting the error
+            # escape turns this matched rule into a parse-level failure,
+            # and _execute_command then dictates the same words a second
+            # time -- both insertions can run. Absorb it: one submission
+            # is the outcome of the fallback, acknowledged or not.
+            logger.exception(
+                "grid dictation fallback: insert of %r raised after "
+                "submission; not retrying", redact_transcript(utterance),
+            )
+
     async def open_pattern_manager(self):
         """Open the Pattern Manager dialog via GUI IPC."""
         self._send_gui_action({"action": "open_pattern_manager"})
         logger.info("Sent open_pattern_manager to GUI")
+        return None
+
+    async def open_calibration(self):
+        """Open the Teach-WheelHouse-your-voice window via GUI IPC.
+
+        wh-7ou.7.2.4 (spec Sections 3.1, 6.4): the "learn my voice" /
+        "calibrate my voice" voice commands land here. The GUI opens the
+        calibration window and answers with cal_session_open; the
+        CalibrationController then decides the first screen (intro, or
+        the wrong-provider notice when the active STT provider is not
+        Distil-Whisper).
+        """
+        self._send_gui_action({"action": "open_calibration"})
+        logger.info("Sent open_calibration to GUI")
         return None
 
     def set_speech_interaction_mode(self, mode: str):
@@ -973,6 +1908,46 @@ class ActionFunctions:
             return None
         return getattr(sm, 'ai_service', None)
 
+    @contextlib.asynccontextmanager
+    async def _ai_cancel_lane(self):
+        """Keep the speech processor's cancel-only lane open for one AI call.
+
+        wh-cancel-fix-running-rewrite. The word-event loop is serial: it awaits
+        one event's processing before it reads the next, and this action is
+        that processing. Without this the words of "x-ray cancel fix" sit in
+        word_queue for the whole model call and reach ``cancel_fix`` only after
+        the replacement has been pasted, when ``ai.is_processing()`` is already
+        False -- so the cancel sets no flag and shows no notice.
+
+        While the lane is open the processor defers every word event it takes
+        and acts on none of them EXCEPT the cancel command, which it runs at
+        once. That keeps the property this serial loop has always had: nothing
+        else types while the model runs.
+
+        A processor that does not offer the lane, or an AI action reached from
+        outside the word loop, simply runs as it did before.
+        """
+        processor = getattr(self.speech_handler, "speech_processor", None)
+        begin = getattr(processor, "begin_ai_cancel_lane", None)
+        end = getattr(processor, "end_ai_cancel_lane", None)
+        if not callable(begin) or not callable(end):
+            yield
+            return
+        begin()
+        try:
+            yield
+        finally:
+            end()
+
+    def _notify_ai_status(self, message: str) -> None:
+        """Keep AI outcome wording visible; screen readers own spoken feedback."""
+        logger.info("AI: %s", message)
+        self._send_gui_action({
+            "action": "show_notification",
+            "title": "Wheelhouse",
+            "message": message,
+        })
+
     async def fix_text_ai(self):
         """Capture text from focused element, correct via AI, paste back."""
         return await self._run_ai_text_transform(
@@ -1001,6 +1976,86 @@ class ActionFunctions:
             failed_message="Rewrite failed. Original text preserved.",
         )
 
+    async def ask_ai(self, prompt: str) -> str:
+        """Ask the configured AI one question and return its trimmed reply.
+
+        Pattern-template substitution has already happened before this action
+        is called. Every failure raises so CommandEngine stops later pattern
+        steps rather than attempting to use an absent or partial reply.
+        """
+        if not prompt or not str(prompt).strip():
+            logger.warning("ask_ai failed: prompt is blank or missing")
+            raise ValueError("ask_ai: prompt is blank or missing")
+
+        ai = self._get_ai_service()
+        if ai is None:
+            logger.warning("ask_ai failed: AI service unavailable")
+            raise RuntimeError("ask_ai: AI service unavailable")
+        if not ai.is_ready():
+            logger.warning(
+                "ask_ai failed: AI subsystem is not configured or unavailable"
+            )
+            raise RuntimeError("ask_ai: AI subsystem is not configured or unavailable")
+        if ai.is_processing():
+            logger.warning("ask_ai failed: processing lock busy")
+            raise RuntimeError("ask_ai: processing lock busy")
+
+        timeout_s = min(ai.get_request_timeout_s(), 60.0)
+        # This request names itself, so a provider switch started while
+        # it runs keeps its own "Loading <engine>" dialog when this
+        # request finishes (wh-dialog-ownership-token).
+        from shared.dialog_owner import next_ai_owner_token
+
+        owner = next_ai_owner_token()
+        async with ai._processing_lock:
+            logger.info("Asking.")
+            self._send_gui_action(
+                {"action": "show_working", "message": "Asking...", "owner": owner}
+            )
+            try:
+                try:
+                    # wh-cancel-fix-running-rewrite: the lane spans the
+                    # model await, so "cancel fix" spoken while this
+                    # question is out reaches cancel_fix. AIService.ask
+                    # reads the flag after the provider call and returns
+                    # CANCELLED, which the check below turns into the
+                    # action's cancelled failure.
+                    async with self._ai_cancel_lane():
+                        reply = await asyncio.wait_for(
+                            ai.ask(prompt), timeout=timeout_s,
+                        )
+                except asyncio.TimeoutError:
+                    logger.warning("ask_ai failed: request timed out")
+                    raise TimeoutError("ask_ai: request timed out") from None
+                except Exception as exc:  # noqa: BLE001 -- action failure contract
+                    logger.warning(
+                        "ask_ai failed: AI request raised %s", type(exc).__name__
+                    )
+                    raise RuntimeError("ask_ai: AI request failed") from exc
+
+                if reply.status is ChatStatus.CANCELLED:
+                    logger.warning("ask_ai failed: request cancelled")
+                    raise RuntimeError("ask_ai: request cancelled")
+
+                if not reply.ok:
+                    logger.warning(
+                        "ask_ai failed: AI request not ok (status=%s)",
+                        reply.outcome,
+                    )
+                    raise RuntimeError("ask_ai: AI request not ok")
+
+                text = reply.text.strip()
+                if len(text) > self._get_actions_config().output_cap_chars:
+                    logger.warning("ask_ai failed: reply exceeds output_cap_chars")
+                    raise ValueError("ask_ai: reply exceeds output_cap_chars")
+                return text
+            finally:
+                # cancel_fix only sets this under the processing lock, so it
+                # targets this ask_ai request. Clear it on every exit to
+                # prevent stale cancellation from pre-cancelling the next fix.
+                ai.cancel_requested = False
+                self._send_gui_action({"action": "hide_working", "owner": owner})
+
     async def _run_ai_text_transform(
         self,
         send,
@@ -1016,7 +2071,7 @@ class ActionFunctions:
         lock, capture, send, check for a cancellation that raced the answer,
         paste. Only three things differ between the correcting command and the
         rewriting ones, and they are the three keyword arguments -- the request
-        itself plus the wording spoken to the user.
+        itself plus the status wording shown to the user.
 
         Args:
             send: Called with the AIService and the captured text, returning
@@ -1024,10 +2079,10 @@ class ActionFunctions:
                 correcting and rewriting. It receives the service rather than
                 looking it up again so there is exactly one lookup per command
                 and the caller cannot be handed a different one mid-sequence.
-            working_word: Present participle spoken and shown while waiting,
+            working_word: Present participle shown while waiting,
                 for example "Correcting".
-            no_text_message: Spoken when the selection is empty.
-            failed_message: Spoken when the server answered but the request
+            no_text_message: Shown when the selection is empty.
+            failed_message: Shown when the server answered but the request
                 did not succeed, and the server is still reachable.
         """
         ai = self._get_ai_service()
@@ -1036,116 +2091,382 @@ class ActionFunctions:
             return None
 
         # Readiness gate moved here (finding 1.9). When AI is off / unreachable
-        # speak a graceful notice instead of failing silently (design s7).
+        # show a graceful notice instead of failing silently (design s7).
         if not ai.is_ready():
-            await ai.speak("AI is not available right now.")
+            self._notify_ai_status("AI is not available right now.")
             return None
 
         if ai.is_processing():
-            await ai.speak("Already processing, please wait.")
+            self._notify_ai_status("Already processing, please wait.")
             return None
 
+        # This transform names itself, so a provider switch or another
+        # AI operation started while it runs keeps its own dialog when
+        # this one finishes (wh-dialog-ownership-token). The token is
+        # bound before the lock rather than inside the try below,
+        # because the close in that try's finally runs on paths that
+        # raised before the show -- a failed copy, an empty selection --
+        # and a name bound inside the try would not exist for them. A
+        # close naming a token nothing owns is simply dropped, where the
+        # unnamed close it replaces tore down whatever dialog was up.
+        from shared.dialog_owner import next_ai_owner_token
+
+        owner = next_ai_owner_token()
         async with ai._processing_lock:
             # Step 1: Capture text via Input Process
             result = await self.speech_handler.app.send_request(
                 "capture_selected_text", params={}
             )
-            text = result.get("text", "")
-            logger.debug("AI text transform: captured %d chars", len(text))
-            if not text or not text.strip():
-                await ai.speak(no_text_message)
+
+            # wh-review-pattern-fixes.26: the capture flushes the
+            # deferred letter buffer before it touches the clipboard or
+            # the selection, and fails closed. When the flush failed,
+            # the Input process changed nothing on screen; abort the
+            # whole transform the same way.
+            if result.get("flush_failed"):
+                logger.warning(
+                    "AI text transform: letter-buffer flush failed "
+                    "before capture; transform aborted."
+                )
+                self._notify_ai_status(
+                    "Earlier dictated letters were not delivered. "
+                    "Original text preserved."
+                )
                 return None
 
-            # Step 2: Word-count notice for large text (no time estimate -- the
-            # thin client has no local-tier basis for a seconds estimate, so the
-            # estimate_correction_time call and 'roughly N seconds' wording were
-            # dropped; design s4).
-            word_count = len(text.split())
-            if word_count > 200:
-                await ai.speak(f"About {word_count} words.")
-
-            await ai.speak_brief(f"{working_word}.")
-            self._send_gui_action(
-                {"action": "show_working", "message": f"{working_word}..."}
-            )
-
+            # wh-review-pattern-fixes.28: when the capture used the
+            # Ctrl+A no-selection fallback, the whole field is still
+            # selected after the copy. Every exit below that does not
+            # replace the captured text must collapse that selection,
+            # or the next dictated insertion overwrites the entire
+            # field. A selection the user made themselves arrives with
+            # select_all_fallback False and is left alone.
+            fallback_selection_armed = bool(result.get("select_all_fallback"))
+            # wh-review-pattern-fixes.45: the capture names the control
+            # it read the selection from. The token resolves to that
+            # control inside the Input process (a UIA control object
+            # cannot cross the process boundary); the HWND is a plain
+            # integer that can. Both go back with the replacement, and
+            # the Input process refuses to paste unless both still match
+            # a target that holds the foreground. The user can switch
+            # windows while the model runs, and this is what stops the
+            # correction from overwriting the new window's selection.
+            capture_token = result.get("capture_token")
+            capture_target_hwnd = result.get("target_hwnd")
+            replaced = False
             try:
-                # Step 3: Send to the AI (returns a ChatResult).
-                corrected = await send(ai, text)
-
-                # Step 3a: Cancellation is a distinct outcome -- do NOT probe
-                # the server or speak an error (finding wh-ay6h.6.4).
-                if corrected.status is ChatStatus.CANCELLED:
-                    await ai.speak_brief("Cancelled.")
-                    return None
-
-                if not corrected.ok:
+                # wh-review-pattern-fixes.35: copy_failed means a Ctrl+C
+                # chord short-delivered in the Input process. The
+                # selection state is UNKNOWN, not empty -- showing the
+                # no-text wording would be a false result. Abort with a
+                # copy-failure notice. The check sits inside the try so
+                # the finally still collapses a fallback-armed
+                # whole-field selection (the fallback copy can fail
+                # AFTER a verified Ctrl+A armed it).
+                if result.get("copy_failed"):
                     logger.warning(
-                        "AI text transform: not ok (status=%s)",
-                        corrected.outcome,
+                        "AI text transform: selection copy delivery "
+                        "failed; transform aborted."
                     )
-                    # MODEL_NOT_FOUND means the server responded (404 on
-                    # the model), so a reachability re-probe would only
-                    # mislead -- name the real problem instead (wh-75m).
-                    if corrected.status is ChatStatus.MODEL_NOT_FOUND:
-                        await ai.speak(
-                            "The AI server doesn't have the configured "
-                            "model. Check the model name in the AI "
-                            "settings. Original text preserved."
-                        )
-                        return None
-                    # A reasoning model that spent the whole budget on
-                    # hidden thinking also responded fine at the HTTP
-                    # level -- name the real problem
-                    # (wh-ai-reasoning-model-empty).
-                    if corrected.exhausted_reasoning:
-                        await ai.speak(
-                            "The AI model spent its whole answer budget "
-                            "on hidden reasoning and returned nothing. "
-                            "Configure a non-reasoning model. "
-                            "Original text preserved."
-                        )
-                        return None
-                    # Re-probe reachability before the 'isn't responding'
-                    # wording so a server that just recovered is not maligned
-                    # (s7 / decision 27).
-                    if not await ai.recheck_ready():
-                        await ai.speak(
-                            "The AI server isn't responding. "
-                            "Original text preserved."
-                        )
-                    else:
-                        await ai.speak(failed_message)
+                    self._notify_ai_status(
+                        "Could not copy the text. "
+                        "Original text preserved."
+                    )
                     return None
 
-                corrected_text = corrected.text
-
-                # Step 4: Check cancellation before pasting (race between the
-                # AI response arriving and a concurrent cancel_fix call).
-                if ai.cancel_requested:
-                    ai.cancel_requested = False
-                    await ai.speak_brief("Cancelled.")
+                # wh-review-pattern-fixes.38: capture_failed is the
+                # catch-all for every capture-state failure that has no
+                # more specific flag -- a failed sentinel clipboard
+                # write, a short Ctrl+A, or a swallowed exception. Each
+                # of those used to return the exact shape of a genuine
+                # empty selection, so the branch below showed the
+                # ordinary no-text message although the Input process
+                # never established whether anything was selected. Like
+                # the copy_failed check, this sits inside the try so
+                # the finally still collapses a fallback-armed
+                # whole-field selection.
+                if result.get("capture_failed"):
+                    logger.warning(
+                        "AI text transform: the selection capture "
+                        "failed; transform aborted."
+                    )
+                    self._notify_ai_status(
+                        "Could not capture the text. "
+                        "Original text preserved."
+                    )
                     return None
+
+                text = result.get("text", "")
+                logger.debug("AI text transform: captured %d chars", len(text))
+                if not text or not text.strip():
+                    self._notify_ai_status(no_text_message)
+                    return None
+
+                # Step 2: Word-count notice for large text (no time
+                # estimate -- the thin client has no local-tier basis for
+                # a seconds estimate, so the estimate_correction_time call
+                # and 'roughly N seconds' wording were dropped; design s4).
+                word_count = len(text.split())
+                if word_count > 200:
+                    self._notify_ai_status(f"About {word_count} words.")
+
+                logger.info("%s.", working_word)
+                self._send_gui_action(
+                    {
+                        "action": "show_working",
+                        "message": f"{working_word}...",
+                        "owner": owner,
+                    }
+                )
+                # wh-cancel-fix-running-rewrite: the cancel-only lane is
+                # open from the moment the request goes out until this
+                # code has decided whether to paste. While it is open the
+                # speech processor defers every word event and acts on
+                # none of them except the cancel command, so "cancel
+                # fix" spoken during the model call reaches cancel_fix
+                # instead of waiting behind this await.
+                async with self._ai_cancel_lane():
+                    # Step 3: Send to the AI (returns a ChatResult).
+                    corrected = await send(ai, text)
+
+                    # Step 3a: Cancellation is a distinct outcome -- do NOT probe
+                    # the server or show an error (finding wh-ay6h.6.4).
+                    if corrected.status is ChatStatus.CANCELLED:
+                        self._notify_ai_status("Cancelled.")
+                        return None
+
+                    if not corrected.ok:
+                        logger.warning(
+                            "AI text transform: not ok (status=%s)",
+                            corrected.outcome,
+                        )
+                        # MODEL_NOT_FOUND means the server responded (404 on
+                        # the model), so a reachability re-probe would only
+                        # mislead -- name the real problem instead (wh-75m).
+                        if corrected.status is ChatStatus.MODEL_NOT_FOUND:
+                            self._notify_ai_status(
+                                "The AI server doesn't have the configured "
+                                "model. Check the model name in the AI "
+                                "settings. Original text preserved."
+                            )
+                            return None
+                        # A reasoning model that spent the whole budget on
+                        # hidden thinking also responded fine at the HTTP
+                        # level -- name the real problem
+                        # (wh-ai-reasoning-model-empty).
+                        if corrected.exhausted_reasoning:
+                            self._notify_ai_status(
+                                "The AI model spent its whole answer budget "
+                                "on hidden reasoning and returned nothing. "
+                                "Configure a non-reasoning model. "
+                                "Original text preserved."
+                            )
+                            return None
+                        # Re-probe reachability before the 'isn't responding'
+                        # wording so a server that just recovered is not maligned
+                        # (s7 / decision 27).
+                        if not await ai.recheck_ready():
+                            self._notify_ai_status(
+                                "The AI server isn't responding. "
+                                "Original text preserved."
+                            )
+                        else:
+                            self._notify_ai_status(failed_message)
+                        return None
+
+                    corrected_text = corrected.text
+
+                    # Step 4: Check cancellation before pasting (race between the
+                    # AI response arriving and a concurrent cancel_fix call).
+                    #
+                    # crewcut: this check is the last point at which a
+                    # cancel can stop the paste, and the lane closes
+                    # here. A cancel spoken after the
+                    # replace_selected_text request below is already in
+                    # flight cannot recall it. To remove the limit the
+                    # Input process would have to accept a cancel for a
+                    # paste it has accepted but not yet delivered;
+                    # nothing in that channel does today.
+                    #
+                    # The check does not clear the flag. The finally below
+                    # clears it on every exit from this call, including
+                    # this one, so a clear here as well would be a second
+                    # clear no test could tell from the first -- and a
+                    # mutation gate cannot honestly claim to guard a line
+                    # whose removal changes nothing.
+                    if ai.cancel_requested:
+                        self._notify_ai_status("Cancelled.")
+                        return None
 
                 # Step 5: Replace with the answer via Input Process
                 if corrected_text != text:
-                    await self.speech_handler.app.send_request(
-                        "replace_selected_text", params={"text": corrected_text}
+                    # wh-overlay-slow-uia-stale-badges.7.1.8: the rule
+                    # pre-scan refused the command while a read was in
+                    # flight at parse time, but a read can also BEGIN
+                    # during the model await above. Re-check here: sent
+                    # anyway, the paste would queue behind the read in
+                    # Input's one command loop and land seconds late.
+                    # The window-handle and capture-token checks defend
+                    # the destination, not the timing, so the gate's
+                    # drop-never-queue rule applies. The answer is
+                    # discarded (the marker caps at
+                    # _READ_GATE_MAX_REFUSAL_S, so this is a bounded
+                    # race, and the status notice tells the user).
+                    paste_processor = getattr(
+                        self.speech_handler, 'speech_processor', None,
                     )
-                    await ai.speak_brief("Done.")
+                    paste_refuses = getattr(
+                        paste_processor, '_screen_read_refuses_dictation',
+                        None,
+                    )
+                    if callable(paste_refuses) and paste_refuses() is True:
+                        logger.info(
+                            "AI text transform: a screen read started "
+                            "while the model ran; the replacement is "
+                            "dropped, not queued."
+                        )
+                        self._notify_ai_status(
+                            "A screen read was in progress. Nothing was "
+                            "pasted, and your original text is unchanged."
+                        )
+                        return None
+                    replace_result = await self.speech_handler.app.send_request(
+                        "replace_selected_text",
+                        params={
+                            "text": corrected_text,
+                            "target_hwnd": capture_target_hwnd,
+                            "capture_token": capture_token,
+                        },
+                    )
+                    # wh-review-pattern-fixes.28: replace_selected_text
+                    # returns success False when the clipboard write or
+                    # the paste failed. Nothing was pasted, so the
+                    # captured text is still on screen -- report the
+                    # failure instead of reporting Done.
+                    if not replace_result or not replace_result.get("success"):
+                        # wh-review-pattern-fixes.45: focus_drift is a
+                        # distinct outcome and needs its own words. The
+                        # Input process refused because the window the
+                        # selection came from no longer holds the
+                        # foreground. It wrote no clipboard and sent no
+                        # key, and it attempted no repair, so the user's
+                        # text is exactly as they left it. Say that.
+                        if replace_result and replace_result.get(
+                            "focus_drift"
+                        ):
+                            logger.warning(
+                                "AI text transform: the captured target "
+                                "lost the foreground; nothing was pasted."
+                            )
+                            self._notify_ai_status(
+                                "The window changed while the AI worked. "
+                                "Nothing was pasted, and your original "
+                                "text is unchanged."
+                            )
+                            return None
+                        logger.warning(
+                            "AI text transform: replacement paste failed"
+                        )
+                        self._notify_ai_status(
+                            "Could not paste the corrected text. "
+                            "Original text preserved."
+                        )
+                        return None
+                    replaced = True
+                    self._notify_ai_status("Done.")
                 else:
-                    await ai.speak_brief("No changes needed.")
+                    self._notify_ai_status("No changes needed.")
             finally:
-                self._send_gui_action({"action": "hide_working"})
+                # wh-cancel-fix-running-rewrite.1.1: the lane can run
+                # cancel_fix while this call still holds the processing
+                # lock, so the flag it sets belongs to THIS call. Step 3a
+                # and the step 4 check consume it on the paths that end
+                # normally, but every not-ok exit returns without reading
+                # it -- and the one that matters awaits recheck_ready
+                # inside the lane, which is the longest window a user has
+                # to say "cancel fix". A flag left set here is consumed
+                # by AIService._transform_text BEFORE the next provider
+                # call, so the user's next rewrite would silently do
+                # nothing. ask_ai clears it on every exit for the same
+                # reason; this is that clear. cancel_fix sets the flag
+                # only while is_processing() is true, which is this same
+                # lock, so nothing later can be discarded here.
+                ai.cancel_requested = False
+                self._send_gui_action({"action": "hide_working", "owner": owner})
+                # wh-review-pattern-fixes.28: collapse the fallback-armed
+                # whole-field selection on every outcome that did not
+                # replace the captured text (no text, cancelled, AI
+                # failure, unchanged response, failed paste, exception).
+                # A successful paste consumed the selection, and a user
+                # selection never arms the flag.
+                # wh-review-pattern-fixes.32 (c): the collapse is an
+                # acknowledged request now. When the Right press was not
+                # acknowledged, the whole-field selection may still be
+                # armed and the next dictated insertion would overwrite
+                # the entire field -- do not complete silently; warn the
+                # user (the status notice is this file's convention for
+                # user-visible danger states, e.g. the failed-paste
+                # branch above).
+                if fallback_selection_armed and not replaced:
+                    collapsed = await self._collapse_fallback_selection()
+                    if not collapsed:
+                        logger.error(
+                            "AI text transform: fallback-selection "
+                            "collapse was not acknowledged; the "
+                            "whole-field selection may still be active."
+                        )
+                        self._notify_ai_status(
+                            "Warning: the text may still be selected."
+                        )
 
         return None
+
+    async def _collapse_fallback_selection(self) -> bool:
+        """Collapse the capture's Ctrl+A whole-field selection.
+
+        wh-review-pattern-fixes.28: capture_selected_text's no-selection
+        fallback selects the whole field with Ctrl+A, and the copy does
+        not collapse that selection. Press Right once. In standard
+        Windows edit controls -- Win32 EDIT and RichEdit, Qt text
+        widgets, and browser/Electron text fields -- Right collapses a
+        selection to its end without modifying the text, which is why
+        it is the cross-editor-safe choice over Escape
+        (application-defined) or a click (position-dependent).
+
+        wh-review-pattern-fixes.32 (c): the press goes through the
+        acknowledged ``press_key_verified`` request (the same
+        request/response channel capture_selected_text uses), not the
+        enqueue-only send_command channel -- send_command has no
+        response tracking and press_key_action discards the SendInput
+        count, so a dropped Right would leave the selection armed while
+        Logic believed cleanup completed. The Input handler invalidates
+        the shadow buffer, so the next dictated word re-syncs against
+        the moved caret.
+
+        Returns:
+            True only when the Input process acknowledged that the
+            Right press was fully accepted by SendInput. False on a
+            reported short send AND on a failed request (timeout, dead
+            channel) -- both leave the selection state unknown.
+        """
+        try:
+            result = await self.speech_handler.app.send_request(
+                "press_key_verified", params={"key": "right", "repeat": 1}
+            )
+        except Exception as exc:  # noqa: BLE001 -- unknown state, report False
+            logger.error(
+                "collapse_fallback_selection: press_key_verified "
+                "request failed: %s", exc,
+            )
+            return False
+        return bool(result and result.get("success"))
 
     async def cancel_fix(self):
         """Set cancellation flag. Checked between AI response and paste."""
         ai = self._get_ai_service()
         if ai and ai.is_processing():
             ai.cancel_requested = True
-            await ai.speak_brief("Cancelling.")
+            self._notify_ai_status("Cancelling.")
         return None
 
     """ async def wheelhouse_help(self, question: str = ""):
@@ -1170,7 +2491,7 @@ class ActionFunctions:
         if not gem_url:
             ai = self._get_ai_service()
             if ai:
-                await ai.speak_brief("Online help is not configured.")
+                self._notify_ai_status("Online help is not configured.")
             return None
 
         import webbrowser

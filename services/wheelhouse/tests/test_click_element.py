@@ -605,6 +605,53 @@ def test_from_dict_accepts_empty_summary_items():
     assert restored.snapshot_summary.items == []
 
 
+# The walk-time mark (wh-vscode-menu-badge-misplaced) must cross the wire. A
+# payload from a sender that predates the field has no key; it must read as
+# the default, "not suspect".
+
+
+def _summary_with_marked_item() -> WalkSnapshotSummary:
+    summary = _summary(2)
+    marked = WalkSnapshotSummaryItem(
+        item_id="m3", display_number=3, name="Exit", role="MenuItem",
+        bounds=(110, 850, 980, 87), monitor_id=0, bounds_outside_menu=True,
+    )
+    return WalkSnapshotSummary(
+        snapshot_id=summary.snapshot_id,
+        items=[*summary.items, marked],
+        created_at_monotonic=summary.created_at_monotonic,
+    )
+
+
+def test_round_trip_keeps_bounds_outside_menu():
+    original = _ok_response(snapshot_summary=_summary_with_marked_item())
+    payload = original.to_dict()
+    assert payload["snapshot_summary"]["items"][2]["bounds_outside_menu"] is True
+    restored = ClickElementResponse.from_dict(payload)
+    assert restored == original
+    assert [i.bounds_outside_menu for i in restored.snapshot_summary.items] == [
+        False, False, True,
+    ]
+
+
+def test_from_dict_missing_bounds_outside_menu_reads_false():
+    payload = _ok_response(snapshot_summary=_summary_with_marked_item()).to_dict()
+    for item in payload["snapshot_summary"]["items"]:
+        del item["bounds_outside_menu"]
+    restored = ClickElementResponse.from_dict(payload)
+    assert [i.bounds_outside_menu for i in restored.snapshot_summary.items] == [
+        False, False, False,
+    ]
+
+
+def test_from_dict_rejects_non_bool_bounds_outside_menu():
+    payload = _ok_response().to_dict()
+    payload["snapshot_summary"]["items"][0]["bounds_outside_menu"] = 1
+    with pytest.raises(ClickElementResponseSchemaError) as exc_info:
+        ClickElementResponse.from_dict(payload)
+    assert "bounds_outside_menu" in str(exc_info.value)
+
+
 def test_from_dict_rejects_summary_items_as_tuple():
     """wh-9f3t.12.2: the v5 contract types items as
     list[WalkSnapshotSummaryItem] and to_dict emits a list. A tuple is
@@ -715,6 +762,28 @@ def test_from_dict_rejects_created_at_monotonic_as_bool():
 def test_from_dict_rejects_display_number_as_bool():
     payload = _ok_response().to_dict()
     payload["snapshot_summary"]["items"][0]["display_number"] = True
+    with pytest.raises(ClickElementResponseSchemaError) as exc_info:
+        ClickElementResponse.from_dict(payload)
+    assert "display_number" in str(exc_info.value)
+
+
+def test_from_dict_rejects_zero_display_number():
+    """A real walk summary numbers its items 1..N; 0 is wire corruption.
+    Mirrors the walk_snapshot_serde lower bound so the two copies of the
+    deserializer stay consistent (wh-overlay-bubble-badges.2.1)."""
+    payload = _ok_response().to_dict()
+    payload["snapshot_summary"]["items"][0]["display_number"] = 0
+    with pytest.raises(ClickElementResponseSchemaError) as exc_info:
+        ClickElementResponse.from_dict(payload)
+    assert "display_number" in str(exc_info.value)
+
+
+def test_from_dict_rejects_negative_display_number():
+    """-1 is the overlay paint manager's INTERNAL working-badge number; a
+    wire item carrying it would draw the working hourglass instead of being
+    rejected as malformed (wh-overlay-bubble-badges.2.1)."""
+    payload = _ok_response().to_dict()
+    payload["snapshot_summary"]["items"][0]["display_number"] = -1
     with pytest.raises(ClickElementResponseSchemaError) as exc_info:
         ClickElementResponse.from_dict(payload)
     assert "display_number" in str(exc_info.value)

@@ -14,9 +14,21 @@ from adapters.base import ModelAdapter, TranscriptionResult
 from adapters.whisper_cpp_adapter import WhisperCppAdapter
 
 
+@pytest.fixture
+def mock_optional_vulkan_probe():
+    """Model-mocked unit tests do not require a manually installed backend.
+
+    Apply explicitly to the ordinary adapter tests, so warning tests and
+    the real installed-wheel canary below keep their own probe behavior.
+    """
+    with patch("adapters.whisper_cpp_adapter._vulkan_wheel_installed", return_value=True):
+        yield
+
+
 # -- Protocol Conformance --
 
 
+@pytest.mark.usefixtures("mock_optional_vulkan_probe")
 class TestProtocolConformance:
     """WhisperCppAdapter must satisfy the ModelAdapter protocol."""
 
@@ -53,6 +65,7 @@ class TestProtocolConformance:
 # -- Transcription --
 
 
+@pytest.mark.usefixtures("mock_optional_vulkan_probe")
 class TestTranscription:
     """Adapter must return proper TranscriptionResult."""
 
@@ -119,6 +132,7 @@ class TestTranscription:
 # -- Configuration --
 
 
+@pytest.mark.usefixtures("mock_optional_vulkan_probe")
 class TestConfiguration:
     """Adapter should pass configuration to whisper.cpp model."""
 
@@ -156,6 +170,7 @@ class TestConfiguration:
 # -- Reset --
 
 
+@pytest.mark.usefixtures("mock_optional_vulkan_probe")
 class TestReset:
     """Reset should be a safe no-op."""
 

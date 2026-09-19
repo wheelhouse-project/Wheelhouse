@@ -10,6 +10,15 @@ Attribution 4.0 International License
 (https://creativecommons.org/licenses/by/4.0/), in the int8 export for
 sherpa-onnx published by the k2-fsa project
 (https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models, asset
-sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2). The model is not
-redistributed in this repository; the installer downloads it from the
-k2-fsa release at install time and verifies its checksum.
+sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2). The model weights are
+not redistributed in this repository; the installer downloads them from the
+k2-fsa release at install time and verifies the checksum.
+
+One small file derived from that model IS redistributed here:
+services/stt_providers/sherpa_offline_parakeet_stt_server/model_assets/bpe.vocab,
+the model's own sentencepiece sub-word list with its merge scores,
+generated from the tokenizer inside NVIDIA's published checkpoint. It is a
+derivative of the model above, so it is redistributed under the same
+Creative Commons Attribution 4.0 International License and under the
+attribution given above. docs/vendoring/SECURITY.md records where it came
+from and how it was checked.

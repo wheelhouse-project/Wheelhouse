@@ -18,6 +18,7 @@ EVENT CATEGORIES:
 
 from dataclasses import dataclass, field
 from typing import Optional
+import itertools
 import time
 
 @dataclass
@@ -144,6 +145,9 @@ class VolumeAdjustCommand:
     """
     delta: int
 
+# Source of BrightnessAdjustCommand.command_id: 1, 2, 3, ... for the life of the process.
+_brightness_command_ids = itertools.count(1)
+
 @dataclass
 class BrightnessAdjustCommand:
     """
@@ -153,8 +157,14 @@ class BrightnessAdjustCommand:
     Consumed by BrightnessCoordinator for routing to hardware/software plugins.
     
     :param delta: Brightness change delta (positive=brighter, negative=dimmer)
+    :param command_id: Unique id of this command, increasing within the process. Set
+        automatically. BrightnessCoordinator copies it into HardwareBrightnessCommand so
+        that every plugin answer names the command it answers. An explicit None sends
+        the command untagged: BrightnessCoordinator then decides each overflow that
+        answers it on arrival.
     """
     delta: int
+    command_id: Optional[int] = field(default_factory=_brightness_command_ids.__next__)
 
 @dataclass
 class HardwareBrightnessCommand:
@@ -166,8 +176,11 @@ class HardwareBrightnessCommand:
     unwinding, preventing double-adjustment (hardware + software simultaneously).
     
     :param delta: Brightness change delta (positive=brighter, negative=dimmer)
+    :param command_id: Id of the BrightnessAdjustCommand this command carries out, or
+        None. Plugins copy it into every state and overflow event they publish for it.
     """
     delta: int
+    command_id: Optional[int] = None
 
 # ============================================================================
 # BRIGHTNESS COORDINATION EVENTS
@@ -187,12 +200,15 @@ class BrightnessStateChanged:
     :param at_max: True if at hardware maximum (100)
     :param source_plugin: Plugin name ("bravia", "laptop", etc.)
     :param timestamp: Event timestamp for debugging
+    :param command_id: Id of the HardwareBrightnessCommand this state answers, or None
+        for a state published outside a command (for example at plugin start)
     """
     level: int
     at_min: bool
     at_max: bool
     source_plugin: str
     timestamp: float = field(default_factory=time.time)
+    command_id: Optional[int] = None
 
 @dataclass  
 class BrightnessOverflowEvent:
@@ -200,7 +216,7 @@ class BrightnessOverflowEvent:
     Published when hardware can't adjust further (cascade trigger).
     
     This event signals that hardware brightness has reached its limit and
-    additional adjustment should cascade to software dimming (f.lux, overlay, etc.).
+    additional adjustment should cascade to software dimming (overlay, gamma dimmer, etc.).
     The delta indicates how much adjustment couldn't be applied.
     
     Events flow naturally - no debouncing at plugin level. BrightnessCoordinator
@@ -210,11 +226,14 @@ class BrightnessOverflowEvent:
     :param source_plugin: Plugin that hit limit ("bravia", "laptop", etc.)
     :param reason: Why overflow occurred ("at_hardware_limit", "device_offline")
     :param timestamp: Event timestamp for debugging
+    :param command_id: Id of the HardwareBrightnessCommand this overflow answers, or
+        None when unknown (BrightnessCoordinator then applies the overflow on arrival)
     """
     delta: int
     source_plugin: str
     reason: str
     timestamp: float = field(default_factory=time.time)
+    command_id: Optional[int] = None
 
 @dataclass
 class AtmosActivationRequest:
@@ -285,8 +304,13 @@ class PTTStartedEvent:
     Consumed by SystemVolumePlugin to mute system audio during PTT.
 
     :param source: Where PTT was triggered ("floating_button", "tray_icon")
+    :param hold_id: The number StateManager gave this hold. SystemVolumePlugin
+        echoes it back on PTTMuteStateEvent so a report that arrives late,
+        after the user released the button and pressed it again, can be told
+        apart from the running hold's own report (wh-ptt-audio-override.1.1).
     """
     source: str
+    hold_id: int
 
 @dataclass
 class PTTStoppedEvent:
@@ -297,6 +321,28 @@ class PTTStoppedEvent:
     :param reason: Why PTT stopped ("released", "safety_timeout")
     """
     reason: str
+
+@dataclass
+class PTTMuteStateEvent:
+    """Published by SystemVolumePlugin with the outcome of the PTT mute.
+
+    Consumed by StateManager, which lets a hold ignore audio suppression only
+    while the speakers are known to be silenced. Without this answer the hold
+    would listen over sound it never managed to mute, and transcribe it
+    (wh-ptt-audio-override).
+
+    :param muted: True when the speakers were actually turned down, False when
+        no audio device is connected or the attempt raised.
+    :param reason: Short machine-readable cause when muted is False
+        ("no_device", "error", "endpoint_unverified", "endpoint_mismatch"),
+        or "muted" on success.
+    :param hold_id: The hold this report answers, copied from the
+        PTTStartedEvent that caused the mute. StateManager ignores a report
+        whose number is not the running hold's.
+    """
+    muted: bool
+    reason: str
+    hold_id: int
 
 
 # ============================================================================

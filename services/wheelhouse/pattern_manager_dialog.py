@@ -30,8 +30,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QFrame,
 )
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt, QTimer, QRect, QSize, Signal
+from PySide6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut
 
 from speech.pattern_explainer import explain_pattern, pattern_kind
 
@@ -46,9 +46,70 @@ TRY_IT_DEBOUNCE_MS = 400
 # editor's save watchdog.
 LOAD_RESPONSE_TIMEOUT_MS = 5000
 
-_ERROR_STYLE = "color: #dc2626; font-size: 11px;"
-_OK_STYLE = "color: #15803d; font-size: 11px;"
-_MUTED_STYLE = "color: gray; font-size: 11px;"
+# No font-size here on purpose (wh-pattern-font-size): these status
+# labels sit inside the tree and try-it panes the zoom controls cover,
+# so their size must track the dialog's QFont cascade instead of a
+# pixel value pinned in the stylesheet, which would override it.
+# Hover help for an override the merge kept but could not place
+# (wh-pattern-override-doc-id A4). One wording for the list mark and
+# the detail badge: they name the same state, and the fix is the same.
+_UNRESOLVED_OVERRIDE_TIP = (
+    "[unresolved override] -- saved before patterns had names, and "
+    "more than one built-in uses this expression, so WheelHouse "
+    "cannot tell which one you meant. It still runs, but it no longer "
+    "replaces a built-in. Add doc_id to the entry in "
+    "user_patterns.toml to say which."
+)
+
+
+def _other_copies(count: int) -> tuple[str, str]:
+    """The subject phrase and matching verb for ``count`` other copies.
+
+    Removing one customization deletes one saved rule, and every other rule
+    replacing the same built-in stays. So the window may promise the built-in
+    comes back only when this is the last copy, and it has to say what remains
+    when it is not (wh-pattern-override-doc-id.3.6).
+
+    Two forms only, singular and plural. Never "customization(s)": a reader
+    has to work that out, and the count is already known here.
+    """
+    if count == 1:
+        return "One other customization", "replaces"
+    return f"{count} other customizations", "replace"
+
+
+_ERROR_STYLE = "color: #dc2626;"
+_OK_STYLE = "color: #15803d;"
+_MUTED_STYLE = "color: gray;"
+
+# Widgets the font cascade cannot reach (wh-pattern-manager-improve.1.1).
+# Qt resolves a styled widget's font ONCE, when the style sheet is
+# applied, and pins the result; a later ``setFont`` on an ancestor never
+# lands, and clearing the style sheet does not release it. Measured on
+# PySide6 6.11: with the dialog at 9pt, ``self.setFont(24)`` leaves every
+# widget below at 9pt while its unstyled siblings move to 24. So each one
+# gets the zoom size applied to it directly in ``_apply_font_size``. Two
+# rules make that stick:
+#   - none of their style sheets may name a ``font-size`` -- a style-sheet
+#     size beats the widget's own font, which is why _placeholder_label's
+#     rule is colour-only now (the three badge pills keep their 11px on
+#     purpose; see the crewcut note in _build_detail_panel);
+#   - the explicit font survives the later ``setStyleSheet`` calls
+#     _set_try_result / _show_load_error / _show_banner make, so those
+#     paths need no re-application.
+_STYLED_WIDGET_ATTRS = (
+    "_placeholder_label",
+    "_hotword_value",
+    "_tree_empty_label",
+    "_try_result_label",
+    "_hotword_error_label",
+    "_advanced_toggle",
+    "_delete_btn",
+    # No build-time style sheet, so it follows the cascade until the
+    # first banner is shown and freezes from then on. Listed for the
+    # same treatment rather than left as a latent second case.
+    "_banner_label",
+)
 
 # The reusable top banner's two looks (wh-pattern-editor-r0.7/r0.8 GUI
 # side): error for a corrupt user patterns file, warning for a save whose
@@ -61,6 +122,69 @@ _BANNER_WARNING_STYLE = (
     "background-color: #fef3c7; color: #92400e; "
     "border: 1px solid #f59e0b; border-radius: 3px; padding: 6px;"
 )
+
+# Preferred / minimum dialog size (wh-pattern-window-scaling). These are
+# the SAME numbers the dialog always used; they are no longer applied
+# unconditionally -- _clamp_dialog_size bounds them to the current
+# screen's availableGeometry before __init__ applies them, so the window
+# never opens larger than the screen it appears on.
+_PREFERRED_DIALOG_SIZE = QSize(900, 560)
+_MIN_DIALOG_SIZE = QSize(800, 500)
+
+# Font-size zoom (wh-pattern-font-size): Ctrl+=/-/0 scale every pane's
+# text together. Bounds keep the UI legible at both ends -- 7pt is the
+# smallest that stays readable on a standard-DPI display, 24pt is large
+# enough for low-vision use without the fixed-width detail-row labels
+# wrapping onto each other.
+_FONT_SIZE_MIN = 7
+_FONT_SIZE_MAX = 24
+_FONT_SIZE_STEP = 1
+# The trigger title keeps its own point size, offset above the base, so
+# it still reads as a title as the base size changes.
+_TITLE_FONT_SIZE_OFFSET = 4
+
+# Size caps that used to be fixed pixel values sized for the default font
+# (wh-pattern-manager-improve.1.4). They are floors now, not caps:
+# _apply_font_size raises each button's cap to whatever its label needs at
+# the current size (a QPushButton does not elide -- an undersized cap just
+# cuts the text off), and scales each read-only box's height with the
+# zoom so a 24pt line does not leave a one-line box.
+_CHANGE_HOTWORD_BTN_BASE_MAX_WIDTH = 90
+_HELP_BTN_BASE_MAX_WIDTH = 60
+_EXPLAIN_BASE_MAX_HEIGHT = 120
+_RAW_REGEX_BASE_MAX_HEIGHT = 60
+_RAW_ACTIONS_BASE_MAX_HEIGHT = 100
+
+
+def _clamp_dialog_size(
+    preferred: QSize, minimum: QSize, available: QRect
+) -> tuple[QSize, QSize]:
+    """Bound ``preferred``/``minimum`` to a screen's available area.
+
+    ``available`` is a ``QScreen.availableGeometry()`` rect -- already in
+    Qt LOGICAL pixels (DPI-adjusted by Qt itself), so no separate DPI
+    math belongs here; multiplying by a device-pixel-ratio would double
+    count the scaling Qt already applied. Returns ``(minimum, preferred)``
+    each clamped so neither dimension exceeds the available width/height,
+    and the clamped preferred size is never smaller than the clamped
+    minimum (so a screen smaller than the minimum still gets a usable,
+    internally consistent pair rather than an inverted one).
+    """
+    avail_w = max(available.width(), 1)
+    avail_h = max(available.height(), 1)
+
+    min_w = min(minimum.width(), avail_w)
+    min_h = min(minimum.height(), avail_h)
+
+    pref_w = min(preferred.width(), avail_w)
+    pref_h = min(preferred.height(), avail_h)
+    # Never let the clamped preferred size fall below the clamped
+    # minimum -- both are already <= avail_w/avail_h above, so raising
+    # pref to min here cannot push it back over the screen.
+    pref_w = max(pref_w, min_w)
+    pref_h = max(pref_h, min_h)
+
+    return QSize(min_w, min_h), QSize(pref_w, pref_h)
 
 
 class PatternManagerDialog(QDialog):
@@ -77,10 +201,33 @@ class PatternManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pattern Manager")
-        self.setMinimumSize(800, 500)
-        self.resize(900, 560)
+        # Standard title-bar minimize/maximize buttons (wh-pattern-window-
+        # buttons) on top of QDialog's default flags, so this window
+        # behaves like a normal resizable window instead of a fixed
+        # dialog. wh-pattern-window-voice (voice minimize/maximize)
+        # depends on these existing.
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
+        self._apply_screen_bounded_size()
         # Prevent Qt from quitting the app when this dialog closes
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+
+        # Font-size zoom baseline (wh-pattern-font-size): captured before
+        # anything changes the dialog's font, so Ctrl+0 has a real
+        # starting point to return to.
+        self._default_font_point_size = self.font().pointSize()
+        if self._default_font_point_size <= 0:
+            # crewcut: on a platform that resolves the default Qt font by
+            # pixel size rather than point size, pointSize() can report
+            # -1. Fall back to a conservative default instead of letting
+            # every zoom computation clamp against a meaningless value;
+            # revisit if a real report surfaces a platform where 9pt is
+            # visibly wrong.
+            self._default_font_point_size = 9
+        self._current_font_point_size = self._default_font_point_size
 
         # Stored state
         self._hotword = "x-ray"
@@ -96,6 +243,8 @@ class PatternManagerDialog(QDialog):
         self._editor_dialog = None
 
         self._build_ui()
+        self._setup_font_size_shortcuts()
+        self._apply_font_size()
 
         # Load watchdog (wh-pattern-editor-r0.2): a lost pm_patterns_data
         # response used to leave a permanently empty window with no error
@@ -105,6 +254,174 @@ class PatternManagerDialog(QDialog):
         self._load_timer.setSingleShot(True)
         self._load_timer.setInterval(LOAD_RESPONSE_TIMEOUT_MS)
         self._load_timer.timeout.connect(self._on_load_timeout)
+
+    def _apply_screen_bounded_size(self):
+        """Set the dialog's minimum/initial size, clamped to the current
+        screen (wh-pattern-window-scaling). Called from __init__ and
+        exposed as its own method so a resize triggered by a screen
+        change (e.g. the window dragged to a smaller monitor) could call
+        it again; today only __init__ does.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+        else:
+            # No resolvable screen (should not happen once Qt is up, but
+            # keep the dialog usable rather than raising): fall back to
+            # the preferred size acting as its own bound.
+            available = QRect(
+                0, 0,
+                _PREFERRED_DIALOG_SIZE.width(),
+                _PREFERRED_DIALOG_SIZE.height(),
+            )
+        min_size, initial_size = _clamp_dialog_size(
+            _PREFERRED_DIALOG_SIZE, _MIN_DIALOG_SIZE, available
+        )
+        self.setMinimumSize(min_size)
+        self.resize(initial_size)
+
+    # ------------------------------------------------------------------ #
+    #  Font-size zoom (wh-pattern-font-size)
+    # ------------------------------------------------------------------ #
+
+    def _setup_font_size_shortcuts(self):
+        """Wire Ctrl+= / Ctrl+- / Ctrl+0 to the zoom slots.
+
+        ``WidgetWithChildrenShortcut`` context makes each shortcut fire
+        no matter which child widget currently holds focus (the filter
+        box, the tree, the try-it box, ...), so the zoom works from
+        anywhere in the dialog, not just when the dialog itself has
+        focus.
+        """
+        self._zoom_in_shortcut = QShortcut(QKeySequence("Ctrl+="), self)
+        self._zoom_in_shortcut.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._zoom_in_shortcut.activated.connect(self._on_zoom_in)
+
+        self._zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
+        self._zoom_out_shortcut.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._zoom_out_shortcut.activated.connect(self._on_zoom_out)
+
+        self._zoom_reset_shortcut = QShortcut(QKeySequence("Ctrl+0"), self)
+        self._zoom_reset_shortcut.setContext(
+            Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._zoom_reset_shortcut.activated.connect(self._on_zoom_reset)
+
+    def _on_zoom_in(self):
+        self._set_font_point_size(
+            self._current_font_point_size + _FONT_SIZE_STEP
+        )
+
+    def _on_zoom_out(self):
+        self._set_font_point_size(
+            self._current_font_point_size - _FONT_SIZE_STEP
+        )
+
+    def _on_zoom_reset(self):
+        self._set_font_point_size(self._default_font_point_size)
+
+    def _set_font_point_size(self, point_size: int):
+        clamped = max(_FONT_SIZE_MIN, min(_FONT_SIZE_MAX, point_size))
+        if clamped == self._current_font_point_size:
+            return
+        self._current_font_point_size = clamped
+        self._apply_font_size()
+
+    def _apply_font_size(self):
+        """Push ``_current_font_point_size`` out to every pane.
+
+        The tree, the detail body labels, the try-it box, and the
+        Advanced section's explanation text all pick up the change
+        automatically through Qt's normal font-inheritance cascade
+        (``self.setFont`` propagates to any descendant that has not been
+        given its own explicit font). Three groups escape that cascade
+        and are handled one at a time here:
+
+        - The trigger title and the raw-data monospace boxes carry an
+          explicit ``QFont`` set once at build time, so they are
+          re-applied relative to the new size.
+        - Every widget in ``_STYLED_WIDGET_ATTRS`` had its font pinned
+          when its style sheet was applied (see the note there), so each
+          one takes the new size directly.
+        - The tree's bold category-header fonts are per-item, not
+          per-widget, so they are re-applied to the items that already
+          exist; ``populate()`` builds fresh ones from ``self.font()`` on
+          every later refresh (see there), so a refresh after a zoom
+          change does not revert them.
+
+        Finally the fixed size caps are re-derived from the new size, so
+        a zoomed button label is not cut off by a cap measured for the
+        default font.
+        """
+        size = self._current_font_point_size
+        base_font = self.font()
+        base_font.setPointSize(size)
+        self.setFont(base_font)
+
+        title_font = self._trigger_label.font()
+        title_font.setPointSize(size + _TITLE_FONT_SIZE_OFFSET)
+        self._trigger_label.setFont(title_font)
+
+        mono_font = self._raw_regex.font()
+        mono_font.setPointSize(size)
+        self._raw_regex.setFont(mono_font)
+        self._raw_actions.setFont(mono_font)
+
+        for attr in _STYLED_WIDGET_ATTRS:
+            widget = getattr(self, attr)
+            # Start from the widget's own font, not the dialog's, so a
+            # style sheet's other effects and any per-widget family stay
+            # as they are -- only the size changes.
+            widget_font = widget.font()
+            widget_font.setPointSize(size)
+            widget.setFont(widget_font)
+
+        self._resize_tree_category_fonts()
+        self._resize_fixed_caps()
+
+    def _resize_fixed_caps(self):
+        """Re-derive the fixed width/height caps for the current font
+        size (wh-pattern-manager-improve.1.4).
+
+        Widths: the original constant is a floor, and the real cap is
+        whatever the button's label needs at this size. Called after the
+        fonts above are in place, because ``minimumSizeHint()`` is
+        measured from the button's current font.
+
+        Heights: the three read-only boxes were sized for the default
+        font, so their caps scale with the ratio between the current size
+        and that default. They stay scrollable either way -- this keeps
+        them from collapsing to one or two visible lines at high zoom.
+        """
+        for widget, floor in (
+            (self._change_hw_btn, _CHANGE_HOTWORD_BTN_BASE_MAX_WIDTH),
+            (self._help_btn, _HELP_BTN_BASE_MAX_WIDTH),
+        ):
+            widget.setMaximumWidth(
+                max(floor, widget.minimumSizeHint().width())
+            )
+
+        scale = self._current_font_point_size / self._default_font_point_size
+        for widget, base_height in (
+            (self._explain_text, _EXPLAIN_BASE_MAX_HEIGHT),
+            (self._raw_regex, _RAW_REGEX_BASE_MAX_HEIGHT),
+            (self._raw_actions, _RAW_ACTIONS_BASE_MAX_HEIGHT),
+        ):
+            widget.setMaximumHeight(round(base_height * scale))
+
+    def _resize_tree_category_fonts(self):
+        """Re-apply the bold category-header item font at the current
+        size to every existing top-level tree item (wh-pattern-font-size).
+        """
+        bold_font = QFont(self.font())
+        bold_font.setBold(True)
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            root.child(i).setFont(0, bold_font)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -240,7 +557,7 @@ class PatternManagerDialog(QDialog):
         hotword_row.addStretch()
         change_hw_btn = QPushButton("Change...")
         self._change_hw_btn = change_hw_btn
-        change_hw_btn.setMaximumWidth(90)
+        change_hw_btn.setMaximumWidth(_CHANGE_HOTWORD_BTN_BASE_MAX_WIDTH)
         change_hw_btn.setAccessibleName("Change wake word")
         change_hw_btn.setAccessibleDescription(
             "Opens a prompt for a new wake word"
@@ -344,7 +661,7 @@ class PatternManagerDialog(QDialog):
 
         help_btn = QPushButton("? Help")
         self._help_btn = help_btn
-        help_btn.setMaximumWidth(60)
+        help_btn.setMaximumWidth(_HELP_BTN_BASE_MAX_WIDTH)
         help_btn.setAccessibleName("Pattern help")
         help_btn.setAccessibleDescription(
             "Opens the help page explaining patterns and the wake word"
@@ -369,7 +686,10 @@ class PatternManagerDialog(QDialog):
         # --- Placeholder shown when nothing is selected ---
         self._placeholder_label = QLabel("Select a pattern to view details")
         self._placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder_label.setStyleSheet("color: gray; font-size: 13px;")
+        # Colour only: a font-size here would beat the size
+        # _apply_font_size sets on this label (wh-pattern-manager-
+        # improve.1.1).
+        self._placeholder_label.setStyleSheet("color: gray;")
 
         # --- Detail content (hidden until a pattern is selected) ---
         self._detail_widget = QWidget()
@@ -385,6 +705,14 @@ class PatternManagerDialog(QDialog):
         detail_layout.addWidget(self._trigger_label)
 
         # Badges row
+        # crewcut: these three badge pills keep their own hardcoded
+        # "font-size: 11px" and do not follow the Ctrl+=/-/0 zoom
+        # (wh-pattern-font-size) -- they are small fixed-size decorative
+        # chips, not reading panes. To make them scale, add them to
+        # _STYLED_WIDGET_ATTRS and drop the "font-size: 11px" from these
+        # three rules: a style-sheet font-size beats the widget's own
+        # font, so the size has to leave the style sheet before
+        # _apply_font_size can reach these labels at all.
         self._badges_layout = QHBoxLayout()
         self._type_badge = QLabel()
         self._type_badge.setStyleSheet(
@@ -551,7 +879,7 @@ class PatternManagerDialog(QDialog):
         )
         # Tab must leave read-only panes, never get swallowed by them.
         self._explain_text.setTabChangesFocus(True)
-        self._explain_text.setMaximumHeight(120)
+        self._explain_text.setMaximumHeight(_EXPLAIN_BASE_MAX_HEIGHT)
         explain_layout.addWidget(self._explain_text)
         self._explain_group.setVisible(False)
         detail_layout.addWidget(self._explain_group)
@@ -584,7 +912,7 @@ class PatternManagerDialog(QDialog):
             "The raw regular expression this pattern matches, read-only"
         )
         self._raw_regex.setTabChangesFocus(True)
-        self._raw_regex.setMaximumHeight(60)
+        self._raw_regex.setMaximumHeight(_RAW_REGEX_BASE_MAX_HEIGHT)
         self._raw_regex.setFont(QFont("Consolas", 9))
         adv_layout.addWidget(self._raw_regex)
 
@@ -596,7 +924,7 @@ class PatternManagerDialog(QDialog):
             "The pattern's stored action steps as JSON, read-only"
         )
         self._raw_actions.setTabChangesFocus(True)
-        self._raw_actions.setMaximumHeight(100)
+        self._raw_actions.setMaximumHeight(_RAW_ACTIONS_BASE_MAX_HEIGHT)
         self._raw_actions.setFont(QFont("Consolas", 9))
         adv_layout.addWidget(self._raw_actions)
 
@@ -699,7 +1027,11 @@ class PatternManagerDialog(QDialog):
         self._tree.clear()
         self._clear_detail()
 
-        bold_font = QFont()
+        # Built from self.font(), not a bare QFont(), so a category
+        # header always matches the dialog's current zoom level
+        # (wh-pattern-font-size) even on a refresh triggered without an
+        # explicit _apply_font_size() call.
+        bold_font = QFont(self.font())
         bold_font.setBold(True)
 
         for cat_name, cat_data in categories.items():
@@ -730,6 +1062,15 @@ class PatternManagerDialog(QDialog):
                     tips.append(
                         "[overrides built-in] -- your customized copy; "
                         "it replaces the built-in pattern."
+                    )
+                elif pat.get("unresolved_override"):
+                    # wh-pattern-override-doc-id A4. Ahead of [user]
+                    # because [user] says "a pattern you created",
+                    # which is the wrong thing to tell someone whose
+                    # customization stopped replacing its built-in.
+                    label += "  [unresolved override]"
+                    tips.append(
+                        _UNRESOLVED_OVERRIDE_TIP
                     )
                 elif pat.get("is_user_created"):
                     label += "  [user]"
@@ -949,11 +1290,34 @@ class PatternManagerDialog(QDialog):
         # User badge (note when this user pattern overrides a built-in)
         is_user = pat.get("is_user_created", False)
         overrides = is_user and bool(pat.get("overrides_builtin"))
+        unresolved = is_user and bool(pat.get("unresolved_override"))
         if overrides:
             self._user_badge.setText("User (overrides built-in)")
+            # The restoration promise holds only for the LAST copy. Other
+            # saved rules replacing the same built-in keep it switched off,
+            # and deleting this one leaves them in place
+            # (wh-pattern-override-doc-id.3.6). The count stays in the hover
+            # help rather than the badge label, which names the state.
+            others = pat.get("other_claimants", 0)
+            if others:
+                subject, verb = _other_copies(others)
+                self._user_badge.setToolTip(
+                    "Your editable copy of a built-in pattern. It replaces "
+                    f"the built-in. {subject} also {verb} it. Removing this "
+                    "copy will not bring the built-in back."
+                )
+            else:
+                self._user_badge.setToolTip(
+                    "Your editable copy of a built-in pattern. It replaces "
+                    "the built-in; Remove customization restores it."
+                )
+        elif unresolved:
+            # wh-pattern-override-doc-id A4: the merge kept this entry
+            # but could not say which built-in it replaced, so neither
+            # badge above is true of it.
+            self._user_badge.setText("User (unresolved override)")
             self._user_badge.setToolTip(
-                "Your editable copy of a built-in pattern. It replaces "
-                "the built-in; Remove customization restores it."
+                _UNRESOLVED_OVERRIDE_TIP
             )
         else:
             self._user_badge.setText("User")
@@ -1094,7 +1458,10 @@ class PatternManagerDialog(QDialog):
     #  Button Slots
     # ------------------------------------------------------------------ #
 
-    def _open_editor(self, entry: dict = None, pattern_id: str = None):
+    def _open_editor(
+        self, entry: dict = None, pattern_id: str = None,
+        keep_identity: bool = False,
+    ):
         """Open the pattern editor dialog and route its traffic through us.
 
         ``entry`` prefills the editor; ``pattern_id`` with it means edit in
@@ -1103,12 +1470,33 @@ class PatternManagerDialog(QDialog):
         pm_update_pattern itself when Save is clicked and stays open on
         failure; its Logic responses arrive through handle_response above
         while ``_editor_dialog`` is set (wh-pattern-editor-dialog).
+
+        ``keep_identity`` is what finally separates Customize from
+        Duplicate, which until now opened the editor with the same call.
+        Customize passes True, so the saved copy carries the built-in's
+        doc_id and keeps overriding it when a later release rewrites the
+        built-in's expression. Duplicate passes False, because a duplicate
+        is a rule of its own: two rules claiming one built-in would fight
+        over it with the file order deciding the winner
+        (wh-pattern-override-doc-id A2). Edit passes False as well, and it
+        is not the flag that decides an edit: the editor carries the id
+        whenever it is editing in place, because ``pattern_id`` alone says
+        so. It needs the id for its try-it preview, which has no file to
+        read; the save reads the id from the block on disk, which is what
+        stops an edit moving a rule onto a different built-in
+        (wh-pattern-override-doc-id.2.2).
         """
         from create_pattern_dialog import CreatePatternDialog
 
         dialog = CreatePatternDialog(
-            self._hotword, parent=self, entry=entry, pattern_id=pattern_id
+            self._hotword, parent=self, entry=entry, pattern_id=pattern_id,
+            keep_identity=keep_identity,
         )
+        # The editor is one of the Pattern Manager's zoomable panes
+        # (wh-pattern-font-size): a QDialog opened with a parent is still
+        # its own top-level window, so it does not inherit our font
+        # automatically -- it must be applied explicitly.
+        dialog.setFont(self.font())
         dialog.pattern_action.connect(self.pattern_action)
         self._editor_dialog = dialog
         try:
@@ -1137,7 +1525,11 @@ class PatternManagerDialog(QDialog):
         self._open_editor(entry=pat, pattern_id=pat.get("id"))
 
     def _on_duplicate_clicked(self):
-        """Open the editor prefilled from the selection; saves as new."""
+        """Open the editor prefilled from the selection; saves as new.
+
+        Deliberately NOT keep_identity: a duplicate is a new rule, and a
+        second rule carrying the original's doc_id would claim the same
+        built-in (wh-pattern-override-doc-id A2)."""
         pat = self._selected_pattern
         if not pat:
             return
@@ -1145,11 +1537,16 @@ class PatternManagerDialog(QDialog):
 
     def _on_customize_clicked(self):
         """Open the editor prefilled from a built-in; saving creates the
-        same-trigger user copy that overrides it (plain create semantics)."""
+        same-trigger user copy that overrides it (plain create semantics).
+
+        The copy carries the built-in's doc_id, which is what keeps it
+        overriding that built-in after a release rewrites the built-in's
+        expression (wh-pattern-override-doc-id A2). This is the only
+        caller that passes keep_identity=True."""
         pat = self._selected_pattern
         if not pat or pat.get("is_user_created"):
             return
-        self._open_editor(entry=pat)
+        self._open_editor(entry=pat, keep_identity=True)
 
     def _on_remove_customization_clicked(self):
         """Delete the user copy that overrides a built-in, after confirming."""
@@ -1157,11 +1554,24 @@ class PatternManagerDialog(QDialog):
         if not pat or not pat.get("overrides_builtin"):
             return
         trigger = pat.get("trigger_display", "???")
+        # Only the last copy's removal brings the built-in back. Deleting
+        # this one leaves every other rule replacing the same built-in in
+        # place, so the person has to be told before they agree
+        # (wh-pattern-override-doc-id.3.6). Nothing else is deleted to make
+        # the older sentence true: the catalog keeps those rows on purpose.
+        others = pat.get("other_claimants", 0)
+        if others:
+            subject, verb = _other_copies(others)
+            outcome = (
+                f"{subject} still {verb} the built-in. "
+                "It will not take over again."
+            )
+        else:
+            outcome = "The built-in pattern takes over again."
         reply = QMessageBox.question(
             self,
             "Remove Customization",
-            f'Remove your customized copy of "{trigger}"?\n\n'
-            "The built-in pattern takes over again.",
+            f'Remove your customized copy of "{trigger}"?\n\n' + outcome,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -1244,6 +1654,9 @@ class PatternManagerDialog(QDialog):
         from pattern_help_dialog import PatternHelpDialog
 
         dlg = PatternHelpDialog(parent=self)
+        # The help window is a zoomable pane too (wh-pattern-font-size);
+        # see _open_editor for why this must be explicit.
+        dlg.setFont(self.font())
         dlg.exec()
 
     def _on_advanced_toggled(self, checked: bool):

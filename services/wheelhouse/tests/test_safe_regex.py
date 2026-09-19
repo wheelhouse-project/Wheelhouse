@@ -14,6 +14,7 @@ warmed at creation so that cost is never charged against a caller's match
 timeout. The pathological tests are deliberately few (each pays a timeout
 plus a pool respawn) to keep the suite fast.
 """
+import inspect
 import re
 import time
 
@@ -29,10 +30,11 @@ PATHOLOGICAL_TEXT = "a" * 30 + "!"
 # Generous budget for matches that must SUCCEED. These tests verify pool
 # lifecycle and result contents, not the production latency budget: on a
 # loaded shared CI runner a healthy worker round-trip can exceed the
-# 0.25 s production default (public CI run 29591822010 failed exactly
-# this way), and a spurious RegexTimeout turns a lifecycle test into a
+# production default (public CI run 29591822010 failed exactly this way
+# against the old 0.25 s value, which is why wh-safe-regex-budget raised
+# it to 1 s), and a spurious RegexTimeout turns a lifecycle test into a
 # flake. Timeout behavior itself is covered by TestTimeout, whose
-# pathological matches keep the tight default on purpose.
+# pathological matches keep the production default on purpose.
 HEALTHY_TIMEOUT = 5.0
 
 
@@ -43,6 +45,20 @@ def _shutdown_pool_after_module():
 
 
 class TestMatchBounded:
+    def test_default_timeout_is_one_second(self):
+        # wh-safe-regex-budget: David ruled on 2026-09-03
+        # (QUESTIONS-2026-09-02.md item 40, answer "option two") that the
+        # bounded-regex budget rises from 0.25 s to 1 s. The old value was
+        # tight enough that a healthy pattern's worker round-trip could exceed
+        # it on a slow or heavily loaded machine and be reported to the user as
+        # pathological; that happened on a shared CI runner, public run
+        # 29591822010. Both production callers -- the Pattern Manager's
+        # backtracking probe and the pattern tester -- take this default rather
+        # than passing a budget of their own, so this signature is the whole
+        # contract.
+        default = inspect.signature(match_bounded).parameters["timeout"].default
+        assert default == 1.0
+
     def test_match_round_trips_groups_and_groupdict(self):
         result = match_bounded(
             r"^(\w+) (?P<rest>.+)$", "hello there world",
@@ -161,7 +177,7 @@ class TestFailureRecovery:
         # must discard the pool instead of leaving _pool referencing a
         # possibly broken one; the next call recreates it and works.
         safe_regex.shutdown()
-        # HEALTHY_TIMEOUT, not the 0.25 s production default: the pool was
+        # HEALTHY_TIMEOUT, not the production default: the pool was
         # just shut down, so this call pays a real worker spawn, and on a
         # slow CI runner the default deadline can expire during the spawn --
         # RegexTimeout then preempts the expected re.error (public CI run

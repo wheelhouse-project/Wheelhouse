@@ -9,9 +9,12 @@ Designed for NeMo Parakeet TDT models via sherpa-onnx.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
+import struct
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -36,58 +39,334 @@ _add_onnxruntime_dll_directory()
 import numpy as np
 import sherpa_onnx
 
+from shared_stt.transcript_rules import apply_itn, normalize_transcript
+
 logger = logging.getLogger(__name__)
 
-
-# Time-reformat rule: Parakeet emits dotted-period AM/PM forms like
-# "It is 8.17 p.m."; after the punctuation pass collapses "p.m." to "pm",
-# this rule reshapes "8.17 pm" into "8:17 PM". The trailing \b keeps
-# words that merely start with am/pm out of the rule ("0.75 amps" must
-# not become "0:75 AMps" -- wh-251rh.1.2, same hole as the whisper
-# engine's copy of the rule). The leading \b keeps longer digit runs
-# from partially rewriting ("123.45 am" must not become "1" +
-# "23:45 AM" -- wh-251rh.3).
-_TIME_PERIOD = re.compile(
-    r'\b(\d{1,2})\.(\d{2})\s*(am|pm)\b',
-    re.IGNORECASE,
-)
-
-# Canonicalize "am" / "pm" next to an HH:MM time to uppercase AM / PM.
-_AMPM_UPPERCASE = re.compile(r'(\d{1,2}:\d{2}\s+)(am|pm)\b', re.IGNORECASE)
-
-# Phone-number hyphenation. A 10-digit block surrounded by word
-# boundaries becomes NNN-NNN-NNNN. Parakeet emits the flat form for
-# some voices ("7035551234") and the hyphenated form for others
-# ("703-555-1234"), so this rule normalizes to the more readable
-# written form. \b on both ends prevents matching 11-digit country-
-# code blocks ("17035551234") or 9-digit ZIP+4 strings.
-#
-# Known false-positive surface: a genuinely non-phone 10-digit number
-# in dictation (e.g., a 10-digit ID) will be hyphenated. This is rare
-# in practice; users who need to dictate non-phone digit runs can
-# pronounce them in smaller groups.
-_HYPHENATE_PHONE = re.compile(r'\b(\d{3})(\d{3})(\d{4})\b')
-
-# wh-parakeet-xray-hotword: a deliberate pause between the syllables of
-# "x-ray" makes Parakeet emit two words (measured raw form: "X, Ray
-# Boost"), which breaks the Logic-side wake-word match -- the wake word
-# must arrive as ONE word. Rejoin the single letter x + the word "ray"
-# into the standard English spelling, keeping the x's case. Runs after
-# the punctuation pass, which has already collapsed "X, Ray" to "X Ray".
-# The \b on both ends keeps longer words out ("Max ray", "x raymond").
-_XRAY_JOIN = re.compile(r'\b([Xx])\s+[Rr]ay\b')
+# The sentencepiece vocabulary sherpa needs to turn a written hotword into
+# the model's own tokens. It sits beside the ONNX files in the model
+# directory and is NOT tokens.txt (wh-parakeet-hotword-vocab).
+BPE_VOCAB_FILENAME = "bpe.vocab"
 
 
-def _time_replace(match: re.Match) -> str:
-    # wh-251rh.3.1: only values that read as a real 12-hour clock time may
-    # rewrite ("0.75 am" / "13.99 pm" are measurements, not times). Same
-    # validation as the whisper engine's copy.
-    hour = match.group(1)
-    minutes = match.group(2)
-    if not (1 <= int(hour) <= 12 and 0 <= int(minutes) <= 59):
-        return match.group(0)
-    ampm = match.group(3).upper()
-    return f"{hour}:{minutes} {ampm}"
+@dataclass(frozen=True)
+class HotwordsStatus:
+    """What actually happened to hint boosting at load time.
+
+    'requested' means the caller asked for hotwords. 'active' means the
+    recognizer was built with them. The two differ whenever the
+    vocabulary or the hotwords file could not be used, and the caller
+    needs that difference to avoid telling the user that boosting is on
+    when it is off."""
+
+    requested: bool = False
+    active: bool = False
+    detail: str = ""
+
+
+# What a C++ stream extraction skips over: the whitespace of the C
+# locale, and nothing else. Python's own str.split also separates on
+# U+00A0, U+2028 and the rest of the Unicode whitespace set, which the
+# loader reads as ordinary bytes inside a token
+# (wh-parakeet-hotword-vocab.2.3).
+_LOADER_WHITESPACE = " \t\n\v\f\r"
+
+
+def _loader_items(line: str) -> list[str]:
+    """The items `stream >> item` would read out of one vocabulary line."""
+    items: list[str] = []
+    current: list[str] = []
+    for character in line:
+        if character in _LOADER_WHITESPACE:
+            if current:
+                items.append("".join(current))
+                current = []
+        else:
+            current.append(character)
+    if current:
+        items.append("".join(current))
+    return items
+
+
+def _loader_text(path: Path) -> str:
+    """The text sherpa's loaders read out of this file.
+
+    Both loaders open the file as a text stream (std::ifstream with no
+    ios::binary), and on Windows the C runtime ends a text-mode file at
+    the first 0x1A byte, so nothing after it reaches std::getline. Read
+    whole, a marker a text tool appended after the last row was a token
+    with no score, and a vocabulary the loader accepts lost boosting;
+    a marker inside a piece cut the loader's copy of that row to a token
+    with no score, which ended the provider, while the row read whole
+    here had both (wh-parakeet-hotword-vocab.2.8, measured against the
+    real model). The cut comes before decoding, because bytes after the
+    marker never reach the loader whether or not they are UTF-8.
+
+    Text mode also turns \\r\\n into \\n, which changes nothing here:
+    _loader_items drops a \\r at the end of a line as whitespace, which
+    is what both loaders do with one that reaches them. The bytes are
+    decoded here rather than read with read_text, because read_text
+    turns a lone \\r into a \\n and that changes the verdict: the row
+    'piece\\r\\t-2.5' is one good line to the loader, which treats the
+    \\r as whitespace inside the line, and arrived as two broken ones
+    (wh-parakeet-hotword-vocab.2.4, measured against the real model)."""
+    data = path.read_bytes()
+    if os.name == "nt":
+        data = data.split(b"\x1a", 1)[0]
+    return data.decode("utf-8")
+
+
+def _loader_lines(text: str) -> list[str]:
+    """The lines std::getline reads out of a file's text.
+
+    A line ends at a newline and at nothing else, and the empty remainder
+    after a final newline is not a line. str.splitlines also ends one at
+    \\v, \\f, \\x1c-\\x1e, U+0085, U+2028 and U+2029, which the loader
+    reads as ordinary bytes inside a token (wh-parakeet-hotword-vocab.2.3
+    for the vocabulary, .2.6 for tokens.txt). A \\r that ends a line in a
+    CRLF file survives into the line here and is dropped by _loader_items,
+    which is what the loader does with it."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def read_token_pieces(path: Path) -> list[str]:
+    """The token column of tokens.txt, read the way sherpa reads it.
+
+    sherpa loads tokens.txt through SymbolTable::ReadTokens: std::getline
+    ends a line at a newline, the line is trimmed of C whitespace, and
+    `stream >> item` reads the token and then the id, on C whitespace.
+    A line holding one item is the space symbol, whose id is that item.
+    str.splitlines and str.rsplit(None, 1) read Unicode instead: they
+    ended a line at U+2028 and separated a token from its id at U+00A0,
+    so a token the loader keeps whole came out of here in fragments,
+    a vocabulary made of such tokens was refused as built for another
+    model, and a hint holding such a character was dropped as outside
+    the model (wh-parakeet-hotword-vocab.2.6, measured against the real
+    model: the loader builds the recognizer from a tokens.txt whose
+    token holds U+2028 or U+0085, or ends in U+00A0).
+
+    The loader ends the provider on a line with more than two items,
+    and the NeMo transducer's own line count ends it on a blank one, so
+    no file with either can start the provider whatever this reads out
+    of it; both are read as the loader reads them before it stops. The
+    file is read only as far as the loader reads it (_loader_text), so
+    a line after a text-mode end of file is not a line here either."""
+    pieces: list[str] = []
+    for line in _loader_lines(_loader_text(path)):
+        items = _loader_items(line)
+        pieces.append(items[0] if len(items) >= 2 else " ")
+    return pieces
+
+
+# The number sherpa's vocabulary loader collects for a score: a sign,
+# digits with at most one point, an exponent with digits. ASCII digits
+# only: \d would also match the Unicode digits float() accepts.
+_SCORE_SYNTAX = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+
+def _loader_score(value_text: str) -> float | None:
+    """The score sherpa's vocabulary loader reads from this item, or None
+    when that loader cannot read one and ends the provider.
+
+    The loader reads the score with `stream >> float`: it collects an
+    ASCII number, converts it with strtof, and refuses the item when
+    nothing was collected or the conversion overflowed or underflowed
+    to zero. float() reads more than that: nan and inf in any spelling,
+    Unicode digits, Unicode whitespace, a digit-group underscore, and
+    any magnitude a double holds. Each of those passed here and ended
+    the provider (wh-parakeet-hotword-vocab.2.7, measured against the
+    real model: nan, inf, -1e40, -3.4028236e38, -1e999, -1e-50, a
+    Unicode digit, a leading U+00A0 and an exponent holding a Unicode
+    digit all end it; -3.4028235e38, which rounds to the largest
+    float32, -1e-40, a float32 denormal, and the smallest normal
+    float32 all load).
+
+    The range is the float32 range after rounding, taken from the
+    packed value rather than from constants, so that the boundary is
+    the one the C library's own rounding produces. The rounding here
+    goes through a double first, which can differ from strtof's direct
+    rounding only for a number written to about seventeen significant
+    digits that lands within half a double step of a float32 boundary;
+    sentencepiece writes far fewer digits than that.
+
+    The digit-group underscore is refused although the loader reads
+    -1 out of -1_000 and runs on: that is the safe direction the
+    docstring of bpe_vocab_rejection_reason records for '-2.5x'."""
+    if _SCORE_SYNTAX.fullmatch(value_text) is None:
+        return None
+    value = float(value_text)
+    try:
+        as_float32 = struct.unpack("<f", struct.pack("<f", value))[0]
+    except OverflowError:
+        return None
+    if math.isinf(as_float32):
+        return None
+    mantissa = re.split("[eE]", value_text, maxsplit=1)[0]
+    if as_float32 == 0.0 and mantissa.strip("+-.0"):
+        return None
+    return value
+
+
+def hotwords_file_rejection_reason(hotwords_path: Path) -> str | None:
+    """Why this hotwords file cannot be used, or None when it can be.
+
+    sherpa reads the file itself, so this only asks whether it is there.
+    The question is asked inside a try because Path.exists calls stat and
+    pathlib re-raises a stat failure that is not a missing-path error: a
+    file the account cannot stat raised out of startup and killed the
+    provider, where an unusable hotwords file should only turn boosting
+    off with a reason (wh-parakeet-hotword-vocab.2.5)."""
+    try:
+        if not hotwords_path.exists():
+            return f"the hotwords file is missing: {hotwords_path}"
+    except OSError as e:
+        return f"the hotwords file could not be read: {e}"
+    return None
+
+
+def bpe_vocab_rejection_reason(vocab_path: Path, tokens_path: Path) -> str | None:
+    """Why this vocabulary cannot be used, or None when it can be.
+
+    sherpa's own contract for the bpe_vocab argument, from the installed
+    package: "The vocabulary generated by google's sentencepiece program.
+    It is a file has two columns, one is the token, the other is the log
+    probability." tokens.txt has two columns as well, but its second
+    column is an integer id, so it passes a shape check and still
+    produces wrong tokenization. The score test below is what separates
+    them, and it rests on one property: a usable vocabulary carries at
+    least one value that is written negative or is not whole, and a
+    column of ids carries none.
+
+    The shape test is stricter than that contract, because the native
+    loader behind the argument is stricter: it reads every physical
+    line and ends the process on one it cannot read as a token and a
+    score. It reads a line and its items the way that loader does,
+    with C whitespace over bytes rather than Python's Unicode split,
+    so that it refuses what the loader refuses and accepts what the
+    loader accepts (wh-parakeet-hotword-vocab.2.3).
+
+    The score test reads each item the way that loader reads a float
+    (_loader_score): an ASCII number within float32 range. float()
+    alone accepted nan, inf, Unicode digits and any magnitude, and the
+    loader ended the provider on every one of them
+    (wh-parakeet-hotword-vocab.2.7).
+
+    One difference is left in place, in the safe direction. A C++
+    stream reads a score as far as it parses, so it takes -2.5 out of
+    '-2.5x' and -1 out of '-1_000'; _loader_score refuses both whole
+    items. A file like that loses boosting and keeps a reason, where
+    the loader would run on with a score it read out of half an item.
+    sentencepiece writes plain floats, so no file it generates reaches
+    the difference."""
+    try:
+        # One read answers both questions, and asking Path.exists first
+        # could not: it calls stat, and pathlib re-raises a stat failure
+        # that is not a missing-path error, so a vocabulary the account
+        # cannot read ended startup instead of turning boosting off
+        # (wh-parakeet-hotword-vocab.2.5, measured on Python 3.12.10).
+        text = _loader_text(vocab_path)
+    except FileNotFoundError:
+        return f"the vocabulary file is missing: {vocab_path}"
+    except (OSError, UnicodeDecodeError) as e:
+        return f"the vocabulary file could not be read: {e}"
+
+    # Split into lines the way std::getline does; _loader_lines says why
+    # str.splitlines cannot (wh-parakeet-hotword-vocab.2.3).
+    raw_lines = _loader_lines(text)
+    if not any(line.strip() for line in raw_lines):
+        return f"the vocabulary file is empty: {vocab_path}"
+
+    pieces: list[str] = []
+    every_value_is_an_id = True
+    for index, line in enumerate(raw_lines):
+        # sherpa hands this file to simple-sentencepiece, which reads
+        # every physical line and then requires one token and one score
+        # out of it, separated by whitespace. On a line it cannot read
+        # that way it ends the process; it does not raise, so no except
+        # around the recognizer can turn that into degraded boosting
+        # (wh-parakeet-hotword-vocab.2.2, measured against the real
+        # model). Blank lines therefore count, and so does a piece with
+        # a space or a tab inside it: splitting on the last tab used to
+        # keep such a piece whole and read the score after it, which
+        # passed every check here and still ended the provider.
+        #
+        # The loader reads two items and ignores whatever follows them,
+        # so a third column is not a reason to refuse a file: doing so
+        # turned boosting off for a vocabulary the loader accepts
+        # (wh-parakeet-hotword-vocab.2.3, measured against the real
+        # model).
+        items = _loader_items(line)
+        if not items:
+            return (
+                f"line {index + 1} is blank, and sherpa's vocabulary "
+                f"loader ends the provider on a line it cannot read as "
+                f"a token and a score"
+            )
+        if len(items) < 2:
+            return (
+                f"line {index + 1} carries no score after its token, "
+                f"because nothing on it is separated by the whitespace "
+                f"sherpa's vocabulary loader reads, so that loader "
+                f"would end the provider on it"
+            )
+        piece, value_text = items[0], items[1]
+        value = _loader_score(value_text)
+        if value is None:
+            return (
+                f"line {index + 1} has '{value_text}' where a sentencepiece "
+                f"score belongs, and sherpa's vocabulary loader would end "
+                f"the provider on it"
+            )
+        pieces.append(piece)
+        # A token id is a whole number of zero or more, and an id column
+        # never carries a minus sign. A score column carries at least one
+        # value that is not one of those -- negative, fractional, or
+        # both. Reading the column this way, rather than comparing each
+        # value with its line number, rejects tokens.txt whatever base
+        # its ids start from and whatever order the lines are in
+        # (wh-parakeet-hotword-vocab.1.1).
+        #
+        # The sign has to come from the text. float("-0") is -0.0, which
+        # is whole and is not less than zero, so a score written -0 looks
+        # exactly like the id 0 to the number alone
+        # (wh-parakeet-hotword-vocab.2.1). Reading the sign from the text
+        # also makes a numeric `value >= 0` test redundant, because the
+        # only way float() returns a negative number is a written minus.
+        written_negative = value_text.strip().startswith("-")
+        if every_value_is_an_id and (
+            written_negative or not value.is_integer()
+        ):
+            every_value_is_an_id = False
+
+    if every_value_is_an_id:
+        return (
+            "every value in the second column is a whole number of zero or "
+            "more, so this file holds token ids rather than sentencepiece "
+            "scores; tokens.txt is not a vocabulary"
+        )
+
+    try:
+        model_pieces = set(read_token_pieces(tokens_path))
+    except (OSError, UnicodeDecodeError) as e:
+        return f"the model's tokens.txt could not be read: {e}"
+    if model_pieces:
+        shared = sum(1 for piece in pieces if piece in model_pieces)
+        # crewcut: half is a deliberately loose floor, chosen without a
+        # real bpe.vocab to measure against. It separates a vocabulary
+        # built for another language or another tokenizer from this
+        # model's own, and it cannot prove the scores came from this
+        # model's tokenizer. Once the real file exists, compare it with
+        # tokens.txt and tighten this to the relationship the two
+        # actually have.
+        if shared * 2 < len(pieces):
+            return (
+                f"only {shared} of its {len(pieces)} tokens belong to this "
+                f"model, so the vocabulary was built for another model"
+            )
+    return None
 
 
 class SherpaOfflineEngine:
@@ -101,6 +380,9 @@ class SherpaOfflineEngine:
     Models with external weights (encoder.weights) require loading from the
     model directory.
     """
+
+    #: Set by _load_model on every path, so a caller can always read it.
+    hotwords_status: HotwordsStatus
 
     def __init__(
         self,
@@ -187,23 +469,45 @@ class SherpaOfflineEngine:
         orig_cwd = os.getcwd()
 
         # Hotwords biasing (wh-afhfj). Contract from the wh-q3nrw spike:
-        # plain-text hotwords work only with modeling_unit='bpe' AND
-        # bpe_vocab=tokens.txt (omitting bpe_vocab access-violates sherpa
-        # natively), and greedy_search silently ignores hotwords_file, so
-        # enabling hotwords forces modified_beam_search.
+        # plain-text hotwords work only with modeling_unit='bpe' AND a
+        # bpe_vocab (omitting bpe_vocab access-violates sherpa natively),
+        # and greedy_search silently ignores hotwords_file, so enabling
+        # hotwords forces modified_beam_search.
+        #
+        # wh-parakeet-hotword-vocab: that spike passed tokens.txt as the
+        # bpe_vocab. tokens.txt is the model's id table, not a
+        # sentencepiece vocabulary, so every hotword was tokenized
+        # wrongly. The real file is bpe.vocab beside the ONNX files, and
+        # it is checked before use: an unusable vocabulary drops boosting
+        # instead of biasing on nonsense, and the caller can read
+        # hotwords_status to tell the user the truth.
+        bpe_vocab = model_dir / BPE_VOCAB_FILENAME
         hotwords_kwargs = {}
-        if hotwords_file:
-            if Path(hotwords_file).exists():
+        if not hotwords_file:
+            self.hotwords_status = HotwordsStatus()
+        else:
+            reason = hotwords_file_rejection_reason(Path(hotwords_file))
+            if reason is None:
+                reason = bpe_vocab_rejection_reason(bpe_vocab, tokens)
+            if reason is None:
                 hotwords_kwargs = {
                     "hotwords_file": hotwords_file,
                     "hotwords_score": hotwords_score,
                     "modeling_unit": "bpe",
-                    "bpe_vocab": str(tokens),
+                    "bpe_vocab": str(bpe_vocab),
                     "decoding_method": "modified_beam_search",
                 }
+                self.hotwords_status = HotwordsStatus(
+                    requested=True, active=True
+                )
+                logger.info(f"Hotwords initialized from {bpe_vocab}")
             else:
+                self.hotwords_status = HotwordsStatus(
+                    requested=True, active=False, detail=reason
+                )
                 logger.warning(
-                    f"Hotwords file not found, constructing without hotwords: {hotwords_file}"
+                    "Hotwords requested but not initialized; continuing "
+                    f"without boosting: {reason}"
                 )
 
         try:
@@ -224,10 +528,17 @@ class SherpaOfflineEngine:
                 model_type="nemo_transducer",
                 **hotwords_kwargs,
             )
+            status = self.hotwords_status
+            if status.active:
+                hotwords_state = "on"
+            elif status.requested:
+                hotwords_state = f"requested but off ({status.detail})"
+            else:
+                hotwords_state = "off"
             logger.info(
                 f"Sherpa-ONNX recognizer loaded: {model_dir.name} "
                 f"(provider={provider}, feature_dim=128, external_weights={has_external_weights}, "
-                f"hotwords={'on' if hotwords_kwargs else 'off'})"
+                f"hotwords={hotwords_state})"
             )
         finally:
             if has_external_weights:
@@ -339,7 +650,12 @@ class SherpaOfflineEngine:
         self._samples_since_last_inference = 0
 
         text = self._recognize(audio)
-        text = self._normalize_text(text)
+        # normalize_transcript first, apply_itn second: normalization
+        # strips punctuation and collapses "p.m." to "pm", which is the
+        # shape the ITN clock rule reads. Parakeet already emits digits,
+        # so apply_itn also has to leave existing numerals alone
+        # (wh-shared-itn-parakeet).
+        text = apply_itn(normalize_transcript(text))
         current_words = text.split() if text else []
 
         self._update_stability(current_words)
@@ -350,7 +666,8 @@ class SherpaOfflineEngine:
         audio = np.concatenate(self._audio_buffer)
 
         text = self._recognize(audio)
-        text = self._normalize_text(text)
+        # Same stage order as _run_inference above.
+        text = apply_itn(normalize_transcript(text))
         current_words = text.split() if text else []
 
         if current_words:
@@ -373,58 +690,3 @@ class SherpaOfflineEngine:
                 self._confirmed_words = current_words[:lcp_len]
 
         self._prev_words = current_words
-
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        """Normalize transcription output for WheelHouse.
-
-        - Convert spelled-out letter sequences (V-O-X -> vox)
-        - Remove punctuation (except periods between digits and colons in times)
-        - Rejoin a split "x ray" / "X, Ray" into "x-ray" (wake word arrives
-          as one word -- wh-parakeet-xray-hotword)
-        - Dotted-period time form: '8.17 p.m.' -> '8:17 PM'
-        - AM/PM uppercase beside an HH:MM time
-        - Phone-number hyphenation: '7035551234' -> '703-555-1234'
-        - Lowercase first character
-        - Always capitalize pronoun 'I'
-        """
-        if not text:
-            return ""
-
-        # Convert spelled-out words (3+ letters).
-        text = re.sub(
-            r'\b([A-Za-z](?:-[A-Za-z]){2,})\b',
-            lambda m: m.group(0).replace('-', '').lower(),
-            text,
-        )
-
-        # Remove punctuation FIRST so the time rules see bare "am"/"pm"
-        # instead of the dotted forms "a.m." / "p.m." that Parakeet can
-        # emit. Keeps periods between digits (preserves "8.17" decimal
-        # time form) and colons between digits (preserves HH:MM that a
-        # time rule already produced).
-        text = re.sub(r'(?<!\d)\.|\.(?!\d)|(?<!\d):|:(?!\d)|[,!?;]', '', text)
-
-        # Rejoin a split "x ray" into "x-ray" (wh-parakeet-xray-hotword).
-        text = _XRAY_JOIN.sub(lambda m: m.group(1) + '-ray', text)
-
-        # Time-reformat rule: operates on text with dotted AM/PM already
-        # collapsed to bare am/pm by the punctuation pass.
-        text = _TIME_PERIOD.sub(_time_replace, text)
-
-        # Uppercase am/pm when anchored to an HH:MM time.
-        text = _AMPM_UPPERCASE.sub(
-            lambda m: m.group(1) + m.group(2).upper(), text
-        )
-
-        # Hyphenate 10-digit blocks as phone numbers.
-        text = _HYPHENATE_PHONE.sub(r'\1-\2-\3', text)
-
-        # Lowercase first character
-        if text:
-            text = text[0].lower() + text[1:]
-
-        # Always capitalize 'I' and contractions
-        text = re.sub(r'\bi\b', 'I', text)
-
-        return text

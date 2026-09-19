@@ -271,7 +271,8 @@ class InternalPanelPlugin(BasePlugin):
                 current = await self._display_control.get_brightness()
                 if current is None:
                     logger.warning("Cannot read current brightness - device may be offline")
-                    await self._publish_overflow_event(event.delta, "device_offline")
+                    await self._publish_overflow_event(
+                        event.delta, "device_offline", command_id=event.command_id)
                     return
                 self._current_brightness = current
             
@@ -286,8 +287,9 @@ class InternalPanelPlugin(BasePlugin):
                 overflow_delta = target  # Negative value = remaining dimming needed
                 await self._display_control.set_brightness(0)
                 self._current_brightness = 0
-                await self._publish_brightness_state()
-                await self._publish_overflow_event(overflow_delta, "at_hardware_limit")
+                await self._publish_brightness_state(command_id=event.command_id)
+                await self._publish_overflow_event(
+                    overflow_delta, "at_hardware_limit", command_id=event.command_id)
                 logger.debug(f"Hardware at minimum (0%), overflow cascade: {overflow_delta}")
                 return
             
@@ -296,8 +298,9 @@ class InternalPanelPlugin(BasePlugin):
                 overflow_delta = target - 100  # Positive value = remaining brightening needed
                 await self._display_control.set_brightness(100)
                 self._current_brightness = 100
-                await self._publish_brightness_state()
-                await self._publish_overflow_event(overflow_delta, "at_hardware_limit")
+                await self._publish_brightness_state(command_id=event.command_id)
+                await self._publish_overflow_event(
+                    overflow_delta, "at_hardware_limit", command_id=event.command_id)
                 logger.debug(f"Hardware at maximum (100%), overflow cascade: {overflow_delta}")
                 return
             
@@ -305,7 +308,7 @@ class InternalPanelPlugin(BasePlugin):
             success = await self._display_control.set_brightness(target)
             if success:
                 self._current_brightness = target
-                await self._publish_brightness_state()
+                await self._publish_brightness_state(command_id=event.command_id)
                 logger.debug(f"Adjusted internal panel brightness to {target}%")
             else:
                 logger.warning(f"Failed to set internal panel brightness to {target}%")
@@ -315,12 +318,16 @@ class InternalPanelPlugin(BasePlugin):
             logger.error(f"Error handling brightness command: {e}", exc_info=True)
             self._last_error = str(e)
     
-    async def _publish_brightness_state(self) -> None:
+    async def _publish_brightness_state(self, command_id: Optional[int] = None) -> None:
         """Publish current brightness state for coordinator awareness.
         
         Publishes BrightnessStateChanged event with current level and limit flags.
         This enables the BrightnessCoordinator to make fast decisions during
         overflow cascade scenarios.
+
+        Args:
+            command_id: Id of the HardwareBrightnessCommand this state answers,
+                or None for a state published outside a command (start-up)
         """
         if not self._event_bus or self._current_brightness is None:
             return
@@ -331,23 +338,27 @@ class InternalPanelPlugin(BasePlugin):
                 at_min=(self._current_brightness == 0),
                 at_max=(self._current_brightness == 100),
                 source_plugin=self.name,
-                timestamp=time.time()
+                timestamp=time.time(),
+                command_id=command_id
             ))
             logger.debug(f"Published brightness state: {self._current_brightness}%")
             
         except Exception as e:
             logger.error(f"Failed to publish brightness state: {e}")
     
-    async def _publish_overflow_event(self, delta: int, reason: str) -> None:
+    async def _publish_overflow_event(
+        self, delta: int, reason: str, command_id: Optional[int] = None
+    ) -> None:
         """Publish brightness overflow event for cascade to software dimming.
         
         Publishes BrightnessOverflowEvent when hardware cannot handle the full
         adjustment, signaling the BrightnessCoordinator to cascade to software
-        dimming methods (f.lux, overlay, etc.).
+        dimming methods (overlay, gamma dimmer, etc.).
         
         Args:
             delta: Remaining adjustment that couldn't be applied by hardware
             reason: Why overflow occurred ("at_hardware_limit", "device_offline")
+            command_id: Id of the HardwareBrightnessCommand this overflow answers
         """
         if not self._event_bus:
             return
@@ -357,7 +368,8 @@ class InternalPanelPlugin(BasePlugin):
                 delta=delta,
                 source_plugin=self.name,
                 reason=reason,
-                timestamp=time.time()
+                timestamp=time.time(),
+                command_id=command_id
             ))
             logger.debug(f"Published overflow event: delta={delta}, reason={reason}")
             

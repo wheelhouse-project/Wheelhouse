@@ -260,8 +260,7 @@ class TestLifecycle:
         propagated so the root cause is not silently discarded by a secondary
         teardown failure.
 
-        Also covers wh-ay6h.22.8 (speech.shutdown() still called when close()
-        raises) and wh-ay6h.22.10 (cleanup exceptions are logged at WARNING,
+        Also covers wh-ay6h.22.10 (cleanup exceptions are logged at WARNING,
         not chained onto the re-raised bg-task exception).
         """
         service = AIService(ai_config)
@@ -284,10 +283,6 @@ class TestLifecycle:
         # Simulate cleanup failure in provider.close()
         mock_provider.close = AsyncMock(side_effect=RuntimeError("teardown failed"))
 
-        # Mock speech so we can assert shutdown() is still called (wh-ay6h.22.8).
-        mock_speech = MagicMock()
-        mock_speech.shutdown = AsyncMock()
-        service._speech = mock_speech
 
         # The bg-task BaseException must propagate, not the cleanup RuntimeError.
         with pytest.raises(_SentinelError, match="bg task failed"):
@@ -300,10 +295,6 @@ class TestLifecycle:
         assert service._bg_tasks == []
         assert service._provider is None
         mock_provider.close.assert_called_once()
-
-        # wh-ay6h.22.8: speech.shutdown() must be called even when
-        # provider.close() raised -- skipping it leaks the TTS executor.
-        mock_speech.shutdown.assert_called_once()
 
         # wh-ay6h.22.10: cleanup exceptions are swallowed and logged, not
         # chained. provider.close() is wrapped in except Exception (best-effort
@@ -333,9 +324,6 @@ class TestLifecycle:
             """Test-only BaseException sentinel (unload_model failure)."""
 
         mock_provider.unload_model = AsyncMock(side_effect=_UnloadInterrupt("interrupted"))
-        mock_speech = MagicMock()
-        mock_speech.shutdown = AsyncMock()
-        service._speech = mock_speech
 
         with pytest.raises(_UnloadInterrupt, match="interrupted"):
             await service.stop()
@@ -344,8 +332,6 @@ class TestLifecycle:
         # provider session is not leaked.
         mock_provider.close.assert_called_once()
         assert service._provider is None
-        # speech.shutdown() still ran (outer finally).
-        mock_speech.shutdown.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_stop_calls_close_after_unload_model_raises(
@@ -361,9 +347,6 @@ class TestLifecycle:
         service._provider = mock_provider
 
         mock_provider.unload_model = AsyncMock(side_effect=RuntimeError("unload failed"))
-        mock_speech = MagicMock()
-        mock_speech.shutdown = AsyncMock()
-        service._speech = mock_speech
 
         # A normal Exception from unload_model() is swallowed and logged; stop()
         # completes without raising.

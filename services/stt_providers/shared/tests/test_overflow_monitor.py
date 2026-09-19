@@ -124,7 +124,12 @@ def test_first_summary_logs_even_near_monotonic_zero(caplog, monkeypatch):
 
 
 def test_triggering_restart_still_logged_at_info(caplog, monkeypatch):
-    """The rare 'restart triggered' line stays at INFO and is not suppressed."""
+    """The rare restart-request line stays at INFO and is not suppressed.
+
+    The wording changed under wh-stt-load-metrics.3: the line states the
+    measurement and the request, never a restart the provider may not
+    perform. Its level and its once-per-trip frequency did not change.
+    """
     monitor = OverflowMonitor(
         OverflowConfig(overflow_threshold=5, restart_cooldown_seconds=60.0)
     )
@@ -138,9 +143,10 @@ def test_triggering_restart_still_logged_at_info(caplog, monkeypatch):
 
     triggering = [
         r for r in caplog.records
-        if r.levelno == logging.INFO and "TRIGGERING RESTART" in r.getMessage()
+        if r.levelno == logging.INFO
+        and "restart requested" in r.getMessage()
     ]
-    assert len(triggering) == 1, "restart trigger must remain visible at INFO"
+    assert len(triggering) == 1, "restart request must remain visible at INFO"
 
 
 def test_summary_reaches_handler_on_module_logger(monkeypatch):

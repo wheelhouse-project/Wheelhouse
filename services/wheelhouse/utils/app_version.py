@@ -3,12 +3,14 @@
 There are two places the version can be read from and no single place that
 works in both a source checkout and a build:
 
-- In a source checkout the release process writes it to the ``VERSION`` file
-  at the top of the repository. That file is three directories above this
-  module and is not part of what a build bundles.
-- A build has it stamped into the executable's own version resource by
-  PyInstaller, which is where Windows reads it from for the file properties
-  dialog.
+- Source checkouts and installed releases read ``VERSION`` at the root of
+  the application tree. The release exporter includes it in the source ZIP;
+  the Inno Setup installer extracts that ZIP and runs the app with Python.
+- A frozen application would instead need its own executable version
+  resource. This is a fallback for frozen applications, not the current
+  release pipeline: the installer executable's version is not the app's
+  Python executable version. The old application PyInstaller spec is pruned
+  from the release export.
 
 So this asks whichever question fits the way the program is running, and
 answers ``"unknown"`` rather than raising if neither can be answered. Nothing

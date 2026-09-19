@@ -55,6 +55,7 @@ class FakeUser32:
         cursor_sequence: Optional[list[tuple[int, int]]] = None,
         cursor_ok_sequence: Optional[list[bool]] = None,
         up_return: Optional[int] = None,
+        up_raises: bool = False,
         blockinput_return: int = 1,
     ) -> None:
         self._cursor = cursor
@@ -71,6 +72,9 @@ class FakeUser32:
         # the stuck-button-logging path (wh-review-click-overlay-glm52.1). The
         # 1-event MOVE batch is unaffected -- it is told apart by its flags.
         self._up_return = up_return
+        # When True the compensating LEFTUP batch RAISES instead of returning
+        # short, driving the wh-mouse-grid.1.8 exception path.
+        self._up_raises = up_raises
         # Ordered record of BlockInput(flag) calls: 1 = block, 0 = release.
         self.blockinput_calls: list[int] = []
         # Ordered log of BlockInput / SendInput calls so a test can assert the
@@ -134,20 +138,21 @@ class FakeUser32:
                 }
             )
         self.sendinput_batches.append(batch)
-        # A 2-event batch is the click; a 1-event batch is either the MOVE or
-        # the compensating LEFTUP, told apart by its flags.
-        is_click_batch = num == 2
+        # A multi-event batch is the click (two events per click, so a double
+        # click is four); a 1-event batch is either the MOVE or the
+        # compensating release, told apart by its flags.
+        is_click_batch = num >= 2
         if is_click_batch and self._sendinput_raises_on_click:
             raise OSError("SendInput failed at the platform boundary")
         if is_click_batch:
             return self._click_return
-        # A scripted return for the compensating LEFTUP only (not the MOVE).
-        if (
-            self._up_return is not None
-            and num == 1
-            and (batch[0]["flags"] & wis.MOUSEEVENTF_LEFTUP)
-        ):
-            return self._up_return
+        # A scripted raise/return for the compensating LEFTUP only (not the
+        # MOVE).
+        if num == 1 and (batch[0]["flags"] & wis.MOUSEEVENTF_LEFTUP):
+            if self._up_raises:
+                raise OSError("SendInput failed at the platform boundary")
+            if self._up_return is not None:
+                return self._up_return
         return num  # MOVE batch accepts its single event
 
 
@@ -172,10 +177,11 @@ def test_happy_path_normalizes_flags_and_returns_true_2(patch_user32):
         FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=2)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is True
     assert events_sent == 2
+    assert reason is None
     # Two SendInput batches: the MOVE (1 event) then the click (2 events).
     assert len(fake.sendinput_batches) == 2
     move_batch, click_batch = fake.sendinput_batches
@@ -216,7 +222,7 @@ def test_cursor_did_not_land_fails_closed_no_click(patch_user32):
         FakeUser32(cursor=(50, 60), cursor_ok=True, click_return=2)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 0
@@ -241,7 +247,7 @@ def test_stale_first_read_then_landed_retries_then_clicks(patch_user32):
         )
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is True
     assert events_sent == 2
@@ -261,7 +267,7 @@ def test_exhausted_stale_reads_fail_closed_polls_every_attempt(patch_user32):
         FakeUser32(cursor=(50, 60), cursor_ok=True, click_return=2)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 0
@@ -278,7 +284,7 @@ def test_cursor_within_tolerance_still_clicks(patch_user32):
         FakeUser32(cursor=(962, 542), cursor_ok=True, click_return=2)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is True
     assert events_sent == 2
@@ -295,7 +301,7 @@ def test_getcursorpos_failure_fails_closed(patch_user32):
         FakeUser32(cursor=(960, 540), cursor_ok=False, click_return=2)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 0
@@ -318,7 +324,7 @@ def test_getcursorpos_transient_failure_retries_then_succeeds(patch_user32):
         )
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is True
     assert events_sent == 2
@@ -343,14 +349,37 @@ def test_compensating_up_failure_is_logged(patch_user32, caplog):
     )
 
     with caplog.at_level(logging.ERROR, logger="utils.win_input_sender"):
-        success, events_sent = wis.click_at(960, 540)
+        success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 1
+    # wh-mouse-grid.1.5: the refused compensation is a DISTINCT reason, so
+    # the executor can tell "button may be held" apart from a plain short
+    # send instead of collapsing both to sendinput_short.
+    assert reason == "release_failed"
     # The compensating LEFTUP was still attempted (MOVE, click, up).
     assert len(fake.sendinput_batches) == 3
     text = caplog.text.lower()
     assert "compensating" in text and "stuck" in text
+
+
+def test_compensating_up_raise_still_reports_release_failed(patch_user32):
+    # wh-mouse-grid.1.8: the click batch accepts only the LEFTDOWN and the
+    # compensating LEFTUP RAISES instead of returning short. The button may
+    # still be held; the raise must not reset the result to (False, 0, None)
+    # -- that would both drop the stuck-button warning and let the executor
+    # treat 0 events as safe for the no-input fallback.
+    patch_user32(
+        FakeUser32(
+            cursor=(960, 540), cursor_ok=True, click_return=1, up_raises=True
+        )
+    )
+
+    success, events_sent, reason = wis.click_at(960, 540)
+
+    assert success is False
+    assert events_sent == 1
+    assert reason == "release_failed"
 
 
 def test_short_click_send_is_success_false_events_1(patch_user32):
@@ -363,10 +392,13 @@ def test_short_click_send_is_success_false_events_1(patch_user32):
         FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=1)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 1
+    # The compensation SUCCEEDED, so the button is not held and no
+    # release_failed is reported.
+    assert reason is None
     # MOVE, the short click batch, THEN a compensating LEFTUP.
     assert len(fake.sendinput_batches) == 3
     comp = fake.sendinput_batches[2]
@@ -388,7 +420,7 @@ def test_zero_click_send_sends_no_compensating_up(patch_user32):
         FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=0)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 0
@@ -406,7 +438,7 @@ def test_sendinput_raises_fails_soft(patch_user32):
         )
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 0
@@ -426,7 +458,7 @@ def test_degenerate_virtual_desktop_pins_axis_to_zero(patch_user32):
         FakeUser32(cursor=(960, 540), cursor_ok=True, metrics=metrics)
     )
 
-    success, _events = wis.click_at(960, 540)
+    success, _events, _reason = wis.click_at(960, 540)
 
     assert success is True
     move = fake.sendinput_batches[0][0]
@@ -450,7 +482,7 @@ def test_blockinput_wraps_move_and_click_and_releases(patch_user32):
         FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=2)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is True
     assert events_sent == 2
@@ -470,7 +502,7 @@ def test_blockinput_released_when_cursor_never_lands(patch_user32):
         FakeUser32(cursor=(50, 60), cursor_ok=True, click_return=2)
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 0
@@ -491,7 +523,7 @@ def test_blockinput_released_when_sendinput_raises(patch_user32):
         )
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is False
     assert events_sent == 0
@@ -512,7 +544,7 @@ def test_outer_retry_relands_after_first_attempt_misses(patch_user32):
         )
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is True
     assert events_sent == 2
@@ -536,9 +568,112 @@ def test_blockinput_ignored_still_clicks_best_effort(patch_user32):
         )
     )
 
-    success, events_sent = wis.click_at(960, 540)
+    success, events_sent, reason = wis.click_at(960, 540)
 
     assert success is True
     assert events_sent == 2
     assert fake.blockinput_calls == [1]            # attempted once, no release
     assert fake.call_log == [("block", 1), ("send", 1), ("send", 2)]
+
+
+# ---------------------------------------------------------------------------
+# Gesture parameters (wh-click-gesture-param): right button and click count.
+# ---------------------------------------------------------------------------
+
+
+def test_right_button_sends_right_down_up(patch_user32):
+    fake = patch_user32(
+        FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=2)
+    )
+
+    success, events_sent, reason = wis.click_at(960, 540, button="right")
+
+    assert success is True
+    assert events_sent == 2
+    move_batch, click_batch = fake.sendinput_batches
+    assert len(move_batch) == 1
+    down, up = click_batch
+    assert down["flags"] == (
+        wis.MOUSEEVENTF_RIGHTDOWN
+        | wis.MOUSEEVENTF_ABSOLUTE
+        | wis.MOUSEEVENTF_VIRTUALDESK
+    )
+    assert up["flags"] == (
+        wis.MOUSEEVENTF_RIGHTUP
+        | wis.MOUSEEVENTF_ABSOLUTE
+        | wis.MOUSEEVENTF_VIRTUALDESK
+    )
+
+
+def test_double_click_sends_two_down_up_pairs_in_one_batch(patch_user32):
+    # Both pairs go out in ONE SendInput batch so nothing can slip between them
+    # and break the double-click interval.
+    fake = patch_user32(
+        FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=4)
+    )
+
+    success, events_sent, reason = wis.click_at(960, 540, click_count=2)
+
+    assert success is True
+    assert events_sent == 4
+    move_batch, click_batch = fake.sendinput_batches
+    assert len(move_batch) == 1
+    assert len(click_batch) == 4
+    down_flags = (
+        wis.MOUSEEVENTF_LEFTDOWN
+        | wis.MOUSEEVENTF_ABSOLUTE
+        | wis.MOUSEEVENTF_VIRTUALDESK
+    )
+    up_flags = (
+        wis.MOUSEEVENTF_LEFTUP
+        | wis.MOUSEEVENTF_ABSOLUTE
+        | wis.MOUSEEVENTF_VIRTUALDESK
+    )
+    assert [ev["flags"] for ev in click_batch] == [
+        down_flags, up_flags, down_flags, up_flags,
+    ]
+    # Every event lands on the same verified point.
+    assert all(ev["dx"] == 32768 and ev["dy"] == 32768 for ev in click_batch)
+
+
+def test_partial_double_click_releases_the_button(patch_user32):
+    # Three of four events accepted leaves the second LEFTDOWN unpaired, so a
+    # compensating release must go out -- the same stuck-button protection the
+    # single click has, generalized to an odd accepted count.
+    fake = patch_user32(
+        FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=3)
+    )
+
+    success, events_sent, reason = wis.click_at(960, 540, click_count=2)
+
+    assert success is False
+    assert events_sent == 3
+    # MOVE, the 4-event click batch, then the compensating 1-event LEFTUP.
+    assert len(fake.sendinput_batches) == 3
+    comp = fake.sendinput_batches[2]
+    assert len(comp) == 1
+    assert comp[0]["flags"] & wis.MOUSEEVENTF_LEFTUP
+
+
+def test_unknown_button_fails_closed_without_sending(patch_user32):
+    fake = patch_user32(
+        FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=2)
+    )
+
+    success, events_sent, reason = wis.click_at(960, 540, button="middle")
+
+    assert success is False
+    assert events_sent == 0
+    assert fake.sendinput_batches == []
+
+
+def test_non_positive_click_count_fails_closed_without_sending(patch_user32):
+    fake = patch_user32(
+        FakeUser32(cursor=(960, 540), cursor_ok=True, click_return=2)
+    )
+
+    success, events_sent, reason = wis.click_at(960, 540, click_count=0)
+
+    assert success is False
+    assert events_sent == 0
+    assert fake.sendinput_batches == []

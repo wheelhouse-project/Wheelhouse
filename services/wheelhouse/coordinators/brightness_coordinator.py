@@ -3,8 +3,8 @@
 This module provides the BrightnessCoordinator, which acts as the central
 orchestrator for multi-stage brightness control. It implements a cascading
 system where hardware controls (Sony Bravia TV) are used first, and when
-hardware reaches its limits, software dimming (f.lux, overlay dimmer, or
-gamma dimming) takes over for extended brightness range.
+hardware reaches its limits, software dimming (overlay dimmer or gamma
+dimming) takes over for extended brightness range.
 
 Architecture:
   - Event-driven: Subscribes to brightness commands and plugin state events
@@ -20,7 +20,7 @@ Architecture:
 
 1. Store references to config_service and event_bus
 2. Load configuration:
-   - brightness_coordinator.software_dimmer (flux|software_dimmer|gamma_dimmer)
+   - brightness_coordinator.software_dimmer (software_dimmer|overlay|gamma_dimmer, default gamma_dimmer)
    - brightness_coordinator.unwinding_threshold (default 10)
 3. Initialize state tracking:
    - _plugin_states: Cache of hardware plugin brightness states
@@ -90,9 +90,12 @@ Architecture:
 
 1. Validate overflow event:
    - Check reason (at_hardware_limit, device_offline)
-   - Validate delta direction matches state (at_min for dimming, at_max for brightening)
+   - at_hardware_limit: validate delta direction matches state (at_min for dimming, at_max for brightening)
+   - device_offline: no direction check; dimming engages software, brightening raises an active software level
+   - One command id gets at most one software step; its device_offline overflows wait until every plugin
+     has answered and are dropped when a plugin applied the step in hardware
 2. Check software dimmer availability:
-   - Load configured dimmer (flux, software_dimmer, gamma_dimmer)
+   - Load configured dimmer (software_dimmer, overlay, gamma_dimmer)
    - If not available: Log warning, ignore overflow
 3. Engage software dimmer:
    - If first overflow: Initialize software dimmer level to 100
@@ -172,12 +175,10 @@ Architecture:
 
 **Exit:** Coordinator stopped, EventBus clean, software dimming disabled
 """
-import asyncio
 import logging
-from typing import TYPE_CHECKING, Dict, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from enum import Enum
-
-from utils.win_input_sender import press_keys
 
 from services.wheelhouse.events import (
     BrightnessAdjustCommand,
@@ -201,13 +202,28 @@ class CoordinatorState(Enum):
     STOPPED = "stopped"     # Coordinator not running
 
 
+@dataclass
+class _CommandRecord:
+    """The plugin answers to one HardwareBrightnessCommand while its publish is running.
+
+    :param software_step_applied: True once a software step ran for this command
+    :param held_offline_overflows: device_offline overflows kept until every plugin answered
+    :param state_plugins: Plugins that sent a state event tagged with this command
+    :param overflow_plugins: Plugins that sent an overflow event tagged with this command
+    """
+    software_step_applied: bool = False
+    held_offline_overflows: List[BrightnessOverflowEvent] = field(default_factory=list)
+    state_plugins: Set[str] = field(default_factory=set)
+    overflow_plugins: Set[str] = field(default_factory=set)
+
+
 class BrightnessCoordinator:
     """
     Orchestrates multi-stage brightness control across hardware and software dimmers.
     
     This coordinator implements a cascading brightness system where hardware controls
     (Sony Bravia TV) are used first, and when hardware reaches its limits, software
-    dimming (f.lux, overlay dimmer, or gamma dimming) takes over for extended range.
+    dimming (overlay dimmer or gamma dimming) takes over for extended range.
     
     The coordinator is event-driven, subscribing to brightness commands from input
     handlers (MouseHandler) and state events from hardware plugins (BraviaPlugin).
@@ -237,19 +253,26 @@ class BrightnessCoordinator:
         config = self._config_service.get_config()
         coordinator_config = config.get("brightness_coordinator", {})
         
-        self._software_dimmer_type: str = coordinator_config.get("software_dimmer", "flux")
+        self._software_dimmer_type: str = coordinator_config.get("software_dimmer", "gamma_dimmer")
+        if self._software_dimmer_type not in ("software_dimmer", "overlay", "gamma_dimmer"):
+            # An unrecognised value gets the default dimmer. This is the one
+            # WARNING per start; service_manager builds GammaDimmer silently.
+            logger.warning(
+                f"brightness_coordinator.software_dimmer = {self._software_dimmer_type!r} "
+                "is not a recognised value; "
+                "accepted values are software_dimmer, overlay, gamma_dimmer. "
+                "Using gamma_dimmer."
+            )
+            self._software_dimmer_type = "gamma_dimmer"
         self._unwinding_threshold: int = coordinator_config.get("unwinding_threshold", 10)
-        
-        # Load f.lux configuration settings
-        self._flux_transition_percent: int = coordinator_config.get("flux_transition_percent", 100)
-        self._flux_dim_hotkey: list = coordinator_config.get("flux_dim_hotkey", ["alt", "pagedown"])
-        self._flux_brighten_hotkey: list = coordinator_config.get("flux_brighten_hotkey", ["alt", "pageup"])
-        
+
         # State tracking
         self._plugin_states: Dict[str, Dict] = {}  # {plugin_name: {level, at_min, at_max}}
         self._software_dimmer_level: int = 100  # 100 = no dimming, 0 = max dimming
         self._is_software_active: bool = False
         self._state: CoordinatorState = CoordinatorState.STOPPED
+        # Records of hardware commands whose publish has not returned, by command id
+        self._open_commands: Dict[int, _CommandRecord] = {}
         
         logger.info(
             f"BrightnessCoordinator initialized (software_dimmer={self._software_dimmer_type}, "
@@ -266,7 +289,7 @@ class BrightnessCoordinator:
         logger.info("Starting BrightnessCoordinator...")
         
         # Initialize software dimmer to 100% (no dimming) to establish known state
-        # This ensures coordinator's internal tracking matches actual f.lux level
+        # This ensures coordinator's internal tracking matches the actual dimmer level
         if self._software_dimmer:
             logger.debug("Initializing software dimmer to 100% (no dimming)")
             self._software_dimmer.set_brightness(100)
@@ -332,13 +355,13 @@ class BrightnessCoordinator:
         
         if self._state == CoordinatorState.IDLE:
             # Hardware-only mode: publish HardwareBrightnessCommand for plugins
-            await self._route_to_hardware(delta)
+            await self._route_to_hardware(delta, command_id=event.command_id)
             
         elif self._state == CoordinatorState.CASCADED:
             # Software dimmer engaged: handle unwinding logic
-            await self._handle_unwinding(delta)
+            await self._handle_unwinding(delta, command_id=event.command_id)
     
-    async def _route_to_hardware(self, delta: int) -> None:
+    async def _route_to_hardware(self, delta: int, command_id: Optional[int] = None) -> None:
         """
         Route brightness command to hardware plugins.
         
@@ -354,12 +377,57 @@ class BrightnessCoordinator:
         
         Args:
             delta: Brightness adjustment delta
+            command_id: Id of the BrightnessAdjustCommand being carried out, or None.
+                With an id, a record of the plugin answers is open while the publish
+                runs. EventBus.publish returns only after every plugin handler has
+                finished, so the device_offline overflows held in the record are
+                decided after every plugin has answered.
         """
-        event = HardwareBrightnessCommand(delta=delta)
-        await self._event_bus.publish(event)
+        event = HardwareBrightnessCommand(delta=delta, command_id=command_id)
+        if command_id is None:
+            await self._event_bus.publish(event)
+            logger.debug(f"Routed to hardware: delta={delta:+d}")
+            return
+
+        record = _CommandRecord()
+        self._open_commands[command_id] = record
+        try:
+            await self._event_bus.publish(event)
+        finally:
+            self._open_commands.pop(command_id, None)
         logger.debug(f"Routed to hardware: delta={delta:+d}")
+        await self._settle_held_offline_overflows(command_id, record)
     
-    async def _handle_unwinding(self, delta: int) -> None:
+    async def _settle_held_offline_overflows(self, command_id: int, record: _CommandRecord) -> None:
+        """
+        Decide the device_offline overflows held for one command after every plugin answered.
+
+        At most one software step runs, with the first held overflow's delta, and only
+        when no software step ran for the command and no plugin applied the command in
+        hardware (a tagged state event and no tagged overflow from that plugin).
+
+        Args:
+            command_id: Id of the command whose publish has returned
+            record: The closed record of that command
+        """
+        if not record.held_offline_overflows:
+            return
+        if record.software_step_applied:
+            logger.debug(
+                f"Dropping device_offline overflow for command {command_id}: "
+                f"a software step already ran for this command"
+            )
+            return
+        applied_in_hardware = record.state_plugins - record.overflow_plugins
+        if applied_in_hardware:
+            logger.debug(
+                f"Dropping device_offline overflow for command {command_id}: "
+                f"applied in hardware by {sorted(applied_in_hardware)}"
+            )
+            return
+        await self._apply_device_offline_step(record.held_offline_overflows[0].delta)
+
+    async def _handle_unwinding(self, delta: int, command_id: Optional[int] = None) -> None:
         """
         Handle unwinding logic when software dimmer is active.
         
@@ -377,6 +445,7 @@ class BrightnessCoordinator:
         
         Args:
             delta: Brightness adjustment delta (-100 to 100)
+            command_id: Id of the BrightnessAdjustCommand being carried out, or None
         """
         if delta < 0:
             # Dimming: apply to software dimmer only (hardware stays at minimum)
@@ -392,22 +461,23 @@ class BrightnessCoordinator:
                 
             else:
                 # Software dimmer fully restored (100%) - transition back to hardware
+                # Only the part of the step that software did not absorb goes to hardware.
+                remaining = delta - (100 - self._software_dimmer_level)
                 
-                # Disengage software dimmer (only touch overlay if not using f.lux)
+                # Disengage software dimmer
                 if self._software_dimmer_type in ("software_dimmer", "overlay", "gamma_dimmer") and self._software_dimmer:
                     self._software_dimmer.set_brightness(100)  # Remove dimming (100% brightness)
                     logger.info("Software dimming (overlay) fully restored, returning to hardware")
-                elif self._software_dimmer_type == "flux":
-                    logger.info("Software dimming (f.lux) fully restored, returning to hardware")
-                
+
                 self._is_software_active = False
                 self._software_dimmer_level = 100
                 self._state = CoordinatorState.IDLE
                 
-                # Now route the current brightening command to hardware
-                # (Hardware was at minimum, now it can start brightening)
-                await self._route_to_hardware(delta)
-                logger.debug(f"Transitioned to IDLE, routed delta={delta:+d} to hardware")
+                # Hardware never received the steps software absorbed, so it gets the
+                # remainder only (wh-bravia-offline-fallback.1.2)
+                if remaining > 0:
+                    await self._route_to_hardware(remaining, command_id=command_id)
+                logger.debug(f"Transitioned to IDLE, routed remaining delta={remaining:+d} to hardware")
     
     async def _adjust_software_dimmer(self, delta: int) -> None:
         """
@@ -421,32 +491,7 @@ class BrightnessCoordinator:
         new_level = max(0, min(100, self._software_dimmer_level + delta))
         
         # Apply adjustment based on configured dimmer type
-        if self._software_dimmer_type == "flux":
-            # f.lux hotkey integration using configured hotkeys, sent through
-            # the app's own SendInput path. (Formerly pyautogui.hotkey;
-            # pyautogui's win32 install dependency MouseInfo is GPLv3 and
-            # cannot ship in the Apache-2.0 release. press_keys has no
-            # mouse-corner fail-safe, so no FAILSAFE juggling is needed.)
-            # Calculate presses needed based on configured transition percent
-            # flux_transition_percent represents the % change per keypress (e.g., 2 means 2% per press)
-            # For a 1% change with 2% per press: 1 // 2 = 0, so we need at least 1 press
-            level_change = abs(new_level - old_level)
-            presses = max(1, level_change // self._flux_transition_percent)
-
-            # Use configured hotkeys (dim for decrease, brighten for increase)
-            hotkey = self._flux_dim_hotkey if delta < 0 else self._flux_brighten_hotkey
-
-            for _ in range(presses):
-                await asyncio.to_thread(press_keys, *hotkey)
-                await asyncio.sleep(0.05)  # Small delay between presses
-
-            self._software_dimmer_level = new_level
-            logger.debug(
-                f"f.lux adjusted: {old_level} → {new_level} "
-                f"(delta={delta:+d}, {presses} keypresses using {hotkey})"
-            )
-        
-        elif self._software_dimmer_type in ("software_dimmer", "overlay", "gamma_dimmer"):
+        if self._software_dimmer_type in ("software_dimmer", "overlay", "gamma_dimmer"):
             # SoftwareDimmer overlay integration
             if not self._software_dimmer:
                 logger.warning("Software dimmer overlay not available, ignoring adjustment")
@@ -490,6 +535,12 @@ class BrightnessCoordinator:
             "timestamp": event.timestamp
         }
         
+        # A state event tagged with an open command is this plugin's answer to that command
+        record = (self._open_commands.get(event.command_id)
+                  if event.command_id is not None else None)
+        if record is not None:
+            record.state_plugins.add(plugin_name)
+        
         # Log important state transitions
         if event.at_min:
             logger.debug(f"Hardware plugin '{plugin_name}' at minimum brightness")
@@ -511,6 +562,11 @@ class BrightnessCoordinator:
         to provide extended brightness range. The coordinator transitions from
         IDLE to CASCADED state.
         
+        An overflow tagged with the id of an open command counts toward that
+        command: at_hardware_limit applies on arrival at most once per command,
+        and device_offline is held until every plugin has answered (see
+        _route_to_hardware). An overflow with no open command applies on arrival.
+        
         Args:
             event: BrightnessOverflowEvent from hardware plugin
         """
@@ -521,9 +577,16 @@ class BrightnessCoordinator:
         logger.info(
             f"Brightness overflow from '{plugin_name}': delta={delta:+d}, reason={reason}"
         )
+
+        # The record of the command this overflow answers; None for an untagged
+        # overflow or for a command whose publish has already returned
+        record = (self._open_commands.get(event.command_id)
+                  if event.command_id is not None else None)
+        if record is not None:
+            record.overflow_plugins.add(plugin_name)
         
-        # Check if software dimmer available (f.lux doesn't need the overlay object)
-        if self._software_dimmer_type not in ("flux", "software_dimmer", "overlay", "gamma_dimmer"):
+        # Check if software dimmer available
+        if self._software_dimmer_type not in ("software_dimmer", "overlay", "gamma_dimmer"):
             logger.warning(
                 f"Unknown software dimmer type '{self._software_dimmer_type}', cannot cascade overflow"
             )
@@ -535,23 +598,75 @@ class BrightnessCoordinator:
             )
             return
         
-        # Validate overflow direction
-        plugin_state = self._plugin_states.get(plugin_name, {})
-        at_min = plugin_state.get("at_min", False)
-        at_max = plugin_state.get("at_max", False)
-        
-        if delta < 0 and not at_min:
-            logger.warning(f"Overflow event for dimming but plugin not at minimum")
+        if reason == "device_offline":
+            if record is not None:
+                # Another plugin may still apply this command in hardware, so the
+                # decision waits until every plugin has answered (_route_to_hardware).
+                record.held_offline_overflows.append(event)
+                logger.debug(
+                    f"Holding device_offline overflow from '{plugin_name}' for command "
+                    f"{event.command_id} until every plugin has answered"
+                )
+                return
+            await self._apply_device_offline_step(delta)
             return
-        if delta > 0 and not at_max:
-            logger.warning(f"Overflow event for brightening but plugin not at maximum")
-            return
-        
-        # Only cascade for DIMMING overflow (trying to go below 0%)
-        # Brightening past 100% is a no-op - hardware is already at max
+        else:
+            # Validate overflow direction
+            plugin_state = self._plugin_states.get(plugin_name, {})
+            at_min = plugin_state.get("at_min", False)
+            at_max = plugin_state.get("at_max", False)
+
+            if delta < 0 and not at_min:
+                logger.warning(f"Overflow event for dimming but plugin not at minimum")
+                return
+            if delta > 0 and not at_max:
+                logger.warning(f"Overflow event for brightening but plugin not at maximum")
+                return
+
+            # Only cascade for DIMMING overflow (trying to go below 0%)
+            # Brightening past 100% is a no-op - hardware is already at max
+            if delta > 0:
+                logger.debug(f"Ignoring brightening overflow (hardware at max, nothing to do)")
+                return
+
+        if record is not None:
+            if record.software_step_applied:
+                logger.debug(
+                    f"Dropping at_hardware_limit overflow from '{plugin_name}' for command "
+                    f"{event.command_id}: a software step already ran for this command"
+                )
+                return
+            record.software_step_applied = True
+
+        await self._engage_and_apply_software_step(delta)
+
+    async def _apply_device_offline_step(self, delta: int) -> None:
+        """
+        Apply one device_offline overflow step to the software dimmer.
+
+        Used on arrival for an overflow with no open command record, and after a
+        command's publish has returned for a held overflow, so the two paths match.
+
+        Args:
+            delta: Overflow delta (negative dims, positive brightens)
+        """
+        # An unreachable device has no current level, so the at_min/at_max
+        # check for at_hardware_limit cannot apply: the software dimmer takes the step.
         if delta > 0:
-            logger.debug(f"Ignoring brightening overflow (hardware at max, nothing to do)")
+            if self._is_software_active:
+                await self._adjust_software_dimmer(delta)
+            else:
+                logger.debug("Ignoring brightening overflow from offline device (no software dimming to remove)")
             return
+        await self._engage_and_apply_software_step(delta)
+
+    async def _engage_and_apply_software_step(self, delta: int) -> None:
+        """
+        Engage the software dimmer if it is not active, then apply one overflow step to it.
+
+        Args:
+            delta: Overflow delta to apply
+        """
         
         # Engage software dimmer on first overflow
         if not self._is_software_active:

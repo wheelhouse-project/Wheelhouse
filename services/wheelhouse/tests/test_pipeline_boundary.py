@@ -115,11 +115,6 @@ def _make_processor(word_queue: asyncio.Queue, app: _RecordingApp) -> SpeechProc
         command_timeout_ms=1000,
         hotword="x-ray",
     )
-    proc.context_mirror = MagicMock()
-    proc.context_mirror.read_context.return_value = {
-        "app_name": "test.exe",
-        "window_title": "Test",
-    }
     return proc
 
 

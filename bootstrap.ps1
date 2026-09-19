@@ -453,78 +453,6 @@ function Start-OllamaService {
     return (Test-OllamaRunning)
 }
 
-function Install-OllamaModel {
-    param([string]$ModelName)
-
-    Write-Status "Checking for $ModelName model..."
-    try {
-        $tags = Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -TimeoutSec 5
-        $installed = $tags.models | Where-Object { $_.name -like "$ModelName*" }
-    } catch {
-        Write-WarningStatus "Cannot reach Ollama API -- skipping model check"
-        return
-    }
-
-    if ($installed) {
-        Write-Status "$ModelName already pulled"
-    } else {
-        Write-Status "Pulling $ModelName (this may take a few minutes)..."
-        & ollama pull $ModelName
-        if ($LASTEXITCODE -ne 0) {
-            Write-WarningStatus "Failed to pull $ModelName -- you can pull it manually later: ollama pull $ModelName"
-        } else {
-            Write-Status "$ModelName pulled successfully"
-        }
-    }
-}
-
-function Test-GrepaiAvailable {
-    if (Get-Command grepai -ErrorAction SilentlyContinue) {
-        return $true
-    }
-    return $false
-}
-
-function Install-Grepai {
-    Write-Status "Installing grepai..."
-    try {
-        $installScript = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/yoanbernabeu/grepai/main/install.ps1"
-        Invoke-Expression $installScript
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
-                    [System.Environment]::GetEnvironmentVariable("Path", "User")
-    } catch {
-        Write-WarningStatus "grepai auto-install failed. Install manually: https://yoanbernabeu.github.io/grepai/installation/"
-        return
-    }
-    if (Test-GrepaiAvailable) {
-        Write-Status "grepai installed"
-    } else {
-        Write-WarningStatus "grepai installed but not in PATH -- restart terminal or add to PATH manually"
-    }
-}
-
-function Initialize-Grepai {
-    $configDir = Join-Path $script:RepoRoot ".grepai"
-    $configFile = Join-Path $configDir "config.yaml"
-    $templateFile = Join-Path $configDir "config.template.yaml"
-
-    if (Test-Path $configFile) {
-        Write-Status "grepai config already exists"
-    } elseif (Test-Path $templateFile) {
-        Copy-Item $templateFile $configFile
-        Write-Status "grepai config seeded from template"
-    } else {
-        Write-WarningStatus "No grepai config template found -- run 'grepai init' manually"
-        return
-    }
-
-    # Start indexing in background
-    if (Test-GrepaiAvailable) {
-        Write-Status "Starting grepai index (background)..."
-        Start-Process "grepai" -ArgumentList "index" -WorkingDirectory $script:RepoRoot -WindowStyle Hidden
-    }
-}
-
 function Invoke-Phase3 {
     Write-Host "`n=== Phase 3: Tooling ===" -ForegroundColor Cyan
 
@@ -547,23 +475,10 @@ function Invoke-Phase3 {
             if ($started) {
                 Write-Status "Ollama started on localhost:11434"
             } else {
-                Write-WarningStatus "Ollama not responding -- skipping model pull (start manually and run: ollama pull nomic-embed-text)"
+                Write-WarningStatus "Ollama not responding -- start it manually with: ollama serve"
             }
         }
-
-        if (Test-OllamaRunning) {
-            Install-OllamaModel -ModelName "nomic-embed-text"
-        }
     }
-
-    # grepai
-    if (Test-GrepaiAvailable) {
-        Write-Status "grepai found"
-    } else {
-        Install-Grepai
-    }
-
-    Initialize-Grepai
 }
 
 # --- Main ---
@@ -591,9 +506,6 @@ if (-not $FunctionsOnly) {
     }
     if (Test-OllamaAvailable) {
         Write-Status "Ollama available"
-    }
-    if (Test-GrepaiAvailable) {
-        Write-Status "grepai available"
     }
     Write-Host ""
     Write-Host "Elapsed: $($elapsed.Minutes)m $($elapsed.Seconds)s" -ForegroundColor Gray

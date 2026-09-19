@@ -10,6 +10,7 @@ Reference: docs/design/chunked_streaming_engine_design.md
 """
 import numpy as np
 import pytest
+from typing import Any
 from unittest.mock import Mock, patch
 
 
@@ -47,6 +48,8 @@ def make_mock_segment(text: str):
     segment.compression_ratio = 0.5
     segment.start = 0.0
     segment.end = 1.0
+    # Real faster-whisper segments have words=None unless word_timestamps=True
+    segment.words = None
     return segment
 
 
@@ -641,10 +644,16 @@ class TestMultiSegmentTranscription:
         mock_model.transcribe.return_value = ([make_mock_segment("Hello World")], Mock())
         feed_audio(engine, CHUNKS_FOR_INFERENCE)
 
-        # "Hello" lowercased (sentence start), "World" stays as-is
-        # But both happen to be non-proper-nouns, so Whisper's output after
-        # first-char lowercasing gives "hello World"
-        assert engine.get_result() == "hello World"
+        # wh-first-char-lowercase changed this row from "hello World".
+        # The capital on "World" is evidence that "Hello" was not
+        # capitalized merely because it opens the utterance, so the H
+        # survives. The unconditional lowercasing this row used to pin is
+        # still pinned, by
+        # TestCapitalEvidenceInExtractText::
+        # test_a_lowercase_second_word_still_lowercases_the_first in
+        # test_whisper_engine_text_rules.py, whose second word is
+        # lowercase and therefore supplies no evidence.
+        assert engine.get_result() == "Hello World"
 
     @patch("shared_stt.whisper_engine.WhisperModel")
     def test_proper_nouns_preserved(self, mock_model_class):
@@ -664,7 +673,11 @@ class TestMultiSegmentTranscription:
         mock_model.transcribe.return_value = ([make_mock_segment("Open Google Chrome")], Mock())
         feed_audio(engine, CHUNKS_FOR_INFERENCE)
 
-        assert engine.get_result() == "open Google Chrome"
+        # wh-first-char-lowercase changed this row from
+        # "open Google Chrome". "Google" is capitalized, so the condition
+        # keeps the O as the model wrote it. The row's own subject --
+        # proper nouns surviving -- holds more completely than before.
+        assert engine.get_result() == "Open Google Chrome"
 
     @patch("shared_stt.whisper_engine.WhisperModel")
     def test_punctuation_stripped(self, mock_model_class):
@@ -1084,8 +1097,14 @@ def make_mock_segment_with_conf(
     compression_ratio: float = 0.5,
     start: float = 0.0,
     end: float = 1.0,
+    words=None,
 ):
-    """Mock segment with per-segment confidence attributes used by wh-7ou.2."""
+    """Mock segment with per-segment confidence attributes used by wh-7ou.2.
+
+    words: list of word mocks (see make_mock_word) as returned by
+    faster-whisper when word_timestamps=True; None otherwise (the real
+    library's default).
+    """
     segment = Mock()
     segment.text = text
     segment.avg_logprob = avg_logprob
@@ -1093,7 +1112,18 @@ def make_mock_segment_with_conf(
     segment.compression_ratio = compression_ratio
     segment.start = start
     segment.end = end
+    segment.words = words
     return segment
+
+
+def make_mock_word(word: str, probability: float, start: float = 0.0, end: float = 0.5):
+    """Mock faster-whisper Word (word_timestamps=True output) for wh-7ou.6."""
+    w = Mock()
+    w.word = word
+    w.probability = probability
+    w.start = start
+    w.end = end
+    return w
 
 
 class TestHallucinationFilter:
@@ -1389,3 +1419,1069 @@ class TestHotwords:
         with caplog.at_level(logging.INFO):
             WhisperStreamingEngine()
         assert not any("hotwords active" in r.message for r in caplog.records)
+
+
+class TestSingleWordRescue:
+    """wh-7ou.6: the peak-avg_logprob filter suppresses real single-word
+    utterances ('comma' -0.596/-0.630/-0.609 vs the -0.55 threshold, field
+    data 2026-08-06) because the segment-average confidence is systematically
+    lower on one-word utterances than on phrases, even for the voice the
+    threshold was calibrated on.
+
+    Fix: when the filter would suppress AND the cleaned transcript is exactly
+    one word, give a second chance using two signals from the FINAL inference:
+    - min per-word probability (faster-whisper word_timestamps=True) must be
+      >= single_word_min_probability (default 0.6)
+    - max segment no_speech_prob must be <= single_word_max_no_speech_prob
+      (default 0.03; field data: real one-word finals 0.008-0.017,
+      cough-driven 'Thank you.' hallucinations 0.044-0.089)
+    Missing word data keeps the suppression (default to refusing).
+    """
+
+    def _engine(self, mock_model_class, **kwargs: Any):
+        from shared_stt.whisper_engine import WhisperStreamingEngine
+
+        defaults: dict[str, Any] = dict(
+            re_inference_interval_ms=400,
+            silence_rms_threshold=0.001,
+            hallucination_logprob_threshold=-0.55,
+        )
+        defaults.update(kwargs)
+        return WhisperStreamingEngine(**defaults)
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_single_word_confident_low_no_speech_rescued(self, mock_model_class):
+        """The 'comma' case: low segment average, but the word itself decoded
+        confidently on near-certain speech audio -> transcript is kept."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.85)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == "comma"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_single_word_high_no_speech_stays_suppressed(self, mock_model_class):
+        """The 'hmm' case: confident word but the audio was not clearly
+        speech (no_speech_prob in the hallucination range) -> suppressed."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " hmm.",
+            avg_logprob=-0.95,
+            no_speech_prob=0.048,
+            words=[make_mock_word(" hmm.", probability=0.9)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_single_word_low_word_probability_stays_suppressed(self, mock_model_class):
+        """Clear speech audio but the model was unsure of the word -> suppressed."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Kamo.",
+            avg_logprob=-0.58,
+            no_speech_prob=0.010,
+            words=[make_mock_word(" Kamo.", probability=0.3)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_multi_word_never_rescued(self, mock_model_class):
+        """'Thank you.' with confident words and low no_speech must STAY
+        suppressed: the rescue applies to single-word transcripts only."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Thank you.",
+            avg_logprob=-0.70,
+            no_speech_prob=0.010,
+            words=[
+                make_mock_word(" Thank", probability=0.95),
+                make_mock_word(" you.", probability=0.95),
+            ],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_no_word_data_keeps_suppression(self, mock_model_class):
+        """words=None (word timestamps unavailable) -> no rescue, no crash."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_rescue_disabled_by_min_probability_above_one(self, mock_model_class):
+        """single_word_min_probability=2.0 disables the rescue entirely
+        (word probabilities never exceed 1.0)."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.001,
+            words=[make_mock_word(" Comma.", probability=0.99)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class, single_word_min_probability=2.0)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_thresholds_configurable(self, mock_model_class):
+        """Both rescue thresholds are constructor/config parameters."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.045,
+            words=[make_mock_word(" Comma.", probability=0.55)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        # Defaults would refuse (0.55 < 0.6, 0.045 > 0.03); widened
+        # thresholds accept.
+        engine = self._engine(
+            mock_model_class,
+            single_word_min_probability=0.5,
+            single_word_max_no_speech_prob=0.05,
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "comma"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_word_timestamps_only_on_final_inference(self, mock_model_class):
+        """Interim passes must stay cheap: word_timestamps is requested only
+        by the final inference, where the rescue reads per-word data."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([make_mock_segment("hello")], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+
+        engine._run_inference()
+        interim_kwargs = mock_model.transcribe.call_args.kwargs
+        assert "word_timestamps" not in interim_kwargs
+
+        engine._run_final_inference()
+        final_kwargs = mock_model.transcribe.call_args.kwargs
+        assert final_kwargs["word_timestamps"] is True
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_accept_path_does_not_need_word_data(self, mock_model_class):
+        """A confident single word (peak above threshold) is accepted without
+        ever consulting word-level data."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.20,
+            no_speech_prob=0.010,
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "comma"
+
+    # -- wh-7ou.6.1.1: non-finite / out-of-range confidence values ----------
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_nan_word_probability_after_finite_stays_suppressed(self, mock_model_class):
+        """min() skips a NaN that follows a finite value, so without explicit
+        validation a NaN word probability would inherit the finite word's
+        pass. Malformed data must keep the suppression."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[
+                make_mock_word(" Comma.", probability=0.9),
+                make_mock_word(".", probability=float("nan")),
+            ],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_nan_word_probability_first_stays_suppressed(self, mock_model_class):
+        """NaN in first position: min() returns the NaN and the comparison
+        refuses, but the validation must refuse explicitly either way."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[
+                make_mock_word(" Comma.", probability=float("nan")),
+                make_mock_word(".", probability=0.9),
+            ],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_nan_no_speech_prob_after_finite_stays_suppressed(self, mock_model_class):
+        """max() skips a NaN that follows a finite value, so a NaN
+        no_speech_prob on a later segment would inherit the earlier
+        segment's pass. Malformed data must keep the suppression."""
+        mock_model = mock_model_class.return_value
+        seg1 = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.9)],
+        )
+        seg2 = make_mock_segment_with_conf(
+            ".",
+            avg_logprob=-0.63,
+            no_speech_prob=float("nan"),
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg1, seg2], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_infinite_word_probability_stays_suppressed(self, mock_model_class):
+        """A positive-infinite word probability satisfies min_prob >= 0.6 but
+        is not a probability; it must keep the suppression."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=float("inf"))],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_negative_no_speech_prob_stays_suppressed(self, mock_model_class):
+        """A negative no_speech_prob satisfies max_no_speech <= 0.03 but is
+        not a probability; it must keep the suppression."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=-1.0,
+            words=[make_mock_word(" Comma.", probability=0.9)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    # -- wh-7ou.6.1.2: malformed threshold config must not crash ------------
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_quoted_toml_threshold_string_is_coerced(self, mock_model_class):
+        """A quoted TOML number ('0.5' instead of 0.5) reaches the
+        constructor as a string; it must be read as the number, not crash
+        the final inference."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.045,
+            words=[make_mock_word(" Comma.", probability=0.55)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(
+            mock_model_class,
+            single_word_min_probability="0.5",
+            single_word_max_no_speech_prob="0.05",
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == "comma"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_unreadable_threshold_falls_back_to_default(self, mock_model_class):
+        """A config value float() cannot read (a list, garbage text) falls
+        back to the documented default with a warning instead of raising a
+        TypeError mid-utterance. Defaults 0.6/0.03 rescue the calibrated
+        'comma' shape."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.85)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(
+            mock_model_class,
+            single_word_min_probability=[0.6],
+            single_word_max_no_speech_prob="not-a-number",
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == "comma"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_unreadable_hallucination_threshold_falls_back(self, mock_model_class):
+        """Same defect family: hallucination_logprob_threshold is also
+        compared mid-utterance, so an unreadable value must fall back to its
+        default (-0.5), not raise at final inference. Peak -0.20 clears the
+        default threshold, so the transcript is accepted."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.20,
+            no_speech_prob=0.010,
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(
+            mock_model_class, hallucination_logprob_threshold={"bad": 1}
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == "comma"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_neg_infinite_hallucination_threshold_still_disables_filter(
+        self, mock_model_class
+    ):
+        """-inf is the documented off-switch for the hallucination filter and
+        must survive the defensive coercion."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-5.0,
+            no_speech_prob=0.010,
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(
+            mock_model_class, hallucination_logprob_threshold=-float("inf")
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "comma"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_rescue_comparison_contained_against_bad_attribute(self, mock_model_class):
+        """Belt and suspenders: even if a non-numeric threshold reaches the
+        comparison (attribute poked after construction), the rescue refuses
+        instead of crashing the final inference."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.85)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine._single_word_min_probability = "0.6"  # type: ignore[assignment]  # bypasses coercion
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == ""
+
+    # -- wh-7ou.6.1.7: TOML booleans must not become thresholds -------------
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_boolean_rescue_thresholds_fall_back_to_defaults(self, mock_model_class):
+        """TOML false/true reach the constructor as bool; float() would turn
+        them into 0.0/1.0, silently turning OFF both rescue criteria. They
+        must fall back to the defaults instead: word prob 0.3 refuses under
+        the default 0.6 but would pass a bool-derived 0.0."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Kamo.",
+            avg_logprob=-0.58,
+            no_speech_prob=0.010,
+            words=[make_mock_word(" Kamo.", probability=0.3)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(
+            mock_model_class,
+            single_word_min_probability=False,
+            single_word_max_no_speech_prob=True,
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_boolean_hallucination_threshold_falls_back(self, mock_model_class):
+        """hallucination_logprob_threshold=false would float to 0.0 and
+        suppress every ordinary negative-logprob final. It must fall back to
+        the default -0.5, which accepts a peak of -0.20."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.20,
+            no_speech_prob=0.010,
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(
+            mock_model_class, hallucination_logprob_threshold=False
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "comma"
+
+    # -- wh-7ou.6.1.6: only NEGATIVE infinity is the documented off-switch --
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_positive_infinity_hallucination_threshold_falls_back(
+        self, mock_model_class
+    ):
+        """TOML inf parses POSITIVE; peak < +inf is always true, which would
+        silently suppress every final. Only -inf (the documented off-switch)
+        may pass; +inf falls back to the default -0.5, which accepts -0.20."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.20,
+            no_speech_prob=0.010,
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(
+            mock_model_class, hallucination_logprob_threshold=float("inf")
+        )
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "comma"
+
+    # -- wh-7ou.6.1.8: oversized TOML integers must not crash construction --
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_oversized_toml_integers_fall_back_to_defaults(self, mock_model_class):
+        """A valid 400-digit TOML integer parses as int; float() raises
+        OverflowError, which must be treated like any other unreadable value
+        (fall back with a warning), not crash provider startup."""
+        engine = self._engine(
+            mock_model_class,
+            single_word_min_probability=10**400,
+            single_word_max_no_speech_prob=10**400,
+            hallucination_logprob_threshold=-(10**400),
+        )
+
+        assert engine._single_word_min_probability == 0.6
+        assert engine._single_word_max_no_speech_prob == 0.03
+        assert engine._hallucination_logprob_threshold == -0.5
+
+    # -- wh-7ou.6.1.4: real transcribe returns a one-shot iterable ----------
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_rescue_works_when_transcribe_returns_one_shot_iterator(
+        self, mock_model_class
+    ):
+        """faster-whisper's transcribe returns a generator, not a list. The
+        rescue re-reads segments after _extract_text consumed them, so the
+        final path must materialize the iterable first. A replayable-list
+        mock cannot catch losing that materialization; this one can."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.85)],
+        )
+        mock_model.transcribe.return_value = (iter([seg]), Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == "comma"
+
+
+class TestFinalConfidenceBlock:
+    """wh-7ou.7.1.1: every final inference computes a measurement block --
+    lowest word probability, highest segment no_speech_prob, peak avg_logprob,
+    word count, and the suppressed/rescued outcome -- exposed via
+    get_final_confidence() so AudioProcessor can attach it to the final
+    WebSocket message as the optional "confidence" object. Fields are null
+    when the underlying data is missing or malformed (the same refusal
+    discipline as the single-word rescue)."""
+
+    EXPECTED_KEYS = {
+        "min_word_probability",
+        "max_no_speech_prob",
+        "peak_avg_logprob",
+        "word_count",
+        "suppressed",
+        "rescued",
+    }
+
+    def _engine(self, mock_model_class, **kwargs: Any):
+        from shared_stt.whisper_engine import WhisperStreamingEngine
+
+        defaults: dict[str, Any] = dict(
+            re_inference_interval_ms=400,
+            silence_rms_threshold=0.001,
+            hallucination_logprob_threshold=-0.55,
+        )
+        defaults.update(kwargs)
+        return WhisperStreamingEngine(**defaults)
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_none_before_any_final(self, mock_model_class):
+        """No block exists until a final inference has run."""
+        engine = self._engine(mock_model_class)
+        assert engine.get_final_confidence() is None
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_accepted_final_reports_measurements(self, mock_model_class):
+        """An ordinary accepted final carries the full block: it is attached
+        to every final, not only suppressed or rescued ones."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Hello world.",
+            avg_logprob=-0.2,
+            no_speech_prob=0.012,
+            words=[
+                make_mock_word(" Hello", probability=0.91),
+                make_mock_word(" world.", probability=0.85),
+            ],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block is not None
+        assert set(block.keys()) == self.EXPECTED_KEYS
+        assert block["min_word_probability"] == pytest.approx(0.85)
+        assert block["max_no_speech_prob"] == pytest.approx(0.012)
+        assert block["peak_avg_logprob"] == pytest.approx(-0.2)
+        assert block["word_count"] == 2
+        assert block["suppressed"] is False
+        assert block["rescued"] is False
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_measurements_span_all_segments(self, mock_model_class):
+        """min word probability and max no_speech_prob aggregate across all
+        segments of the final inference, not just the first."""
+        mock_model = mock_model_class.return_value
+        seg1 = make_mock_segment_with_conf(
+            " Hello",
+            avg_logprob=-0.3,
+            no_speech_prob=0.01,
+            words=[make_mock_word(" Hello", probability=0.91)],
+        )
+        seg2 = make_mock_segment_with_conf(
+            " world.",
+            avg_logprob=-0.2,
+            no_speech_prob=0.04,
+            words=[make_mock_word(" world.", probability=0.62)],
+        )
+        mock_model.transcribe.return_value = ([seg1, seg2], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block["min_word_probability"] == pytest.approx(0.62)
+        assert block["max_no_speech_prob"] == pytest.approx(0.04)
+        assert block["peak_avg_logprob"] == pytest.approx(-0.2)
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_rescued_single_word_reports_rescued(self, mock_model_class):
+        """The 'comma' shape: rescued finals say rescued=True, suppressed=False."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.85)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block["suppressed"] is False
+        assert block["rescued"] is True
+        assert block["min_word_probability"] == pytest.approx(0.85)
+        assert block["max_no_speech_prob"] == pytest.approx(0.014)
+        assert block["peak_avg_logprob"] == pytest.approx(-0.63)
+        assert block["word_count"] == 1
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_suppressed_final_reports_suppressed(self, mock_model_class):
+        """A hallucination-filtered final says suppressed=True, rescued=False,
+        and still carries the measurement numbers."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Thank you.",
+            avg_logprob=-0.8,
+            no_speech_prob=0.05,
+            words=[
+                make_mock_word(" Thank", probability=0.95),
+                make_mock_word(" you.", probability=0.95),
+            ],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block["suppressed"] is True
+        assert block["rescued"] is False
+        assert block["min_word_probability"] == pytest.approx(0.95)
+        assert block["max_no_speech_prob"] == pytest.approx(0.05)
+        assert block["word_count"] == 2
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_missing_word_data_reports_null_min_word_probability(
+        self, mock_model_class
+    ):
+        """words=None (no word-level data) -> min_word_probability is None;
+        the segment-level fields are still reported."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Hello world.",
+            avg_logprob=-0.2,
+            no_speech_prob=0.012,
+            words=None,
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block["min_word_probability"] is None
+        assert block["max_no_speech_prob"] == pytest.approx(0.012)
+        assert block["peak_avg_logprob"] == pytest.approx(-0.2)
+        assert block["word_count"] == 2
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_malformed_word_probability_reports_null(self, mock_model_class):
+        """A NaN word probability is malformed data: report null rather than
+        a min() that silently skipped the NaN."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[
+                make_mock_word(" Comma.", probability=0.9),
+                make_mock_word(".", probability=float("nan")),
+            ],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block["min_word_probability"] is None
+        assert block["max_no_speech_prob"] == pytest.approx(0.014)
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_malformed_no_speech_prob_reports_null(self, mock_model_class):
+        """An out-of-range no_speech_prob (negative) is malformed: null."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=-1.0,
+            words=[make_mock_word(" Comma.", probability=0.9)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block["max_no_speech_prob"] is None
+        assert block["min_word_probability"] == pytest.approx(0.9)
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_empty_final_reports_nulls_and_zero_word_count(self, mock_model_class):
+        """An empty final (no segments) still produces a block: all nulls,
+        word_count 0, and peak_avg_logprob null because the peak tracker
+        never left its -inf sentinel (which is not JSON-serializable)."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block is not None
+        assert block["min_word_probability"] is None
+        assert block["max_no_speech_prob"] is None
+        assert block["peak_avg_logprob"] is None
+        assert block["word_count"] == 0
+        assert block["rescued"] is False
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_reset_clears_block(self, mock_model_class):
+        """reset() clears the block so a stale utterance's numbers can never
+        be attached to the next utterance's final."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Hello world.", avg_logprob=-0.2, no_speech_prob=0.012, words=None
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+        assert engine.get_final_confidence() is not None
+
+        engine.reset()
+        assert engine.get_final_confidence() is None
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_block_recomputed_for_each_final(self, mock_model_class):
+        """Every final gets a fresh block reflecting its own inference."""
+        mock_model = mock_model_class.return_value
+        seg1 = make_mock_segment_with_conf(
+            " Hello world.", avg_logprob=-0.2, no_speech_prob=0.012, words=None
+        )
+        mock_model.transcribe.return_value = ([seg1], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+        assert engine.get_final_confidence()["word_count"] == 2
+
+        engine.reset()
+
+        seg2 = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.85)],
+        )
+        mock_model.transcribe.return_value = ([seg2], Mock())
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        block = engine.get_final_confidence()
+        assert block["word_count"] == 1
+        assert block["rescued"] is True
+
+
+class TestCalibrationMode:
+    """wh-7ou.7.1.2 (spec Section 5.2): while calibration mode is enabled the
+    engine skips hallucination suppression at final inference, so every final
+    arrives with its text -- a cough's invented text is exactly the noise
+    sample calibration wants. The confidence block still reports the filter's
+    verdict (suppressed=True) so the Logic process can see what would have
+    happened. Safety: the mode resets to off after a ten-minute internal
+    timeout (the WebSocket-disconnect reset lives in WSForwarder), so a
+    crashed Logic process can never leave the filter disabled."""
+
+    def _engine(self, mock_model_class, **kwargs: Any):
+        from shared_stt.whisper_engine import WhisperStreamingEngine
+
+        defaults: dict[str, Any] = dict(
+            re_inference_interval_ms=400,
+            silence_rms_threshold=0.001,
+            hallucination_logprob_threshold=-0.55,
+        )
+        defaults.update(kwargs)
+        return WhisperStreamingEngine(**defaults)
+
+    def _hallucinated_segment(self):
+        """A cough-driven 'Thank you.' final: peak below the threshold, high
+        no_speech_prob, multi-word (so the single-word rescue never applies).
+        Without calibration mode this is always suppressed."""
+        return make_mock_segment_with_conf(
+            " Thank you.",
+            avg_logprob=-0.8,
+            no_speech_prob=0.05,
+            words=[
+                make_mock_word(" Thank", probability=0.95),
+                make_mock_word(" you.", probability=0.95),
+            ],
+        )
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_bypass_delivers_would_be_suppressed_final(self, mock_model_class):
+        """While enabled, a final the filter would suppress keeps its text,
+        and the confidence block still reports the filter's verdict with the
+        measurement numbers the noise stage needs."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.set_calibration_mode(True)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine._finalized is True
+        assert engine.get_result() == "thank you"
+        block = engine.get_final_confidence()
+        assert block["suppressed"] is True
+        assert block["rescued"] is False
+        assert block["min_word_probability"] == pytest.approx(0.95)
+        assert block["max_no_speech_prob"] == pytest.approx(0.05)
+        assert block["word_count"] == 2
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_off_by_default_suppression_unchanged(self, mock_model_class):
+        """An engine that never saw set_calibration_mode suppresses exactly
+        as before."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_disable_restores_suppression(self, mock_model_class):
+        """set_calibration_mode(False) turns the bypass off again (the path
+        the WSForwarder disconnect reset drives)."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.set_calibration_mode(True)
+        engine.set_calibration_mode(False)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == ""
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_confident_final_unaffected(self, mock_model_class):
+        """A final that clears the threshold behaves identically with the
+        mode on: delivered, suppressed=False."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Hello world.", avg_logprob=-0.2, no_speech_prob=0.012, words=None
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.set_calibration_mode(True)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "hello world"
+        block = engine.get_final_confidence()
+        assert block["suppressed"] is False
+        assert block["rescued"] is False
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_rescued_single_word_still_reports_rescued(self, mock_model_class):
+        """The single-word rescue still runs first, so a rescued 'comma'
+        reports rescued=True (not suppressed=True) during calibration --
+        the flags stay mutually exclusive and honest."""
+        mock_model = mock_model_class.return_value
+        seg = make_mock_segment_with_conf(
+            " Comma.",
+            avg_logprob=-0.63,
+            no_speech_prob=0.014,
+            words=[make_mock_word(" Comma.", probability=0.85)],
+        )
+        mock_model.transcribe.return_value = ([seg], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.set_calibration_mode(True)
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "comma"
+        block = engine.get_final_confidence()
+        assert block["rescued"] is True
+        assert block["suppressed"] is False
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_mode_survives_per_utterance_reset(self, mock_model_class):
+        """reset() runs between every utterance; the calibration session
+        spans many utterances, so the mode must survive it."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.set_calibration_mode(True)
+        engine.reset()
+        engine.process_audio(make_audio_chunk(30))
+        engine._run_final_inference()
+
+        assert engine.get_result() == "thank you"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_timeout_resets_mode(self, mock_model_class):
+        """Ten minutes after enable, the bypass is gone and the mode is off:
+        a crashed Logic process can never leave the filter disabled."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        with patch("shared_stt.whisper_engine.time") as mock_time:
+            mock_time.monotonic.return_value = 1000.0
+            engine.set_calibration_mode(True)
+            mock_time.monotonic.return_value = 1000.0 + 601.0
+            engine.process_audio(make_audio_chunk(30))
+            engine._run_final_inference()
+
+        assert engine.get_result() == ""
+        assert engine._calibration_mode is False
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_within_timeout_still_bypasses(self, mock_model_class):
+        """Just under ten minutes the mode is still active."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        with patch("shared_stt.whisper_engine.time") as mock_time:
+            mock_time.monotonic.return_value = 1000.0
+            engine.set_calibration_mode(True)
+            mock_time.monotonic.return_value = 1000.0 + 599.0
+            engine.process_audio(make_audio_chunk(30))
+            engine._run_final_inference()
+
+        assert engine.get_result() == "thank you"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_reenable_restarts_timeout_window(self, mock_model_class):
+        """Enabling again while already on restarts the ten-minute window,
+        so the Logic process can keep a long session alive by re-sending."""
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        with patch("shared_stt.whisper_engine.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            engine.set_calibration_mode(True)
+            mock_time.monotonic.return_value = 500.0
+            engine.set_calibration_mode(True)
+            # 700s after the first enable, 200s after the second
+            mock_time.monotonic.return_value = 700.0
+            engine.process_audio(make_audio_chunk(30))
+            engine._run_final_inference()
+
+        assert engine.get_result() == "thank you"
+
+    @patch("shared_stt.whisper_engine.WhisperModel")
+    def test_bypass_log_prints_numbers_only(self, mock_model_class, caplog):
+        """The bypass log line follows the numbers-only privacy discipline:
+        no transcript text, and no [hallucination_suppressed] line either
+        (nothing was suppressed)."""
+        import logging
+
+        mock_model = mock_model_class.return_value
+        mock_model.transcribe.return_value = ([self._hallucinated_segment()], Mock())
+
+        engine = self._engine(mock_model_class)
+        engine.set_calibration_mode(True)
+        engine.process_audio(make_audio_chunk(30))
+        with caplog.at_level(logging.INFO):
+            engine._run_final_inference()
+
+        bypass_lines = [
+            r.getMessage() for r in caplog.records
+            if "[calibration_mode]" in r.getMessage()
+        ]
+        assert bypass_lines, "expected a [calibration_mode] bypass log line"
+        assert all("thank" not in line.lower() for line in bypass_lines)
+        assert not any(
+            "[hallucination_suppressed]" in r.getMessage() for r in caplog.records
+        )

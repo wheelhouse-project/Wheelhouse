@@ -1,13 +1,20 @@
-"""Tests for SherpaOfflineEngine numeric fallback rules.
+"""Tests for SherpaOfflineEngine's use of the shared transcript rules.
 
-Covers `_normalize_text` -- time / phone-number / am-pm-uppercase
-rules. There is deliberately NO redundant-dollar rule here: Parakeet
-does not emit "$200 dollars" forms (see the 2026-04-19 Parakeet ITN
-design doc), so that rule lives only in the whisper engine.
-The sherpa recognizer is mocked; these tests
-never load the real ONNX model. `_load_model` is patched to a no-op at
-the class level so the filesystem / model-file checks don't fire during
-construction.
+The engine used to carry its own `_normalize_text` copy of the time /
+phone-number / am-pm-uppercase rules, and this file pinned that copy row
+by row. wh-shared-itn-parakeet deleted the copy: both inference paths now
+call shared_stt.transcript_rules.normalize_transcript and apply_itn, and
+the rules themselves are pinned by the table-driven tests in
+services/stt_providers/shared/tests/test_transcript_rules.py.
+
+What is left here is INTEGRATION coverage -- rows that exercise the
+engine calling the shared functions in the fixed order, including the
+double-conversion guard that matters only for this provider, because
+Parakeet emits digits natively.
+
+The sherpa recognizer is mocked; these tests never load the real ONNX
+model. `_load_model` is patched to a no-op so the filesystem /
+model-file checks don't fire during construction.
 """
 from __future__ import annotations
 
@@ -46,153 +53,13 @@ def engine_factory(monkeypatch):
     return _make
 
 
-# ---------------------------------------------------------------------------
-# _normalize_text: dotted-period time, AM/PM uppercase, phone hyphenation
-# ---------------------------------------------------------------------------
+def _chunk() -> bytes:
+    """One second of silent float32 audio, as process_audio wants it.
 
-class TestNormalizeTextTimeRules:
-    def test_period_form_becomes_colon(self):
-        assert (
-            SherpaOfflineEngine._normalize_text("call at 9.45 am")
-            == "call at 9:45 AM"
-        )
-
-    def test_pm_variants_case_insensitive(self):
-        assert (
-            SherpaOfflineEngine._normalize_text("see you at 6.30 Pm")
-            == "see you at 6:30 PM"
-        )
-
-    def test_idempotent_on_uppercase_colon_output(self):
-        # Text already in canonical '6:30 PM' form must not be double-transformed.
-        assert (
-            SherpaOfflineEngine._normalize_text("remind me at 6:30 PM")
-            == "remind me at 6:30 PM"
-        )
-
-    def test_uppercases_lowercase_ampm_beside_colon_time(self):
-        # Lowercase am/pm next to HH:MM must be canonicalized to AM/PM.
-        assert (
-            SherpaOfflineEngine._normalize_text("remind me at 6:30 pm")
-            == "remind me at 6:30 PM"
-        )
-
-    def test_dotted_digits_before_amps_untouched(self):
-        # wh-251rh.1.2: (am|pm) must be word-bounded or "0.75 amps"
-        # becomes "0:75 AMps". Same hole as the whisper engine's copy.
-        assert (
-            SherpaOfflineEngine._normalize_text("the meter reads 0.75 amps")
-            == "the meter reads 0.75 amps"
-        )
-
-    def test_invalid_minutes_dotted_untouched(self):
-        # wh-251rh.3.1 (codex): only values that read as a real 12-hour
-        # clock may rewrite. 75 is not a minute; 13 is not a 12-hour hour.
-        assert (
-            SherpaOfflineEngine._normalize_text("the log shows 0.75 am today")
-            == "the log shows 0.75 am today"
-        )
-        assert (
-            SherpaOfflineEngine._normalize_text("value 13.99 pm recorded")
-            == "value 13.99 pm recorded"
-        )
-
-    def test_long_dotted_number_before_am_untouched(self):
-        # wh-251rh.3 (codex): without a LEADING \b, "123.45 am" partially
-        # rewrites as "1" + "23:45 AM". Same hole as the whisper engine.
-        assert (
-            SherpaOfflineEngine._normalize_text("part 123.45 am reading")
-            == "part 123.45 am reading"
-        )
-
-    def test_parakeet_dotted_ampm_period_time_form(self):
-        # Regression guard for the TTS-audio diagnostic finding:
-        # Parakeet itself emits strings like "It is 8.17 p.m." where
-        # the AM/PM marker has internal dots. The punctuation strip runs
-        # before the time rule so the dotted AM/PM has collapsed to bare
-        # "am"/"pm" by the time _TIME_PERIOD fires.
-        assert (
-            SherpaOfflineEngine._normalize_text("It is 8.17 p.m.")
-            == "it is 8:17 PM"
-        )
-        assert (
-            SherpaOfflineEngine._normalize_text("It is 9.45 a.m.")
-            == "it is 9:45 AM"
-        )
-        assert (
-            SherpaOfflineEngine._normalize_text("Call me at 9.45 p.m.")
-            == "call me at 9:45 PM"
-        )
-
-    def test_hyphenates_ten_digit_phone_number(self):
-        # Some Parakeet voices emit "7035551234" (flat); others emit
-        # "703-555-1234" (hyphenated). The hyphenated form is canonical.
-        assert (
-            SherpaOfflineEngine._normalize_text("call me at 7035551234")
-            == "call me at 703-555-1234"
-        )
-        assert (
-            SherpaOfflineEngine._normalize_text("my number is 2025559876")
-            == "my number is 202-555-9876"
-        )
-
-    def test_hyphenate_phone_preserves_already_hyphenated(self):
-        assert (
-            SherpaOfflineEngine._normalize_text("call 703-555-1234 now")
-            == "call 703-555-1234 now"
-        )
-
-    def test_hyphenate_phone_leaves_short_digit_runs_alone(self):
-        # 7-digit, 9-digit, 11-digit runs must not become phone shapes.
-        assert (
-            SherpaOfflineEngine._normalize_text("the code is 5551234")
-            == "the code is 5551234"
-        )
-        assert (
-            SherpaOfflineEngine._normalize_text("the id is 12345678901")
-            == "the id is 12345678901"
-        )
-
-    def test_preserves_two_digit_hours(self):
-        assert (
-            SherpaOfflineEngine._normalize_text("lunch at 10:45 AM")
-            == "lunch at 10:45 AM"
-        )
-        assert (
-            SherpaOfflineEngine._normalize_text("noon meeting 12:00 PM")
-            == "noon meeting 12:00 PM"
-        )
-
-    def test_plain_decimal_without_ampm_left_alone(self):
-        # "3.14" without an AM/PM anchor is a plain decimal and must not
-        # be misinterpreted as a time.
-        assert (
-            SherpaOfflineEngine._normalize_text("pi is about 3.14")
-            == "pi is about 3.14"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Punctuation-regex colon negative-case coverage
-# ---------------------------------------------------------------------------
-
-class TestNormalizeTextColonHandling:
-    def test_non_digit_colons_still_stripped(self):
-        # Prior behavior: colons outside of HH:MM are stripped as punctuation.
-        # The tightened regex must not start preserving those.
-        assert (
-            SherpaOfflineEngine._normalize_text("subject: dinner plans")
-            == "subject dinner plans"
-        )
-
-    def test_digit_flanked_colons_preserved_in_non_time_contexts(self):
-        # Ratios, scores, IPv4 port suffixes -- anywhere colons sit
-        # between digits -- must survive the punctuation pass, even when
-        # not emitted by the time-reformat rules.
-        assert (
-            SherpaOfflineEngine._normalize_text("the score was 3:2 tonight")
-            == "the score was 3:2 tonight"
-        )
+    Silence is enough: the recognizer is a MagicMock whose result text is
+    fixed by engine_factory, so the samples only have to reach the buffer.
+    """
+    return np.zeros(16000, dtype=np.float32).tobytes()
 
 
 class TestRecognizeStripsLeadingAndTrailingWhitespace:
@@ -203,74 +70,150 @@ class TestRecognizeStripsLeadingAndTrailingWhitespace:
 
 
 # ---------------------------------------------------------------------------
-# wh-parakeet-xray-hotword: rejoin a split "x ray" into "x-ray"
+# Integration: the engine calls the shared transcript rules
+# (wh-shared-itn-parakeet). These rows exercise the two inference call
+# sites, not the rules themselves -- the rules have their own
+# table-driven tests in services/stt_providers/shared/tests/.
 # ---------------------------------------------------------------------------
 
-class TestNormalizeTextXrayJoin:
-    """A deliberate pause between the syllables of "x-ray" makes Parakeet
-    emit two words (measured 2026-07-18 on TTS audio with a 250 ms pause:
-    raw='X, Ray Boost'). The Logic-side wake-word match needs the wake
-    word to arrive as ONE word, so the engine rejoins letter-x + "ray"
-    into the standard English spelling."""
+class TestNormalizeApplied:
+    """normalize_transcript reaches the engine's confirmed words.
 
-    def test_split_comma_form_rejoined(self):
-        # The exact raw form measured from the model.
-        assert (
-            SherpaOfflineEngine._normalize_text("X, Ray Boost")
-            == "x-ray Boost"
+    One recognizer string in, one confirmed-word string out, through
+    each of the two call sites: _run_final_inference (via finalize) and
+    _run_inference (the periodic path, which needs two agreeing decodes
+    before LocalAgreement-2 confirms anything).
+    """
+
+    def test_final_inference_normalizes(self, engine_factory):
+        engine = engine_factory(recognizer_text="It is 8.17 p.m.")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "it is 8:17 PM"
+
+    def test_periodic_inference_normalizes(self, engine_factory):
+        engine = engine_factory(recognizer_text="X, Ray Boost")
+        engine.process_audio(_chunk())
+        engine._run_inference()
+        engine._run_inference()
+        # wh-first-char-lowercase changed this row from "x-ray Boost".
+        # "Boost" is capitalized, which the condition reads as evidence
+        # that the leading X is not merely positional, so the X
+        # survives. The rejoin this row exists to prove still ran: the
+        # hyphen is present. The hotword is unaffected, because
+        # speech.router._word_matches_hotword lowercases both sides.
+        assert engine.get_result() == "X-ray Boost"
+
+
+class TestItnApplied:
+    """apply_itn reaches the engine's confirmed words.
+
+    Same shape as TestNormalizeApplied. The stage order is fixed:
+    normalize_transcript first, apply_itn second. Normalization strips
+    punctuation and collapses "p.m." to "pm", which is the shape the ITN
+    clock rule reads.
+    """
+
+    def test_cardinal_phrase_converted(self, engine_factory):
+        engine = engine_factory(recognizer_text="set the volume to fifty nine")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "set the volume to 59"
+
+    def test_money_phrase_converted(self, engine_factory):
+        engine = engine_factory(
+            recognizer_text="fifty nine dollars and seventeen cents"
         )
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "$59.17"
 
-    def test_split_form_with_trailing_period(self):
-        assert (
-            SherpaOfflineEngine._normalize_text("X, Ray patterns.")
-            == "x-ray patterns"
+    def test_clock_time_with_period_word_converted(self, engine_factory):
+        """The uppercase "PM" here can only come from apply_itn: the
+        _AMPM_UPPERCASE rule inside normalize_transcript runs first and
+        needs an HH:MM shape, so it leaves the lowercase "pm" alone."""
+        engine = engine_factory(recognizer_text="eleven fifteen pm")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "11:15 PM"
+
+    def test_periodic_inference_converts(self, engine_factory):
+        engine = engine_factory(recognizer_text="set the volume to fifty nine")
+        engine.process_audio(_chunk())
+        engine._run_inference()
+        engine._run_inference()
+        assert engine.get_result() == "set the volume to 59"
+
+    def test_lone_number_word_stays_a_word(self, engine_factory):
+        """Command safety: "delete two" must never become "delete 2",
+        which would be a different, destructive command."""
+        engine = engine_factory(recognizer_text="delete two")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "delete two"
+
+        bare = engine_factory(recognizer_text="two")
+        bare.process_audio(_chunk())
+        bare.finalize()
+        assert bare.get_result() == "two"
+
+
+class TestItnDoesNotDoubleConvert:
+    """Parakeet emits digits natively, unlike word-emitting streaming
+    models, so apply_itn runs on text that may ALREADY hold numerals.
+    Every row here feeds a recognizer string that contains digits and
+    asserts the engine's output is exactly the normalized form -- no
+    second conversion pass on top of the first (wh-shared-itn-parakeet,
+    acceptance item 2).
+    """
+
+    def test_bare_numeral_passes_through(self, engine_factory):
+        engine = engine_factory(recognizer_text="set brightness to 25")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "set brightness to 25"
+
+    def test_numeral_beside_unit_anchor_passes_through(self, engine_factory):
+        """A digit next to "dollars" is the shape the money rule reads
+        in its spoken form. Already-written digits must not be swept
+        into "$25"."""
+        engine = engine_factory(recognizer_text="I have 25 dollars")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "I have 25 dollars"
+
+    def test_normalizer_produced_clock_time_passes_through(
+        self, engine_factory
+    ):
+        """The hazard specific to this phase: normalize_transcript turns
+        "8.17 p.m." into "8:17 PM" and apply_itn then sees a clock shape
+        it also knows how to build. It must leave it alone."""
+        engine = engine_factory(recognizer_text="It is 8.17 p.m.")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "it is 8:17 PM"
+
+    def test_normalizer_produced_phone_number_passes_through(
+        self, engine_factory
+    ):
+        engine = engine_factory(recognizer_text="call me at 7035551234")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "call me at 703-555-1234"
+
+    def test_decimal_and_digit_run_pass_through(self, engine_factory):
+        engine = engine_factory(recognizer_text="pi is about 3.14")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "pi is about 3.14"
+
+    def test_mixed_digits_and_words_pass_through(self, engine_factory):
+        engine = engine_factory(
+            recognizer_text="set it to 25 percent and call 7035551234"
         )
-
-    def test_plain_split_form_rejoined(self):
+        engine.process_audio(_chunk())
+        engine.finalize()
         assert (
-            SherpaOfflineEngine._normalize_text("X Ray close window")
-            == "x-ray close window"
-        )
-
-    def test_mid_sentence_lowercase_split_rejoined(self):
-        assert (
-            SherpaOfflineEngine._normalize_text("Take an x ray tomorrow")
-            == "take an x-ray tomorrow"
-        )
-
-    def test_mid_sentence_preserves_leading_capital(self):
-        # The join keeps the X's case; only "Ray" is normalized.
-        assert (
-            SherpaOfflineEngine._normalize_text("see the X Ray result")
-            == "see the X-ray result"
-        )
-
-    def test_hyphenated_form_unchanged(self):
-        # The model's dominant output form must pass through untouched.
-        assert (
-            SherpaOfflineEngine._normalize_text("X-ray boost")
-            == "x-ray boost"
-        )
-
-    def test_regex_does_not_match_already_hyphenated_form(self):
-        # deepseek review, wh-parakeet-xray-hotword.1.3: rejoining "X-ray"
-        # is idempotent, so the output-level test above cannot detect a
-        # regex widened to also match the hyphen (e.g. [-\s]+ instead of
-        # \s+). Pin the non-match directly on the regex object.
-        from sherpa_engine import _XRAY_JOIN
-        assert _XRAY_JOIN.search("X-ray") is None
-        assert _XRAY_JOIN.search("see the x-ray boost") is None
-
-    def test_word_ending_in_x_not_joined(self):
-        # "Max ray" -- the x inside a longer word must not trigger.
-        assert (
-            SherpaOfflineEngine._normalize_text("Max ray gun")
-            == "max ray gun"
-        )
-
-    def test_ray_prefix_word_not_joined(self):
-        # "raymond" is not the word "ray".
-        assert (
-            SherpaOfflineEngine._normalize_text("x raymond called")
-            == "x raymond called"
+            engine.get_result()
+            == "set it to 25 percent and call 703-555-1234"
         )

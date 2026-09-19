@@ -19,7 +19,7 @@ wheels are required at runtime by any shipped component.
 
 | Subsystem | What runs | Where inference happens |
 |-----------|-----------|------------------------|
-| STT (default) | Parakeet TDT 0.6B v3 int8 via sherpa-onnx | Local, CPU |
+| STT (default) | Parakeet TDT 0.6B v3 full precision via sherpa-onnx | Local, CPU |
 | STT (opt-in) | Distil-Whisper distil-medium.en via faster-whisper | Local, NVIDIA CUDA |
 | STT (opt-in) | Google Cloud Speech-to-Text | Google's servers |
 | AI text fixing / help chat | Any OpenAI-compatible server (a bundled llama.cpp server by default) | Wherever that server runs |
@@ -46,10 +46,18 @@ WebSocket -> Logic process (SpeechProcessor -> command routing)
 
 ### 2.1 The three providers
 
+Every STT provider takes audio through WinRT, using the shared
+`get_audio_provider` factory without backend selection. A provider that cannot
+use WinRT must report a startup failure and stop; it must not run as a degraded
+provider or fall back to another capture path. The shared standing-rule test
+is `services/stt_providers/shared/tests/test_capture_standing_rule.py`.
+
 - **`sherpa_offline_parakeet_stt_server`** (default): NVIDIA NeMo Parakeet
-  TDT 0.6B v3, int8 ONNX export, run through the sherpa-onnx
+  TDT 0.6B v3, full-precision ONNX export, run through the sherpa-onnx
   `OfflineRecognizer` on CPU. Best word-error rate of every local model we
-  benchmarked. Fully offline; nothing leaves the machine.
+  benchmarked. Fully offline; nothing leaves the machine. The shipped
+  export changed from int8 to full precision on 2026-09-07
+  (wh-parakeet-fp32-shipped-model).
 - **`distil_medium_en`** (opt-in, NVIDIA GPUs): Distil-Whisper
   distil-medium.en through faster-whisper/CTranslate2. Requires CUDA plus
   system cuBLAS/cuDNN; auto-downloads its ~756 MB model from Hugging Face on
@@ -60,8 +68,8 @@ WebSocket -> Logic process (SpeechProcessor -> command routing)
 
 ### 2.2 Model delivery and the override file (Parakeet)
 
-The Parakeet model (~640 MB int8 archive) is downloaded at install time, not
-committed to the repository. The provider resolves `[model].model_path` at
+The Parakeet model (about 2.5 GB, five loose files) is downloaded at install
+time, not committed to the repository. The provider resolves `[model].model_path` at
 config load in this order (see `_resolve_model_path` in the provider's
 `main.py`):
 
@@ -71,7 +79,10 @@ config load in this order (see `_resolve_model_path` in the provider's
    installer; can be created by hand.
 2. The provider's own tracked `config.toml` value (shipped empty).
 3. The coded default
-   `%LOCALAPPDATA%\WheelHouse\models\sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`.
+   `%LOCALAPPDATA%\WheelHouse\models\sherpa-onnx-nemo-parakeet-tdt-0.6b-v3`.
+   That directory holds the full-precision model the installer downloads;
+   it lost its `-int8` suffix on 2026-09-07 when the shipped model changed
+   (wh-parakeet-fp32-shipped-model).
 
 A malformed or unreadable override file never crashes the provider: it logs
 a warning and the next value in the chain stands.
@@ -125,8 +136,9 @@ a declared dependency** of any service: uv validates path-source metadata on
 every `uv sync --locked` regardless of dependency-group selection, so a
 path-source reference would break fresh clones that lack the wheel
 (wh-797.2.1). Evaluation users install it manually into the `shared` venv
-from `vendor/wheels/` (dev machines) or the hosted release asset (see
-wh-kft).
+from `vendor/wheels/` (dev machines) or build it from source as described
+below. There is no hosted release asset: the upload was dropped on
+2026-09-05 (wh-kft, closed).
 
 To rebuild the wheel from source (Windows x64, Python 3.12, VS Build Tools,
 CMake, Vulkan SDK):

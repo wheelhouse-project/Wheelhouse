@@ -61,7 +61,7 @@ Wheelhouse controls a Windows PC by voice. It performs five functions: dictating
 
 - A Windows 10 or Windows 11 PC (64-bit)
 - A microphone. A laptop's built-in microphone is usually adequate. If recognition accuracy is poor, a headset or external microphone is worth trying, and one can be connected after installing.
-- About 10 GB of free disk space. Most of that is the Python environments the program and its speech engines run in; the speech model itself is the smaller part.
+- About 10 GB of free disk space. Most of that is the speech model; the Python environments the program and its speech engines run in are the smaller part.
 
 The installer provides everything else and checks the hardware before it begins. No account, subscription or prior installation of other software is required. The full requirements, including memory and processor, are in [System Requirements](#system-requirements) below.
 
@@ -167,7 +167,7 @@ The same re-run repairs a missing or incomplete speech model, for example after 
 
 ### Teaching Wheelhouse your voice
 
-The Distil-Whisper engine sometimes misses short words spoken alone, such as "comma". A short session teaches Wheelhouse how you sound so it stops missing them. Start it by saying "learn my voice" or "calibrate my voice", or right-click either the floating button or the tray icon -- both open the same menu -- and choose **Teach WheelHouse your voice...**.
+The Distil-Whisper engine sometimes misses short words spoken alone, such as "comma". A short session teaches Wheelhouse how you sound so it stops missing them. Start it by saying "learn my voice" or "calibrate my voice", or right-click either the floating button or the tray icon -- both open the same menu -- open **STT Provider**, and choose **Teach WheelHouse your voice...**.
 
 The session shows four words, one at a time, and asks you to say each word five times. It then asks for a cough or a throat clear, three separate times, to tell your words apart from your other sounds; this part can be skipped. No step has a time limit -- go at your own pace. While the session is open, spoken words are used for the session only; nothing is typed into any window. Clicking by voice still works: say the hotword, "click", and the button name -- "x-ray click cancel", "x-ray click skip this part".
 
@@ -223,7 +223,7 @@ If none of these produces acceptable response times, the Wheelhouse Assistant ca
 
 ## Voice Commands
 
-Wheelhouse converts speech into keystrokes, text, and system actions. Most commands require no prefix. Commands with destructive or far-reaching effects require the hotword **"x-ray"** first, so they cannot fire during dictation; they are written here with the "x-ray" prefix.
+Wheelhouse converts speech into keystrokes, text, and system actions. Most commands require no prefix. The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands require **"x-ray"** first; they are written here with the "x-ray" prefix.
 
 There are two kinds of voice pattern. **Commands** perform an action -- press a key, switch a window, click a button -- and are normally spoken as a complete utterance: say the command, then pause. **Replacements** apply inline during dictation: spoken mid-sentence, the recognized word is replaced with a symbol or corrected text as the text is typed. All punctuation words ("period", "comma", "question mark") are replacements, so dictation does not have to stop to insert punctuation.
 
@@ -274,7 +274,7 @@ Common mishearings of "undo" and "redo" ("undue", "undu", "redu") are accepted, 
 
 Wherever a command takes **[number]**, say the count either way: as digits ("backspace 15") or as words ("backspace fifteen", "delete twenty three"). Words up to "nine hundred ninety nine" are read, and each command still applies its own limit afterwards.
 
-A count of two or more words needs the command to wait for the end of the sentence. Every count command waits except "backspace", which fires as soon as the words spoken so far form the command, so it uses only the first word of the count. "backspace fifteen" deletes fifteen characters, because that count is one word. "backspace twenty three" deletes twenty characters and then types "three". Say "backspace 23", or use "delete twenty three", which does wait for the whole sentence.
+A spoken count can run to more than one word, so a command with a count waits until no further word could make the number larger, and at the latest until the end of the sentence. "backspace twenty three" deletes twenty-three characters, and "backspace 23" does the same. The wait depends on the number, not on how many words you used: "fifteen" and "ninety nine" are finished as spoken, while "twenty" and "fifty" could still grow into "twenty three" or "fifty five", so those wait for the next word. Every count command behaves this way, including "backspace". The counts in the "go" and "grab" movement commands are read differently, one word at a time; see the paragraph on counts further down this section.
 
 ##### The "press [keys]" Command in Detail
 
@@ -296,7 +296,7 @@ A count of two or more words needs the command to wait for the end of the senten
 
 #### Text Formatting
 
-Formatting commands apply to the current selection: select first, with the mouse or "select word" / "select line", then say the command. The case and shape transforms cover UPPERCASE, lowercase, capitalize, title case, and the programming styles snake_case, camelCase, PascalCase, and kebab-case. The wrapping commands ("parentheses", "brackets", "braces", "angle brackets", "quotes", "single quotes") enclose the selection in those characters; spoken with no selection, they insert an empty pair with the cursor between them. Words spoken after a wrapping word in the same utterance are wrapped verbatim: symbol words such as "colon" are typed literally rather than converted. Three commands apply character formatting through the host application's own keyboard shortcuts: "x-ray bold text", "x-ray italics", and "x-ray underline".
+Formatting commands apply to the current selection: select first, with the mouse or "select word" / "select line", then say the command. The case and shape transforms cover UPPERCASE, lowercase, capitalize, title case, and the programming styles snake_case, camelCase, PascalCase, and kebab-case. The wrapping commands ("parentheses", "brackets", "braces", "angle brackets", "quotes", "single quotes") enclose the selection in those characters; spoken with no selection, they insert an empty pair with the cursor between them. Words spoken after a wrapping word in the same utterance are wrapped verbatim: symbol words such as "colon" are typed literally rather than converted. Three commands apply character formatting through the host application's own keyboard shortcuts: "bold text", "italics", and "underline". None of the three needs the hotword, and each fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.
 
 #### Navigation
 
@@ -353,13 +353,13 @@ Wheelhouse can click buttons, links, menu items, and other on-screen controls. A
 
 #### Wheelhouse Control
 
-These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for grammar correction and replaces the selection with the result; it requires that server to be configured and reachable, announces its progress ("Correcting", "Done"), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under [Selected Commands in Detail](#selected-commands-in-detail), which also covers adding others. "boost" adds the selected text to the speech recognition hints, "patterns" opens the Pattern Manager, "x-ray help" opens the Wheelhouse Assistant in the default browser, and "x-ray cancel fix" stops a correction or rewrite still running.
+These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for grammar correction and replaces the selection with the result; it requires that server to be configured and reachable, shows its progress on screen rather than out loud ("Correcting..."), then a notice with the outcome (for example "Done.", "No changes needed." or "Cancelled."), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under [Selected Commands in Detail](#selected-commands-in-detail), which also covers adding others. "boost" adds the selected text to the speech recognition hints, "patterns" opens the Pattern Manager, "help" opens the Wheelhouse Assistant in the default browser, and "x-ray cancel fix" stops a correction or rewrite still running. Every command in this paragraph written without the "x-ray" prefix needs no hotword, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.
 
 Three further commands act on text through the host application: "x-ray find [text]" opens its find box and searches for the words spoken, "replace" opens its find-and-replace box, and "search" copies the selection and searches the web for it in the default browser.
 
 Switching the microphone on and off is not a voice command: a switch that responded to speech could be turned off by a phrase spoken in passing, leaving no voice route back. In toggle mode, click either the floating button or the tray icon. In push-to-talk mode, listening lasts only as long as the floating button is held; the hold works on the floating button alone, and a click on either surface has no effect.
 
-The in-app help chat window is disabled in this release, and the voice patterns that opened it are switched off. "x-ray help" opens the Wheelhouse Assistant in the browser; see [Getting Help](#getting-help).
+The in-app help chat window is disabled in this release, and the voice patterns that opened it are switched off. "help" opens the Wheelhouse Assistant in the browser; see [Getting Help](#getting-help).
 
 ### Selected Commands in Detail
 
@@ -385,7 +385,7 @@ Personal patterns live in a separate per-machine file, preserved across upgrades
 
 **Rewriting the selected text**
 
-With text selected, **"simplify"** sends it to the AI server to be rewritten in plain language and replaces the selection with the result. **"shorten"** removes repetition and padding, **"x-ray make formal"** removes contractions and casual wording, and **"pirate"** rewrites the text in pirate speech. **"x-ray translate to [language]"** translates the selection into the language named -- "x-ray translate to spanish", "x-ray translate to brazilian portuguese"; multi-word names are recognised. All five use the same AI server as "x-ray fix" and leave the original in place if the request fails; they announce "Rewriting" where "x-ray fix" announces "Correcting", then "Done".
+With text selected, **"simplify"** sends it to the AI server to be rewritten in plain language and replaces the selection with the result. **"shorten"** removes repetition and padding, **"x-ray make formal"** removes contractions and casual wording, and **"pirate"** rewrites the text in pirate speech. **"x-ray translate to [language]"** translates the selection into the language named -- "x-ray translate to spanish", "x-ray translate to brazilian portuguese"; multi-word names are recognised. All five use the same AI server as "x-ray fix" and leave the original in place if the request fails; they show "Rewriting..." where "x-ray fix" shows "Correcting...", then an outcome notice.
 
 A rewrite pastes back plain text, so word-processor character formatting -- bold, italics, a font, a colour -- is lost on the rewritten part. Layout is preserved: line breaks, blank lines, indentation, bullets, numbering, and non-sentence lines such as a code line or a postal address return unchanged.
 
@@ -399,7 +399,7 @@ Selecting a paragraph and saying "x-ray reading level" then rewrites it. Two con
 
 **"x-ray cancel fix"** stops a request that is still running -- a correction or any of the rewrites -- and nothing is pasted.
 
-**"x-ray help"**
+**"help"**
 
 Opens the Wheelhouse Assistant, the project's online help, in the default browser, where questions can be asked in plain language. The address is the gem_url setting in [ai.help], which points at the assistant by default.
 
@@ -421,11 +421,11 @@ Wheelhouse has no command mode and no dictation mode to switch between. Each utt
 
 ### Hotword-protected commands
 
-Commands with destructive effects, such as closing a window, run only when the utterance begins with "x-ray", as in "x-ray close window". Low-risk commands do not require it. The hotword follows the same position rule: "x-ray" carries its special meaning only as the first word of a phrase, and is typed as text anywhere else. If "x-ray" is followed by something that is not a command, the whole phrase including "x-ray" is typed as text.
+The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands run only when the utterance begins with "x-ray", as in "x-ray close window". Other commands do not require it. The hotword follows the same position rule: "x-ray" carries its special meaning only as the first word of a phrase, and is typed as text anywhere else. If "x-ray" is followed by something that is not a command, the whole phrase including "x-ray" is typed as text.
 
 ### Streaming insertion
 
-Recognized words are inserted while speech continues, rather than after the utterance ends. The exceptions are the brief hold at the start of a phrase while a command match is evaluated, and a similar hold around replacement words. Both are fractions of a second.
+Recognized words are inserted while speech continues, rather than after the utterance ends. Two exceptions are brief holds, both fractions of a second: one at the start of a phrase while a command match is evaluated, and a similar one around replacement words. A third exception is not a hold. While Wheelhouse reads the window -- to put numbers on the controls, or to find a control named in a "click" command -- a word spoken in that moment is dropped instead of typed, and it is not typed afterwards. Wheelhouse drops it deliberately: a word held until the read finished would be typed seconds later, into whatever had focus by then. The refusal lasts no longer than the read itself, and it cannot continue without limit.
 
 ### Chaining cursor moves with "then"
 
@@ -452,7 +452,7 @@ Wheelhouse listens only while the floating button is held down. Press and hold t
 
 Three constraints apply:
 
-- **Audio already playing takes precedence.** Listening is suspended while the computer is playing sound, and starting a hold does not override that. A hold begun while a video or music is playing receives no audio, and the button shows that listening is off. Pause the audio first; listening resumes once the sound-level check notices the silence, which can take up to ten seconds after the audio stops ([Plugins](#plugins) describes the check). The speaker mute described above keeps subsequent audio out of a hold begun in silence, and does not enable a hold begun while audio is playing.
+- **Audio already playing.** When the sound pause applies (see `ENABLE_AUDIO_SUPPRESSION` in [Plugins](#plugins)), a hold can still listen over the sound, but only when the speakers are really muted: the hold mutes them and ignores the pause at once, and it goes on ignoring the pause only if the System Volume plugin confirms the mute. If no confirmation arrives -- the plugin is disabled, or no audio device answers -- the pause applies to the hold about half a second after it starts, and the button shows that listening is off. In that case, pause the audio first; listening resumes once the sound-level check notices the silence, which can take up to about thirteen seconds after the audio stops. A Sonos speaker playing music still pauses a hold, because muting this computer cannot silence it.
 - **Safety release.** If a release is never registered, listening stops after 30 seconds and the previous audio state is restored, so the microphone is not left open and the speakers are not left muted. If that cutoff interrupts long dictations, raise ptt_safety_timeout_seconds in the [speech] section of the settings file.
 - Push-to-talk requires a hand on the mouse or a finger on a touchscreen, so it is not hands-free.
 
@@ -480,6 +480,8 @@ The button is a coloured circle that remains above other windows. Its colour rep
 - **Dark grey**: Wheelhouse is starting and has not yet determined whether the speech engine is ready.
 - **Light grey**: listening is off.
 - **Blue**: push-to-talk mode, button not held. Press and hold it to speak.
+- **Amber with "..."**: you are holding the button, and Wheelhouse has asked to start listening but has no answer yet. It turns purple if no answer arrives.
+- **Purple with "!"**: the hold did not start listening, or listening stopped. The reason is in the button's tooltip, and Wheelhouse shows it as a notice as well.
 - **Solid red**: listening is on.
 - **Pulsing red to orange**: speech is being received.
 - **A brief flash of green**: the last utterance has been processed.
@@ -517,12 +519,11 @@ The floating button and the tray icon open the same menu. Most items are unavail
 - **Show Floating Button** -- show or hide the floating button. The checkmark shows whether it is visible.
 - **Interim Results** -- selects whether words are typed as they are recognized and corrected afterwards, or held until the phrase ends. The first is the streaming insertion described under [Speech Modes](#speech-modes); switching this off trades the immediate feedback for text that arrives already settled.
 - **Push-to-Talk Mode** -- switch between the two interaction modes. The checkmark shows when push-to-talk is active.
-- **STT Provider** -- select the speech engine. Only engines set up on this computer are listed. See [Speech Engines](#speech-engines).
+- **STT Provider** -- select the speech engine. Only engines set up on this computer are listed. See [Speech Engines](#speech-engines). The last item in this list, **Teach WheelHouse your voice...**, opens the voice-teaching session for the Distil-Whisper engine. See [Teaching Wheelhouse your voice](#teaching-wheelhouse-your-voice).
 - **AI Model** -- select the AI model, when AI features are configured. If the model named in the settings file is no longer offered by the server, the menu reports that rather than substituting another model.
 - **Pattern Manager** -- open the editor for personal voice patterns. See [Voice Commands](#voice-commands).
-- **Teach WheelHouse your voice...** -- open the voice-teaching session for the Distil-Whisper engine. See [Teaching Wheelhouse your voice](#teaching-wheelhouse-your-voice).
 - **Debug** -- switch detailed logging on or off. Leave it off except when diagnosing or reporting a problem.
-- **Help** -- open the Wheelhouse Assistant in the browser. This is the same page the spoken command "x-ray help" opens.
+- **Help** -- open the Wheelhouse Assistant in the browser. This is the same page the spoken command "help" opens.
 - **About Wheelhouse** -- show the program name and the running version. Include the version in any problem report.
 - **Restart Wheelhouse** -- restart the whole program. This is the first step when speech recognition stops responding.
 - **Exit** -- close Wheelhouse. Required before running the installer to update, and before uninstalling.
@@ -587,7 +588,7 @@ It connects to the speaker over your home network directly -- no Sonos account o
 
 The pause this plugin applies is narrow: it fires only when the Sonos is playing from a music service, and not when the Sonos is playing audio it received from this computer or from the television. That is deliberate, so that watching a film does not stop Wheelhouse from listening.
 
-A second, separate mechanism does pause listening for computer audio, and it is on by default whether or not you own a Sonos. Wheelhouse watches the sound level of the Windows output device and pauses recognition while sound is playing through it (`ENABLE_AUDIO_SUPPRESSION`, default true). The check runs on an interval that widens to ten seconds while audio is playing, so listening can take up to that long to resume after the audio stops. So audio your computer plays does pause listening -- including audio it plays through a Sonos, when the Sonos is the Windows output device. What the Windows output device never sees, and therefore never pauses listening for, is audio that reaches the Sonos without passing through this computer: television audio over HDMI or an optical cable, and music the Sonos streams by itself.
+A second, separate mechanism can pause listening for computer audio, whether or not you own a Sonos. It is set by `ENABLE_AUDIO_SUPPRESSION`, which takes three values. With `"auto"`, the default, Wheelhouse asks Windows once at startup whether the default microphone has an echo canceller. When Windows reports one, sound this computer plays does not pause listening. When Windows reports none, or cannot answer, Wheelhouse watches the sound level of the Windows output device and pauses recognition while sound is playing through it. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening. `true` pauses listening whenever sound plays, whatever Windows reports, and `false` never pauses. A settings file from an older install has `true`; change it to `"auto"` to let Windows decide. A microphone plugged in or made the default after startup is checked at the next start. While the pause applies, the check runs on an interval that widens to ten seconds while audio is playing, and listening resumes only after the sound has stayed quiet for about three seconds, so listening can take up to about thirteen seconds to resume after the audio stops. So audio your computer plays can pause listening -- including audio it plays through a Sonos, when the Sonos is the Windows output device. What the Windows output device never sees, and therefore never pauses listening for, is audio that reaches the Sonos without passing through this computer: television audio over HDMI or an optical cable, and music the Sonos streams by itself.
 
 ### System Volume
 
@@ -697,14 +698,14 @@ If all five pass, the installation is working; any remaining problem is specific
 **Command words are typed as text instead of running**
 
 - *Symptom:* "close window" is typed into the document instead of closing the window.
-- *Likely cause:* Expected behavior. Destructive commands require the hotword "x-ray" first, so that they cannot fire during dictation.
+- *Likely cause:* Expected behavior. The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands require "x-ray" first.
 - *Action:* Say "x-ray close window". The command reference marks which commands require the hotword.
 
 **Dictation not appearing in text fields**
 
-- *Symptom:* Speech is recognized but no text appears in the application. A notice may state that the focused location could not be confirmed to accept text.
-- *Likely cause:* The text field is not focused, or the focused control could not be confirmed to be one. In some applications, particularly web browsers, typing into a non-text control triggers keyboard shortcuts, so the insertion is refused rather than attempted.
-- *Action:* Click inside the text field and try again. If a notice appears with a "Try it anyway" button, use it; after the text lands correctly several times, Wheelhouse asks whether it should always type there, and answering Yes approves the control and the notice stops appearing. If dictation works in Notepad, the problem is specific to that application's text field.
+- *Symptom:* Speech is recognized but no text appears in the application.
+- *Likely cause:* The text field is not focused, or Wheelhouse could not confirm that the focused control accepts text. Wheelhouse then pastes your words with Ctrl+V instead of typing them, so the words arrive only where a paste works. A web browser page that is not a text field takes no paste, so words spoken while the page itself is focused arrive nowhere.
+- *Action:* Click inside the text field and try again. If the application runs as administrator, Wheelhouse cannot reach it at all and shows a notice that says so; use the physical keyboard there, or run Wheelhouse as administrator as well. If dictation works in Notepad, the problem is specific to that application's text field.
 
 **Real speech ignored, or short dictations dropped**
 
@@ -737,7 +738,7 @@ Each installer failure message and its action is listed under [Installation fail
 
 <https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse>
 
-Three ways to reach it: the address above, the **Help** item in the right-click menu on the floating button or the tray icon, and the spoken command "x-ray help". All three open the same assistant in the default browser. It requires a ChatGPT account; the free tier is sufficient.
+Three ways to reach it: the address above, the **Help** item in the right-click menu on the floating button or the tray icon, and the spoken command "help". All three open the same assistant in the default browser. It requires a ChatGPT account; the free tier is sufficient.
 
 The assistant does not have access to a particular computer, so it cannot read logs that are not pasted into it, and it does not know about changes made after the release it was built from.
 
@@ -750,5 +751,5 @@ Include the Wheelhouse version from **About Wheelhouse** in the right-click menu
 
 ---
 
-Generated: 2026-07-31 for the v1.0.7 release
-Wheelhouse version: 1.0.7
+Generated: 2026-09-18 for the v1.0.8 release
+Wheelhouse version: 1.0.8

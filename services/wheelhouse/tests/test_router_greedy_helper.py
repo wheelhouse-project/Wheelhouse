@@ -15,6 +15,7 @@ Both bugs share one root cause: greedy-timer probes were duplicated and
 inconsistent across entry points. The fix is a single shared helper that
 every entry point consults.
 """
+import gc
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,10 @@ import pytest
 
 from speech.router import SpeechRouter
 from speech.pattern_catalog import PatternCatalog
+from speech.pattern_transform import (
+    MAX_PREFIX_MATCHERS,
+    build_literal_prefix_matchers,
+)
 from speech.word_event import WordEvent
 from speech.domain import ProcessingMode, Action
 
@@ -47,6 +52,23 @@ def router(catalog):
     return SpeechRouter(catalog, hotword="x-ray")
 
 
+@pytest.mark.parametrize("words", [("right",), ("double",)])
+def test_shipped_class_separator_command_uses_greedy_timer(router, words):
+    """A pause inside an eligible command prefix gets the actual long timer."""
+    decision = router.decide(
+        WordEvent(words[-1], start_of_utterance=len(words) == 1, end_of_utterance=False),
+        ProcessingMode.IDLE if len(words) == 1 else ProcessingMode.COMMAND_BUFFERING,
+        list(words[:-1]),
+        hotword_active=False,
+        command_timeout_ms=COMMAND_TIMEOUT_MS,
+        replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
+        greedy_timeout_ms=GREEDY_TIMEOUT_MS,
+    )
+    assert decision.action == Action.BUFFER
+    assert decision.target_mode == ProcessingMode.COMMAND_BUFFERING
+    assert decision.timeout_ms == 5000
+
+
 # ============================================================================
 # Test A: FRESH_REPLACEMENT single-word greedy match (wh-greedy-first-word-race)
 # ============================================================================
@@ -64,7 +86,6 @@ class TestFreshReplacementGreedy:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -89,7 +110,6 @@ class TestFreshReplacementGreedy:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -161,7 +181,6 @@ class TestFreshCommandGreedy:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -199,7 +218,6 @@ class TestFreshReplacementGreedyPrefix:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -220,7 +238,6 @@ class TestFreshReplacementGreedyPrefix:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -288,7 +305,6 @@ class TestFreshReplacementNonGreedyLookalike:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -533,7 +549,6 @@ class TestPrefixProbeRespectsHotwordRequirement:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -557,7 +572,6 @@ class TestPrefixProbeRespectsHotwordRequirement:
             event,
             ProcessingMode.IDLE,
             [],
-            {},
             hotword_active=False,
             command_timeout_ms=COMMAND_TIMEOUT_MS,
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
@@ -629,3 +643,389 @@ class TestLiteralPrefixPrecompute:
                     SpeechRouter._extract_literal_prefix(compiled.pattern)
                 ), compiled.pattern
         assert seen_greedy > 0
+
+
+# ============================================================================
+# Test F: one-word literal prefix carrying a \s+ tail (wh-click-number-dictation)
+# ============================================================================
+#
+# The shipped click pattern ^click\s+(.+)$ has literal_prefix 'click\s+':
+# strategy 1's fullmatch demands trailing whitespace 'click' does not have,
+# and str.split() sees ONE token (the \s+ is a regex escape, not a real
+# space), so the word-truncation strategy never ran. The first word 'click'
+# therefore buffered on the 700 ms command timer; a slow second word split
+# the command ('click' dictated alone, the number typed as text). Observed
+# live 2026-08-08 13:39 (wheelhouse.log UTT-18). The probe must treat the
+# \s+/\s* tokens as word separators.
+
+
+class TestOneWordLiteralPrefixWithWhitespaceTail:
+    """The greedy hold now needs the hotword, because the command does.
+
+    David required the hotword for the click-element command on
+    2026-08-17 (wh-voice-access-parity.1.6.1.1), so the router's greedy
+    probe skips that pattern while the hotword is inactive. The hold this
+    section exists to protect is unchanged with the hotword active; with
+    the hotword inactive there is no command to hold for, and 'click'
+    takes the ordinary command timer.
+    """
+
+    def test_click_alone_uses_greedy_timer_with_the_hotword(self, router):
+        event = WordEvent("click", start_of_utterance=True, end_of_utterance=False)
+        decision = router.decide(
+            event,
+            ProcessingMode.IDLE,
+            [],
+            hotword_active=True,
+            command_timeout_ms=COMMAND_TIMEOUT_MS,
+            replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
+            greedy_timeout_ms=GREEDY_TIMEOUT_MS,
+        )
+        assert decision.action == Action.BUFFER
+        assert decision.target_mode == ProcessingMode.COMMAND_BUFFERING
+        assert decision.timeout_ms == GREEDY_TIMEOUT_MS, (
+            f"'click' is the entire literal prefix of the greedy command "
+            rf"^(?:click|tap)\s+(.+)$ and must hold the greedy timer "
+            f"({GREEDY_TIMEOUT_MS}), got {decision.timeout_ms}."
+        )
+
+    def test_click_alone_takes_the_command_timer_without_the_hotword(
+        self, router
+    ):
+        event = WordEvent("click", start_of_utterance=True, end_of_utterance=False)
+        decision = router.decide(
+            event,
+            ProcessingMode.IDLE,
+            [],
+            hotword_active=False,
+            command_timeout_ms=COMMAND_TIMEOUT_MS,
+            replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
+            greedy_timeout_ms=GREEDY_TIMEOUT_MS,
+        )
+        assert decision.timeout_ms != GREEDY_TIMEOUT_MS, (
+            "without the hotword the click command cannot match, so 'click' "
+            "must not hold the greedy timer"
+        )
+
+    def test_literal_prefix_matcher_handles_whitespace_escape_tail(self):
+        m = SpeechRouter._buffer_matches_literal_prefix
+        # One-word prefix with a \s+ tail (the shipped click shape).
+        assert m("click", r"click\s+") is True
+        # Two literal words JOINED by \s+ (no real space anywhere).
+        assert m("select", r"select\s+all\s+") is True
+        assert m("select all", r"select\s+all\s+") is True
+        # Non-prefix words must still be rejected.
+        assert m("clack", r"click\s+") is False
+        assert m("select any", r"select\s+all\s+") is False
+
+
+# ============================================================================
+# Test G: the literal-prefix probe stays uncached (wh-lru-cache-hot-paths)
+# ============================================================================
+#
+# This section is named for the settled design, not for the one the branch
+# started with (wh-lru-cache-hot-paths.1.10). _buffer_matches_literal_prefix
+# is now the FALLBACK path only, for synthetic test catalogs whose pattern
+# data predates the precomputed matchers; production reads the tuple the
+# catalog built at load time. The fallback compiles on every call, on purpose.
+#
+# It must never be memoized. It takes buffer_text, which is the user's spoken
+# words, so a cache on it retains what was said and returns almost no hits --
+# measured at 0 hits over a 600-word utterance, holding 826 KB
+# (wh-lru-cache-hot-paths.1.2). The tests below state that as a contract:
+# distinct arguments keep distinct answers, and nothing on SpeechRouter
+# carries a cache at all.
+
+
+class TestLiteralPrefixProbeIsNotCached:
+    def test_distinct_arguments_keep_distinct_answers(self):
+        """The probe must not flatten distinct prefixes together.
+
+        Any arrangement that ignored the prefix argument -- a memo keyed on
+        the wrong thing, or a shared compiled pattern -- would return the
+        first pair's answer for every later pair, so the router would hand the
+        5 s greedy timer to words that are not greedy prefixes at all.
+        Interleave the pairs so a stale single-key result cannot survive by
+        accident.
+        """
+        m = SpeechRouter._buffer_matches_literal_prefix
+
+        # Same buffer text, different prefixes -> different answers.
+        assert m("click", r"click\s+") is True
+        assert m("click", r"select\s+all\s+") is False
+
+        # Same prefix, different buffer texts -> different answers.
+        assert m("select all", r"select\s+all\s+") is True
+        assert m("select any", r"select\s+all\s+") is False
+
+        # Re-ask every pair in a different order; the answers must hold.
+        assert m("select any", r"select\s+all\s+") is False
+        assert m("click", r"click\s+") is True
+        assert m("select all", r"select\s+all\s+") is True
+        assert m("click", r"select\s+all\s+") is False
+
+    def test_probe_itself_is_not_cached(self):
+        """The probe must NOT memoize on ``buffer_text``.
+
+        This is the guard for wh-lru-cache-hot-paths.1.2 stated as a contract
+        rather than as a measurement: whatever else changes, the function that
+        receives the user's spoken text must not be the one holding a cache.
+        """
+        assert not hasattr(
+            SpeechRouter._buffer_matches_literal_prefix, "cache_info"
+        ), "the probe takes user speech; a cache on it retains what was said"
+
+    def test_router_holds_no_process_global_cache(self):
+        """No attribute of SpeechRouter may carry a cache.
+
+        Regression for wh-lru-cache-hot-paths.1.5, stated as a contract over
+        the whole class rather than over one named function. Two earlier
+        rounds of this review each moved a cache to a "safe" key and each was
+        wrong, so the guard now refuses ANY cache on the router instead of
+        checking the one place the last mistake was made.
+
+        The router runs inside the long-lived Logic process. A cache on it is
+        process-global, and nothing in the codebase clears it: PatternCatalog
+        .reload() replaces five attributes of the catalog and cannot reach a
+        cache that lives on a different class. Compiled patterns built from a
+        user rule therefore outlive the rule itself. Keep the compiled work in
+        the pattern data the catalog owns, where reload replaces it.
+        """
+        cached = [
+            name
+            for name in dir(SpeechRouter)
+            if hasattr(getattr(SpeechRouter, name, None), "cache_info")
+        ]
+        assert cached == [], (
+            f"SpeechRouter carries a process-global cache on {cached}. "
+            f"Nothing clears it on catalog reload, so user-pattern data "
+            f"survives the rule that produced it (wh-lru-cache-hot-paths.1.5)."
+        )
+
+
+class TestCatalogPrecomputesPrefixMatchers:
+    """wh-lru-cache-hot-paths.1.5: the compiled prefix matchers belong to the
+    catalog, beside the literal_prefix string the catalog already computes at
+    load time (wh-greedy-prefix-precompute). Storing them there rather than in
+    an lru_cache on the router bounds what WHEELHOUSE retains by the live
+    catalog: reload() rebuilds the pattern data, so the catalog holds nothing
+    for a deleted user rule.
+
+    CPython's own regex cache keeps the compiled pattern until eviction no
+    matter where WheelHouse stores it (wh-lru-cache-hot-paths.1.6), so that is
+    not a claim about total process memory.
+    TestReloadReleasesUserPatternMatchers below states exactly what its own
+    heap scan does and does not prove.
+    """
+
+    def test_every_catalog_greedy_pattern_carries_compiled_matchers(self, catalog):
+        seen_greedy = 0
+        for word in catalog.get_all_first_words():
+            for compiled, _ptype, data in catalog.get_matching_patterns(word):
+                if not (data and data.get("is_greedy", False)):
+                    continue
+                seen_greedy += 1
+                assert "literal_prefix_matchers" in data, compiled.pattern
+                matchers = data["literal_prefix_matchers"]
+                assert isinstance(matchers, tuple), compiled.pattern
+                assert matchers == build_literal_prefix_matchers(
+                    data["literal_prefix"]
+                ), compiled.pattern
+        assert seen_greedy > 0
+
+    def test_precomputed_matchers_answer_the_same_as_the_probe(self, catalog):
+        """The stored matchers must not drift from the probe's own answer."""
+        for word in catalog.get_all_first_words():
+            for compiled, _ptype, data in catalog.get_matching_patterns(word):
+                if not (data and data.get("is_greedy", False)):
+                    continue
+                prefix = data["literal_prefix"]
+                for buffer_text in (word, f"{word} extra", "nonsense buffer"):
+                    stored = any(
+                        m.match(buffer_text)
+                        for m in data["literal_prefix_matchers"]
+                    )
+                    probe = SpeechRouter._buffer_matches_literal_prefix(
+                        buffer_text, prefix
+                    )
+                    assert stored == probe, (compiled.pattern, buffer_text)
+
+
+class TestReloadReleasesUserPatternMatchers:
+    """Regression for wh-lru-cache-hot-paths.1.5.
+
+    The pattern editor writes user_patterns.toml and then calls
+    catalog.reload() (services/wheelhouse/main.py, _reload_and_refresh). When
+    the compiled matchers lived in an lru_cache on SpeechRouter, reload could
+    not reach them: matchers built from a deleted or edited user rule stayed
+    resident until eviction or process exit. maxsize bounds the ENTRY COUNT,
+    not the bytes those entries hold, so one long user prefix could retain an
+    arbitrary amount.
+    """
+
+    PREFIX_WORDS = "zzqx marker phrase"
+
+    def _write_user_file(self, path, include_greedy: bool) -> None:
+        body = ""
+        if include_greedy:
+            body = (
+                "[[pattern]]\n"
+                f"pattern = '''^{self.PREFIX_WORDS}(.+)$'''\n"
+                'doc_id = "user-greedy-marker"\n'
+                "actions = [\n"
+                '    { function = "insert_text", params = ["g1"] }\n'
+                "]\n"
+            )
+        path.write_text(body, encoding="utf-8")
+
+    @staticmethod
+    def _live_marker_patterns():
+        """Every compiled regex alive in this process that names the marker.
+
+        The scan covers the whole heap on purpose. The point of
+        wh-lru-cache-hot-paths.1.5 is that the retention was NOT reachable
+        from the catalog: it sat in an lru_cache on SpeechRouter, which
+        ``PatternCatalog.reload()`` cannot see. A check that only walks the
+        catalog would call that arrangement clean. This one names the
+        condition the finding is about -- no compiled matcher for a deleted
+        user rule may stay alive anywhere -- so it holds no matter which class
+        a future cache is added to.
+
+        Callers must run ``re.purge()`` and ``gc.collect()`` first. ``re``
+        keeps its own cache of every pattern ``re.compile`` has seen,
+        independent of where WheelHouse stores the result, so without the
+        purge this returns matchers even when nothing in WheelHouse holds
+        them. ``re.purge()`` is documented public API.
+
+        Be exact about what that purge means, because it decides what this
+        test proves (wh-lru-cache-hot-paths.1.6). Production never calls
+        ``re.purge()``, so in a running Wheelhouse CPython's regex cache does
+        hold a deleted rule's matchers until eviction. That retention is real,
+        it is bounded at ``re._MAXCACHE`` (512) entries process-wide, and
+        ordinary compiling evicts it -- but it is CPython's, not WheelHouse's,
+        and it was present identically before this branch. Purging it is what
+        isolates the one variable under test: does WHEELHOUSE hold matchers
+        for a rule the user deleted?
+
+        So this test proves that no WheelHouse structure strands matchers
+        across a reload. It deliberately does NOT measure the ``re`` cache.
+        The mutation gate shows the isolation works rather than hides a leak:
+        re-adding ``@lru_cache`` to ``build_literal_prefix_matchers`` is
+        caught here, with the purge in place, because an ``lru_cache`` holds
+        its own strong reference that purging ``re`` does not touch.
+        """
+        found = []
+        for obj in gc.get_objects():
+            if not isinstance(obj, re.Pattern):
+                continue
+            pattern = obj.pattern
+            if isinstance(pattern, str) and "zzqx" in pattern:
+                found.append(pattern)
+        return found
+
+    def test_removed_user_pattern_leaves_no_compiled_matchers(self, tmp_path):
+        user_file = tmp_path / "user_patterns.toml"
+        self._write_user_file(user_file, include_greedy=True)
+
+        catalog = PatternCatalog(
+            "speech/config/patterns.toml", user_patterns_file=str(user_file),
+        )
+        router = SpeechRouter(catalog, hotword="x-ray")
+
+        # Speak the rule's first word. This is what fills a router-side cache
+        # in the arrangement the finding is about: the probe runs once per
+        # candidate greedy pattern per word event.
+        assert router._buffer_is_greedy_prefix(
+            ["zzqx"], ("command", "replacement"), hotword_active=False,
+        ) is True
+
+        re.purge()
+        gc.collect()
+        assert self._live_marker_patterns(), (
+            "the user greedy rule must produce compiled matchers that stay "
+            "alive while the rule exists, or the removal below proves nothing"
+        )
+
+        # The user deletes the rule in the pattern editor. The editor writes
+        # the file and calls reload(); see main.py::_reload_and_refresh.
+        self._write_user_file(user_file, include_greedy=False)
+        assert catalog.reload() is True
+
+        re.purge()
+        gc.collect()
+        leaked = self._live_marker_patterns()
+        assert leaked == [], (
+            f"compiled matchers for a deleted user rule are still alive: "
+            f"{leaked}. Something outside the catalog holds them, so "
+            f"reload() cannot free them (wh-lru-cache-hot-paths.1.5)."
+        )
+
+
+class TestPrefixMatcherCountIsBounded:
+    """Regression for wh-lru-cache-hot-paths.1.7.
+
+    The matcher count must not depend on user input. A prefix of N words used
+    to produce N matchers whose combined source text grows quadratically, and
+    the advanced Pattern Manager accepts a raw expression with no length or
+    word-count limit: no ``setMaxLength`` on the input, ``_resolve_raw_expression``
+    checks only that the regex compiles and is anchored to match its declared
+    type, and ``_probe_backtracking`` runs three short probes that a long
+    literal prefix passes easily.
+
+    That mattered more once the build moved to catalog load time. The build
+    now runs on startup and on every successful ``reload()`` after a pattern
+    save, synchronously inside the Logic process's asyncio loop (main.py,
+    ``_handle_pattern_manager_action`` calls ``_reload_and_refresh`` directly
+    at four sites), so it blocks speech routing -- and it runs even when the
+    trigger is never spoken. Measured on a 1000-word prefix: 1000 matchers,
+    3.310 s and 62.3 MB uncapped, against 0.0072 s and 129 KB capped.
+    """
+
+    @staticmethod
+    def _many_word_prefix(words: int) -> str:
+        return " ".join(f"zzqxcap{i}" for i in range(words))
+
+    def test_matcher_count_never_exceeds_the_cap(self):
+        for words in (1, 2, MAX_PREFIX_MATCHERS - 1, MAX_PREFIX_MATCHERS,
+                      MAX_PREFIX_MATCHERS + 1, 500):
+            matchers = build_literal_prefix_matchers(
+                self._many_word_prefix(words)
+            )
+            assert len(matchers) <= MAX_PREFIX_MATCHERS, (
+                f"a {words}-word prefix built {len(matchers)} matchers; the "
+                f"count must not depend on user input "
+                f"(wh-lru-cache-hot-paths.1.7)"
+            )
+            # Below the cap nothing is lost: still one matcher per truncation
+            # plus the full prefix.
+            if words <= MAX_PREFIX_MATCHERS:
+                assert len(matchers) == words
+
+    def test_full_prefix_still_matches_past_the_cap(self):
+        """Capping drops only the deepest partial probes, never the whole
+        trigger. A user who speaks such a phrase in full still matches."""
+        words = MAX_PREFIX_MATCHERS + 20
+        prefix = self._many_word_prefix(words)
+        matchers = build_literal_prefix_matchers(prefix)
+        assert any(m.match(prefix) for m in matchers), (
+            "the full-prefix matcher must survive the cap"
+        )
+        # The truncations that survive are the shallow ones, in probe order.
+        first_word = prefix.split()[0]
+        assert any(m.match(first_word) for m in matchers)
+
+    def test_shipped_catalog_is_far_below_the_cap(self, catalog):
+        """The cap must be a guard against absurd input, not something a real
+        pattern trips. The longest shipped prefix is two words."""
+        worst = 0
+        for word in catalog.get_all_first_words():
+            for _compiled, _ptype, data in catalog.get_matching_patterns(word):
+                if not (data and data.get("is_greedy", False)):
+                    continue
+                worst = max(worst, len(data.get("literal_prefix_matchers", ())))
+        assert 0 < worst <= 4, (
+            f"the shipped catalog's largest matcher set is {worst}; if this "
+            f"grows toward MAX_PREFIX_MATCHERS ({MAX_PREFIX_MATCHERS}) the cap "
+            f"needs to be re-justified rather than silently truncating a real "
+            f"trigger phrase"
+        )

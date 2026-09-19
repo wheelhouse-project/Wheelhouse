@@ -3,8 +3,9 @@
 
 This GUI-process module manages ONE transparent, always-on-top,
 no-activate, click-through layered Win32 window PER monitor that
-currently has badges. It paints centered outlined numerals (drop shadow,
-no background box, configurable point size) over on-screen controls via
+currently has badges. It paints centered outlined numerals (optional
+drop shadow, no background box, configurable point size) over on-screen
+controls via
 the existing Qt-to-GDI per-pixel-alpha bridge
 (``shared/overlay_bitmap.py``), generation-gates its own painting, and
 returns an ``overlay_state_changed`` wire dict for the GUI to forward
@@ -78,11 +79,12 @@ from __future__ import annotations
 import ctypes
 import logging
 import math
+import unicodedata
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Optional
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QLineF, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -95,7 +97,16 @@ from PySide6.QtGui import (
     QScreen,
 )
 
-from shared.monitor_geometry import _NativeMonitor, _enumerate_native_monitors
+from services.wheelhouse.grid_overlay_state import (
+    GridRect as _GridRect,
+    cell_center as _grid_cell_center,
+    cell_rects as _grid_cell_rects,
+)
+from shared.monitor_geometry import (
+    _NativeMonitor,
+    _enumerate_native_monitors,
+    _overlap_area,
+)
 from shared.overlay_bitmap import (
     LayeredDib,
     build_layered_dib,
@@ -248,11 +259,44 @@ _DEFAULT_BADGE_CORNER = _BADGE_CORNER_TOP_RIGHT
 # list row, a column header) a half-above badge would sit visually between two
 # stacked rows and read as ambiguous, so those keep the inside corner.
 _BADGE_SMALL_CONTROL_FACTOR = 2.0
+# A numbered control whose width is at least this many times its height is a
+# "wide row" (wh-vscode-menu-badge-misplaced): its numeral goes in the LEADING
+# gutter, beside the edge where the label starts, instead of past the far
+# trailing edge. A VS Code menu row is 861 pixels wide, so the trailing
+# placement put the number about 870 pixels from the word it labels. The
+# threshold is a settled decision: 10 x height, accepted by David 2026-09-14.
+_WIDE_ROW_MIN_ASPECT = 10
 # Gap (LOGICAL pixels, scaled by dpr) between a badge and the already-placed
 # badge it was nudged away from (wh-overlay-badge-collision). Two digits drawn
 # flush against each other read as one number ("3" beside "4" reads "34"), so
 # collision nudges keep this much clear space between badges.
 _BADGE_COLLISION_GAP_PX = 3.0
+# How many rings of collision-nudge candidates to search around the base
+# anchor (wh-overlay-bubble-badges.4). Each ring tries eight directions at
+# ring-many badge-size steps out, so 3 rings is 24 candidates. The old
+# three-candidate list ran out in packed clusters at monitor corners and
+# stacked the digits; a badge pushed past the attach threshold draws as a
+# detached bubble with a leader line, so a far candidate stays readable.
+_BADGE_COLLISION_RINGS = 3
+
+# Edge-cluster layout (wh-taskbar-badge-mispoint, option 1): several small
+# controls packed against a monitor edge -- the tray corner of a vertical or
+# horizontal taskbar -- get their badges in ONE single-file column (left/right
+# edge) or row (bottom/top edge) beside the cluster, in target order along
+# the edge, instead of collision-ring scatter (which places in ring order,
+# not target order, so the leader lines crossed into a tangle). A run must
+# have at least this many members to form a cluster; the collision nudge
+# already handles a pair unambiguously.
+_EDGE_CLUSTER_MIN_COUNT = 3
+# A cluster member must lie ENTIRELY within this many badge heights of the
+# monitor edge. The band is deliberately narrow: a full-width list row (nav
+# pane, file list) flush to the window edge extends far past it and must
+# never trade its trailing-space placement for a column.
+_EDGE_CLUSTER_BAND_FACTOR = 3.0
+# Consecutive run members may be separated by at most this many badge heights
+# of gap along the edge; a larger gap splits the run (two separate icon
+# groups).
+_EDGE_CLUSTER_JOIN_GAP_FACTOR = 1.0
 
 # Whether to place the numeral in the empty space just BEYOND the control's
 # trailing edge (the corner's horizontal side) instead of inside its corner,
@@ -268,6 +312,314 @@ _BADGE_COLLISION_GAP_PX = 3.0
 # unchanged. False restores pure corner placement. The value is the validated
 # [click] setting overlay_badge_trailing_space.
 _DEFAULT_BADGE_TRAILING_SPACE = True
+
+# The bubble badge's own color scheme (wh-overlay-bubble-badges): "light" is a
+# white bubble with a black digit, "dark" a near-black bubble with a white
+# digit, and "auto" picks per paint from the Windows app theme -- system dark
+# theme -> light bubble, system light theme -> dark bubble, so the bubble
+# contrasts with typical screen content. The values name the BUBBLE color, not
+# the system theme. The value is the validated [click] setting
+# overlay_badge_theme; an unknown value falls back to _DEFAULT_BADGE_THEME.
+_BADGE_THEME_AUTO = "auto"
+_BADGE_THEME_LIGHT = "light"
+_BADGE_THEME_DARK = "dark"
+_VALID_BADGE_THEMES = frozenset(
+    {_BADGE_THEME_AUTO, _BADGE_THEME_LIGHT, _BADGE_THEME_DARK}
+)
+_DEFAULT_BADGE_THEME = _BADGE_THEME_AUTO
+
+# Bubble geometry (wh-overlay-bubble-badges). The bubble's padding around the
+# digit is proportional to the digit's cap height, with an absolute floor so a
+# tiny font still reads as a bubble rather than a box hugging the digit.
+_BUBBLE_PAD_X_CAP_FACTOR = 0.4
+_BUBBLE_PAD_Y_CAP_FACTOR = 0.3
+_BUBBLE_PAD_MIN_LOGICAL_PX = 3.0
+
+# The three per-badge drawing states, decided from the shortest straight-line
+# distance between the bubble's final placed rectangle and its control's
+# rectangle: intersecting by area -> bubble + a pointer tail aimed inward
+# toward the control's center (user decision 2026-08-07: every bubble points
+# at its control, matching Voice Access); within
+# _BUBBLE_ATTACH_GAP_LOGICAL_PX (scaled by dpr) -> bubble + pointer tail
+# across the gap; further away (a collision nudge or monitor-edge shift moved
+# it) -> bubble + thin leader line. A single threshold, deliberately NOT a
+# config setting (user decision 2026-08-04: judge it visually, adjust the
+# constant if needed).
+_BUBBLE_STATE_OVERLAP = "overlap"
+_BUBBLE_STATE_ADJACENT = "adjacent"
+_BUBBLE_STATE_DETACHED = "detached"
+_BUBBLE_ATTACH_GAP_LOGICAL_PX = 8.0
+
+# Bubble scheme colors (wh-overlay-bubble-badges): (fill, digit, border) per
+# bubble scheme. The digit is a plain fill in the digit color -- no outline
+# pen -- because the bubble fill provides the contrast, so the old
+# outline-swallows-glyph failure mode cannot occur for numerals.
+_BUBBLE_SCHEME_COLORS: "dict[str, tuple[QColor, QColor, QColor]]" = {
+    _BADGE_THEME_LIGHT: (
+        QColor(255, 255, 255, 255),
+        QColor(0, 0, 0, 255),
+        QColor(102, 102, 102, 255),
+    ),
+    _BADGE_THEME_DARK: (
+        QColor(32, 32, 32, 255),
+        QColor(255, 255, 255, 255),
+        QColor(170, 170, 170, 255),
+    ),
+}
+# Corner radius as a fraction of the bubble's height, and the border stroke
+# width. The border equals _NUMERAL_OUTLINE_PX so the decoration margin
+# _numeral_badge_size reserves is exactly the pen half-width the stroke needs.
+_BUBBLE_CORNER_RADIUS_FACTOR = 0.3
+_BUBBLE_BORDER_PX = _NUMERAL_OUTLINE_PX
+# Pointer tail: base width on the bubble edge; how far past the control's
+# nearest boundary point the apex reaches (i.e. INTO the control); and how far
+# the base is rooted inside the bubble so the triangle overlaps the rounded
+# rect and the union has no seam at a rounded corner.
+_BUBBLE_TAIL_BASE_LOGICAL_PX = 8.0
+_BUBBLE_TAIL_APEX_INSET_LOGICAL_PX = 3.0
+_BUBBLE_TAIL_ROOT_INSET_LOGICAL_PX = 2.0
+# Inward tail (the OVERLAP state, or a degenerate zero anchor distance): how
+# far the apex reaches past the bubble's edge toward the center of the
+# control's ON-monitor part. May exceed the badge box by up to (this minus
+# the 5.25 logical-px box margin), so the overhang must land inside the
+# on-monitor control -- the region _compute_monitor_bbox preserves after its
+# monitor clamp. The reach is therefore confined to the slab interval where
+# the aim ray is inside the clipped control (an exit-only cap is not enough:
+# the ray can leave the bubble outside the control and enter it only past
+# this reach, wh-overlay-bubble-badges.3.1 and .3.3); the slab rectangle is
+# further inset from the monitor edges by the rendered-ink extents (pen
+# half-width left/top, shadow offset right/bottom), because the border
+# stroke and shadow paint past the apex point and an apex ON a monitor edge
+# still bleeds clipped ink (wh-overlay-bubble-badges.3.4); when no point of
+# the reach lies in that interval, the apex falls back to the badge-box ink
+# budget (box margin minus the shadow offset, 3.25 logical px), which
+# placement keeps on-monitor unconditionally.
+_BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX = 7.0
+# Leader line: a border-color outer stroke with a fill-color core.
+_LEADER_OUTER_LOGICAL_PX = 3.0
+_LEADER_CORE_LOGICAL_PX = 1.5
+
+# ---------------------------------------------------------------------------
+# Mouse-grid drawing mode (wh-grid-paint-mode). Spec:
+# docs/superpowers/specs/2026-08-09-mouse-grid-overlay-design.md -- "Grid
+# styling as user configuration" is deliberately out of scope, so these are
+# hard-coded constants beside the numbered overlay's styling, in LOGICAL
+# pixels (every use multiplies by the target monitor's dpr).
+# ---------------------------------------------------------------------------
+
+# The grid lines and the pin are stroked TWICE -- a wide dark outer stroke
+# with a narrow light core on top -- exactly like the numbered badge's leader
+# line (_LEADER_OUTER_LOGICAL_PX / _LEADER_CORE_LOGICAL_PX). That is what
+# makes a one-pixel-thin line readable over both a white document and a dark
+# editor without knowing anything about the pixels underneath; a single-color
+# line disappears against a background of its own color. The grid covers a
+# whole monitor, so it always crosses both kinds of content at once and a
+# theme-dependent single color could never work.
+_GRID_LINE_OUTER_LOGICAL_PX = 3.0
+_GRID_LINE_CORE_LOGICAL_PX = 1.25
+# Reuses the numbered overlay's palette choices: white ink, black surround.
+_GRID_LINE_OUTER_COLOR = _OUTLINE_COLOR
+_GRID_LINE_CORE_COLOR = _NUMERAL_COLOR
+
+# Cell label size. The label is proportional to the SHORTER side of the cell
+# so a wide-but-short cell (a 16:9 monitor's cell is 1.78:1) never gets a
+# digit taller than the cell, then clamped: the floor keeps a deeply refined
+# cell's digit legible, and the cap stops a full-monitor cell (640x360 on a
+# 1080p screen) from painting a 144-pixel numeral over the user's window.
+_GRID_LABEL_CELL_FACTOR = 0.4
+_GRID_LABEL_MIN_LOGICAL_PX = 11.0
+_GRID_LABEL_MAX_LOGICAL_PX = 72.0
+# The label's outline pen, as a FRACTION of the label's pixel size rather
+# than an absolute width. The numbered badge learned this the hard way: an
+# absolute 3px outline is stroked centered on the glyph edge, so half of it
+# eats inward and a small numeral reads as a solid black blob
+# (wh-dictation-retraction-indicator.11). A proportional width keeps the same
+# outline-to-glyph ratio at every cell size, from a full-monitor cell down to
+# the refinement floor. The absolute floor keeps the outline visible at all.
+_GRID_LABEL_OUTLINE_FACTOR = 0.07
+_GRID_LABEL_OUTLINE_MIN_LOGICAL_PX = 1.0
+
+# The drag-anchor pin: a crosshair (two arms crossing at the point) inside a
+# small ring. The arms locate the exact pixel the drag starts from -- a
+# filled dot would hide it -- and the ring makes the mark findable on a busy
+# screen.
+_GRID_PIN_ARM_LOGICAL_PX = 14.0
+_GRID_PIN_RADIUS_LOGICAL_PX = 5.0
+
+# Transparent breathing room added around the drawn rectangle when sizing the
+# per-monitor paint surface, so the outer stroke on the grid's own border
+# (stroked centered, half of it outside the rectangle) and its anti-aliased
+# edge are not clipped. Half of _GRID_LINE_OUTER_LOGICAL_PX plus slack. The
+# same role _SURFACE_MARGIN_PX plays for badges.
+_GRID_INK_MARGIN_LOGICAL_PX = 4.0
+
+
+def _resolve_bubble_scheme(badge_theme: str, system_scheme: Qt.ColorScheme) -> str:
+    """Map the validated overlay_badge_theme plus the system color scheme to
+    the bubble's OWN scheme -- ``_BADGE_THEME_LIGHT`` or ``_BADGE_THEME_DARK``,
+    never "auto".
+
+    "auto" INVERTS the system theme for contrast: a system dark theme means
+    mostly-dark screen content, so the bubble goes light (white); a system
+    light theme gets the near-black bubble. An unknown scheme falls back to
+    the light bubble. Pinned "light"/"dark" ignore the system scheme -- the
+    override for content that does not match the system theme (a dark editor
+    on a light-themed system)."""
+    if badge_theme == _BADGE_THEME_LIGHT or badge_theme == _BADGE_THEME_DARK:
+        return badge_theme
+    if system_scheme == Qt.ColorScheme.Light:
+        return _BADGE_THEME_DARK
+    return _BADGE_THEME_LIGHT
+
+
+def _system_color_scheme() -> Qt.ColorScheme:
+    """The Windows app light/dark scheme via Qt's style hints (Qt >= 6.5).
+
+    The one seam that touches ``QGuiApplication.styleHints()``; read fresh at
+    each paint so a system theme switch shows on the next repaint. Degrades to
+    ``Unknown`` (never raises) so a paint cannot crash on the theme read."""
+    try:
+        return QGuiApplication.styleHints().colorScheme()
+    except Exception:  # noqa: BLE001 - theme read is best-effort
+        return Qt.ColorScheme.Unknown
+
+
+def _bubble_drawing_state(
+    bubble: tuple[float, float, float, float],
+    control: tuple[float, float, float, float],
+    dpr: float,
+) -> str:
+    """Pick the drawing state for one badge (see the state constants above).
+
+    Both rectangles are ``(left, top, right, bottom)`` in PHYSICAL pixels;
+    the threshold is logical, so it is scaled by ``dpr``. The gap is the
+    shortest straight-line distance between the two rectangles -- zero when
+    they touch. Touching is NOT area overlap (matching
+    ``OverlayPaintWindowManager._rects_overlap_phys``), so a bubble placed
+    flush against its control's edge -- the common trailing-space placement --
+    gets the pointer tail."""
+    if OverlayPaintWindowManager._rects_overlap_phys(bubble, control):
+        return _BUBBLE_STATE_OVERLAP
+    gap_x = max(0.0, bubble[0] - control[2], control[0] - bubble[2])
+    gap_y = max(0.0, bubble[1] - control[3], control[1] - bubble[3])
+    gap = math.hypot(gap_x, gap_y)
+    if gap <= _BUBBLE_ATTACH_GAP_LOGICAL_PX * dpr:
+        return _BUBBLE_STATE_ADJACENT
+    return _BUBBLE_STATE_DETACHED
+
+
+def _bubble_anchor_points(
+    bubble: tuple[float, float, float, float],
+    control: tuple[float, float, float, float],
+) -> "tuple[tuple[float, float], tuple[float, float]]":
+    """The attachment anchors between a bubble and its control, in PHYSICAL
+    pixels: the center of the bubble edge nearest the control, and the point
+    on the control rectangle nearest that edge center. The pointer tail grows
+    from the first toward (and past) the second; the leader line connects the
+    two. Both rectangles are ``(left, top, right, bottom)``."""
+    bl, bt, br, bb = bubble
+    cx0, cy0, cx1, cy1 = control
+    edge_centers = (
+        (bl, (bt + bb) / 2.0),
+        (br, (bt + bb) / 2.0),
+        ((bl + br) / 2.0, bt),
+        ((bl + br) / 2.0, bb),
+    )
+    best_pa = edge_centers[0]
+    best_pb = best_pa
+    best_dist: Optional[float] = None
+    for pa in edge_centers:
+        pb = (
+            min(max(pa[0], cx0), cx1),
+            min(max(pa[1], cy0), cy1),
+        )
+        dist = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+        if best_dist is None or dist < best_dist:
+            best_pa, best_pb, best_dist = pa, pb, dist
+    return best_pa, best_pb
+
+
+def _leader_anchor_points(
+    bubble: tuple[float, float, float, float],
+    control: tuple[float, float, float, float],
+    mon_w_phys: float,
+    mon_h_phys: float,
+) -> "tuple[tuple[float, float], tuple[float, float]]":
+    """The endpoints of a DETACHED badge's leader line, in PHYSICAL pixels:
+    the center of the bubble edge nearest the target, and the CENTER of the
+    control's on-monitor part (wh-taskbar-badge-mispoint).
+
+    This is deliberately NOT :func:`_bubble_anchor_points` (which the pointer
+    tail keeps): the nearest POINT on the control's rectangle is wrong for a
+    leader line. A taskbar button reports a full-row rectangle with its
+    visible icon centered inside, so a nearest-point endpoint lands on blank
+    pixels at the row's edge -- and two stacked rows share a corner, so two
+    leader lines converge on the SAME point and neither reads as labeling
+    anything. The visible-part center is distinct per control and sits on the
+    glyph the user actually sees.
+
+    The control is clipped to the monitor (``[0, mon_w_phys] x
+    [0, mon_h_phys]``, monitor-local like every placement rectangle) before
+    taking the center, so a control overhanging the monitor edge aims the
+    line at the middle of its VISIBLE part, not at off-screen pixels. A
+    control entirely off the monitor (nothing visible to aim at) falls back
+    to its raw center. Both rectangles are ``(left, top, right, bottom)``."""
+    cx0, cy0, cx1, cy1 = control
+    vx0, vy0 = max(cx0, 0.0), max(cy0, 0.0)
+    vx1, vy1 = min(cx1, mon_w_phys), min(cy1, mon_h_phys)
+    if vx1 <= vx0 or vy1 <= vy0:
+        pb = ((cx0 + cx1) / 2.0, (cy0 + cy1) / 2.0)
+    else:
+        pb = ((vx0 + vx1) / 2.0, (vy0 + vy1) / 2.0)
+    bl, bt, br, bb = bubble
+    edge_centers = (
+        (bl, (bt + bb) / 2.0),
+        (br, (bt + bb) / 2.0),
+        ((bl + br) / 2.0, bt),
+        ((bl + br) / 2.0, bb),
+    )
+    pa = min(
+        edge_centers, key=lambda p: math.hypot(pb[0] - p[0], pb[1] - p[1])
+    )
+    return pa, pb
+
+
+def _ray_rect_interval(
+    px: float,
+    py: float,
+    ux: float,
+    uy: float,
+    rect: tuple[float, float, float, float],
+) -> tuple[float, float]:
+    """The parameter interval ``[t_enter, t_exit]`` where the line
+    ``(px, py) + t * (ux, uy)`` lies inside the axis-aligned ``(left, top,
+    right, bottom)`` rectangle (slab intersection, one slab per axis). Empty
+    is signaled by ``t_exit < t_enter``: an axis-parallel ray whose fixed
+    coordinate misses the rectangle's span, an INVERTED rectangle (right <
+    left or bottom < top, the empty result of an intersection), or a line
+    that never crosses the rectangle all return ``(inf, -inf)`` or a crossed
+    pair the caller's ``t_exit < t_enter`` check rejects. A zero-width or
+    zero-height rectangle is a valid degenerate slab (a segment): a line
+    crossing it returns the point interval where it does."""
+    if rect[2] < rect[0] or rect[3] < rect[1]:
+        return (math.inf, -math.inf)
+    t_enter = -math.inf
+    t_exit = math.inf
+    for p_axis, u_axis, lo, hi in (
+        (px, ux, rect[0], rect[2]),
+        (py, uy, rect[1], rect[3]),
+    ):
+        if u_axis == 0.0:
+            if not (lo <= p_axis <= hi):
+                return (math.inf, -math.inf)
+            continue
+        t0 = (lo - p_axis) / u_axis
+        t1 = (hi - p_axis) / u_axis
+        if t0 > t1:
+            t0, t1 = t1, t0
+        t_enter = max(t_enter, t0)
+        t_exit = min(t_exit, t1)
+    return (t_enter, t_exit)
 
 # Working/busy badge (wh-dictation-retraction-indicator.2): a single static
 # glyph painted at an arbitrary screen point to signal that dictated text is
@@ -328,6 +680,44 @@ class _PointBadgeSummary:
 
     items: list[_PointBadgeItem]
     snapshot_id: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetPaintRect(OverlayPaintRect):
+    """A resolved paint rect that also carries what the wide-row rule reads
+    about its control (wh-vscode-menu-badge-misplaced).
+
+    ``_do_paint`` builds one for each summary item that has a name, so the
+    placement code can read the name and the walk-time mark without a new
+    argument on the placement methods or a third member in the
+    ``(rect, display_number)`` badge tuples. A plain ``OverlayPaintRect`` (the
+    working badge, a direct caller) never takes the wide-row path.
+
+    ``target_name`` is the control's accessible name; its first strong bidi
+    character decides which side is the leading side. ``bounds_outside_menu``
+    is the summary item's field of the same name: True means the rectangle may
+    be wrong, so the badge keeps its normal placement.
+    """
+
+    target_name: str = ""
+    bounds_outside_menu: bool = False
+
+
+def _name_is_right_to_left(name: str) -> bool:
+    """True when the first strong bidi character of ``name`` is right-to-left.
+
+    Bidi class ``R`` (Hebrew and similar) or ``AL`` (Arabic letters) means
+    right-to-left; ``L`` means left-to-right. Digits, spaces, and punctuation
+    are weak or neutral and are skipped. A name with no strong character is
+    left-to-right.
+    """
+    for char in name:
+        direction = unicodedata.bidirectional(char)
+        if direction in ("R", "AL"):
+            return True
+        if direction == "L":
+            return False
+    return False
 
 
 class WNDCLASSEXW(ctypes.Structure):
@@ -633,10 +1023,11 @@ class OverlayPaintWindowManager:
 
     def __init__(
         self,
-        badge_font_pt: int = 16,
-        badge_shadow: bool = True,
+        badge_font_pt: int = 10,
+        badge_shadow: bool = False,
         badge_corner: str = _DEFAULT_BADGE_CORNER,
         badge_trailing_space: bool = _DEFAULT_BADGE_TRAILING_SPACE,
+        badge_theme: str = _DEFAULT_BADGE_THEME,
     ) -> None:
         self._badge_font_pt = badge_font_pt
         self._badge_shadow = badge_shadow
@@ -651,6 +1042,13 @@ class OverlayPaintWindowManager:
         # over the inside corner (see _DEFAULT_BADGE_TRAILING_SPACE). Coerced to a
         # plain bool so a truthy non-bool can never leak into the placement test.
         self._badge_trailing_space = bool(badge_trailing_space)
+        # The bubble color scheme (see _DEFAULT_BADGE_THEME). ClickConfig
+        # already validates the config value, but normalize defensively so an
+        # unexpected string can never select an unknown scheme.
+        self._badge_theme = (
+            badge_theme if badge_theme in _VALID_BADGE_THEMES
+            else _DEFAULT_BADGE_THEME
+        )
 
         self._user32 = ctypes.windll.user32
         self._kernel32 = ctypes.windll.kernel32
@@ -667,6 +1065,19 @@ class OverlayPaintWindowManager:
         self._gate = GenerationGate()
         # hmonitor -> _OverlayWindow for the monitors currently painted.
         self._windows: dict[int, _OverlayWindow] = {}
+        # The mouse grid's retained drawing (wh-grid-paint-mode). The grid and
+        # its pin arrive as SEPARATE Logic -> GUI events, and neither may
+        # erase the other: "mark" paints a pin and then resets the grid to the
+        # full monitor, so a paint_grid immediately follows a paint_grid_pin
+        # and both must end up on screen. UpdateLayeredWindow replaces the
+        # WHOLE window surface per call, so there is no way to add the pin to
+        # an already-composited surface -- the manager therefore keeps the
+        # last of each and repaints BOTH on every grid event. That is the only
+        # state the grid mode holds, and it is a memory of what was drawn, not
+        # a decision: no cell arithmetic, no refinement tracking, no monitor
+        # choice. Both are dropped by clear_grid.
+        self._grid_event: Optional[Any] = None
+        self._grid_pin: Optional[Any] = None
         # Windows whose destroy() failed on the REBUILD path (monitor
         # moved/resized): the new window claims the hmonitor slot in
         # _windows, so the still-on-screen old window cannot be retained
@@ -674,6 +1085,16 @@ class OverlayPaintWindowManager:
         # clear / clear_all / paint's except-path) so it is not orphaned
         # (wh-n29v.55.4 rebuild-path gap).
         self._pending_destroy: list[_OverlayWindow] = []
+        # Teardown-completion tracking (wh-overlay-slow-uia-stale-badges.18.4).
+        # _teardown_pending is True only while a TEARDOWN (clear /
+        # expire_lease / reset) left a window whose DestroyWindow failed.
+        # A container check cannot stand in for it: _windows non-empty is
+        # the NORMAL painted state. Any _destroy_all sweep that ends with
+        # both containers empty clears the flag. _deferred_teardown_ack
+        # parks the cleared/expired event an incomplete teardown withheld;
+        # retry_teardown releases it once a sweep ends clean.
+        self._teardown_pending = False
+        self._deferred_teardown_ack: Optional[dict[str, Any]] = None
 
     # -- ctypes prototypes --------------------------------------------------
 
@@ -789,12 +1210,21 @@ class OverlayPaintWindowManager:
 
     def _numeral_font(self, dpr: float) -> QFont:
         """The bold numeral font at ``self._badge_font_pt`` scaled by ``dpr``.
-        Single source of truth shared by ``_render_badge`` (which draws the
-        glyph) and ``_numeral_badge_size`` (which sizes the tight image)."""
+        Single source of truth shared by ``_draw_numeral_bubble`` (which draws
+        the digit) and ``_numeral_badge_size`` (which sizes the badge box)."""
         font = QFont()
         font.setPointSizeF(self._badge_font_pt * dpr)
         font.setBold(True)
         return font
+
+    @staticmethod
+    def _badge_box_margin_phys(dpr: float) -> float:
+        """Per-side decoration margin between the badge BOX and the visible
+        bubble, in physical px: the border pen, the drop shadow, and
+        antialiasing slack. Single source shared by ``_numeral_badge_size``
+        (which reserves it) and the bubble/leader drawing (which insets by
+        it), so the box and the drawing cannot disagree."""
+        return _NUMERAL_OUTLINE_PX * dpr + _SHADOW_OFFSET_PX * dpr + 2.0 * dpr
 
     def _numeral_badge_size(
         self,
@@ -802,12 +1232,17 @@ class OverlayPaintWindowManager:
         dpr: float,
         metrics: Optional[QFontMetricsF] = None,
     ) -> tuple[int, int]:
-        """Tight physical-pixel size for a numeral badge image: the glyph
-        advance and cap height plus a per-side margin for the outline pen, the
-        drop shadow, and antialiasing slack. The image is sized to the NUMERAL,
-        not to the control it labels, so a number over a large control no longer
-        allocates a per-badge control-sized (dpr^2) transient QImage
-        (wh-overlay-badge-alloc-decouple).
+        """Physical-pixel size of a numeral badge: the BUBBLE box
+        (wh-overlay-bubble-badges). The glyph advance and cap height, plus the
+        bubble's proportional padding per side (``_BUBBLE_PAD_X_CAP_FACTOR`` /
+        ``_BUBBLE_PAD_Y_CAP_FACTOR`` x cap height, floored at
+        ``_BUBBLE_PAD_MIN_LOGICAL_PX`` logical px), plus a per-side margin for
+        the border pen, the drop shadow, and antialiasing slack. Sized to the
+        bubble, not to the control it labels, so a number over a large control
+        does not allocate a control-sized (dpr^2) transient surface region
+        (wh-overlay-badge-alloc-decouple). Because the placement pass and the
+        collision nudges consume this size, they operate on the bubble's true
+        box with no placement-code changes.
 
         ``metrics`` lets the caller pass a ``QFontMetricsF`` built once for the
         whole surface (the font is fixed per surface because ``dpr`` is), so a
@@ -821,83 +1256,322 @@ class OverlayPaintWindowManager:
         # width, capHeight for the vertical block) so the glyph fits the box.
         text_w = metrics.horizontalAdvance(text)
         cap_h = metrics.capHeight()
-        margin = _NUMERAL_OUTLINE_PX * dpr + _SHADOW_OFFSET_PX * dpr + 2.0 * dpr
-        w = int(math.ceil(text_w + 2.0 * margin))
-        h = int(math.ceil(cap_h + 2.0 * margin))
+        pad_x = max(_BUBBLE_PAD_X_CAP_FACTOR * cap_h, _BUBBLE_PAD_MIN_LOGICAL_PX * dpr)
+        pad_y = max(_BUBBLE_PAD_Y_CAP_FACTOR * cap_h, _BUBBLE_PAD_MIN_LOGICAL_PX * dpr)
+        margin = self._badge_box_margin_phys(dpr)
+        w = int(math.ceil(text_w + 2.0 * pad_x + 2.0 * margin))
+        h = int(math.ceil(cap_h + 2.0 * pad_y + 2.0 * margin))
         return max(1, w), max(1, h)
 
     def _render_badge(
         self, number: int, width: int, height: int, dpr: float = 1.0
     ) -> QImage:
-        """Render one centered, outlined numeral badge as a premultiplied
-        ARGB32 ``QImage`` sized ``width`` x ``height`` (PHYSICAL pixels).
+        """Render the WORKING badge image: the ``WORKING_BADGE_NUMBER``
+        sentinel routes to ``_render_working_glyph`` (the busy/working
+        hourglass, wh-dictation-retraction-indicator.2), sized ``width`` x
+        ``height`` in PHYSICAL pixels with ``dpr`` scaling the outline pen
+        and shadow offset.
 
-        White fill, black outline, optional black drop shadow, and NO
-        background box (the image is transparent except the numeral and
-        its outline/shadow). Point size comes from ``overlay_badge_font_pt``;
-        the shadow is drawn only when ``overlay_badge_shadow`` is set.
-
-        ``dpr`` is the monitor's scaling factor. The image is sized in
-        physical pixels (``_render_monitor_surface`` passes ``logical * dpr``)
-        and the font point size, outline width, and shadow offset are scaled
-        by ``dpr`` too, so the perceived size and thickness are unchanged but
-        the glyph is rendered at full screen resolution instead of being drawn
-        small and enlarged (which softens every edge on a scaled display).
-        At ``dpr == 1.0`` the geometry (glyph position and size) is
-        pixel-identical to the pre-scaling render. The numeral itself is NOT
-        byte-identical at dpr 1.0: the same change reduced the numeral outline
-        pen from 3px to ``_NUMERAL_OUTLINE_PX`` (1.25px), so the outline is
-        thinner at every scale, including 100% (wh-dictation-retraction-indicator.11).
-
-        The ``WORKING_BADGE_NUMBER`` sentinel routes to
-        ``_render_working_glyph`` (the busy/working glyph) instead of a
-        numeral (wh-dictation-retraction-indicator.2).
+        Numerals no longer render here: each numeral badge is a speech-bubble
+        ``QPainterPath`` drawn directly on the per-monitor surface by
+        ``_draw_numeral_bubble`` (wh-overlay-bubble-badges), so a per-badge
+        image exists only for the working glyph. A numeral argument is a
+        programming error and raises, so nothing can silently exercise the
+        deleted numeral-image path (``paint`` maps an unexpected raise to a
+        "failed" state).
         """
-        if number == WORKING_BADGE_NUMBER:
-            return self._render_working_glyph(width, height, dpr)
-        w = max(1, int(width))
-        h = max(1, int(height))
-        img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
-        img.fill(0)  # fully transparent: no background box
+        if number != WORKING_BADGE_NUMBER:
+            raise ValueError(
+                "numeral badges draw as bubbles on the monitor surface "
+                "(_draw_numeral_bubble); _render_badge renders only the "
+                "working glyph"
+            )
+        return self._render_working_glyph(width, height, dpr)
 
+    def _draw_numeral_bubble(
+        self,
+        painter: QPainter,
+        number: int,
+        placement: "tuple[int, int, tuple[float, float, float, float]]",
+        control_phys: "tuple[float, float, float, float]",
+        dpr: float,
+        scheme: str,
+        metrics: QFontMetricsF,
+        font: QFont,
+        mon_w_phys: float,
+        mon_h_phys: float,
+    ) -> None:
+        """Draw ONE numeral badge as a speech bubble directly on the monitor
+        surface (wh-overlay-bubble-badges): a rounded rectangle inset from the
+        badge box by the decoration margin, merged with a pointer tail unless
+        the box is DETACHED (``_bubble_drawing_state``) -- toward the control
+        across the gap when ADJACENT, inward toward the control's center when
+        the box OVERLAPS it -- painted shadow -> fill -> border stroke, then
+        the digit filled centered in the bubble. Coordinates are monitor-local
+        PHYSICAL pixels (the caller's painter is already translated to
+        bounding-box-local).
+
+        Drawing the path directly replaces the per-badge tight numeral image:
+        no per-badge allocation at all, and a tail can never be clipped by an
+        image edge. The badge box from ``_numeral_badge_size`` still bounds
+        the bubble and its decoration, so the placement, collision, and
+        bounding-box math are unchanged.
+        """
+        fill, digit, border = _BUBBLE_SCHEME_COLORS[scheme]
+        _bw, _bh, (fl, ft, fr, fb) = placement
+        margin = self._badge_box_margin_phys(dpr)
+        bubble = QRectF(
+            fl + margin,
+            ft + margin,
+            (fr - fl) - 2.0 * margin,
+            (fb - ft) - 2.0 * margin,
+        )
+        radius = _BUBBLE_CORNER_RADIUS_FACTOR * bubble.height()
+        path = QPainterPath()
+        path.addRoundedRect(bubble, radius, radius)
+
+        state = _bubble_drawing_state((fl, ft, fr, fb), control_phys, dpr)
+        if state in (_BUBBLE_STATE_ADJACENT, _BUBBLE_STATE_OVERLAP):
+            path = path.united(
+                self._bubble_tail_path(
+                    bubble, control_phys, dpr, mon_w_phys, mon_h_phys
+                )
+            )
+
+        if self._badge_shadow:
+            shadow = QPainterPath(path)
+            shadow_off = _SHADOW_OFFSET_PX * dpr
+            shadow.translate(shadow_off, shadow_off)
+            painter.fillPath(shadow, _SHADOW_COLOR)
+        border_pen = QPen(border)
+        border_pen.setWidthF(_BUBBLE_BORDER_PX * dpr)
+        border_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(border_pen)
+        painter.setBrush(fill)
+        painter.drawPath(path)
+
+        # The digit, centered in the BUBBLE (not the badge box) so a tail
+        # never shifts it. A plain fill in the digit color: the bubble fill
+        # provides the contrast, so there is no outline pen that could swallow
+        # the glyph. ``metrics`` and ``font`` are the surface-shared instances
+        # (wh-overlay-4bug-review.2, wh-overlay-bubble-badges.1.1).
         text = str(number)
-        painter = QPainter(img)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        text_path = QPainterPath()
+        text_path.addText(
+            bubble.center().x() - metrics.horizontalAdvance(text) / 2.0,
+            bubble.center().y() + metrics.capHeight() / 2.0,
+            font,
+            text,
+        )
+        painter.fillPath(text_path, digit)
 
-            font = self._numeral_font(dpr)
-            painter.setFont(font)
+    def _bubble_tail_path(
+        self,
+        bubble: QRectF,
+        control_phys: "tuple[float, float, float, float]",
+        dpr: float,
+        mon_w_phys: float,
+        mon_h_phys: float,
+    ) -> QPainterPath:
+        """The pointer-tail triangle for an ADJACENT or OVERLAPPING bubble.
+        The base is ``_BUBBLE_TAIL_BASE_LOGICAL_PX`` wide on the bubble edge
+        nearest the control, rooted slightly INSIDE the bubble so the union
+        with the rounded rect has no seam at a rounded corner.
 
-            # Build a vector glyph path so we can stroke an outline and
-            # fill the interior independently (a plain drawText cannot
-            # outline). Center it in the badge rect.
-            path = QPainterPath()
-            metrics = painter.fontMetrics()
-            text_width = metrics.horizontalAdvance(text)
-            # baseline y: vertically center the cap-height block.
-            baseline_x = (w - text_width) / 2.0
-            baseline_y = (h + metrics.capHeight()) / 2.0
-            path.addText(baseline_x, baseline_y, font, text)
+        Every apex must land where the surface clamp preserves ink: the
+        surface bounding box is the union of control rects and badge boxes
+        CLAMPED to the monitor (``_compute_monitor_bbox``), and placement
+        clamps every badge box onto the monitor, so the safe region is the
+        badge box union the control's ON-monitor part -- never the raw
+        control, which can continue past a monitor edge
+        (wh-overlay-bubble-badges.3.1, .3.3). And because the border pen and
+        the shadow paint INK past the apex point itself, the apex must
+        additionally stop short of the monitor edges by the rendered-ink
+        extents -- half the pen width on the left and top, the shadow offset
+        on the right and bottom (wh-overlay-bubble-badges.3.4).
 
-            if self._badge_shadow:
-                shadow = QPainterPath(path)
-                shadow_off = _SHADOW_OFFSET_PX * dpr
-                shadow.translate(shadow_off, shadow_off)
-                painter.fillPath(shadow, _SHADOW_COLOR)
+        Adjacent (anchor distance nonzero): the apex ends
+        ``_BUBBLE_TAIL_APEX_INSET_LOGICAL_PX`` past the control's nearest
+        boundary point -- just inside the control, which is what makes the
+        bubble read as pointing AT it -- shortened where the stroke or
+        shadow would leave the control's ink-inset on-monitor part (a
+        control hanging off a monitor edge, or thinner than the reach). When
+        the anchor itself sits in a monitor-edge ink band (an on-monitor
+        sliver thinner than the inset), no apex at the control is safe, so
+        the apex falls back to the badge-box ink budget measured from the
+        bubble anchor.
 
-            # Outline stroke under the white fill. Use the thin numeral pen,
-            # NOT the hourglass's own outline pen -- a heavy pen swallows the
-            # glyph (wh-dictation-retraction-indicator.11).
-            outline_pen = QPen(_OUTLINE_COLOR)
-            outline_pen.setWidthF(_NUMERAL_OUTLINE_PX * dpr)
-            outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(outline_pen)
-            painter.setBrush(_NUMERAL_COLOR)
-            painter.drawPath(path)
-        finally:
-            painter.end()
-        return img
+        Overlapping (anchor distance zero -- the bubble sits ON the control,
+        so there is no gap to span): the tail aims from the bubble's edge
+        inward toward the center of the control's ON-monitor part, the apex
+        reaching ``_BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX`` past the edge (user
+        decision 2026-08-07, matching Voice Access), kept inside the safe
+        region by the slab cap below; when no point of that reach lies in
+        the ink-inset on-monitor control (the ray enters it only past the
+        requested reach, or never), the apex falls back to the badge-box ink
+        budget so a visible tail always remains and can never be cut
+        flat."""
+        rect = (bubble.left(), bubble.top(), bubble.right(), bubble.bottom())
+        (pax, pay), (pbx, pby) = _bubble_anchor_points(rect, control_phys)
+        # The control's on-monitor part, in monitor-local physical px. Only
+        # ink inside it (or inside the badge box) survives the surface clamp.
+        clipped = (
+            max(control_phys[0], 0.0),
+            max(control_phys[1], 0.0),
+            min(control_phys[2], mon_w_phys),
+            min(control_phys[3], mon_h_phys),
+        )
+        # Where the apex may LAND is tighter than ``clipped``: the border pen
+        # is centered on the path (half its width of ink past the apex on
+        # every side, with a round join at the vertex) and the shadow is the
+        # whole path translated down-right by the shadow offset, so an apex
+        # exactly ON a monitor edge still paints stroke and shadow past it,
+        # which the surface clamp cuts flat (wh-overlay-bubble-badges.3.4).
+        # ``apex_safe`` is the control intersected with the monitor rect
+        # inset by those per-side ink extents. Control edges interior to the
+        # monitor need no inset: the surface bounding box pads every element
+        # by the full decoration margin.
+        pen_half = _BUBBLE_BORDER_PX * dpr / 2.0
+        shadow_off = _SHADOW_OFFSET_PX * dpr
+        apex_safe = (
+            max(control_phys[0], pen_half),
+            max(control_phys[1], pen_half),
+            min(control_phys[2], mon_w_phys - shadow_off),
+            min(control_phys[3], mon_h_phys - shadow_off),
+        )
+        dx = pbx - pax
+        dy = pby - pay
+        length = math.hypot(dx, dy)
+        if length > 0.0:
+            ux, uy = dx / length, dy / length
+            apex_reach = _BUBBLE_TAIL_APEX_INSET_LOGICAL_PX * dpr
+            if (
+                apex_safe[0] <= pbx <= apex_safe[2]
+                and apex_safe[1] <= pby <= apex_safe[3]
+            ):
+                # The anchor point is on the raw control's boundary and
+                # inside the ink-inset monitor, so it is on the safe
+                # rectangle's boundary or inside it; the exit distance caps
+                # the apex where stroke or shadow would leave the preserved
+                # region.
+                _t_enter, t_exit = _ray_rect_interval(
+                    pbx, pby, ux, uy, apex_safe
+                )
+                apex_reach = min(apex_reach, max(t_exit, 0.0))
+                apex = QPointF(pbx + ux * apex_reach, pby + uy * apex_reach)
+            else:
+                # The anchor sits in a monitor-edge ink band (an on-monitor
+                # sliver thinner than the ink inset): no apex position at
+                # the control keeps the stroke and shadow on the monitor, so
+                # fall back to the badge-box ink budget measured from the
+                # BUBBLE anchor -- always safe (placement clamps the box
+                # onto the monitor), always visible.
+                fallback = self._badge_box_margin_phys(dpr) - shadow_off
+                reach = min(length + apex_reach, fallback)
+                apex = QPointF(pax + ux * reach, pay + uy * reach)
+        else:
+            # Inward tail: aim from the bubble's center toward the center of
+            # the control's ON-monitor part (diagonal down-right when they
+            # coincide) -- the raw center can sit far off-monitor and point
+            # the tail at pixels the user cannot see -- and root the base
+            # where that ray exits the bubble's rectangle.
+            cx, cy = bubble.center().x(), bubble.center().y()
+            dx = (clipped[0] + clipped[2]) / 2.0 - cx
+            dy = (clipped[1] + clipped[3]) / 2.0 - cy
+            length = math.hypot(dx, dy)
+            if length <= 0.0:
+                dx, dy = 1.0, 1.0
+                length = math.hypot(dx, dy)
+            ux, uy = dx / length, dy / length
+            hw = bubble.width() / 2.0
+            hh = bubble.height() / 2.0
+            tx = hw / abs(ux) if ux != 0.0 else float("inf")
+            ty = hh / abs(uy) if uy != 0.0 else float("inf")
+            t = min(tx, ty)
+            pax, pay = cx + ux * t, cy + uy * t
+            requested = _BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX * dpr
+            # Keep the apex (and its stroke and shadow ink) inside the
+            # safe rectangle: the reach may use [t_enter, t_exit] only when
+            # that interval is ahead of the base AND starts within the
+            # requested reach. An exit-only cap is not enough -- the base is
+            # where the ray exits the BUBBLE, which can sit outside the
+            # control even at anchor distance zero (the zero-distance anchor
+            # is a different bubble-edge point), so the ray may enter the
+            # control only PAST the requested reach and an apex at the
+            # requested reach lands between bubble and control, where the
+            # monitor clamp cuts it flat (wh-overlay-bubble-badges.3.3).
+            t_enter, t_exit = _ray_rect_interval(pax, pay, ux, uy, apex_safe)
+            if t_exit >= max(t_enter, 0.0) and max(t_enter, 0.0) <= requested:
+                apex_reach = min(requested, t_exit)
+            else:
+                apex_reach = 0.0
+            # Unconditional floor: an apex within the badge box is always
+            # safe (placement clamps the box onto the monitor and the box is
+            # unioned into the surface), so a visible tail always remains.
+            # The box margin is the full decoration budget; the shadow
+            # offset is the largest ink extent past the apex point (the
+            # border pen's half-width is smaller), so the floor is the
+            # margin minus the shadow offset: 3.25 logical px at the current
+            # constants.
+            fallback = self._badge_box_margin_phys(dpr) - shadow_off
+            apex_reach = max(apex_reach, min(requested, fallback))
+            apex = QPointF(pax + ux * apex_reach, pay + uy * apex_reach)
+        root_inset = _BUBBLE_TAIL_ROOT_INSET_LOGICAL_PX * dpr
+        root_x = pax - ux * root_inset
+        root_y = pay - uy * root_inset
+        half = _BUBBLE_TAIL_BASE_LOGICAL_PX * dpr / 2.0
+        # Base endpoints sit half the base width along the unit perpendicular,
+        # clamped into the bubble so a short bubble edge cannot let the base
+        # poke past the rounded corners.
+        perp_x, perp_y = -uy, ux
+        base_ax = min(max(root_x + perp_x * half, bubble.left()), bubble.right())
+        base_ay = min(max(root_y + perp_y * half, bubble.top()), bubble.bottom())
+        base_bx = min(max(root_x - perp_x * half, bubble.left()), bubble.right())
+        base_by = min(max(root_y - perp_y * half, bubble.top()), bubble.bottom())
+        tail = QPainterPath()
+        tail.moveTo(QPointF(base_ax, base_ay))
+        tail.lineTo(apex)
+        tail.lineTo(QPointF(base_bx, base_by))
+        tail.closeSubpath()
+        return tail
+
+    def _draw_leader_line(
+        self,
+        painter: QPainter,
+        placement: "tuple[int, int, tuple[float, float, float, float]]",
+        control_phys: "tuple[float, float, float, float]",
+        dpr: float,
+        scheme: str,
+        mon_w_phys: float,
+        mon_h_phys: float,
+    ) -> None:
+        """Draw a DETACHED badge's leader line: from the center of the bubble
+        edge nearest the target to the center of the control's on-monitor
+        part (``_leader_anchor_points``; wh-taskbar-badge-mispoint), a
+        border-color outer stroke under a fill-color core so the line reads
+        in the same palette as its bubble on any background. The render pass
+        draws EVERY leader line before ANY bubble, so a line can end under a
+        bubble but never crosses over one."""
+        fill, _digit, border = _BUBBLE_SCHEME_COLORS[scheme]
+        _bw, _bh, (fl, ft, fr, fb) = placement
+        margin = self._badge_box_margin_phys(dpr)
+        bubble = (fl + margin, ft + margin, fr - margin, fb - margin)
+        (pax, pay), (pbx, pby) = _leader_anchor_points(
+            bubble, control_phys, mon_w_phys, mon_h_phys
+        )
+        if pax == pbx and pay == pby:
+            return
+        line = QLineF(pax, pay, pbx, pby)
+        outer_pen = QPen(border)
+        outer_pen.setWidthF(_LEADER_OUTER_LOGICAL_PX * dpr)
+        outer_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(outer_pen)
+        painter.drawLine(line)
+        core_pen = QPen(fill)
+        core_pen.setWidthF(_LEADER_CORE_LOGICAL_PX * dpr)
+        core_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(core_pen)
+        painter.drawLine(line)
 
     def _render_working_glyph(
         self, width: int, height: int, dpr: float = 1.0
@@ -1188,7 +1862,10 @@ class OverlayPaintWindowManager:
         # Retry any rebuild-path orphans parked on a PRIOR paint whose
         # DestroyWindow failed (wh-n29v.63.1). _pending_destroy is otherwise
         # swept only by _destroy_all (the clear / clear_all / paint-except
-        # paths); the geom_phys rebuild key (wh-n29v.62) makes rebuilds routine,
+        # paths) and by retry_teardown's _destroy_pending (.18.10). This
+        # prune does NOT pay off _teardown_pending; the next retry finds
+        # the cohort empty, pays the debt, and releases the parked ack.
+        # The geom_phys rebuild key (wh-n29v.62) makes rebuilds routine,
         # so without a hot-path retry a long run of repaints with no intervening
         # clear would accumulate live, on-screen, always-on-top, click-through
         # windows. Each orphan is retried on the very next paint (same filter
@@ -1248,6 +1925,21 @@ class OverlayPaintWindowManager:
                     rect.hmonitor,
                 )
                 continue
+            # wh-vscode-menu-badge-misplaced: carry the control's name and the
+            # walk-time mark to the placement code on the rect itself. Only a
+            # summary item has a name; the working badge keeps a plain rect,
+            # which never takes the wide-row path. Any value of the mark other
+            # than exactly False counts as suspect, so a malformed item keeps
+            # today's placement.
+            target_name = getattr(item, "name", None)
+            if isinstance(target_name, str) and isinstance(rect, OverlayPaintRect):
+                rect = _TargetPaintRect(
+                    **{f.name: getattr(rect, f.name) for f in fields(OverlayPaintRect)},
+                    target_name=target_name,
+                    bounds_outside_menu=(
+                        getattr(item, "bounds_outside_menu", False) is not False
+                    ),
+                )
             per_monitor.setdefault(rect.hmonitor, []).append(
                 (rect, item.display_number)
             )
@@ -1647,37 +2339,33 @@ class OverlayPaintWindowManager:
         candidate must not land on one, and a corner anchor that collides is
         nudged away (``_resolve_badge_collision``). ``None``/empty keeps the
         stateless behaviour for direct callers.
+
+        When the canonical corner footprint (after the monitor clamp) lands on
+        a NEIGHBORING numbered control, a fallback ladder runs before
+        accepting the intrusion (wh-taskbar-badge-mispoint; the live trigger
+        is a vertical right-edge taskbar, where every button reports a
+        full-row rectangle: the half-outside corner-point badge of one row
+        overhangs the row ABOVE, covering its icon, and the monitor clamp
+        pushes the bottom sliver's badge up onto the control above it):
+
+        1. The LEADING gutter -- the badge fully beside the control's leading
+           edge (for a right corner, the badge's right edge on the control's
+           left edge), top/bottom-aligned per the corner and vertically
+           clamped onto the monitor. Fully outside, covering nothing.
+        2. For a SMALL control (whose canonical spot is the half-outside
+           corner point), the fully-INSIDE corner anchor: covering the
+           control's own icon beats covering a neighbor's.
+        3. The canonical footprint plus the collision nudge -- the shipped
+           floor: an intruding badge is still unambiguous when attached.
+
+        A ladder step is accepted only when clean of every other control AND
+        every already-placed badge; a canonical spot clean of other controls
+        skips the ladder entirely (the shipped placements are unchanged).
         """
         placed = placed_badges if placed_badges is not None else []
 
         def _hits_placed(c: tuple[float, float, float, float]) -> bool:
             return any(self._rects_overlap_phys(c, p) for p in placed)
-
-        def _corner_resolved() -> tuple[float, float, float, float]:
-            base = self._numeral_badge_footprint_phys(
-                rect, badge_w_phys, badge_h_phys, dpr,
-                mon_w_phys, mon_h_phys, corner=corner,
-            )
-            # The control's OWN box is excluded from the nudge avoidance: the
-            # corner anchor already sits on it, so landing there is fine. Only
-            # OTHER controls' boxes make a nudged digit read as labeling the
-            # wrong control (wh-overlay-collision-review.1).
-            own_box = (
-                rect.x * dpr, rect.y * dpr,
-                (rect.x + rect.width) * dpr, (rect.y + rect.height) * dpr,
-            )
-            others = [b for b in ctrl_rects_phys if b != own_box]
-            return self._resolve_badge_collision(
-                base, badge_w_phys, badge_h_phys, dpr,
-                mon_w_phys, mon_h_phys, placed, others, corner=corner,
-            )
-
-        if (
-            not self._badge_trailing_space
-            or mon_w_phys is None
-            or mon_h_phys is None
-        ):
-            return _corner_resolved()
 
         left_phys = rect.x * dpr
         top_phys = rect.y * dpr
@@ -1687,6 +2375,123 @@ class OverlayPaintWindowManager:
         is_bottom = corner in (
             _BADGE_CORNER_BOTTOM_LEFT, _BADGE_CORNER_BOTTOM_RIGHT
         )
+        # The control's OWN box is excluded from the intrusion and nudge
+        # avoidance: the corner anchor already sits on it, so landing there is
+        # fine. Only OTHER controls' boxes make a digit read as labeling the
+        # wrong control (wh-overlay-collision-review.1).
+        own_box = (left_phys, top_phys, right_phys, bottom_phys)
+        others = [b for b in ctrl_rects_phys if b != own_box]
+
+        def _hits_others(c: tuple[float, float, float, float]) -> bool:
+            return any(self._rects_overlap_phys(c, o) for o in others)
+
+        def _clean_gutter(
+            on_left: bool,
+        ) -> Optional[tuple[float, float, float, float]]:
+            """The badge fully beside the control's left (``on_left``) or
+            right edge, top/bottom-aligned per the corner and vertically
+            clamped onto the monitor; ``None`` when it leaves the monitor
+            HORIZONTALLY or lands on another control or a placed badge."""
+            g_left = left_phys - badge_w_phys if on_left else right_phys
+            g_top = bottom_phys - badge_h_phys if is_bottom else top_phys
+            if mon_h_phys is not None:
+                g_top = max(0.0, min(g_top, mon_h_phys - badge_h_phys))
+            gutter = (
+                g_left, g_top,
+                g_left + badge_w_phys, g_top + badge_h_phys,
+            )
+            on_monitor = gutter[0] >= 0.0 and (
+                mon_w_phys is None or gutter[2] <= mon_w_phys
+            )
+            if (
+                on_monitor
+                and not _hits_others(gutter)
+                and not _hits_placed(gutter)
+            ):
+                return gutter
+            return None
+
+        # Wide-row rule (wh-vscode-menu-badge-misplaced): a row at least
+        # _WIDE_ROW_MIN_ASPECT times wider than tall puts the numeral in the
+        # LEADING gutter -- left of the row for left-to-right text, right of
+        # it for right-to-left text -- so the number sits by the label instead
+        # of past the far edge. It trusts the row's rectangle, so it runs only
+        # when the walk did not mark the rectangle suspect and the whole row
+        # lies on its monitor. A gutter that fails the ladder step 1 checks
+        # falls through to the placement below, unchanged.
+        if (
+            isinstance(rect, _TargetPaintRect)
+            and not rect.bounds_outside_menu
+            and mon_w_phys is not None
+            and mon_h_phys is not None
+            and left_phys >= 0.0
+            and top_phys >= 0.0
+            and right_phys <= mon_w_phys
+            and bottom_phys <= mon_h_phys
+            and (right_phys - left_phys)
+            >= _WIDE_ROW_MIN_ASPECT * (bottom_phys - top_phys)
+        ):
+            leading = _clean_gutter(
+                on_left=not _name_is_right_to_left(rect.target_name)
+            )
+            if leading is not None:
+                return leading
+
+        def _corner_resolved() -> tuple[float, float, float, float]:
+            base = self._numeral_badge_footprint_phys(
+                rect, badge_w_phys, badge_h_phys, dpr,
+                mon_w_phys, mon_h_phys, corner=corner,
+            )
+            if _hits_others(base):
+                # Ladder step 1: the leading gutter. Rejected only when it
+                # leaves the monitor HORIZONTALLY (its vertical position is
+                # clamped on instead, matching the canonical clamp).
+                gutter = _clean_gutter(on_left=is_right)
+                if gutter is not None:
+                    return gutter
+                # Ladder step 2: a small control's canonical spot is the
+                # half-outside corner point; its fully-inside corner anchor
+                # is a distinct spot worth trying before intruding.
+                small = (
+                    (right_phys - left_phys)
+                    < badge_w_phys * _BADGE_SMALL_CONTROL_FACTOR
+                    and (bottom_phys - top_phys)
+                    < badge_h_phys * _BADGE_SMALL_CONTROL_FACTOR
+                )
+                if small:
+                    i_left = (
+                        right_phys - badge_w_phys if is_right else left_phys
+                    )
+                    i_top = (
+                        bottom_phys - badge_h_phys if is_bottom else top_phys
+                    )
+                    if mon_w_phys is not None:
+                        i_left = max(
+                            0.0, min(i_left, mon_w_phys - badge_w_phys)
+                        )
+                    if mon_h_phys is not None:
+                        i_top = max(
+                            0.0, min(i_top, mon_h_phys - badge_h_phys)
+                        )
+                    inside = (
+                        i_left, i_top,
+                        i_left + badge_w_phys, i_top + badge_h_phys,
+                    )
+                    if not _hits_others(inside) and not _hits_placed(inside):
+                        return inside
+            return self._resolve_badge_collision(
+                base, badge_w_phys, badge_h_phys, dpr,
+                mon_w_phys, mon_h_phys, placed, others, corner=corner,
+                own_box=own_box,
+            )
+
+        if (
+            not self._badge_trailing_space
+            or mon_w_phys is None
+            or mon_h_phys is None
+        ):
+            return _corner_resolved()
+
         # Beyond the trailing edge: a right corner puts the badge's LEFT edge on
         # the control's right edge; a left corner puts the badge's RIGHT edge on
         # the control's left edge (the left gutter). Vertical alignment follows
@@ -1728,6 +2533,7 @@ class OverlayPaintWindowManager:
         other_ctrl_rects: "list[tuple[float, float, float, float]]",
         *,
         corner: str,
+        own_box: tuple[float, float, float, float],
     ) -> tuple[float, float, float, float]:
         """Move a corner-anchored badge off the badges already placed there
         (wh-overlay-badge-collision).
@@ -1740,22 +2546,36 @@ class OverlayPaintWindowManager:
         to avoid the badges placed BEFORE it.
 
         Candidates are tried in a fixed order so both placement passes agree:
-        the base anchor itself, then one badge width INWARD along the corner's
-        horizontal side, then one badge height BELOW, then ABOVE. Each nudge
-        keeps ``_BADGE_COLLISION_GAP_PX`` (scaled by dpr) of clear space --
-        two digits drawn flush read as one number. A candidate that leaves the
-        monitor is skipped.
+        the base anchor itself, then rings of eight directions (INWARD along
+        the corner's horizontal side, BELOW, ABOVE, OUTWARD, then the four
+        diagonals) at one, two, and three badge-size steps out
+        (``_BADGE_COLLISION_RINGS``; wh-overlay-bubble-badges.4 -- packed
+        clusters at a monitor corner exhausted the old three-candidate list
+        and stacked digits). Each step keeps ``_BADGE_COLLISION_GAP_PX``
+        (scaled by dpr) of clear space -- two digits drawn flush read as one
+        number. A candidate that leaves the monitor is skipped. A badge moved
+        beyond the attach threshold draws as a detached bubble with a leader
+        line back to its control, so a far spot stays unambiguous.
 
-        Among the on-monitor, badge-free candidates, one that overlaps no
-        OTHER control's box is preferred (``other_ctrl_rects``; the caller
-        excludes the control's own box): a digit nudged fully onto a
-        neighbouring numbered control reads as labeling that control
+        Among the on-monitor, badge-free candidates, the ranking (each tier
+        scanned in ring order) prefers, first, a spot that keeps the bubble
+        ATTACHED to its own control (``own_box``; on it or within the attach
+        gap, per ``_bubble_drawing_state``) AND overlapping no OTHER
+        control's box; then an attached spot even on another control -- the
+        pointer tail disambiguates a badge touching its own control, while a
+        detached bubble needs a leader line that itself can mislead
+        (wh-taskbar-badge-mispoint: on a vertical taskbar every candidate
+        inside the column overlaps some full-width row, so preferring
+        control-free spots systematically exiled badges to the desktop);
+        then the old first preference, a spot merely clean of other
+        controls' boxes -- a digit nudged fully onto a neighbouring numbered
+        control reads as labeling that control
         (wh-overlay-collision-review.1). When every such spot is taken, the
-        first badge-free candidate wins anyway -- sitting on a neighbour still
-        beats stacking on another digit. When every candidate collides with a
-        badge (a pathological pile-up of identical controls), the base anchor
-        is returned: an overlapped number is still clickable by voice, a
-        dropped number is not.
+        first badge-free candidate wins anyway -- sitting on a neighbour
+        still beats stacking on another digit. When every candidate collides
+        with a badge (a pathological pile-up of identical controls), the
+        base anchor is returned: an overlapped number is still clickable by
+        voice, a dropped number is not.
         """
         def _hits_placed(c: tuple[float, float, float, float]) -> bool:
             return any(self._rects_overlap_phys(c, p) for p in placed)
@@ -1764,13 +2584,25 @@ class OverlayPaintWindowManager:
             return base
         gap = _BADGE_COLLISION_GAP_PX * dpr
         is_right = corner in (_BADGE_CORNER_TOP_RIGHT, _BADGE_CORNER_BOTTOM_RIGHT)
-        inward_dx = -(badge_w_phys + gap) if is_right else (badge_w_phys + gap)
+        inward_sign = -1.0 if is_right else 1.0
+        offsets: "list[tuple[float, float]]" = []
+        for ring in range(1, _BADGE_COLLISION_RINGS + 1):
+            step_x = ring * (badge_w_phys + gap)
+            step_y = ring * (badge_h_phys + gap)
+            offsets.extend((
+                (inward_sign * step_x, 0.0),
+                (0.0, step_y),
+                (0.0, -step_y),
+                (-inward_sign * step_x, 0.0),
+                (inward_sign * step_x, step_y),
+                (inward_sign * step_x, -step_y),
+                (-inward_sign * step_x, step_y),
+                (-inward_sign * step_x, -step_y),
+            ))
         viable: "list[tuple[float, float, float, float]]" = []
-        for cand_left, cand_top in (
-            (base[0] + inward_dx, base[1]),
-            (base[0], base[1] + badge_h_phys + gap),
-            (base[0], base[1] - badge_h_phys - gap),
-        ):
+        for dx, dy in offsets:
+            cand_left = base[0] + dx
+            cand_top = base[1] + dy
             cand = (
                 cand_left, cand_top,
                 cand_left + badge_w_phys, cand_top + badge_h_phys,
@@ -1785,14 +2617,312 @@ class OverlayPaintWindowManager:
                 continue
             if not _hits_placed(cand):
                 viable.append(cand)
+
+        def _clean(c: tuple[float, float, float, float]) -> bool:
+            return not any(
+                self._rects_overlap_phys(c, o) for o in other_ctrl_rects
+            )
+
+        def _attached(c: tuple[float, float, float, float]) -> bool:
+            return (
+                _bubble_drawing_state(c, own_box, dpr)
+                != _BUBBLE_STATE_DETACHED
+            )
+
         for cand in viable:
-            if not any(
-                self._rects_overlap_phys(cand, o) for o in other_ctrl_rects
-            ):
+            if _attached(cand) and _clean(cand):
+                return cand
+        for cand in viable:
+            if _attached(cand):
+                return cand
+        for cand in viable:
+            if _clean(cand):
                 return cand
         if viable:
             return viable[0]
         return base
+
+    def _edge_cluster_placements_phys(
+        self,
+        badges: "list[tuple[OverlayPaintRect, int]]",
+        dpr: float,
+        mon_w_phys: float,
+        mon_h_phys: float,
+        metrics: QFontMetricsF,
+    ) -> "dict[int, tuple[int, int, tuple[float, float, float, float]]]":
+        """Column placements for edge-cluster badges, keyed by badge index
+        (wh-taskbar-badge-mispoint, option 1).
+
+        The live trigger: the tray corner of a vertical right-edge taskbar.
+        The icons are packed tighter than one badge height, so every corner
+        anchor collided and ``_resolve_badge_collision`` scattered the
+        badges in RING order -- not target order -- and the leader lines
+        crossed into an unreadable tangle. This pass detects such clusters
+        up front and lays their badges out as one single-file column just
+        beside the cluster, in the same top-to-bottom order as the targets:
+        every leader line is short and roughly parallel, and crossings are
+        impossible by construction (badge order matches target order, and
+        the column x is constant).
+
+        All four monitor edges are covered: a vertical stack against the
+        left or right edge gets a COLUMN beside it, and a horizontal run
+        against the top or bottom edge (the tray of a horizontal taskbar)
+        gets a ROW beside it -- the same layout rotated. A control joins a
+        cluster when ALL of:
+
+        * it lies ENTIRELY within ``_EDGE_CLUSTER_BAND_FACTOR`` badge
+          heights of the monitor edge (full-width rows -- a nav pane, a
+          file list -- extend past the band and never qualify);
+        * its size ALONG the run direction (height for a vertical run,
+          width for a horizontal one) is under the
+          ``_BADGE_SMALL_CONTROL_FACTOR`` x badge-height cap (a tall pane
+          edge, a wide labeled taskbar button, or a clock is not an icon);
+        * it belongs to a run of at least ``_EDGE_CLUSTER_MIN_COUNT`` such
+          controls along the edge, split wherever the gap along the run
+          exceeds ``_EDGE_CLUSTER_JOIN_GAP_FACTOR`` badge heights;
+        * the run EXTENDS along the edge: its extent along the run
+          direction is at least its extent across it. Without this a
+          same-top horizontal row reaching into the right-edge band would
+          form a bogus vertical column at the corner (and a vertical
+          taskbar's bottom few rows a bogus horizontal row);
+        * the run is PACKED: more badge slots (badge height for a column,
+          each badge's own width for a row, plus the collision gap) than
+          fit single-file in the run's own extent. An unpacked run --
+          spaced taskbar app buttons -- keeps the shipped placement,
+          which already handles it without tangling.
+
+        Geometry: the badges' shared inner edge sits
+        ``_BADGE_COLLISION_GAP_PX`` beyond the cluster's inner side (a
+        right-edge cluster's column ends just left of the cluster; a
+        bottom-edge cluster's row ends just above it). Each badge wants
+        its control's center along the run; a packed run's excess length
+        extends AWAY from the nearer monitor corner (a chained pass in
+        that direction spaces the badges, and a second pass pulls the
+        run back onto the monitor if the first pushed it off), keeping
+        the corner free for the badges of nearby controls the cluster
+        excluded. A column or row that cannot fit on the monitor
+        abandons the cluster (no dict entries; the normal per-badge
+        path applies).
+
+        Deterministic pure float math over the same inputs, like the rest of
+        the placement pass, so the bbox and render calls always agree.
+        """
+        gap = _BADGE_COLLISION_GAP_PX * dpr
+        # Badge height is constant per (font, dpr); only the width varies
+        # with the digit count. Probe with any number for the height.
+        _probe_w, badge_h = self._numeral_badge_size(1, dpr, metrics=metrics)
+        band = _EDGE_CLUSTER_BAND_FACTOR * badge_h
+        join_gap = _EDGE_CLUSTER_JOIN_GAP_FACTOR * badge_h
+        max_member_cross = badge_h * _BADGE_SMALL_CONTROL_FACTOR
+
+        # (index, left, top, right, bottom) per numeral badge, physical px.
+        boxes = []
+        for i, (rect, number) in enumerate(badges):
+            if number == WORKING_BADGE_NUMBER:
+                continue
+            boxes.append((
+                i,
+                rect.x * dpr,
+                rect.y * dpr,
+                (rect.x + rect.width) * dpr,
+                (rect.y + rect.height) * dpr,
+            ))
+
+        out: "dict[int, tuple[int, int, tuple[float, float, float, float]]]" = {}
+        claimed: "set[int]" = set()
+        # Vertical edges first: a corner cluster lying inside both a
+        # vertical and a horizontal band (a vertical taskbar's bottom tray)
+        # is claimed by the vertical pass and keeps its column layout.
+        for side in ("right", "left", "bottom", "top"):
+            vertical = side in ("right", "left")
+            if side == "right":
+                members = [
+                    b for b in boxes
+                    if b[0] not in claimed
+                    and b[1] >= mon_w_phys - band
+                    and (b[4] - b[2]) < max_member_cross
+                ]
+            elif side == "left":
+                members = [
+                    b for b in boxes
+                    if b[0] not in claimed
+                    and b[3] <= band
+                    and (b[4] - b[2]) < max_member_cross
+                ]
+            elif side == "bottom":
+                members = [
+                    b for b in boxes
+                    if b[0] not in claimed
+                    and b[2] >= mon_h_phys - band
+                    and (b[3] - b[1]) < max_member_cross
+                ]
+            else:  # top
+                members = [
+                    b for b in boxes
+                    if b[0] not in claimed
+                    and b[4] <= band
+                    and (b[3] - b[1]) < max_member_cross
+                ]
+            # Order along the run; within one same-position row (or column,
+            # for a horizontal run), the icon FARTHER from the badge line
+            # goes first so its badge sits earlier along the run. The line
+            # is on the cluster's inner side (left of a right-edge cluster,
+            # above a bottom-edge one), so an earlier badge pointing at the
+            # NEARER icon would send the later badge's leader line swapping
+            # over it to the farther icon -- the pair's lines would cross.
+            # Farther-first nests them. Farther means larger left/top for
+            # the right/bottom edges; for the left/top edges the plain
+            # ascending cross coordinate already orders farther-first.
+            if side == "right":
+                members.sort(key=lambda b: (b[2], -b[1]))
+            elif side == "left":
+                members.sort(key=lambda b: (b[2], b[1]))
+            elif side == "bottom":
+                members.sort(key=lambda b: (b[1], -b[2]))
+            else:  # top
+                members.sort(key=lambda b: (b[1], b[2]))
+            run: "list[tuple[int, float, float, float, float]]" = []
+            run_end = 0.0
+
+            def _flush(run_members) -> None:
+                if len(run_members) < _EDGE_CLUSTER_MIN_COUNT:
+                    return
+                y_extent = (
+                    max(b[4] for b in run_members)
+                    - min(b[2] for b in run_members)
+                )
+                x_extent = (
+                    max(b[3] for b in run_members)
+                    - min(b[1] for b in run_members)
+                )
+                main_extent = y_extent if vertical else x_extent
+                cross_extent = x_extent if vertical else y_extent
+                # A run must EXTEND along its edge. A same-top row reaching
+                # into the right-edge band is a row, not a column; without
+                # this it would flush here as a bogus one-per-icon column
+                # (and a vertical tray's bottom rows a bogus row).
+                if main_extent < cross_extent:
+                    return
+                sizes = [
+                    self._numeral_badge_size(
+                        badges[b[0]][1], dpr, metrics=metrics
+                    )
+                    for b in run_members
+                ]
+                # Slot along the run: constant badge height for a column,
+                # each badge's own digit-count-dependent width for a row.
+                slots = [badge_h if vertical else w for w, _h in sizes]
+                if sum(s + gap for s in slots) <= main_extent:
+                    return
+                max_bw = max(w for w, _h in sizes)
+                if side == "right":
+                    inner = min(b[1] for b in run_members) - gap
+                    if inner - max_bw < 0.0:
+                        return
+                elif side == "left":
+                    inner = max(b[3] for b in run_members) + gap
+                    if inner + max_bw > mon_w_phys:
+                        return
+                elif side == "bottom":
+                    inner = min(b[2] for b in run_members) - gap
+                    if inner - badge_h < 0.0:
+                        return
+                else:  # top
+                    inner = max(b[4] for b in run_members) + gap
+                    if inner + badge_h > mon_h_phys:
+                        return
+                # Each badge wants its control's center along the run; a
+                # packed run cannot give every badge its center, so the
+                # excess length must extend somewhere. Extend it AWAY from
+                # the nearer monitor corner: a run hugging the far corner
+                # (the tray at the right end of a bottom taskbar) grows
+                # toward the monitor center, keeping the corner free for
+                # the badges of nearby controls the cluster excluded (a
+                # wide clock, a two-member group). Otherwise both groups
+                # converge on the corner and their leader lines cross
+                # (wh-taskbar-badge-mispoint, 2026-08-08 screenshot).
+                main_limit = mon_h_phys if vertical else mon_w_phys
+                run_lo = min(
+                    (b[2] if vertical else b[1]) for b in run_members
+                )
+                run_hi = max(
+                    (b[4] if vertical else b[3]) for b in run_members
+                )
+                centers = [
+                    ((b[2] + b[4]) / 2.0 if vertical
+                     else (b[1] + b[3]) / 2.0)
+                    for b in run_members
+                ]
+                n = len(run_members)
+                pos: "list[float]" = [0.0] * n
+                if (main_limit - run_hi) < run_lo:
+                    # The run is nearer the FAR corner: reversed chain
+                    # from the ideals so the excess extends backward,
+                    # then push the run forward if it underflows the
+                    # monitor start.
+                    for k in range(n - 1, -1, -1):
+                        ideal = centers[k] - slots[k] / 2.0
+                        limit = (
+                            pos[k + 1] - gap - slots[k]
+                            if k < n - 1
+                            else main_limit - slots[k]
+                        )
+                        pos[k] = min(ideal, limit)
+                    if pos[0] < 0.0:
+                        pos[0] = 0.0
+                        for k in range(1, n):
+                            lo = pos[k - 1] + slots[k - 1] + gap
+                            if pos[k] < lo:
+                                pos[k] = lo
+                    # A run longer than the monitor pushes the last badge
+                    # past the far edge; clamp it on (accepting overlap)
+                    # -- an overlapped number is still clickable by
+                    # voice, a dropped one is not.
+                    for k in range(n):
+                        pos[k] = min(pos[k], main_limit - slots[k])
+                else:
+                    # The run is nearer the monitor start: forward chain
+                    # from the ideals so the excess extends forward, then
+                    # move the run back onto the monitor if it overflows
+                    # the far end.
+                    for k in range(n):
+                        ideal = centers[k] - slots[k] / 2.0
+                        if k and ideal < pos[k - 1] + slots[k - 1] + gap:
+                            ideal = pos[k - 1] + slots[k - 1] + gap
+                        pos[k] = ideal
+                    if pos[-1] + slots[-1] > main_limit:
+                        pos[-1] = main_limit - slots[-1]
+                        for k in range(n - 2, -1, -1):
+                            limit = pos[k + 1] - slots[k] - gap
+                            if pos[k] > limit:
+                                pos[k] = limit
+                    # A run longer than the monitor pushes the first
+                    # badge past the edge; clamp it on (accepting
+                    # overlap).
+                    for k in range(n):
+                        pos[k] = max(0.0, pos[k])
+                for b, (bw, _bh), p in zip(run_members, sizes, pos):
+                    if side == "right":
+                        rect = (inner - bw, p, inner, p + badge_h)
+                    elif side == "left":
+                        rect = (inner, p, inner + bw, p + badge_h)
+                    elif side == "bottom":
+                        rect = (p, inner - badge_h, p + bw, inner)
+                    else:  # top
+                        rect = (p, inner, p + bw, inner + badge_h)
+                    out[b[0]] = (bw, badge_h, rect)
+                    claimed.add(b[0])
+
+            for b in members:
+                main_lo = b[2] if vertical else b[1]
+                main_hi = b[4] if vertical else b[3]
+                if run and main_lo - run_end > join_gap:
+                    _flush(run)
+                    run = []
+                run_end = main_hi if not run else max(run_end, main_hi)
+                run.append(b)
+            _flush(run)
+        return out
 
     def _numeral_badge_placements_phys(
         self,
@@ -1802,8 +2932,15 @@ class OverlayPaintWindowManager:
         mon_h_phys: Optional[float],
         *,
         corner: str,
+        metrics: Optional[QFontMetricsF] = None,
     ) -> "list[Optional[tuple[int, int, tuple[float, float, float, float]]]]":
         """Place every badge for one monitor in ONE sequential pass.
+
+        ``metrics`` is an optional pre-built numeral ``QFontMetricsF``:
+        ``_render_monitor_surface`` builds one per surface and shares it with
+        this pass AND the digit drawing (wh-overlay-4bug-review.2). When
+        omitted it is built lazily here, so a standalone call (the bounding
+        box) stays self-contained and a working-glyph-only pass pays nothing.
 
         Returns a list parallel to ``badges``: ``None`` for the WORKING glyph
         (which fills its own control box and needs no numeral placement), else
@@ -1818,9 +2955,12 @@ class OverlayPaintWindowManager:
         The pass is sequential so each badge can avoid the badges already
         placed (wh-overlay-badge-collision): ``placed`` accumulates every
         numeral footprint in list order and feeds the next placement's
-        collision checks. The pass is deterministic (pure float math over the
-        same inputs), so the bbox call and the render call always produce
-        identical placements.
+        collision checks. Edge-cluster badges
+        (``_edge_cluster_placements_phys``) are placed FIRST -- their column
+        footprints seed ``placed`` before the sequential walk, so every
+        non-cluster badge avoids the column. The pass is deterministic (pure
+        float math over the same inputs), so the bbox call and the render
+        call always produce identical placements.
         """
         # Every badge's physical control box, so the trailing-space placement
         # can tell whether the strip just past a control is occupied by another
@@ -1836,12 +2976,25 @@ class OverlayPaintWindowManager:
         # only variable, dpr, is constant), so build them once and share them
         # across badges (wh-overlay-4bug-review.2). Built lazily so a
         # working-glyph-only paint pays nothing.
-        numeral_metrics: Optional[QFontMetricsF] = None
-        placed: "list[tuple[float, float, float, float]]" = []
+        numeral_metrics: Optional[QFontMetricsF] = metrics
+        has_numeral = any(n != WORKING_BADGE_NUMBER for _r, n in badges)
+        cluster: "dict[int, tuple[int, int, tuple[float, float, float, float]]]" = {}
+        if has_numeral and mon_w_phys is not None and mon_h_phys is not None:
+            if numeral_metrics is None:
+                numeral_metrics = QFontMetricsF(self._numeral_font(dpr))
+            cluster = self._edge_cluster_placements_phys(
+                badges, dpr, mon_w_phys, mon_h_phys, numeral_metrics
+            )
+        placed: "list[tuple[float, float, float, float]]" = [
+            cluster[i][2] for i in sorted(cluster)
+        ]
         out: "list[Optional[tuple[int, int, tuple[float, float, float, float]]]]" = []
-        for rect, number in badges:
+        for i, (rect, number) in enumerate(badges):
             if number == WORKING_BADGE_NUMBER:
                 out.append(None)
+                continue
+            if i in cluster:
+                out.append(cluster[i])
                 continue
             if numeral_metrics is None:
                 numeral_metrics = QFontMetricsF(self._numeral_font(dpr))
@@ -1875,41 +3028,35 @@ class OverlayPaintWindowManager:
         painted in bounding-box-LOCAL physical pixels.
 
         The badge rects are in Qt LOGICAL coordinates local to the monitor, and
-        every badge is rendered at PHYSICAL resolution (``dpr`` is forwarded to
-        ``_render_badge``) so its edges stay sharp on a display scaled above
-        100%. The painter is translated by the bounding box's monitor-local
-        physical offset (``-bbox.offset_x`` / ``-bbox.offset_y``), and the
-        window is composited at ``rect_phys.left()/top() + bbox.offset``, so the
-        offset cancels and a badge's on-screen physical position matches the
-        full-monitor-surface model.
+        every badge is drawn at PHYSICAL resolution (all path geometry, pen
+        widths, and the font are scaled by ``dpr``) so its edges stay sharp on
+        a display scaled above 100%. The painter is translated by the bounding
+        box's monitor-local physical offset (``-bbox.offset_x`` /
+        ``-bbox.offset_y``), and the window is composited at
+        ``rect_phys.left()/top() + bbox.offset``, so the offset cancels and a
+        badge's on-screen physical position matches the full-monitor-surface
+        model.
 
-        Two badge kinds are positioned differently:
+        Two badge kinds are drawn differently:
 
-        - A NUMERAL is a small glyph. It is rendered into a TIGHT image sized to
-          the numeral (``_numeral_badge_size``), not to the control, and drawn
-          anchored to the control's configured corner (default top-right;
-          ``_numeral_badge_footprint_phys``) so the digit covers only a corner
-          and leaves the control's own label/icon visible
-          (wh-overlay-badge-occludes-label). A badge on a control at the
-          monitor's right or bottom edge is shifted inward so the surface clamp
-          does not truncate the digit (wh-review-click-overlay-codex.2). The
-          tight image also avoids a PER-BADGE control-sized (dpr^2) transient
-          QImage for a small number over a large control
-          (wh-overlay-badge-alloc-decouple). The per-monitor
-          SURFACE itself is still bounding-box-sized (``_compute_monitor_bbox``),
-          so for one large control the surface alone is still control-sized --
-          that fix removes the per-badge image, halving the peak for that case,
-          not the surface (wh-overlay-4bug-review.2).
-        - The WORKING glyph FILLS its box, so it is rendered at the box physical
-          size (``logical * dpr``) and drawn at the box top-left, putting the box
-          center on the requested point.
-
-        The original model rendered every badge at LOGICAL size and applied
-        ``painter.scale(dpr, dpr)``, which enlarged a low-resolution image and
-        softened every edge on a scaled display. Rendering at physical
-        resolution and forwarding ``dpr`` to ``_render_badge`` (which scales the
-        font/outline/shadow by ``dpr``) keeps the same perceived size while
-        drawing at full screen resolution (wh-dictation-retraction-indicator.11).
+        - A NUMERAL is a speech bubble (wh-overlay-bubble-badges): one
+          ``QPainterPath`` per badge -- rounded rect, pointer tail when the
+          badge box is adjacent to its control, leader line when detached
+          (``_bubble_drawing_state``) -- drawn DIRECTLY on the surface by
+          ``_draw_numeral_bubble`` / ``_draw_leader_line``, inside the badge
+          box the shared placement pass produced (trailing-edge or corner
+          anchor, monitor-edge inward shift, collision nudges -- all
+          unchanged). No per-badge image is allocated at all (the previous
+          design's tight numeral image is gone entirely, extending
+          wh-overlay-badge-alloc-decouple), and a tail can never be clipped by
+          an image edge. All leader lines draw BEFORE all bubbles, so a line
+          can end under a bubble but never crosses over one. The bubble scheme
+          is resolved ONCE per surface from the validated badge theme plus the
+          CURRENT system color scheme, so a Windows light/dark switch shows up
+          on the next repaint.
+        - The WORKING glyph FILLS its box, so it is rendered at the box
+          physical size (``logical * dpr``) via ``_render_badge`` and drawn at
+          the box top-left, putting the box center on the requested point.
         """
         dpr = monitor.dpr if monitor.dpr > 0 else 1.0
         surface = QImage(
@@ -1918,6 +3065,20 @@ class OverlayPaintWindowManager:
         surface.fill(0)  # transparent: only the badges draw
 
         painter = QPainter(surface)
+        # The bubble scheme, the numeral font, and its metrics are fixed for
+        # the whole surface (the font's only variable, dpr, is constant), so
+        # resolve/build each once. The metrics are shared with the placement
+        # pass and the digit drawing (wh-overlay-4bug-review.2), the font with
+        # each digit's addText (wh-overlay-bubble-badges.1.1); a
+        # working-glyph-only paint builds none of them.
+        scheme = _resolve_bubble_scheme(
+            self._badge_theme, _system_color_scheme()
+        )
+        numeral_font: Optional[QFont] = None
+        numeral_metrics: Optional[QFontMetricsF] = None
+        if any(n != WORKING_BADGE_NUMBER for _r, n in badges):
+            numeral_font = self._numeral_font(dpr)
+            numeral_metrics = QFontMetricsF(numeral_font)
         # The SAME sequential placement pass the bounding box ran (identical
         # inputs, deterministic math), so the surface never clips a badge it
         # did not budget for and collision nudges land where the bbox expected
@@ -1926,13 +3087,37 @@ class OverlayPaintWindowManager:
             badges, dpr,
             monitor.rect_phys.width(), monitor.rect_phys.height(),
             corner=self._badge_corner,
+            metrics=numeral_metrics,
         )
+        # Each badge's control box in physical px: the tail and leader-line
+        # geometry point the bubble at the control it labels.
+        ctrl_boxes = [
+            (r.x * dpr, r.y * dpr, (r.x + r.width) * dpr, (r.y + r.height) * dpr)
+            for r, _n in badges
+        ]
         try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             # Offset by the bounding box origin in PHYSICAL pixels. No painter
-            # scale: each badge is already rendered at physical size and is
-            # drawn 1:1 at its integer physical position (sharp, not enlarged).
+            # scale: everything is drawn in physical coordinates (sharp, not
+            # enlarged).
             painter.translate(-bbox.offset_x, -bbox.offset_y)
-            for (rect, number), placement in zip(badges, placements):
+            # Pass 1: every DETACHED badge's leader line, before any bubble.
+            for placement, control in zip(placements, ctrl_boxes):
+                if placement is None:
+                    continue
+                if (
+                    _bubble_drawing_state(placement[2], control, dpr)
+                    == _BUBBLE_STATE_DETACHED
+                ):
+                    self._draw_leader_line(
+                        painter, placement, control, dpr, scheme,
+                        monitor.rect_phys.width(), monitor.rect_phys.height(),
+                    )
+            # Pass 2: working glyphs and bubbles.
+            for (rect, number), placement, control in zip(
+                badges, placements, ctrl_boxes
+            ):
                 if placement is None:
                     # The working glyph FILLS its box: the box size (logical *
                     # dpr) IS the intended perceived size, so render at that
@@ -1947,18 +3132,14 @@ class OverlayPaintWindowManager:
                         badge,
                     )
                     continue
-                # A numeral is a small glyph: render it into a TIGHT image sized
-                # to the numeral (not the control) and draw it just past the
-                # control's trailing edge when that strip is clear, else anchored
-                # to the configured corner (default top-right;
-                # wh-overlay-badge-occludes-label), nudged off any earlier badge
-                # (wh-overlay-badge-collision), so the digit leaves the
-                # control's own label/icon visible. The tight image also avoids a
-                # control-sized (dpr^2) transient allocation
-                # (wh-overlay-badge-alloc-decouple).
-                bw, bh, (bl, bt, _br, _bb) = placement
-                badge = self._render_badge(number, bw, bh, dpr)
-                painter.drawImage(int(round(bl)), int(round(bt)), badge)
+                # A numeral exists, so both were built above.
+                assert numeral_metrics is not None
+                assert numeral_font is not None
+                self._draw_numeral_bubble(
+                    painter, number, placement, control, dpr, scheme,
+                    numeral_metrics, numeral_font,
+                    monitor.rect_phys.width(), monitor.rect_phys.height(),
+                )
         finally:
             painter.end()
         return surface
@@ -1980,6 +3161,12 @@ class OverlayPaintWindowManager:
         NEWER overlay that must stay on screen. A stale clear is a no-op:
         it returns ``None`` and tears down nothing (wh-n29v.55.1). The GUI
         caller drops a ``None`` result.
+
+        An ACCEPTED clear whose destroy sweep left a survivor (a
+        DestroyWindow failed) also returns ``None``: the ack is parked in
+        ``_deferred_teardown_ack`` and ``teardown_pending`` turns True, so
+        the GUI retry timer finishes the job (see ``retry_teardown``,
+        wh-overlay-slow-uia-stale-badges.18.4).
         """
         if not self._gate.accept_clear(overlay_session_id, paint_generation):
             logger.debug(
@@ -1988,14 +3175,166 @@ class OverlayPaintWindowManager:
                 paint_generation,
             )
             return None
-        self._destroy_all()
-        return OverlayStateChangedEvent(
+        ack = OverlayStateChangedEvent(
             state="cleared",
             overlay_session_id=overlay_session_id,
             paint_generation=paint_generation,
             monitor_ids=(),
             snapshot_id=None,
         ).to_dict()
+        if not self._destroy_all():
+            # wh-overlay-slow-uia-stale-badges.18.4: a window survived its
+            # DestroyWindow, so badges may still be on screen. A "cleared"
+            # ack now would resolve Logic's clear-ack watchdog and cancel
+            # the GUI badge lease -- the only retry drivers -- while the
+            # survivor stays visible. Park the ack instead. Logic's
+            # 5000 ms watchdog then fires a truthful "badges may still be
+            # on the screen" ERROR, and the deferred ack arrives after a
+            # later successful retry as bookkeeping. That is the designed
+            # behavior, not a bug. The newest teardown owns the ack, so
+            # any older parked ack is overwritten.
+            self._teardown_pending = True
+            self._deferred_teardown_ack = ack
+            logger.warning(
+                "overlay_paint_window: clear (%s, %s) left surviving badge "
+                "windows; ack deferred until a retry destroys them",
+                overlay_session_id,
+                paint_generation,
+            )
+            return None
+        return ack
+
+    def expire_lease(
+        self,
+        overlay_session_id: int,
+        paint_generation: int,
+    ) -> Optional[dict[str, Any]]:
+        """Tear down ALL overlay windows and report ``state="expired"``.
+
+        The GUI-side badge-lease timer calls this when Logic stopped
+        renewing the lease (wh-overlay-slow-uia-stale-badges.9): the badges
+        must not outlive a Logic that no longer believes they are on
+        screen. Gate semantics are identical to ``clear`` -- the pair
+        advances the high-water mark and records the clear-block, so a
+        late paint at the expired pair cannot re-present dead badges. A
+        STALE expiry (the armed pair lost a race with a newer paint or
+        clear) returns ``None`` and tears down nothing: a newer overlay
+        owns the screen and its own lease.
+
+        An ACCEPTED expiry whose destroy sweep left a survivor also
+        returns ``None`` and parks the ack, exactly like ``clear``
+        (wh-overlay-slow-uia-stale-badges.18.4).
+        """
+        if not self._gate.accept_clear(overlay_session_id, paint_generation):
+            logger.debug(
+                "overlay_paint_window: stale lease expiry (%s, %s) ignored",
+                overlay_session_id,
+                paint_generation,
+            )
+            return None
+        ack = OverlayStateChangedEvent(
+            state="expired",
+            overlay_session_id=overlay_session_id,
+            paint_generation=paint_generation,
+            monitor_ids=(),
+            snapshot_id=None,
+        ).to_dict()
+        if not self._destroy_all():
+            # See clear(): no success claim while a window survived. The
+            # GUI retry timer re-runs the destroy and releases this ack.
+            self._teardown_pending = True
+            self._deferred_teardown_ack = ack
+            logger.warning(
+                "overlay_paint_window: lease expiry (%s, %s) left surviving "
+                "badge windows; ack deferred until a retry destroys them",
+                overlay_session_id,
+                paint_generation,
+            )
+            return None
+        return ack
+
+    def reset(self) -> None:
+        """Destroy every overlay window and start a FRESH generation gate.
+
+        The ``reset_overlay`` startup action calls this when a new Logic
+        process announces itself (wh-overlay-slow-uia-stale-badges.9). A
+        restarted Logic numbers its (overlay_session_id, paint_generation)
+        pairs from zero again, so the old high-water mark would gate every
+        new paint forever; and any badge windows a dead Logic left behind
+        must not stay on screen. Emits nothing -- there is no live pair to
+        report, and the new Logic starts from ``closed``.
+
+        Drops any parked cleared/expired ack: the Logic process that
+        asked for it is gone, so the ack must not surface later. A
+        survivor still sets ``teardown_pending`` so the GUI retry keeps
+        running (wh-overlay-slow-uia-stale-badges.18.4).
+        """
+        self._gate = GenerationGate()
+        if not self._destroy_all():
+            self._teardown_pending = True
+        self._deferred_teardown_ack = None
+
+    def retry_teardown(self) -> Optional[dict[str, Any]]:
+        """Retry destroying the teardown debt cohort; release the parked ack.
+
+        The GUI's 2000 ms retry timer drives this after an incomplete
+        clear / expire_lease / reset left ``teardown_pending`` True
+        (wh-overlay-slow-uia-stale-badges.18.4). It never touches the
+        generation gate -- the original teardown already advanced it.
+
+        COHORT-OWNED (wh-overlay-slow-uia-stale-badges.18.10): a
+        teardown moves its survivors into the ``_pending_destroy`` debt
+        cohort (see ``_destroy_all``), so the debt branch sweeps ONLY
+        that cohort via ``_destroy_pending``. It never sweeps
+        ``_windows``, so a retry structurally cannot destroy a window
+        that a later accepted paint owns. The paint path prunes the
+        cohort on every paint but does not pay the debt; the next retry
+        then finds the cohort empty, pays the debt, and releases the
+        parked ack.
+
+        Without debt (wh-overlay-slow-uia-stale-badges.18.8) this
+        method sweeps nothing: a later clean clear / expire_lease /
+        reset paid the debt before the timer fired, and a fresh paint
+        may own the screen. It only releases a still-parked ack (the
+        accepted late-bookkeeping residual) or does nothing.
+
+        Returns the deferred cleared/expired ack exactly once, when no
+        teardown debt remains (the cohort sweep just ended clean, or a
+        later teardown already paid the debt) while an ack is parked;
+        otherwise ``None``.
+        """
+        if self._teardown_pending and not self._destroy_pending():
+            return None
+        if self._deferred_teardown_ack is not None:
+            ack = self._deferred_teardown_ack
+            self._deferred_teardown_ack = None
+            return ack
+        return None
+
+    @property
+    def teardown_pending(self) -> bool:
+        """True while a teardown left a window its DestroyWindow failed on.
+
+        The survivor lives in the ``_pending_destroy`` debt cohort, not
+        in ``_windows`` (wh-overlay-slow-uia-stale-badges.18.10). The
+        GUI checks this after every clear / expire_lease / reset and
+        after every retry, and keeps its retry timer armed while it is
+        True (wh-overlay-slow-uia-stale-badges.18.4).
+        """
+        return self._teardown_pending
+
+    @property
+    def has_deferred_teardown_ack(self) -> bool:
+        """True while a deferred cleared/expired ack is still parked.
+
+        The GUI reads this beside ``teardown_pending`` to decide
+        whether an armed retry timer is still needed
+        (wh-overlay-slow-uia-stale-badges.18.8): with no teardown debt
+        and no parked ack the timer has nothing left to do and is
+        stopped; while an ack is parked the timer stays armed so
+        ``retry_teardown`` can release it as late bookkeeping.
+        """
+        return self._deferred_teardown_ack is not None
 
     def clear_all(self) -> None:
         """Destroy every overlay window without emitting an event.
@@ -2004,24 +3343,524 @@ class OverlayPaintWindowManager:
         """
         self._destroy_all()
 
-    def _destroy_all(self) -> None:
-        """Destroy every overlay window, retaining any that failed to destroy.
+    def _destroy_all(self) -> bool:
+        """Destroy every overlay window; move failures into the debt cohort.
 
-        A window whose ``destroy()`` returned False is still on screen, so it
-        is kept for a later teardown to retry; only the windows that
-        successfully destroyed are dropped. This sweeps two sources:
+        A window whose ``destroy()`` returned False is still on screen, so
+        it is kept for a later teardown retry. This sweeps two sources:
 
-        * ``self._pending_destroy`` -- rebuild-path orphans (the new window
-          took their hmonitor slot), retried first; still-failing ones stay.
-        * ``self._windows`` -- the live per-monitor windows; still-failing
-          ones stay in the dict under their hmonitor.
+        * ``self._pending_destroy`` -- the teardown debt cohort:
+          rebuild-path orphans and survivors of earlier sweeps. Retried
+          first; still-failing ones stay.
+        * ``self._windows`` -- the live per-monitor windows. A survivor
+          MOVES into ``self._pending_destroy``
+          (wh-overlay-slow-uia-stale-badges.18.10), so ``_windows`` is
+          always empty after this method returns. A later paint then
+          owns ``_windows`` alone, and ``retry_teardown`` sweeps only
+          the cohort.
+
+        Returns True when the cohort ended empty (a clean sweep) and
+        False when a survivor remains. A clean sweep also pays off any
+        recorded teardown debt (``_teardown_pending`` goes False). Only
+        the TEARDOWN callers (clear / expire_lease / reset) set the flag
+        on a False return; the paint except-path and ``clear_all`` do
+        not, because they own no ack and the teardowns re-check the
+        containers themselves (wh-overlay-slow-uia-stale-badges.18.4).
         """
-        # Retry rebuild-path orphans first; keep the ones that still fail.
+        # Retry cohort members first; keep the ones that still fail.
         self._pending_destroy = [
             window for window in self._pending_destroy if not window.destroy()
         ]
-        survivors: dict[int, _OverlayWindow] = {}
-        for hmonitor, window in list(self._windows.items()):
+        for window in self._windows.values():
             if not window.destroy():
-                survivors[hmonitor] = window
-        self._windows = survivors
+                self._pending_destroy.append(window)
+        self._windows = {}
+        clean = not self._pending_destroy
+        if clean:
+            self._teardown_pending = False
+        return clean
+
+    def _destroy_pending(self) -> bool:
+        """Sweep ONLY the ``_pending_destroy`` teardown debt cohort.
+
+        The same keep-the-failures filter as ``_destroy_all``, restricted
+        to the cohort. It never reads or writes ``self._windows``, so it
+        cannot touch a window that a later paint owns
+        (wh-overlay-slow-uia-stale-badges.18.10). Returns True when the
+        cohort ended empty; a clean sweep also pays off any recorded
+        teardown debt (``_teardown_pending`` goes False).
+        """
+        self._pending_destroy = [
+            window for window in self._pending_destroy if not window.destroy()
+        ]
+        clean = not self._pending_destroy
+        if clean:
+            self._teardown_pending = False
+        return clean
+
+    # -- mouse-grid drawing mode (wh-grid-paint-mode) ------------------------
+    #
+    # A SECOND drawing mode on the same per-monitor click-through layered
+    # windows: three-by-three grid lines with nine large cell numbers, plus
+    # the drag-anchor pin. The GUI decides nothing here -- it draws exactly
+    # the rectangle and the point the events carry. All cell arithmetic,
+    # refinement, monitor choice, and the minimum-cell-size rule live in the
+    # Logic process (``grid_overlay_state.py``).
+    #
+    # These methods share the manager's window dictionary with ``paint`` /
+    # ``clear``, so ONE manager instance must serve one feature: gui.py
+    # constructs a DEDICATED manager for the grid, exactly as it already does
+    # for the dictation working badge. Mixing them on one instance would make
+    # a numbered-overlay clear destroy the grid's windows. There is no
+    # generation gate: the grid has no in-flight build phase, so Logic never
+    # has more than one grid outstanding and every event is a complete
+    # description of what should be on screen (see shared/clear_grid.py).
+
+    def paint_grid(self, event: Any) -> bool:
+        """Draw the mouse grid described by a ``PaintGridEvent``.
+
+        ``event`` is duck-typed on the schema's eight flat int fields
+        (``monitor_left`` / ``monitor_top`` / ``monitor_width`` /
+        ``monitor_height`` name the monitor, ``left`` / ``top`` / ``width`` /
+        ``height`` the rectangle to divide into nine), all in virtual-desktop
+        PHYSICAL pixels. The rectangle shrinks as the user refines; the
+        overlay window is sized to the rectangle plus the ink margin, so the
+        transient surface shrinks with it.
+
+        Retains the event and repaints the pin alongside it, so a refinement
+        never erases an existing drag anchor. Returns True when every
+        involved monitor composited successfully, False when the monitor
+        could not be resolved (it was disconnected), when there was nothing
+        to draw, or when a composite failed.
+        """
+        self._grid_event = event
+        return self._render_grid()
+
+    def paint_grid_pin(self, event: Any) -> bool:
+        """Draw the drag-anchor pin described by a ``PaintGridPinEvent``.
+
+        ``event`` is duck-typed on the schema's ``x`` / ``y`` fields, in
+        virtual-desktop PHYSICAL pixels (either may be negative). The pin
+        lands on whichever monitor contains the point -- deliberately not
+        necessarily the grid's monitor, because a drag from one screen to
+        another is legitimate. A point on no monitor is dropped.
+
+        Retains the pin and repaints the grid alongside it, so marking never
+        erases the grid. Same return value as :meth:`paint_grid`.
+        """
+        self._grid_pin = event
+        return self._render_grid()
+
+    def clear_grid(self) -> None:
+        """Remove all grid drawing, including the pin.
+
+        Forgets both retained events and tears down every window this manager
+        owns. The pin dies with the grid session by contract, which is why
+        one teardown removes both (see shared/clear_grid.py).
+        """
+        self._grid_event = None
+        self._grid_pin = None
+        self._destroy_all()
+
+    def _render_grid(self) -> bool:
+        """Repaint the retained grid and pin; never raises.
+
+        A rendering failure is logged and the windows are torn down, so a
+        half-drawn grid is never left on screen -- the same fail-safe
+        ``paint`` applies to the numbered overlay.
+        """
+        try:
+            return self._do_render_grid()
+        except Exception:  # noqa: BLE001 - a paint failure must not escape
+            logger.error(
+                "overlay_paint_window: grid paint failed", exc_info=True
+            )
+            self._destroy_all()
+            return False
+
+    def _do_render_grid(self) -> bool:
+        """Resolve monitors, (re)create windows, and composite the grid.
+
+        Mirrors ``_do_paint``'s window discipline exactly: retry rebuild-path
+        orphans, enumerate the topology ONCE, tear down monitors absent from
+        this render BEFORE creating new ones, rebuild a window whose geometry
+        changed (so no stale, differently-sized DIB is reused under a refined
+        grid), then composite each monitor's surface at its screen origin.
+        """
+        if self._pending_destroy:
+            self._pending_destroy = [
+                window
+                for window in self._pending_destroy
+                if not window.destroy()
+            ]
+
+        monitors = _enumerate_native_monitors()
+        grid_monitor = self._grid_monitor(monitors)
+        pin_monitor = self._pin_monitor(monitors)
+
+        # The drawn region per monitor, in SCREEN physical pixels, clamped to
+        # that monitor so a window never spills onto a neighbour. Both pieces
+        # can land on the same monitor, in which case one window carries both.
+        regions: dict[int, QRect] = {}
+        if grid_monitor is not None:
+            margin = self._grid_ink_margin_phys(grid_monitor.dpr)
+            region = QRect(
+                int(self._grid_event.left) - margin,
+                int(self._grid_event.top) - margin,
+                int(self._grid_event.width) + 2 * margin,
+                int(self._grid_event.height) + 2 * margin,
+            ).intersected(grid_monitor.rect_phys)
+            if not region.isEmpty():
+                regions[grid_monitor.hmonitor] = region
+        if pin_monitor is not None:
+            margin = self._grid_pin_ink_margin_phys(pin_monitor.dpr)
+            region = QRect(
+                int(self._grid_pin.x) - margin,
+                int(self._grid_pin.y) - margin,
+                2 * margin + 1,
+                2 * margin + 1,
+            ).intersected(pin_monitor.rect_phys)
+            if not region.isEmpty():
+                existing = regions.get(pin_monitor.hmonitor)
+                regions[pin_monitor.hmonitor] = (
+                    region if existing is None else existing.united(region)
+                )
+
+        by_hmonitor = {mon.hmonitor: mon for mon in monitors}
+
+        # Tear down windows for monitors absent from THIS render before
+        # creating any new ones.
+        for hmonitor in list(self._windows.keys()):
+            if hmonitor not in regions:
+                window = self._windows.pop(hmonitor)
+                if not window.destroy():
+                    self._windows[hmonitor] = window
+
+        if not regions:
+            return False
+
+        h_instance = self._ensure_class_registered()
+        for hmonitor, geom in regions.items():
+            existing = self._windows.get(hmonitor)
+            if existing is None or existing.geom_phys != geom:
+                if existing is not None:
+                    old = self._windows.pop(hmonitor)
+                    if not old.destroy():
+                        self._pending_destroy.append(old)
+                self._windows[hmonitor] = _OverlayWindow(
+                    hmonitor=hmonitor,
+                    geom_phys=geom,
+                    class_name=self._CLASS_NAME,
+                    user32=self._user32,
+                    kernel32=self._kernel32,
+                    h_instance=h_instance,
+                )
+
+        all_ok = True
+        for hmonitor, geom in regions.items():
+            window = self._windows.get(hmonitor)
+            if window is None:
+                all_ok = False
+                continue
+            monitor = by_hmonitor[hmonitor]
+            grid_rect = None
+            if grid_monitor is not None and grid_monitor.hmonitor == hmonitor:
+                grid_rect = QRectF(
+                    float(self._grid_event.left),
+                    float(self._grid_event.top),
+                    float(self._grid_event.width),
+                    float(self._grid_event.height),
+                )
+            pin_point = None
+            if pin_monitor is not None and pin_monitor.hmonitor == hmonitor:
+                pin_point = (
+                    float(self._grid_pin.x),
+                    float(self._grid_pin.y),
+                )
+            surface = self._render_grid_surface(
+                monitor, geom, grid_rect, pin_point
+            )
+            dib = build_layered_dib(surface)
+            try:
+                ok = window.composite(dib, geom.left(), geom.top())
+            finally:
+                dib.release()
+            if not ok:
+                # Same reasoning as _do_paint: a failed UpdateLayeredWindow on
+                # a REUSED window leaves the previous rectangle's grid
+                # visible, which would point the user at the wrong cells.
+                all_ok = False
+                logger.warning(
+                    "overlay_paint_window: grid composite failed for monitor "
+                    "%s; destroying its window so no stale DIB lingers",
+                    hmonitor,
+                )
+                if window.destroy():
+                    self._windows.pop(hmonitor, None)
+        return all_ok
+
+    def _grid_monitor(self, monitors: list[_NativeMonitor]):
+        """The enumerated monitor the retained grid event names, or ``None``.
+
+        Prefers an exact rectangle match; otherwise the monitor with the
+        largest physical overlap with the named rectangle (reusing
+        ``_overlap_area``), which absorbs a resolution change between the
+        event being built and being drawn. Deliberately does NOT fall back to
+        the first/primary monitor the way ``_resolve_target_monitor`` does:
+        a grid whose monitor is gone must draw nothing rather than appear on
+        a screen the user did not ask for. Logic closes the grid on a monitor
+        disconnect, so this is the window between the two.
+        """
+        event = self._grid_event
+        if event is None:
+            return None
+        wanted = QRect(
+            int(event.monitor_left),
+            int(event.monitor_top),
+            int(event.monitor_width),
+            int(event.monitor_height),
+        )
+        for monitor in monitors:
+            if monitor.rect_phys == wanted:
+                return monitor
+        best = None
+        best_area = 0
+        for monitor in monitors:
+            area = _overlap_area(monitor.rect_phys, wanted)
+            if area > best_area:
+                best, best_area = monitor, area
+        return best
+
+    def _pin_monitor(self, monitors: list[_NativeMonitor]):
+        """The enumerated monitor CONTAINING the retained pin point, or
+        ``None`` when the pin is unset or lands on no monitor.
+
+        Containment, not overlap: the pin marks one exact point, and the
+        containment test is the same one ``paint_working_badge`` uses to
+        decide whether a point-anchored drawing has a monitor at all.
+        """
+        pin = self._grid_pin
+        if pin is None:
+            return None
+        for monitor in monitors:
+            if monitor.rect_phys.contains(int(pin.x), int(pin.y)):
+                return monitor
+        return None
+
+    @staticmethod
+    def _grid_ink_margin_phys(dpr: float) -> int:
+        """Physical-pixel breathing room around the grid rectangle."""
+        scale = dpr if dpr > 0 else 1.0
+        return int(math.ceil(_GRID_INK_MARGIN_LOGICAL_PX * scale))
+
+    @staticmethod
+    def _grid_pin_ink_margin_phys(dpr: float) -> int:
+        """Physical-pixel half-extent of the pin drawing: the longer of the
+        crosshair arm and the ring radius, plus the outer stroke's half width
+        and antialiasing slack."""
+        scale = dpr if dpr > 0 else 1.0
+        reach = max(_GRID_PIN_ARM_LOGICAL_PX, _GRID_PIN_RADIUS_LOGICAL_PX)
+        return int(
+            math.ceil((reach + _GRID_LINE_OUTER_LOGICAL_PX) * scale)
+        )
+
+    @staticmethod
+    def _grid_label_pixel_size(
+        cell_w: float, cell_h: float, dpr: float
+    ) -> int:
+        """The cell label's font size in PHYSICAL pixels.
+
+        Proportional to the cell's shorter side so the digit always fits,
+        clamped between the legibility floor and the cap (see
+        ``_GRID_LABEL_MIN_LOGICAL_PX`` / ``_GRID_LABEL_MAX_LOGICAL_PX``).
+        Both clamp bounds are logical, so they scale with the monitor's dpr
+        and the label keeps a constant PERCEIVED size across a mixed-DPI
+        desktop -- the same rule the working badge follows.
+        """
+        scale = dpr if dpr > 0 else 1.0
+        target = min(cell_w, cell_h) * _GRID_LABEL_CELL_FACTOR
+        low = _GRID_LABEL_MIN_LOGICAL_PX * scale
+        high = _GRID_LABEL_MAX_LOGICAL_PX * scale
+        return max(1, int(round(min(max(target, low), high))))
+
+    def _render_grid_surface(
+        self,
+        monitor: _NativeMonitor,
+        geom: QRect,
+        grid_rect: Optional[QRectF],
+        pin_point: Optional[tuple[float, float]],
+    ) -> QImage:
+        """Compose one monitor's grid surface.
+
+        The surface is ``geom`` (the drawn region in SCREEN physical pixels)
+        and everything is drawn in screen-physical coordinates: the painter is
+        translated by the region's screen origin, and the window is
+        composited at that same origin, so the translation cancels. Working
+        in physical pixels throughout is what keeps the drawing sharp on a
+        scaled display -- ``UpdateLayeredWindow`` blits the DIB 1:1 against
+        the window's device pixels and never scales.
+        """
+        dpr = monitor.dpr if monitor.dpr > 0 else 1.0
+        surface = QImage(
+            max(1, geom.width()),
+            max(1, geom.height()),
+            QImage.Format.Format_ARGB32_Premultiplied,
+        )
+        surface.fill(0)  # transparent: only the grid draws
+
+        painter = QPainter(surface)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.translate(-geom.left(), -geom.top())
+            if grid_rect is not None:
+                self._draw_grid_cells(painter, grid_rect, dpr)
+            if pin_point is not None:
+                self._draw_grid_pin(painter, pin_point[0], pin_point[1], dpr)
+        finally:
+            painter.end()
+        return surface
+
+    def _draw_grid_cells(
+        self, painter: QPainter, rect: QRectF, dpr: float
+    ) -> None:
+        """Draw the three-by-three lines over ``rect`` and the nine labels.
+
+        Four vertical and four horizontal lines: the two interior divisions
+        plus the rectangle's own border, which is what shows the user how far
+        the grid has been refined once the rectangle is smaller than the
+        monitor. The cell boundaries come from
+        ``grid_overlay_state.cell_rects`` -- the SAME integer edge rule the
+        Logic-side state machine uses to resolve a spoken number
+        (``origin + (size * i) // 3``) -- so for a rectangle whose side does
+        not divide by three the painted line sits exactly on the boundary
+        the click arithmetic uses, never a fraction of a pixel away
+        (wh-mouse-grid.1.13). Labels sit on ``cell_center`` of each cell for
+        the same reason.
+        """
+        grid = _GridRect(
+            left=round(rect.left()),
+            top=round(rect.top()),
+            width=round(rect.width()),
+            height=round(rect.height()),
+        )
+        cells = _grid_cell_rects(grid)
+        xs = (
+            cells[0].left,
+            cells[1].left,
+            cells[2].left,
+            cells[2].left + cells[2].width,
+        )
+        ys = (
+            cells[0].top,
+            cells[3].top,
+            cells[6].top,
+            cells[6].top + cells[6].height,
+        )
+        lines = [
+            QLineF(x, ys[0], x, ys[3]) for x in xs
+        ] + [
+            QLineF(xs[0], y, xs[3], y) for y in ys
+        ]
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for color, width in (
+            (_GRID_LINE_OUTER_COLOR, _GRID_LINE_OUTER_LOGICAL_PX),
+            (_GRID_LINE_CORE_COLOR, _GRID_LINE_CORE_LOGICAL_PX),
+        ):
+            pen = QPen(color)
+            pen.setWidthF(width * dpr)
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            painter.setPen(pen)
+            painter.drawLines(lines)
+
+        # Telephone-keypad order: 1-2-3 top row, 4-5-6 middle, 7-8-9 bottom
+        # (the layout every phone keypad and every competing grid tool uses).
+        # cell_rects returns the cells in exactly this order, and
+        # cell_center is where the pointer actually lands for the spoken
+        # number, so the label marks the true click point.
+        for number in range(1, 10):
+            cell = cells[number - 1]
+            center = _grid_cell_center(cell)
+            self._draw_grid_label(
+                painter,
+                number,
+                float(center.x),
+                float(center.y),
+                float(cell.width),
+                float(cell.height),
+                dpr,
+            )
+
+    def _draw_grid_label(
+        self,
+        painter: QPainter,
+        number: int,
+        center_x: float,
+        center_y: float,
+        cell_w: float,
+        cell_h: float,
+        dpr: float,
+    ) -> None:
+        """Draw one cell number centered on ``(center_x, center_y)``.
+
+        White glyph with a black outline (and the optional drop shadow the
+        accessibility setting controls) -- the numbered overlay's original
+        badge palette, chosen for the same reason it was chosen there: the
+        pair reads over any background without knowing what is underneath.
+        The outline width is proportional to the glyph (see
+        ``_GRID_LABEL_OUTLINE_FACTOR``), so it never swallows a small digit.
+        """
+        pixel_size = self._grid_label_pixel_size(cell_w, cell_h, dpr)
+        font = QFont()
+        font.setPixelSize(pixel_size)
+        font.setBold(True)
+        metrics = QFontMetricsF(font)
+        text = str(number)
+        path = QPainterPath()
+        path.addText(
+            center_x - metrics.horizontalAdvance(text) / 2.0,
+            center_y + metrics.capHeight() / 2.0,
+            font,
+            text,
+        )
+
+        if self._badge_shadow:
+            shadow = QPainterPath(path)
+            shadow_offset = _SHADOW_OFFSET_PX * dpr
+            shadow.translate(shadow_offset, shadow_offset)
+            painter.fillPath(shadow, _SHADOW_COLOR)
+        outline = QPen(_OUTLINE_COLOR)
+        outline.setWidthF(
+            max(
+                _GRID_LABEL_OUTLINE_MIN_LOGICAL_PX * dpr,
+                pixel_size * _GRID_LABEL_OUTLINE_FACTOR,
+            )
+        )
+        outline.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(outline)
+        painter.setBrush(_NUMERAL_COLOR)
+        painter.drawPath(path)
+
+    def _draw_grid_pin(
+        self, painter: QPainter, x: float, y: float, dpr: float
+    ) -> None:
+        """Draw the drag-anchor pin: a crosshair inside a ring, centered on
+        the point, in the same two-stroke palette as the grid lines."""
+        arm = _GRID_PIN_ARM_LOGICAL_PX * dpr
+        radius = _GRID_PIN_RADIUS_LOGICAL_PX * dpr
+        lines = [
+            QLineF(x - arm, y, x + arm, y),
+            QLineF(x, y - arm, x, y + arm),
+        ]
+        ring = QRectF(x - radius, y - radius, 2.0 * radius, 2.0 * radius)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for color, width in (
+            (_GRID_LINE_OUTER_COLOR, _GRID_LINE_OUTER_LOGICAL_PX),
+            (_GRID_LINE_CORE_COLOR, _GRID_LINE_CORE_LOGICAL_PX),
+        ):
+            pen = QPen(color)
+            pen.setWidthF(width * dpr)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLines(lines)
+            painter.drawEllipse(ring)

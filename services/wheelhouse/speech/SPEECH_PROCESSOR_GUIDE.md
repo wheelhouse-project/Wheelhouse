@@ -33,7 +33,7 @@ classDiagram
     }
     
     class SpeechRouter {
-        +decide(word_event, mode, buffer, context) -> Decision
+        +decide(word_event, mode, buffer) -> Decision
         -_decide_idle()
         -_decide_buffering()
     }
@@ -438,7 +438,9 @@ This is why "delete line" executes but "I want to delete line" doesn't.
 
 ## Testing the Decision Logic
 
-See `tests/speech/test_comprehensive_patterns.py` for extensive test coverage of all decision paths.
+See the `services/wheelhouse/tests/test_speech_processor_*.py` files for
+test coverage of the decision paths, and the
+`services/wheelhouse/tests/test_router_*.py` files for the router.
 
 **Key test scenarios**:
 - Fresh vs mid-utterance positioning
@@ -455,5 +457,6 @@ See `tests/speech/test_comprehensive_patterns.py` for extensive test coverage of
 - **Router Logic**: `services/wheelhouse/speech/router.py`
 - **Domain Objects**: `services/wheelhouse/speech/domain.py`
 - **Pattern Catalog**: `services/wheelhouse/speech/pattern_catalog.py`
-- **Tests**: `tests/speech/test_comprehensive_patterns.py`
+- **Tests**: `services/wheelhouse/tests/test_speech_processor_*.py` and
+  `services/wheelhouse/tests/test_router_*.py`
 - **Configuration**: `services/wheelhouse/speech/config/patterns.toml`

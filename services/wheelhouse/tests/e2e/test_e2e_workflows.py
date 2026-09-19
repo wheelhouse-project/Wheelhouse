@@ -61,13 +61,13 @@ class TestDictationWithPunctuation:
         """'hello comma world' -> first word + ',' + ' world'."""
         await harness.send_utterance(["hello", "comma", "world"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 3, f"Expected 3 pastes, got {pastes}"
-        assert_first_word(pastes[0], "hello")
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 3, f"Expected 3 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "hello")
         # comma is punctuation-only -> no space prefix, no trailing space
-        assert pastes[1] == ","
+        assert delivered[1] == ","
         # world follows comma (non-whitespace) -> prefix space, no cap
-        assert pastes[2] == " world"
+        assert delivered[2] == " world"
 
     @pytest.mark.asyncio
     async def test_sentence_with_period(self, harness):
@@ -75,58 +75,58 @@ class TestDictationWithPunctuation:
         await harness.send_utterance(["this", "is", "a", "test", "period"])
         # Wait for 400ms replacement buffer timeout
         await harness.wait_for_timeout(500)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 5, f"Expected 5 pastes, got {pastes}"
-        assert_first_word(pastes[0], "this")
-        assert pastes[1:] == [" is", " a", " test", "."], f"Got {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 5, f"Expected 5 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "this")
+        assert delivered[1:] == [" is", " a", " test", "."], f"Got {delivered}"
 
     @pytest.mark.asyncio
     async def test_question_mark_in_sentence(self, harness):
         """'test question mark' -> first word + '?'."""
         await harness.send_utterance(["test", "question", "mark"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 2, f"Expected 2 pastes, got {pastes}"
-        assert_first_word(pastes[0], "test")
-        assert pastes[1] == "?"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 2, f"Expected 2 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "test")
+        assert delivered[1] == "?"
 
     @pytest.mark.asyncio
     async def test_comma_only(self, harness):
         """'comma' alone -> ','."""
         await harness.send_utterance(["comma"])
         await asyncio.sleep(0.3)
-        assert harness.recording.clipboard_pastes == [","], \
-            f"Got {harness.recording.clipboard_pastes}"
+        assert harness.recording.text_deliveries == [","], \
+            f"Got {harness.recording.text_deliveries}"
 
     @pytest.mark.asyncio
     async def test_exclamation_point(self, harness):
         """'wow exclamation point' -> first word + '!'."""
         await harness.send_utterance(["wow", "exclamation", "point"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 2, f"Expected 2 pastes, got {pastes}"
-        assert_first_word(pastes[0], "wow")
-        assert pastes[1] == "!"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 2, f"Expected 2 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "wow")
+        assert delivered[1] == "!"
 
     @pytest.mark.asyncio
     async def test_colon_in_sentence(self, harness):
         """'dear sir colon' -> first word + ' sir' + ':'."""
         await harness.send_utterance(["dear", "sir", "colon"])
         await harness.wait_for_timeout(500)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 3, f"Expected 3 pastes, got {pastes}"
-        assert_first_word(pastes[0], "dear")
-        assert pastes[1:] == [" sir", ":"]
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 3, f"Expected 3 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "dear")
+        assert delivered[1:] == [" sir", ":"]
 
     @pytest.mark.asyncio
     async def test_new_line_mid_dictation(self, harness):
         """'first new line second' -> paste, keystroke, paste pattern."""
         await harness.send_utterance(["first", "new", "line", "second"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
+        delivered = harness.recording.text_deliveries
         # First word present (timing-tolerant)
-        assert any("first" in p.lower() for p in pastes), \
-            f"Expected 'first' in {pastes}"
+        assert any("first" in p.lower() for p in delivered), \
+            f"Expected 'first' in {delivered}"
         # "new line" -> shift+enter keystroke (patterns.toml:200-224)
         non_paste_keys = [k for k in harness.recording.get_keystroke_keys()
                           if k not in [("ctrl", "v"), ("ctrl", "c"),
@@ -134,38 +134,38 @@ class TestDictationWithPunctuation:
         assert ("shift", "enter") in non_paste_keys, \
             f"Expected ('shift', 'enter') in {non_paste_keys}"
         # "second" pasted after newline
-        assert any("second" in p.lower() for p in pastes), \
-            f"Expected 'second' in {pastes}"
+        assert any("second" in p.lower() for p in delivered), \
+            f"Expected 'second' in {delivered}"
 
     @pytest.mark.asyncio
     async def test_multiple_commas(self, harness):
         """'hello comma comma world' -> two commas between words."""
         await harness.send_utterance(["hello", "comma", "comma", "world"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 4, f"Expected 4 pastes, got {pastes}"
-        assert_first_word(pastes[0], "hello")
-        assert pastes[1:] == [",", ",", " world"]
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 4, f"Expected 4 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "hello")
+        assert delivered[1:] == [",", ",", " world"]
 
     @pytest.mark.asyncio
     async def test_semicolon(self, harness):
         """'test semicolon' -> first word + ';'."""
         await harness.send_utterance(["test", "semicolon"])
         await harness.wait_for_timeout(500)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 2, f"Expected 2 pastes, got {pastes}"
-        assert_first_word(pastes[0], "test")
-        assert pastes[1] == ";"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 2, f"Expected 2 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "test")
+        assert delivered[1] == ";"
 
     @pytest.mark.asyncio
     async def test_hyphen(self, harness):
         """'test hyphen word' -> first word + '-' + ' word'."""
         await harness.send_utterance(["test", "hyphen", "word"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 3, f"Expected 3 pastes, got {pastes}"
-        assert_first_word(pastes[0], "test")
-        assert pastes[1:] == ["-", " word"]
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 3, f"Expected 3 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "test")
+        assert delivered[1:] == ["-", " word"]
 
 
 # ============================================================================
@@ -176,12 +176,12 @@ class TestCommandDictationSwitching:
     """Rapid switching between command and dictation modes.
 
     Tests verify clean transitions: command keystrokes only in command phase,
-    clipboard pastes only in dictation phase.
+    text delivered only in the dictation phase.
     """
 
     @pytest.mark.asyncio
     async def test_backspace_then_dictation(self, harness):
-        """'backspace' (pause) 'hello world' -> backspace keystroke then clipboard pastes."""
+        """'backspace' (pause) 'hello world' -> backspace keystroke then two deliveries."""
         await harness.send_word("backspace", start_of_utterance=True, utterance_id=1)
         await harness.send_utterance_end_marker(utterance_id=1)
         await harness.wait_for_timeout(1100)
@@ -191,20 +191,20 @@ class TestCommandDictationSwitching:
 
         await harness.send_utterance(["hello", "world"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 2, f"Expected 2 pastes, got {pastes}"
-        assert_first_word(pastes[0], "hello")
-        assert pastes[1] == " world"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 2, f"Expected 2 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "hello")
+        assert delivered[1] == " world"
 
     @pytest.mark.asyncio
     async def test_dictation_then_undo(self, harness):
         """'hello world' then 'undo' -> text pasted then Ctrl+Z."""
         await harness.send_utterance(["hello", "world"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 2, f"Expected 2 pastes, got {pastes}"
-        assert_first_word(pastes[0], "hello")
-        assert pastes[1] == " world"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 2, f"Expected 2 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "hello")
+        assert delivered[1] == " world"
         harness.recording.clear()
 
         await harness.send_word("undo", start_of_utterance=True, utterance_id=10)
@@ -229,8 +229,8 @@ class TestCommandDictationSwitching:
         """'I want to delete that' -> all words pasted, no delete keystroke."""
         await harness.send_utterance(["I", "want", "to", "delete", "that"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 5, f"Expected 5 words pasted, got {len(pastes)}: {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 5, f"Expected 5 words delivered, got {len(delivered)}: {delivered}"
         # No delete keystrokes -- only ctrl+v for clipboard paste + context gathering
         non_paste_keys = [k for k in harness.recording.get_keystroke_keys()
                           if k not in [("ctrl", "v"), ("ctrl", "c"),
@@ -251,8 +251,8 @@ class TestCommandDictationSwitching:
         # Dictation
         await harness.send_utterance(["testing", "one", "two", "three"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 4, f"Expected 4 words, got {len(pastes)}: {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 4, f"Expected 4 words, got {len(delivered)}: {delivered}"
         harness.recording.clear()
 
         # Command: undo
@@ -389,43 +389,108 @@ class TestMultiStepCommands:
 
 
 # ============================================================================
+# Single-word commands: the whole utterance, no hotword
+# ============================================================================
+
+
+class TestSingleWordCommandsNeedTheWholeUtterance:
+    """David decided on 2026-08-20 that a command that is one ordinary
+    English word with nothing after it behaves the way Windows Voice Access
+    behaves: say the word by itself and it fires, with no hotword in front.
+
+    The router matches a PREFIX of an utterance, so the anchors in ``^save$``
+    are not what keeps the word out of dictation -- ``whole_utterance_only``
+    is. These three tests cover the whole contract: the word alone works,
+    the word inside a sentence does not, and the old hotword habit still
+    works for anyone who has it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_word_alone_presses_the_hotkey(self, harness):
+        """'save' as the entire utterance -> Ctrl+S."""
+        await harness.send_word("save", start_of_utterance=True, utterance_id=1)
+        await harness.send_utterance_end_marker(utterance_id=1)
+        await harness.wait_for_timeout(1100)
+        keys = harness.recording.get_keystroke_keys()
+        assert ("ctrl", "s") in keys, f"'save' alone should save, got {keys}"
+
+    @pytest.mark.asyncio
+    async def test_the_word_starting_a_sentence_dictates(self, harness):
+        """'save the document' types words and never presses Ctrl+S."""
+        await harness.send_utterance(["save", "the", "document"])
+        await harness.wait_for_timeout(1100)
+        keys = harness.recording.get_keystroke_keys()
+        assert ("ctrl", "s") not in keys, (
+            f"'save the document' must dictate, not save; got {keys}"
+        )
+        delivered = "".join(harness.recording.text_deliveries).lower()
+        assert "save" in delivered, (
+            f"the word should reach the document as text, got {delivered!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_old_hotword_habit_still_works(self, harness):
+        """'x-ray save' keeps working for anyone trained on the old form."""
+        await harness.send_word(
+            harness.hotword, start_of_utterance=True, utterance_id=1
+        )
+        await harness.send_word("save", delay_before_ms=50, utterance_id=1)
+        await harness.send_utterance_end_marker(utterance_id=1)
+        await harness.wait_for_timeout(1100)
+        keys = harness.recording.get_keystroke_keys()
+        assert ("ctrl", "s") in keys, (
+            f"the hotword form should still save, got {keys}"
+        )
+
+
+# ============================================================================
 # TASK 8: Multi-utterance clipboard lifecycle
 # ============================================================================
 
 class TestUtteranceClipboardLifecycle:
-    """Clipboard state across utterance boundaries.
+    """Text delivery across utterance boundaries.
 
-    Exact assertions for paste output, verifying capitalization and spacing
-    are correct for each utterance in a sequence.
+    Exact assertions for the delivered text, verifying capitalization and
+    spacing are correct for each utterance in a sequence.
+
+    wh-review-pattern-fixes.46: every assertion here reads
+    ``recording.text_deliveries``, the record the harness fills after
+    production credited a delivery. The four loose cases in this class
+    (``any(...)``, ``>= 1``, ``> len(...)``, ``>= 5``) previously read
+    ``recording.clipboard_pastes``, which fills at the clipboard WRITE.
+    They all passed against a run whose every focus proof refused and
+    whose target window therefore received nothing.
+    ``TestDeliveryProvesTextArrived`` below is the regression that holds
+    this class to the delivery record.
     """
 
     @pytest.mark.asyncio
     async def test_single_utterance_pastes_word(self, harness):
-        """Single word utterance pastes via clipboard."""
+        """A single-word utterance delivers its word."""
         await harness.send_word("hello", start_of_utterance=True, utterance_id=50)
         await harness.send_utterance_end_marker(utterance_id=50)
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) >= 1, f"Expected at least 1 paste, got {pastes}"
-        assert any("hello" in p.lower() for p in pastes), \
-            f"Expected 'hello' in {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) >= 1, f"Expected at least 1 delivery, got {delivered}"
+        assert any("hello" in p.lower() for p in delivered), \
+            f"Expected 'hello' in {delivered}"
 
     @pytest.mark.asyncio
     async def test_two_utterances_both_paste(self, harness):
-        """Two successive utterances both produce clipboard pastes."""
+        """Two successive utterances both deliver text."""
         await harness.send_word("hello", start_of_utterance=True, utterance_id=60)
         await harness.send_utterance_end_marker(utterance_id=60)
         await asyncio.sleep(0.3)
-        first_pastes = list(harness.recording.clipboard_pastes)
-        assert any("hello" in p.lower() for p in first_pastes), \
-            f"First utterance should paste 'hello', got {first_pastes}"
+        first_delivered = list(harness.recording.text_deliveries)
+        assert any("hello" in p.lower() for p in first_delivered), \
+            f"First utterance should deliver 'hello', got {first_delivered}"
 
         await harness.send_word("world", start_of_utterance=True, utterance_id=61)
         await harness.send_utterance_end_marker(utterance_id=61)
         await asyncio.sleep(0.3)
-        all_pastes = harness.recording.clipboard_pastes
-        assert len(all_pastes) > len(first_pastes), \
-            f"Second utterance should add pastes. Before: {first_pastes}, after: {all_pastes}"
+        all_delivered = harness.recording.text_deliveries
+        assert len(all_delivered) > len(first_delivered), \
+            f"Second utterance should add a delivery. Before: {first_delivered}, after: {all_delivered}"
 
     @pytest.mark.asyncio
     async def test_command_between_dictation_preserves_flow(self, harness):
@@ -434,8 +499,8 @@ class TestUtteranceClipboardLifecycle:
         await harness.send_word("first", start_of_utterance=True, utterance_id=70)
         await harness.send_utterance_end_marker(utterance_id=70)
         await asyncio.sleep(0.3)
-        assert any("first" in p.lower() for p in harness.recording.clipboard_pastes), \
-            f"Expected 'first' in {harness.recording.clipboard_pastes}"
+        assert any("first" in p.lower() for p in harness.recording.text_deliveries), \
+            f"Expected 'first' in {harness.recording.text_deliveries}"
 
         # Command
         await harness.send_word("backspace", start_of_utterance=True, utterance_id=71)
@@ -449,12 +514,12 @@ class TestUtteranceClipboardLifecycle:
         await harness.send_word("second", start_of_utterance=True, utterance_id=72)
         await harness.send_utterance_end_marker(utterance_id=72)
         await asyncio.sleep(0.3)
-        assert len(harness.recording.clipboard_pastes) > 0, \
+        assert len(harness.recording.text_deliveries) > 0, \
             "Dictation after command should still paste"
 
     @pytest.mark.asyncio
     async def test_rapid_five_utterances_all_paste(self, harness):
-        """Five rapid single-word utterances all produce pastes."""
+        """Five rapid single-word utterances all deliver their word."""
         words = ["alpha", "bravo", "charlie", "delta", "echo"]
         for i, word in enumerate(words):
             uid = 80 + i
@@ -462,21 +527,21 @@ class TestUtteranceClipboardLifecycle:
             await harness.send_utterance_end_marker(utterance_id=uid)
             await asyncio.sleep(0.15)
         await asyncio.sleep(0.2)  # Let final paste complete
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) >= 5, \
-            f"Expected >=5 pastes from 5 utterances, got {len(pastes)}: {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) >= 5, \
+            f"Expected >=5 deliveries from 5 utterances, got {len(delivered)}: {delivered}"
 
     @pytest.mark.asyncio
     async def test_nine_word_utterance_pastes_all(self, harness):
-        """'the quick brown fox...' -> exactly 9 clipboard pastes."""
+        """'the quick brown fox...' -> exactly 9 deliveries."""
         words = ["the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog"]
         await harness.send_utterance(words)
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 9, f"Expected 9 pastes for 9 words, got {len(pastes)}: {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 9, f"Expected 9 deliveries for 9 words, got {len(delivered)}: {delivered}"
         # Subsequent words have space prefix
-        assert pastes[1] == " quick"
-        assert pastes[8] == " dog"
+        assert delivered[1] == " quick"
+        assert delivered[8] == " dog"
 
 
 # ============================================================================
@@ -494,35 +559,35 @@ class TestBatchWordArrival:
 
     @pytest.mark.asyncio
     async def test_batch_three_words(self, harness):
-        """Batch of 3 words -> all pasted correctly."""
+        """Batch of 3 words -> all three delivered correctly."""
         await harness.send_word_batch(["hello", "world", "test"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 3, f"Expected 3 pastes from batch, got {len(pastes)}: {pastes}"
-        assert_first_word(pastes[0], "hello")
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 3, f"Expected 3 deliveries from the batch, got {len(delivered)}: {delivered}"
+        assert_first_word(delivered[0], "hello")
 
     @pytest.mark.asyncio
     async def test_batch_single_word(self, harness):
         """Batch of 1 word -> same as regular send_word."""
         await harness.send_word_batch(["hello"])
         await asyncio.sleep(0.3)
-        assert any("hello" in p.lower() for p in harness.recording.clipboard_pastes), \
-            f"Expected 'hello' in {harness.recording.clipboard_pastes}"
+        assert any("hello" in p.lower() for p in harness.recording.text_deliveries), \
+            f"Expected 'hello' in {harness.recording.text_deliveries}"
 
     @pytest.mark.asyncio
     async def test_batch_with_replacement(self, harness):
         """Batch containing replacement word -> replacement fires."""
         await harness.send_word_batch(["hello", "comma", "world"])
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert "," in pastes, f"Expected comma replacement in batch, got {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert "," in delivered, f"Expected comma replacement in batch, got {delivered}"
 
     @pytest.mark.asyncio
     async def test_batch_then_command(self, harness):
         """Batch dictation followed by command utterance."""
         await harness.send_word_batch(["hello", "world"])
         await asyncio.sleep(0.3)
-        assert len(harness.recording.clipboard_pastes) >= 2
+        assert len(harness.recording.text_deliveries) >= 2
 
         harness.recording.clear()
 
@@ -537,13 +602,129 @@ class TestBatchWordArrival:
         words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog"]
         await harness.send_word_batch(words)
         await asyncio.sleep(0.3)
-        pastes = harness.recording.clipboard_pastes
-        assert len(pastes) == 8, f"Expected 8 pastes from batch, got {len(pastes)}: {pastes}"
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 8, f"Expected 8 deliveries from the batch, got {len(delivered)}: {delivered}"
 
     @pytest.mark.asyncio
     async def test_sequential_vs_batch_equivalence(self, harness):
         """Batch arrival should produce same output as sequential send_utterance."""
         await harness.send_word_batch(["testing", "one", "two"])
         await asyncio.sleep(0.3)
-        batch_pastes = list(harness.recording.clipboard_pastes)
-        assert len(batch_pastes) == 3, f"Batch produced {len(batch_pastes)} pastes: {batch_pastes}"
+        batch_delivered = list(harness.recording.text_deliveries)
+        assert len(batch_delivered) == 3, f"Batch produced {len(batch_delivered)} deliveries: {batch_delivered}"
+
+
+# ============================================================================
+# wh-review-pattern-fixes.46: the delivery record is the only paste oracle
+# ============================================================================
+
+#: A foreground window handle that is NOT the one the mocked focused
+#: control resolves to. With this value every focus proof in
+#: verified_paste, VerifiedUnicodeStrategy and WindowFocusManager refuses,
+#: so no Unicode send and no Ctrl+V leaves the pipeline.
+WRONG_FOREGROUND_HWND = 2
+
+
+@pytest.fixture
+async def wrong_foreground_harness(pattern_catalog):
+    """A harness whose focus stand-in names a window that is not the target."""
+    h = E2EPipelineHarness(
+        catalog=pattern_catalog, foreground_hwnd=WRONG_FOREGROUND_HWND,
+    )
+    await h.start()
+    yield h
+    await h.stop()
+
+
+class TestDeliveryProvesTextArrived:
+    """The regression for wh-review-pattern-fixes.46.
+
+    Each case replays a scenario from TestUtteranceClipboardLifecycle,
+    TestDictationWithPunctuation or TestBatchWordArrival against a harness
+    whose focus stand-in names the wrong window. In that run every focus
+    proof refuses, so the target window receives nothing.
+
+    Each case asserts both halves of the finding:
+
+    * ``clipboard_pastes`` still fills. That is why an assertion over the
+      clipboard-write list cannot tell delivery from silence, and why the
+      four loose lifecycle cases passed against a run that delivered
+      nothing.
+    * ``text_deliveries`` stays empty, and ``unicode_sends`` and the
+      Ctrl+V keystroke stay absent. Every lifecycle assertion now reads
+      the delivery record, so every one of them fails in this run.
+
+    A change that appends to ``text_deliveries`` at the clipboard write
+    rather than after the send makes every case here fail.
+    """
+
+    LIFECYCLE_WORDS = (
+        (["hello"], "single word"),
+        (["hello", "world"], "two words"),
+        (["alpha", "bravo", "charlie", "delta", "echo"], "five words"),
+        (
+            ["the", "quick", "brown", "fox", "jumps", "over", "the", "lazy",
+             "dog"],
+            "nine words",
+        ),
+        (["hello", "comma", "world"], "words with punctuation"),
+    )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("words,label", LIFECYCLE_WORDS)
+    async def test_wrong_foreground_delivers_nothing(
+        self, wrong_foreground_harness, words, label,
+    ):
+        """No text is delivered when the focus proof names another window."""
+        harness = wrong_foreground_harness
+        await harness.send_utterance(words)
+        await harness.wait_for_timeout(500)
+
+        recording = harness.recording
+        assert recording.clipboard_pastes != [], (
+            f"{label}: the clipboard writes are the diagnostic this "
+            "regression depends on; without them the run proves nothing"
+        )
+        assert recording.text_deliveries == [], (
+            f"{label}: every focus proof refused, so nothing reached the "
+            f"target window: {recording.text_deliveries}"
+        )
+        assert recording.unicode_sends == [], (
+            f"{label}: no Unicode send may leave the pipeline: "
+            f"{recording.unicode_sends}"
+        )
+        assert ("ctrl", "v") not in recording.get_keystroke_keys(), (
+            f"{label}: no paste keystroke may leave the pipeline: "
+            f"{recording.get_keystroke_keys()}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_wrong_foreground_batch_delivers_nothing(
+        self, wrong_foreground_harness,
+    ):
+        """The batch arrival path delivers nothing under the same refusal."""
+        harness = wrong_foreground_harness
+        await harness.send_word_batch(["hello", "world", "test"])
+        await harness.wait_for_timeout(500)
+
+        recording = harness.recording
+        assert recording.clipboard_pastes != []
+        assert recording.text_deliveries == [], (
+            "the batch path delivered text with the wrong window in the "
+            f"foreground: {recording.text_deliveries}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_right_foreground_delivers_every_word(self, harness):
+        """The control case: the same words deliver with the right window.
+
+        Without this, an empty delivery record would satisfy the cases
+        above for the wrong reason -- a record that never fills at all.
+        """
+        await harness.send_utterance(["hello", "world"])
+        await asyncio.sleep(0.3)
+        recording = harness.recording
+        assert len(recording.text_deliveries) == 2, (
+            f"Expected 2 deliveries, got {recording.text_deliveries}"
+        )
+        assert recording.text_deliveries[1] == " world"

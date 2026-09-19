@@ -412,6 +412,9 @@ def _wire_yes_click_controller(tmp_path, threshold=3):
     controller.click_counter = counter
     controller.app = MagicMock()
     controller.app.send_command = AsyncMock()
+    # The grant travels as an acknowledged request since
+    # wh-overlay-slow-uia-stale-badges.14.14.
+    controller.app.send_request = AsyncMock(return_value={"status": "ok"})
     controller.state_manager = MagicMock()
     controller.state_manager.state_to_gui_queue = MagicMock()
     controller._grant_prompt_no_suppressed = set()
@@ -620,9 +623,9 @@ class TestYesClickWriteAndCounterReset:
         assert "zed::Workspace" in body
         assert "Pane" in body
 
-        # IPC was sent to the input process.
-        controller.app.send_command.assert_awaited_once()
-        call = controller.app.send_command.await_args
+        # IPC was sent to the input process as an acknowledged request.
+        controller.app.send_request.assert_awaited_once()
+        call = controller.app.send_request.await_args
         assert call.args[0] == "add_soft_allow_tuple"
         ipc_params = call.args[1]
         assert ipc_params["process_name"] == "zed.exe"
@@ -650,8 +653,11 @@ class TestYesClickIpcRetry:
 
     def test_transient_ipc_failure_recovers_on_retry(self, tmp_path):
         controller = self._wire(tmp_path)
-        controller.app.send_command = AsyncMock(
-            side_effect=[RuntimeError("queue full"), RuntimeError("again"), None]
+        controller.app.send_request = AsyncMock(
+            side_effect=[
+                RuntimeError("queue full"), RuntimeError("again"),
+                {"status": "ok"},
+            ]
         )
 
         outcome = asyncio.run(
@@ -660,11 +666,11 @@ class TestYesClickIpcRetry:
 
         from main import AddSoftAllowOutcome
         assert outcome is AddSoftAllowOutcome.SUCCESS
-        assert controller.app.send_command.await_count == 3
+        assert controller.app.send_request.await_count == 3
 
     def test_ipc_failed_only_after_all_attempts_exhausted(self, tmp_path):
         controller = self._wire(tmp_path)
-        controller.app.send_command = AsyncMock(
+        controller.app.send_request = AsyncMock(
             side_effect=RuntimeError("input process gone")
         )
 
@@ -675,7 +681,7 @@ class TestYesClickIpcRetry:
         from main import AddSoftAllowOutcome
         assert outcome is AddSoftAllowOutcome.IPC_FAILED
         # 1 initial attempt + one per configured retry delay.
-        assert controller.app.send_command.await_count == 3
+        assert controller.app.send_request.await_count == 3
 
     def test_single_attempt_success_sends_once(self, tmp_path):
         controller = self._wire(tmp_path)
@@ -686,7 +692,7 @@ class TestYesClickIpcRetry:
 
         from main import AddSoftAllowOutcome
         assert outcome is AddSoftAllowOutcome.SUCCESS
-        assert controller.app.send_command.await_count == 1
+        assert controller.app.send_request.await_count == 1
 
 
 class TestYesClickDiskFailureFullFlow:

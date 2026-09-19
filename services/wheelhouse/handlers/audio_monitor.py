@@ -42,6 +42,7 @@ import logging
 import os
 import shutil
 import subprocess
+from time import monotonic
 from typing import Optional, Dict, Any, TYPE_CHECKING
 
 import pythoncom
@@ -55,6 +56,15 @@ if TYPE_CHECKING:
     from ..config_service import ConfigService
 
 logger = logging.getLogger(__name__)
+
+# How long the peak must stay at or below the threshold before the monitor
+# reports that sound stopped. A quiet moment inside a song or a video would
+# otherwise end the pause and the next poll would start a new one, switching
+# listening off and on for every dip (wh-audio-pause-notice-repeats).
+# crewcut: AUDIO_STOP_HOLDOFF_SECONDS is a fixed 3 s, so listening resumes
+# about 3 s after sound stops; a config key read here is the way to change it
+# later.
+AUDIO_STOP_HOLDOFF_SECONDS = 3
 
 class AudioMonitor:
     """Monitors audio playback and adjusts spatial sound settings."""
@@ -170,6 +180,9 @@ class AudioMonitor:
         pythoncom.CoInitialize()
         try:
             test_interval = 1.0
+            # When the current quiet stretch began, while a 'playing' state
+            # waits out the stop hold-off; None when no stop is pending.
+            quiet_since: Optional[float] = None
             while True:
                 try:
                     is_playing = self.is_audio_playing()
@@ -187,8 +200,22 @@ class AudioMonitor:
                         await asyncio.sleep(test_interval)
                         continue
 
+                    # A stop is reported only once the quiet has lasted the
+                    # hold-off; a start is reported on the first loud poll.
+                    report_change = is_playing != self._previous_audio_state
+                    if is_playing or not report_change:
+                        quiet_since = None
+                    else:
+                        now = monotonic()
+                        if quiet_since is None:
+                            quiet_since = now
+                        if now - quiet_since < AUDIO_STOP_HOLDOFF_SECONDS:
+                            report_change = False
+                        else:
+                            quiet_since = None
+
                     # Publish event if audio state has changed
-                    if is_playing != self._previous_audio_state:
+                    if report_change:
                         """:flow: Speech Suppression by Audio
                         :step: 2
                         :produces_for: Speech Suppression by Audio

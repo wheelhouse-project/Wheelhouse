@@ -840,6 +840,151 @@ def _advanced_entry(**overrides):
 
 
 class TestAdvancedExpressionField:
+    @pytest.mark.parametrize("length", [500, 602])
+    @pytest.mark.parametrize("selection", [False, True])
+    def test_expression_length_budget_rejection_preserves_editing_state(self, length, selection):
+        original = "^ab" + "c" * (length - 4) + "$"
+        entry = _advanced_entry(raw_pattern=original)
+        entry.pop("phrases", None)
+        dialog = _make_dialog(entry=entry, pattern_id=entry["id"])
+        edit = dialog._expression_edit
+        # Establish real undo history before a rejected edit.
+        edit.setCursorPosition(3)
+        edit.backspace()
+        shortened = original[:2] + original[3:]
+        if selection:
+            edit.setSelection(1, 1)
+        else:
+            edit.setCursorPosition(2)
+        position = edit.cursorPosition()
+        edit.insert("z" * 20)
+        assert edit.text() == shortened
+        assert edit.cursorPosition() == position
+        assert edit.selectedText() == ("a" if selection else "")
+        assert edit.isUndoAvailable()
+        edit.undo()
+        assert edit.text() == original
+        # Reject again, then delete at the retained cursor/selection.
+        if selection:
+            edit.setSelection(1, 1)
+        else:
+            edit.setCursorPosition(2)
+        edit.insert("z" * 20)
+        edit.backspace()
+        assert edit.text() == original[:1] + original[2:]
+
+    @pytest.mark.parametrize("source", ["legacy", "simple"])
+    def test_expression_length_budget_loaded_oversize_can_be_shortened(self, source):
+        if source == "legacy":
+            original = "^" + "a" * 600 + "$"
+            entry = _advanced_entry(raw_pattern=original)
+            entry.pop("phrases", None)
+            dialog = _make_dialog(entry=entry, pattern_id=entry["id"])
+        else:
+            dialog = _make_dialog()
+            _fill_valid_hotkey(dialog)
+            dialog._phrase_editor.set_phrases(["a" * 600])
+            original = dialog.generated_expression
+            assert dialog._save_btn.isEnabled()
+            dialog._advanced_toggle.setChecked(True)
+        edit = dialog._expression_edit
+        assert edit.text() == original
+        assert edit.maxLength() == 500
+        assert "500 characters" in dialog._expression_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+        with patch("create_pattern_dialog.re.compile") as compile_expression:
+            assert dialog._advanced_group_count() == 0
+            compile_expression.assert_not_called()
+        edit.setCursorPosition(2)
+        edit.insert("b")
+        assert edit.text() == original
+        # Native editing may shorten a loaded oversized value incrementally.
+        edit.backspace()
+        assert len(edit.text()) == len(original) - 1
+        assert not dialog._save_btn.isEnabled()
+        edit.selectAll()
+        edit.insert("^short$")
+        assert edit.text() == "^short$"
+        assert dialog._save_btn.isEnabled()
+        assert dialog._expression_error_label.isHidden()
+
+    @pytest.mark.parametrize("characters", [500, 1000])
+    def test_expression_length_budget_native_setter_does_not_truncate_into_valid_input(self, characters):
+        from PySide6.QtWidgets import QLineEdit
+
+        dialog = _make_dialog()
+        _fill_valid_hotkey(dialog)
+        dialog._advanced_toggle.setChecked(True)
+        edit = dialog._expression_edit
+        original = edit.text()
+        # Native/accessibility callers can reach Qt's setter directly. This
+        # text must still be rejected if Qt first shortens its UTF-16 storage.
+        QLineEdit.setText(edit, "^" + "\U0001f600" * characters + "$")
+        assert edit.text() == original
+        assert "500 characters" in dialog._expression_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+
+    @pytest.mark.parametrize("characters", [250, 498])
+    def test_expression_length_budget_unicode_backend_dialog_round_trip(self, tmp_path, characters):
+        from speech.pattern_manager import PatternManager
+
+        system = tmp_path / "patterns.toml"
+        system.write_text("", encoding="utf-8")
+        user = tmp_path / "user_patterns.toml"
+        manager = PatternManager(str(system), str(user))
+        expression = "^" + "\U0001f600" * characters + "$"
+        result = manager.create_pattern(
+            expression=expression, pattern_type="command",
+            actions=[{"function": "hk", "params": ["ctrl", "d"]}],
+        )
+        assert result["success"] is True
+        stored = tomllib.loads(user.read_text(encoding="utf-8"))["pattern"][0]
+        assert stored["pattern"] == expression
+        entry = next(
+            entry
+            for category in manager.get_all_patterns_structured()["categories"].values()
+            for entry in category["patterns"]
+            if entry["id"] == result["pattern_id"]
+        )
+        dialog = _make_dialog(entry=entry, pattern_id=result["pattern_id"])
+        assert dialog._expression_edit.text() == expression
+        assert dialog._expression_edit.maxLength() == 500
+        assert dialog._expression_error_label.isHidden()
+        assert dialog._save_btn.isEnabled()
+
+    def test_expression_length_budget_maximum(self):
+        dialog = _make_dialog()
+        assert dialog._expression_edit.maxLength() == 500
+
+    @pytest.mark.parametrize("character", ["a", "\U0001f600"])
+    @pytest.mark.parametrize("method", ["setText", "insert", "paste", "typing"])
+    def test_expression_length_budget_rejects_without_truncation(self, method, character, qapp):
+        dialog = _make_dialog()
+        _fill_valid_hotkey(dialog)
+        dialog._advanced_toggle.setChecked(True)
+        edit = dialog._expression_edit
+        original = "^" + character * 498 + "$" if method == "typing" else "^deploy$"
+        edit.setText(original)
+        if method == "typing":
+            from PySide6.QtTest import QTest
+            QTest.keyClicks(edit, "b")
+        else:
+            edit.selectAll()
+            oversized = "^" + character * 499 + "$"
+            if method == "paste":
+                qapp.clipboard().setText(oversized)
+                edit.paste()
+            else:
+                getattr(edit, method)(oversized)
+        assert edit.text() == original
+        assert "500 characters" in dialog._expression_error_label.text()
+        assert not dialog._expression_error_label.isHidden()
+        assert not dialog._save_btn.isEnabled()
+        edit.setText("^" + character * 498 + "$")
+        assert len(edit.text()) == 500
+        assert dialog._expression_error_label.isHidden()
+        assert dialog._save_btn.isEnabled()
+
     def test_user_edit_sets_touched_and_restore_clears(self):
         dialog = _make_dialog()
         _fill_valid_hotkey(dialog, phrase="deploy")
@@ -963,6 +1108,75 @@ class TestAdvancedSteps:
         assert dialog._steps_editor.steps() == [
             {"function": "hk", "params": ["ctrl", "z", 3]},
         ]
+
+    def test_run_capture_numeric_string_first_param_is_program_not_timeout(self):
+        original_step = {
+            "function": "run_capture",
+            "params": ["5", "C:\\Tools\\lookup.exe", "g1", "--plain"],
+            "result": "answer",
+        }
+        entry = _simple_entry(raw_actions=[original_step])
+        dialog = _make_dialog(entry=entry, pattern_id=entry["id"])
+        row = dialog._steps_editor._rows[0]
+        assert row._preserved_params is None
+        assert [row.param_value(index) for index in range(5)] == [
+            "", "5", "C:\\Tools\\lookup.exe", "g1", "--plain",
+        ]
+        assert dialog._steps_editor.steps() == [original_step]
+
+    @pytest.mark.parametrize(
+        ("timeout_text", "expected_timeout"),
+        [("10", 10), ("0.5", 0.5)],
+    )
+    def test_run_capture_editor_serializes_timeout_as_a_toml_number(
+        self, timeout_text, expected_timeout
+    ):
+        from create_pattern_dialog import ActionStepRow
+
+        row = ActionStepRow()
+        index = row._function_combo.findData("run_capture")
+        row._function_combo.setCurrentIndex(index)
+        row.set_param_value(0, timeout_text)
+        row.set_param_value(1, "C:\\Tools\\lookup.exe")
+        row._add_run_capture_argument("g1")
+        row._add_run_capture_argument("--plain")
+        assert row.step() == {
+            "function": "run_capture",
+            "params": [
+                expected_timeout, "C:\\Tools\\lookup.exe", "g1", "--plain",
+            ],
+        }
+
+    def test_run_capture_editor_rejects_non_numeric_timeout(self):
+        entry = _simple_entry(raw_pattern="^capture$", raw_actions=[
+            {"function": "run_capture", "params": [10, "C:\\Tools\\lookup.exe"]},
+        ])
+        del entry["phrases"]
+        dialog = _make_dialog(entry=entry, pattern_id=entry["id"])
+        row = dialog._steps_editor._rows[0]
+
+        row.set_param_value(0, "later")
+        dialog._validate_advanced()
+
+        assert "timeout must be a number" in dialog._steps_error_label.text().lower()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_run_capture_editor_rejects_unicode_digit_timeout_without_crashing(self):
+        from create_pattern_dialog import _parse_run_capture_timeout
+
+        entry = _simple_entry(raw_pattern="^capture$", raw_actions=[
+            {"function": "run_capture", "params": [10, "C:\\Tools\\lookup.exe"]},
+        ])
+        del entry["phrases"]
+        dialog = _make_dialog(entry=entry, pattern_id=entry["id"])
+        row = dialog._steps_editor._rows[0]
+
+        row.set_param_value(0, "²")
+        dialog._validate_advanced()
+
+        assert _parse_run_capture_timeout("²") is None
+        assert "timeout must be a number" in dialog._steps_error_label.text().lower()
+        assert not dialog._save_btn.isEnabled()
 
     def test_hk_multi_digit_group_ref_repeat_recognized(self):
         # The save-side check accepts g10+ when the expression has that
@@ -2487,3 +2701,727 @@ class TestSaveResultRequestIdEcho:
             if m.get("action") == "pm_update_result"
         ]
         assert results[0]["data"]["request_id"] == 9
+
+
+# ---------------------------------------------------------------------------
+# Action picker order (wh-action-picker-ordering)
+# ---------------------------------------------------------------------------
+
+
+def _picker_rows(combo):
+    """(text, function name, enabled) for every row of a step picker."""
+    model = combo.model()
+    return [
+        (combo.itemText(i), combo.itemData(i), model.item(i).isEnabled())
+        for i in range(combo.count())
+    ]
+
+
+class TestActionPickerOrder:
+    """The picker listed 37 entries in source-file order, which a user
+    cannot predict (wh-action-picker-ordering). The visible rule now: A-Z
+    by label, with the long advanced list split into A-Z named groups."""
+
+    def _combo(self):
+        dialog = _make_dialog()
+        return dialog._steps_editor._rows[0]._function_combo
+
+    def _sections(self, combo):
+        """Parse the picker into {audience heading: [(group, [labels])]}.
+
+        A disabled row is a heading; an indented disabled row is a group
+        sub-heading, which is exactly how a user tells the two apart.
+        """
+        sections = {}
+        audience = None
+        group = None
+        for text, name, enabled in _picker_rows(combo):
+            if not enabled:
+                if text.startswith(" "):
+                    group = text.strip()
+                    sections[audience].append((group, []))
+                else:
+                    audience = text.strip()
+                    group = None
+                    sections[audience] = []
+                continue
+            assert audience is not None, "an entry appeared before a heading"
+            if not sections[audience]:
+                sections[audience].append((None, []))
+            sections[audience][-1][1].append(text)
+        return sections
+
+    def test_basic_entries_are_alphabetical_under_one_heading(self):
+        sections = self._sections(self._combo())
+        basic = sections["Basic actions"]
+        assert len(basic) == 1
+        group, labels = basic[0]
+        assert group is None
+        assert labels == sorted(labels, key=str.casefold)
+
+    def test_advanced_entries_sit_under_alphabetical_group_headings(self):
+        sections = self._sections(self._combo())
+        advanced = sections["Advanced actions"]
+        groups = [group for group, _labels in advanced]
+        assert len(groups) > 1
+        assert all(group is not None for group in groups)
+        assert groups == sorted(groups, key=str.casefold)
+        for group, labels in advanced:
+            assert labels, group
+            assert labels == sorted(labels, key=str.casefold), group
+
+    def test_group_headings_are_not_selectable_actions(self):
+        for text, name, enabled in _picker_rows(self._combo()):
+            if not enabled:
+                assert name is None, text
+
+    def test_no_action_moves_between_the_two_headings(self):
+        from speech.action_catalog import CATALOG_BY_NAME
+
+        combo = self._combo()
+        rows = _picker_rows(combo)
+        seen = {"Basic actions": [], "Advanced actions": []}
+        audience = None
+        for text, name, enabled in rows:
+            if not enabled and not text.startswith(" "):
+                audience = text.strip()
+            elif name is not None:
+                seen[audience].append(name)
+        assert seen["Basic actions"] and seen["Advanced actions"]
+        for heading, expected in (
+            ("Basic actions", "basic"),
+            ("Advanced actions", "advanced"),
+        ):
+            for name in seen[heading]:
+                assert CATALOG_BY_NAME[name]["audience"] == expected
+
+    def test_new_step_still_defaults_to_the_hotkey_action(self):
+        # Sorting must not silently change which action a fresh step
+        # starts on; the editor has always opened on the hotkey action.
+        dialog = _make_dialog()
+        assert dialog._steps_editor._rows[0].function_name() == "hk"
+
+
+# ---------------------------------------------------------------------------
+# Step result names (wh-editor-step-result-name)
+# ---------------------------------------------------------------------------
+
+
+def _row_for(function: str):
+    """A standalone step row switched to one catalog function."""
+    from create_pattern_dialog import ActionStepRow
+
+    row = ActionStepRow()
+    index = row._function_combo.findData(function)
+    assert index >= 0, function
+    row._function_combo.setCurrentIndex(index)
+    return row
+
+
+class TestStepResultName:
+    """The editor preserved a hand-written ``result`` name but offered no
+    way to create one, so a user could not connect one step's answer to
+    the next step's parameter (wh-editor-step-result-name)."""
+
+    def test_field_offered_only_for_actions_that_produce_a_value(self):
+        for function in ("ask_ai", "run_capture", "date"):
+            assert _row_for(function)._result_edit is not None, function
+        for function in ("hk", "press", "insert_text"):
+            assert _row_for(function)._result_edit is None, function
+
+    def test_typed_name_becomes_the_step_result_key(self):
+        row = _row_for("ask_ai")
+        row.set_param_value(0, "Answer in one short sentence: g1")
+        row.set_result_name("answer")
+        assert row.step() == {
+            "function": "ask_ai",
+            "params": ["Answer in one short sentence: g1"],
+            "result": "answer",
+        }
+
+    def test_empty_name_writes_no_result_key_at_all(self):
+        row = _row_for("ask_ai")
+        row.set_param_value(0, "hello")
+        assert row.step() == {"function": "ask_ai", "params": ["hello"]}
+        row.set_result_name("   ")
+        assert "result" not in row.step()
+
+    def test_stored_name_loads_into_the_field_and_round_trips(self):
+        step = {
+            "function": "ask_ai", "params": ["g1"], "result": "answer",
+        }
+        row = _row_for("hk")
+        row.set_step(step)
+        assert row.result_name() == "answer"
+        assert row.step() == step
+
+    def test_clearing_the_field_drops_a_loaded_name(self):
+        row = _row_for("hk")
+        row.set_step(
+            {"function": "ask_ai", "params": ["g1"], "result": "answer"},
+        )
+        row.set_result_name("")
+        assert row.step() == {"function": "ask_ai", "params": ["g1"]}
+
+    def test_name_survives_alongside_other_carried_keys(self):
+        step = {
+            "function": "run_capture",
+            "params": ["C:\\Tools\\lookup.exe", "g1"],
+            "awaits_done": True,
+            "result": "answer",
+        }
+        row = _row_for("hk")
+        row.set_step(step)
+        assert row.result_name() == "answer"
+        assert row.step() == step
+
+
+def _switch_function(row, function: str):
+    """Drive the row's picker to another function, as a user would."""
+    index = row._function_combo.findData(function)
+    assert index >= 0, function
+    row._function_combo.setCurrentIndex(index)
+
+
+class TestStoredResultNameSurvivesFunctionSwitch:
+    """Before this batch, _with_extras re-attached a stored ``result``
+    whenever the function matched the loaded one, so switching away and
+    back kept the name. _load_result_extra pops the name into the field,
+    and a function switch destroys the field, so the name was lost
+    permanently (wh-review-pattern-fixes.4)."""
+
+    def _loaded_row(self):
+        row = _row_for("hk")
+        row.set_step(
+            {"function": "ask_ai", "params": ["g1"], "result": "answer"},
+        )
+        return row
+
+    def test_switch_away_and_back_keeps_the_stored_name(self):
+        row = self._loaded_row()
+        _switch_function(row, "insert_text")
+        _switch_function(row, "ask_ai")
+        assert row.result_name() == "answer"
+        assert row.step().get("result") == "answer"
+
+    def test_switch_through_another_result_producer_keeps_the_name(self):
+        row = self._loaded_row()
+        _switch_function(row, "date")
+        # The name belongs to the LOADED function only; date's fresh
+        # field stays empty.
+        assert row.result_name() == ""
+        _switch_function(row, "ask_ai")
+        assert row.step().get("result") == "answer"
+
+    def test_fresh_typed_name_still_vanishes_on_function_switch(self):
+        # Matches how params behave: only the LOADED name round-trips.
+        row = _row_for("ask_ai")
+        row.set_result_name("mine")
+        _switch_function(row, "date")
+        _switch_function(row, "ask_ai")
+        assert row.result_name() == ""
+        assert "result" not in row.step()
+
+
+class TestResultNameValidation:
+    """A result name is a lookup key the engine writes into the run
+    context, so a name that shadows a capture group, repeats another
+    step's name, or hides another step's stored value must not save."""
+
+    def _dialog(self, steps, expression="^ask (.+)$"):
+        entry = _simple_entry(raw_pattern=expression, raw_actions=steps)
+        del entry["phrases"]
+        return _make_dialog(entry=entry, pattern_id=entry["id"])
+
+    def _ask_and_insert(self, result="answer"):
+        return [
+            {"function": "ask_ai", "params": ["g1"], "result": result},
+            {"function": "insert_text", "params": [result]},
+        ]
+
+    def test_a_plain_name_saves_and_reaches_the_save_payload(self):
+        dialog = self._dialog(self._ask_and_insert())
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+        assert dialog.get_pattern_data()["actions"] == self._ask_and_insert()
+
+    def test_capture_group_name_blocks_save(self):
+        dialog = self._dialog(self._ask_and_insert())
+        dialog._steps_editor._rows[0].set_result_name("g1")
+        dialog._validate_advanced()
+        assert "capture group" in dialog._steps_error_label.text().lower()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_name_with_spaces_or_punctuation_blocks_save(self):
+        dialog = self._dialog(self._ask_and_insert())
+        dialog._steps_editor._rows[0].set_result_name("the answer")
+        dialog._validate_advanced()
+        assert "result name" in dialog._steps_error_label.text().lower()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_two_steps_with_the_same_name_block_save(self):
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "answer"},
+            {"function": "ask_ai", "params": ["g1"], "result": "answer"},
+        ])
+        dialog._validate_advanced()
+        assert "answer" in dialog._steps_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_name_that_hides_another_steps_value_blocks_save(self):
+        # The engine also stores every step's value under its function
+        # name, so naming this result "date" would overwrite what the
+        # date step stored (command_engine.py lines 342-347).
+        dialog = self._dialog([
+            {"function": "date", "params": ["%Y-%m-%d"]},
+            {"function": "ask_ai", "params": ["g1"], "result": "date"},
+        ])
+        dialog._validate_advanced()
+        assert "date" in dialog._steps_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_a_step_may_reuse_its_own_function_name(self):
+        # Same value under the same key: nothing is hidden.
+        dialog = self._dialog([
+            {"function": "date", "params": ["%Y-%m-%d"], "result": "date"},
+            {"function": "insert_text", "params": ["date"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+
+class TestResultNameCollisionOnlyForResultProducers:
+    """The function-name collision check must flag only functions in
+    RESULT_PRODUCING_ACTIONS. The engine stores context[func_name] only
+    when the step's return value is a str (command_engine.py lines
+    342-343), so the name of a dict-returning action (press, hk, ...)
+    never becomes a context key, and a result key may safely reuse it
+    (wh-review-pattern-fixes.20)."""
+
+    def _dialog(self, steps, expression="^ask (.+)$"):
+        entry = _simple_entry(raw_pattern=expression, raw_actions=steps)
+        del entry["phrases"]
+        return _make_dialog(entry=entry, pattern_id=entry["id"])
+
+    def test_result_named_after_a_dict_returning_step_saves(self):
+        # The finding's sequence: at run time ask_ai stores its string
+        # under context['press'] via the result key, the press step
+        # returns a UI-action dict and never enters the str store, and
+        # type_text receives the stored string by exact lookup. Nothing
+        # is hidden, so the editor must not refuse the name.
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "press"},
+            {"function": "press", "params": ["tab"]},
+            {"function": "type_text", "params": ["press"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_result_named_after_a_later_dict_returning_step_saves(self):
+        # Same exemption when the dict-returning step comes later: hk
+        # never stores context['hk'], so the earlier result name 'hk'
+        # hides nothing.
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "hk"},
+            {"function": "hk", "params": ["ctrl", "c"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_result_named_after_a_separate_ask_ai_step_still_blocks(self):
+        # Control: ask_ai IS in RESULT_PRODUCING_ACTIONS, so a result
+        # name equal to a SEPARATE ask_ai step's function name still
+        # hides that step's stored value and must still flag. (The
+        # matching 'date' control is
+        # TestResultNameValidation.test_name_that_hides_another_steps
+        # _value_blocks_save.)
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "ask_ai"},
+            {"function": "ask_ai", "params": ["g1"]},
+        ])
+        dialog._validate_advanced()
+        assert "ask_ai" in dialog._steps_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+
+
+class TestResultNamePreservedRows:
+    """A preserved (read-only) row has no result-name field, so an error
+    about its stored name cannot be fixed in the dialog. The sibling
+    checks (invalid_key_name, invalid_repeat_value,
+    invalid_run_capture_timeout) skip preserved rows for that reason;
+    the result-name check must do the same
+    (wh-review-pattern-fixes.3)."""
+
+    def _dialog(self, steps, expression="^ask (.+)$"):
+        entry = _simple_entry(raw_pattern=expression, raw_actions=steps)
+        del entry["phrases"]
+        return _make_dialog(entry=entry, pattern_id=entry["id"])
+
+    def test_preserved_capture_shaped_name_does_not_block_save(self):
+        # capture_clipboard is internal-audience, so its row degrades to
+        # preserved mode; the stored name stays in the row's extras.
+        dialog = self._dialog([
+            {"function": "capture_clipboard", "params": [], "result": "g1"},
+            {"function": "insert_text", "params": ["hello"]},
+        ])
+        assert dialog._steps_editor._rows[0].is_preserved()
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_two_preserved_rows_with_one_name_do_not_block_save(self):
+        dialog = self._dialog([
+            {"function": "capture_clipboard", "params": [], "result": "note"},
+            {"function": "capture_clipboard", "params": [], "result": "note"},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_preserved_non_identifier_name_does_not_block_save(self):
+        dialog = self._dialog([
+            {
+                "function": "capture_clipboard",
+                "params": [],
+                "result": "the note",
+            },
+            {"function": "insert_text", "params": ["hello"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_editable_name_duplicating_a_preserved_name_still_flags(self):
+        # This collision is fixable: the editable row's field can take
+        # another name, so the runtime hazard is still reported.
+        dialog = self._dialog([
+            {"function": "capture_clipboard", "params": [], "result": "note"},
+            {"function": "ask_ai", "params": ["g1"], "result": "note"},
+        ])
+        dialog._validate_advanced()
+        assert "note" in dialog._steps_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_preserved_name_round_trips_unchanged(self):
+        steps = [
+            {"function": "capture_clipboard", "params": [], "result": "g1"},
+            {"function": "insert_text", "params": ["hello"]},
+        ]
+        dialog = self._dialog(steps)
+        assert dialog._steps_editor.steps() == steps
+
+
+class TestResultNameSubstringCorruption:
+    """The engine's replacement loop substitutes a context key anywhere
+    it appears inside a later step's text parameter (command_engine.py
+    lines 252-260). A short result name such as 'an' therefore corrupts
+    literal text like 'answer the question'. The editor must refuse such
+    a name (wh-review-pattern-fixes.2)."""
+
+    def _dialog(self, steps, expression="^ask (.+)$"):
+        entry = _simple_entry(raw_pattern=expression, raw_actions=steps)
+        del entry["phrases"]
+        return _make_dialog(entry=entry, pattern_id=entry["id"])
+
+    def test_name_inside_a_later_steps_text_blocks_save(self):
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "an"},
+            {"function": "insert_text", "params": ["answer the question"]},
+        ])
+        dialog._validate_advanced()
+        error = dialog._steps_error_label.text()
+        assert "'an'" in error
+        assert "answer the question" in error
+        assert "insert_text" in error
+        assert not dialog._save_btn.isEnabled()
+
+    def test_name_inside_an_earlier_steps_text_is_allowed(self):
+        # The engine stores the value only after the defining step runs,
+        # so earlier steps resolve before the name exists.
+        dialog = self._dialog([
+            {"function": "insert_text", "params": ["answer the question"]},
+            {"function": "ask_ai", "params": ["g1"], "result": "an"},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_name_inside_its_own_steps_params_is_allowed(self):
+        # The defining step's own params resolve before the store.
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["plan g1"], "result": "an"},
+            {"function": "insert_text", "params": ["done"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_exact_whole_param_reference_is_allowed(self):
+        # An exact key gets a direct context lookup, never the
+        # replacement loop, so the reference is the intended use.
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "an"},
+            {"function": "insert_text", "params": ["an"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_editable_name_inside_a_preserved_rows_text_blocks_save(self):
+        # The later row is read-only, but the fix is on the editable
+        # row's own field: rename the result.
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "an"},
+            {
+                "function": "add_hint_to_stt",
+                "params": ["answer the question"],
+            },
+        ])
+        dialog._validate_advanced()
+        assert "'an'" in dialog._steps_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_param_that_is_an_earlier_result_name_is_allowed(self):
+        # 'answer' contains 'an', but the whole param is itself an
+        # earlier step's result name: a direct context lookup at run
+        # time, so the replacement loop never touches it.
+        dialog = self._dialog([
+            {"function": "ask_ai", "params": ["g1"], "result": "an"},
+            {"function": "ask_ai", "params": ["g1"], "result": "answer"},
+            {"function": "insert_text", "params": ["answer"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_param_equal_to_a_non_string_function_name_blocks_save(self):
+        # The engine stores context[function] only when the return value
+        # is a str (command_engine.py lines 342-344). press returns a
+        # UI-action dict, so no context['press'] key exists at run time;
+        # the literal 'press' falls into the replacement loop and the
+        # stored 's' corrupts it (wh-review-pattern-fixes.7).
+        dialog = self._dialog([
+            {"function": "press", "params": ["tab"]},
+            {"function": "date", "params": ["%Y-%m-%d"], "result": "s"},
+            {"function": "type_text", "params": ["press"]},
+        ])
+        dialog._validate_advanced()
+        error = dialog._steps_error_label.text()
+        assert "'s'" in error
+        assert "press" in error
+        assert "type_text" in error
+        assert not dialog._save_btn.isEnabled()
+
+    def test_param_equal_to_a_string_producing_function_name_is_allowed(self):
+        # date is in RESULT_PRODUCING_ACTIONS, so the engine stores
+        # context['date'] when the step runs; the later exact param
+        # 'date' gets a direct lookup and never enters the replacement
+        # loop, even though the result name 'at' sits inside it.
+        dialog = self._dialog([
+            {"function": "date", "params": ["%Y-%m-%d"], "result": "at"},
+            {"function": "type_text", "params": ["date"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+
+class TestLoadedResultNameRoundTripsVerbatim:
+    """The engine stores a step's value under the LITERAL ``result``
+    string and resolves a later parameter by an exact context lookup
+    (command_engine.py lines 346-347 and 171), and the save layer keeps
+    a string result unchanged (PatternManager._validate_raw_actions).
+    The editor stripped the loaded name, so an untouched edit/save
+    silently renamed the runtime key, dropped a whitespace-only key,
+    and a preserved raw ' a' wrongly pre-claimed the trimmed 'a'
+    (wh-review-pattern-fixes.10)."""
+
+    def _dialog(self, steps, expression="^ask (.+)$"):
+        entry = _simple_entry(raw_pattern=expression, raw_actions=steps)
+        del entry["phrases"]
+        return _make_dialog(entry=entry, pattern_id=entry["id"])
+
+    def test_loaded_name_with_whitespace_round_trips_verbatim(self):
+        step = {
+            "function": "date", "params": ["%Y-%m-%d"], "result": " answer",
+        }
+        row = _row_for("hk")
+        row.set_step(step)
+        assert row.step() == step
+
+    def test_whitespace_only_loaded_name_round_trips_verbatim(self):
+        # The engine treats ' ' as a real key (``if res_key:`` is true),
+        # so dropping it would change what the pattern does. The UNEDITED
+        # field must also still count as verbatim under the user-edit
+        # tracking of wh-review-pattern-fixes.15.
+        step = {"function": "date", "params": ["%Y-%m-%d"], "result": " "}
+        row = _row_for("hk")
+        row.set_step(step)
+        assert row.result_is_loaded_verbatim()
+        assert row.step() == step
+
+    def test_preserved_raw_name_does_not_claim_the_trimmed_name(self):
+        # The preserved row's literal run-time key is ' a'; the editable
+        # row's 'a' is a different context key, so there is no duplicate.
+        dialog = self._dialog([
+            {"function": "capture_clipboard", "params": [], "result": " a"},
+            {"function": "ask_ai", "params": ["g1"], "result": "a"},
+        ])
+        assert dialog._steps_editor._rows[0].is_preserved()
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_edited_field_takes_the_new_name_rules(self):
+        # Guard: only the UNEDITED loaded value round-trips verbatim; a
+        # typed replacement is stripped and validated as before.
+        row = _row_for("hk")
+        row.set_step(
+            {"function": "ask_ai", "params": ["g1"], "result": " answer"},
+        )
+        row.set_result_name("  answer2  ")
+        assert row.step()["result"] == "answer2"
+
+    def test_typed_whitespace_only_name_still_drops_the_key(self):
+        # Guard: a TYPED whitespace-only value still means "no result
+        # key"; only a loaded one round-trips.
+        row = _row_for("date")
+        row.set_result_name("   ")
+        assert "result" not in row.step()
+
+    def test_unedited_loaded_non_identifier_name_does_not_block_save(self):
+        # Pre-existing data: flagging the loaded ' answer' would dead-end
+        # Save the same way wh-review-pattern-fixes.3 did for preserved
+        # rows. It must pass validation AND reach the payload verbatim.
+        steps = [
+            {"function": "ask_ai", "params": ["g1"], "result": " answer"},
+            {"function": "insert_text", "params": ["done"]},
+        ]
+        dialog = self._dialog(steps)
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+        assert dialog.get_pattern_data()["actions"] == steps
+
+
+class TestHiddenResultOnFieldlessRow:
+    """A loaded step whose function is NOT in RESULT_PRODUCING_ACTIONS can
+    still carry a hand-written string ``result``. Such a row is editable,
+    so it is not preserved, but it has no result-name field: the name is
+    invisible and unfixable, yet _with_extras still serializes it. An
+    error about it would dead-end Save exactly like a preserved row's
+    (wh-review-pattern-fixes.14). The name must never be the SUBJECT of
+    an error while it still claims its literal key, so an editable
+    sibling that duplicates it flags -- fixable in the sibling's field."""
+
+    def _dialog(self, steps, expression="^ask (.+)$"):
+        entry = _simple_entry(raw_pattern=expression, raw_actions=steps)
+        del entry["phrases"]
+        return _make_dialog(entry=entry, pattern_id=entry["id"])
+
+    def test_hidden_format_invalid_result_does_not_block_save(self):
+        # press has no result field, so 'bad name' is on no screen and
+        # in no field; the format error would be unfixable.
+        dialog = self._dialog([
+            {"function": "press", "params": ["tab"], "result": "bad name"},
+            {"function": "insert_text", "params": ["hello"]},
+        ])
+        assert not dialog._steps_editor._rows[0].is_preserved()
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_hidden_capture_shaped_result_does_not_block_save(self):
+        # The capture-group rule is just as unreachable from any field.
+        dialog = self._dialog([
+            {"function": "press", "params": ["tab"], "result": "g1"},
+            {"function": "insert_text", "params": ["hello"]},
+        ])
+        dialog._validate_advanced()
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_editable_name_duplicating_a_hidden_result_still_flags(self):
+        # This collision is fixable: the editable row's field can take
+        # another name, so the runtime hazard is still reported.
+        dialog = self._dialog([
+            {"function": "press", "params": ["tab"], "result": "note"},
+            {"function": "ask_ai", "params": ["g1"]},
+        ])
+        dialog._steps_editor._rows[1].set_result_name("note")
+        dialog._validate_advanced()
+        assert "note" in dialog._steps_error_label.text()
+        assert not dialog._save_btn.isEnabled()
+
+    def test_hidden_result_round_trips_unchanged(self):
+        step = {"function": "press", "params": ["tab"], "result": "bad name"}
+        row = _row_for("hk")
+        row.set_step(step)
+        assert row.result_is_hidden_extra()
+        assert row.step() == step
+
+
+def _user_clear(edit):
+    """Empty a line edit the way a user would (fires textEdited)."""
+    from PySide6.QtTest import QTest
+
+    edit.selectAll()
+    QTest.keyClick(edit, Qt.Key.Key_Backspace)
+
+
+def _user_type(edit, text: str):
+    """Type into a line edit the way a user would (fires textEdited)."""
+    from PySide6.QtTest import QTest
+
+    QTest.keyClicks(edit, text)
+
+
+class TestRetypedResultNameGetsTypedHandling:
+    """result_name() decided 'unedited loaded value' by pure text
+    equality, so a user who cleared the field and retyped the exact raw
+    spelling was treated as if nothing happened: a freshly typed ' '
+    still serialized as the whitespace-only key, surrounding whitespace
+    was kept instead of stripped, and a format-invalid spelling kept its
+    verbatim exemption. A user edit must switch the field to typed
+    handling permanently, even when the keystrokes reproduce the loaded
+    raw string (wh-review-pattern-fixes.15)."""
+
+    def test_cleared_and_retyped_whitespace_drops_the_key(self):
+        row = _row_for("hk")
+        row.set_step(
+            {"function": "date", "params": ["%Y-%m-%d"], "result": " "},
+        )
+        _user_clear(row._result_edit)
+        _user_type(row._result_edit, " ")
+        assert row._result_edit.text() == " "
+        assert not row.result_is_loaded_verbatim()
+        assert "result" not in row.step()
+
+    def test_cleared_and_retyped_name_is_stripped(self):
+        row = _row_for("hk")
+        row.set_step(
+            {"function": "date", "params": ["%Y-%m-%d"], "result": " ok "},
+        )
+        _user_clear(row._result_edit)
+        _user_type(row._result_edit, " ok ")
+        assert row._result_edit.text() == " ok "
+        assert not row.result_is_loaded_verbatim()
+        assert row.step()["result"] == "ok"
+
+    def test_prefill_restore_does_not_count_as_a_user_edit(self):
+        # The switch-back prefill writes the field with setText, which
+        # never fires textEdited, so the loaded raw name still
+        # round-trips verbatim after a function switch away and back
+        # (wh-review-pattern-fixes.4).
+        row = _row_for("hk")
+        row.set_step(
+            {"function": "ask_ai", "params": ["g1"], "result": " answer"},
+        )
+        _switch_function(row, "insert_text")
+        _switch_function(row, "ask_ai")
+        assert row.result_is_loaded_verbatim()
+        assert row.step()["result"] == " answer"

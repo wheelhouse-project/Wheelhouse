@@ -35,7 +35,7 @@ Configuration:
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from services.wheelhouse.plugins.base import BasePlugin, PluginState
 from services.wheelhouse.integrations.bravia_control import (
@@ -266,7 +266,7 @@ class BraviaPlugin(BasePlugin):
             # Check if TV is offline
             if current_brightness is None:
                 logger.warning(f"{self.name}: TV offline, publishing overflow event")
-                await self._publish_overflow(delta, "device_offline")
+                await self._publish_overflow(delta, "device_offline", command_id=event.command_id)
                 self._last_known_brightness = None
                 return
             
@@ -276,8 +276,8 @@ class BraviaPlugin(BasePlugin):
             
             if (delta < 0 and at_min) or (delta > 0 and at_max):
                 logger.debug(f"{self.name}: At hardware limit (current={current_brightness}%, delta={delta}), publishing overflow")
-                await self._publish_overflow(delta, "at_hardware_limit")
-                await self._publish_state_change(current_brightness)  # Still publish state for awareness
+                await self._publish_overflow(delta, "at_hardware_limit", command_id=event.command_id)
+                await self._publish_state_change(current_brightness, command_id=event.command_id)  # Still publish state for awareness
                 return
             
             # Apply brightness adjustment
@@ -286,7 +286,7 @@ class BraviaPlugin(BasePlugin):
             if result is None:
                 # TV went offline during adjustment
                 logger.warning(f"{self.name}: TV went offline during adjustment")
-                await self._publish_overflow(delta, "device_offline")
+                await self._publish_overflow(delta, "device_offline", command_id=event.command_id)
                 self._last_known_brightness = None
                 return
             
@@ -297,16 +297,21 @@ class BraviaPlugin(BasePlugin):
                 return
             
             # Adjustment successful - get new brightness and publish state
+            # crewcut: when this re-read returns None, no state event is sent, so
+            # BrightnessCoordinator does not count the step as applied in hardware and a
+            # second, offline TV can still add a software step for the same command. The
+            # limit goes away if this path publishes a tagged state event (or an explicit
+            # applied signal).
             new_brightness = await self._bravia_control.get_brightness()
             if new_brightness is not None:
-                await self._publish_state_change(new_brightness)
+                await self._publish_state_change(new_brightness, command_id=event.command_id)
                 logger.debug(f"{self.name}: Brightness adjusted to {new_brightness}%")
             
         except Exception as e:
             logger.error(f"{self.name}: Error handling brightness command: {e}", exc_info=True)
             self._last_error = str(e)
     
-    async def _publish_state_change(self, brightness: int) -> None:
+    async def _publish_state_change(self, brightness: int, command_id: Optional[int] = None) -> None:
         """:flow: Brightness Control Plugin System
         :step: 4
         :description: Publishes current brightness state to coordinator
@@ -318,38 +323,43 @@ class BraviaPlugin(BasePlugin):
         """
         Args:
             brightness: Current brightness level (0-100 normalized)
+            command_id: Id of the HardwareBrightnessCommand this state answers,
+                or None for a state published outside a command (start-up)
         """
         event = BrightnessStateChanged(
             level=brightness,
             at_min=(brightness == 0),
             at_max=(brightness == 100),
             source_plugin=self.name,
-            timestamp=time.time()
+            timestamp=time.time(),
+            command_id=command_id
         )
         await self._event_bus.publish(event)
         self._last_known_brightness = brightness
         self._last_health_check = time.time()
         logger.debug(f"{self.name}: Published state change: level={brightness}%, at_min={event.at_min}, at_max={event.at_max}")
     
-    async def _publish_overflow(self, delta: int, reason: str) -> None:
+    async def _publish_overflow(self, delta: int, reason: str, command_id: Optional[int] = None) -> None:
         """:flow: Brightness Control Plugin System
         :step: 5
         :description: Publishes overflow event when hardware cannot satisfy brightness delta
         :data_in: Remaining delta and reason string
         :data_out: BrightnessOverflowEvent on EventBus
-        :notes: Signals to BrightnessCoordinator that TV cannot fulfill adjustment and dimming/brightening should cascade to software methods (f.lux, overlay dimmer, etc.). Reasons: "at_hardware_limit" or "device_offline".
+        :notes: Signals to BrightnessCoordinator that TV cannot fulfill adjustment and dimming/brightening should cascade to software methods (overlay dimmer, gamma dimmer, etc.). Reasons: "at_hardware_limit" or "device_offline".
         """
         
         """
         Args:
             delta: Remaining brightness adjustment that couldn't be applied
             reason: Why overflow occurred ("at_hardware_limit", "device_offline")
+            command_id: Id of the HardwareBrightnessCommand this overflow answers
         """
         event = BrightnessOverflowEvent(
             delta=delta,
             source_plugin=self.name,
             reason=reason,
-            timestamp=time.time()
+            timestamp=time.time(),
+            command_id=command_id
         )
         await self._event_bus.publish(event)
         self._last_health_check = time.time()

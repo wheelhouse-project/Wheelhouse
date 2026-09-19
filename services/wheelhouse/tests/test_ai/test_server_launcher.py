@@ -263,6 +263,22 @@ class TestTheCommandLine:
         cmd = spawn.command
         assert cmd[cmd.index("-ngl") + 1] == "0"
 
+    def test_the_model_alias_is_passed_to_the_server(self):
+        """Without --alias, llama-server reports the model FILE PATH as the
+        model id. The tray menu's live list then never matches the configured
+        name, and the one model shows up twice (wh-ai-model-alias)."""
+        spawn = Spawner()
+        _launcher(_config(model_alias="gemma-4-e4b"), spawn=spawn).start()
+        cmd = spawn.command
+        assert cmd[cmd.index("--alias") + 1] == "gemma-4-e4b"
+
+    def test_no_alias_flag_when_no_alias_is_configured(self):
+        """An empty alias must omit the flag entirely, not pass an empty
+        string for llama-server to reject at startup."""
+        spawn = Spawner()
+        _launcher(spawn=spawn).start()
+        assert "--alias" not in spawn.command
+
 
 class TestStarting:
 

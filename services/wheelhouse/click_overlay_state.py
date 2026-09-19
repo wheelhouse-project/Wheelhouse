@@ -53,7 +53,7 @@ destroy ``SetWinEventHook`` callbacks (which marshal onto the loop via
 that needs to read the machine from another thread must marshal onto the
 same loop. Adding a lock would be the wrong fix: the contract requires
 single-writer ordering through the existing loop, not lock-based
-serialisation. This mirrors the editor-lifecycle concurrency note.
+serialisation.
 """
 
 from __future__ import annotations
@@ -73,6 +73,7 @@ class OverlayState(enum.Enum):
     PAINT_IN_FLIGHT = "paint_in_flight"
     PAINTED = "painted"
     REFRESH_IN_FLIGHT = "refresh_in_flight"
+    POST_CLICK_SETTLING = "post_click_settling"
     PAUSED = "paused"
     ERROR = "error"
 
@@ -121,15 +122,20 @@ class PaintAckState(enum.Enum):
     """The ``state`` carried by a ``paint_ack`` event.
 
     Mirrors the closed ``_ALLOWED_STATE`` set on
-    ``OverlayStateChangedEvent`` (``painted`` / ``failed`` / ``cleared``).
-    A ``CLEARED`` ack is bookkeeping only -- it never drives a state
-    change, because hide-numbers already transitioned the machine to
-    ``closed`` at dispatch time (r2.4).
+    ``OverlayStateChangedEvent`` (``painted`` / ``failed`` / ``cleared`` /
+    ``expired``). A ``CLEARED`` ack is bookkeeping only -- it never drives
+    a state change, because hide-numbers already transitioned the machine
+    to ``closed`` at dispatch time (r2.4). An ``EXPIRED`` ack is the GUI's
+    report that its badge lease ran out and it tore the windows down on
+    its own (wh-overlay-slow-uia-stale-badges.9): in ``painted`` at the
+    live pair it closes the machine (the user no longer sees badges);
+    everywhere else it is bookkeeping like ``CLEARED``.
     """
 
     PAINTED = "painted"
     FAILED = "failed"
     CLEARED = "cleared"
+    EXPIRED = "expired"
 
 
 @dataclass(frozen=True)
@@ -202,9 +208,10 @@ class BuildReason(enum.Enum):
 
     SHOW_NUMBERS = "show_numbers"      # standalone "show numbers" -> start_overlay_walk
     AUTO_OPEN = "auto_open"            # ambiguous click -> show_numbered_overlay (reuse snapshot)
-    REFRESH = "refresh"                # post-click / focus-change / re-said "show numbers"
+    REFRESH = "refresh"                # focus-change / re-said "show numbers" / post-click when settle_after_click is off
     SUPERSEDE = "supersede"            # a newer trigger superseded an in-flight build
     RESUME_REWALK = "resume_rewalk"    # mic-resume with a stale snapshot -> fresh walk
+    SETTLE = "settle"                  # post-click settle re-read -> start_overlay_walk
 
 
 @dataclass(frozen=True)
@@ -231,24 +238,15 @@ class Effect:
         walk failure (wh-n29v.16.1).
       timer_state: the state whose timeout this ARM_TIMER guards.
       duration_ms: the timeout duration for ARM_TIMER.
-      immediate_clear: set on a DISPATCH_PAINT to mean "the integration
-        must NOT present this painted snapshot as a visible frame; it nets
-        hidden" (the auto-hide-while-paused paint, v4 mic-pause case 2). The
-        matching DISPATCH_CLEAR at the same generation ships on ONE of two
-        paths, depending on which in-flight state resolved:
-          * Walk path (``_resolve_in_flight_to_paused``): the DISPATCH_CLEAR
-            is included INLINE in this same effect batch, right after the
-            paint -- the build-response resolved straight to ``paused``.
-          * Refresh path (``_refresh_build_ok`` while auto_hide): the paint
-            is dispatched now but the DISPATCH_CLEAR ships on the SUBSEQUENT
-            paint-ack at the same generation (``_paint_ack_to_paused``),
-            because the refresh stays ``refresh_in_flight`` until the GUI
-            acks the paint.
-        In both cases the net visible result is "no overlay shown for this
-        generation"; the flag does NOT promise that a clear immediately
-        follows in the same batch. The integration must treat an
-        ``immediate_clear`` paint as never-visible and rely on the matching
-        same-generation clear (inline or on the next paint-ack) to confirm.
+      audit_delivery: set on the ONE DISPATCH_PAINT the machine emits that
+        commits ``painted`` synchronously -- the paused MIC_RESUME restore
+        (wh-overlay-slow-uia-stale-badges.21.3). Every other paint lands in
+        ``paint_in_flight`` / ``refresh_in_flight``, where the armed deadline
+        turns a lost paint into a recovery. The restore has no such state and
+        no timer, so the integration must audit this paint's delivery itself
+        and drive the machine out of ``painted`` when the paint does not
+        reach the screen. Leave it ``False`` on every other paint: auditing a
+        deadline-guarded paint would report the same loss twice.
     """
 
     kind: EffectKind
@@ -259,7 +257,7 @@ class Effect:
     notice: Optional[ClickNoticeEvent] = None
     timer_state: Optional[OverlayState] = None
     duration_ms: float = 0.0
-    immediate_clear: bool = False
+    audit_delivery: bool = False
 
 
 class OverlayOutcome(enum.Enum):
@@ -327,15 +325,47 @@ class ClickOverlayStateMachine:
       reason: synthetic reason recorded on entry to ``error``; cleared by
         ``_reset``.
 
-    The constructor takes the two timeout durations as plain ints (the
-    integration reads them from ``ClickConfig``; this class does NOT read
-    config). ``walk_deadline_ms`` guards ``walk_in_flight`` and
-    ``refresh_in_flight``; ``paint_deadline_ms`` guards
-    ``paint_in_flight``.
+    The constructor takes the three timeout durations as plain ints, plus
+    the ``settle_after_click`` flag. This class still does NOT read config.
+    The integration (``main.make_click_overlay_state_machine``) passes
+    ``settle_after_click`` and, since
+    wh-overlay-slow-uia-stale-badges.3, ``walk_deadline_ms`` and
+    ``settle_deadline_ms`` derived from ``[click]
+    screen_read_timeout_ms`` (the read limit plus the pre-walk margin, with
+    the settle one never below the default here), so a state that is waiting
+    on a screen read cannot time out while that read is still inside its own
+    bound. ``paint_deadline_ms`` keeps the default below; no ``[click]`` key
+    sets it. (The ``[click]`` block also has its own ``walk_deadline_ms``,
+    but that one bounds the Input-side UIA walk of a BY-NAME click and is a
+    different value from this machine's.) ``walk_deadline_ms`` guards
+    ``walk_in_flight`` and ``refresh_in_flight``; ``paint_deadline_ms``
+    guards ``paint_in_flight``; ``settle_deadline_ms`` guards
+    ``post_click_settling``.
     """
 
     walk_deadline_ms: int = 2500
     paint_deadline_ms: int = 1000
+    # Guards POST_CLICK_SETTLING. The badges are already gone when this timer
+    # runs, so the cost of it firing is only that the user says "apply
+    # numbers" again. It must be long enough to cover the wait for the
+    # application plus one screen read: a read of a window with about 145
+    # controls measured about 450 ms idle and up to 7 s while the application
+    # repainted (see the measurement comments on
+    # wh-overlay-slow-uia-stale-badges).
+    settle_deadline_ms: int = 8000
+    # wh-overlay-slow-uia-stale-badges.1: the feature flag for the whole
+    # settle-after-click behaviour, OFF by default. False keeps the shipped
+    # behaviour, where a badge click starts a refresh and the OLD badges stay
+    # on screen until the new ones replace them. True clears the badges at
+    # once and enters POST_CLICK_SETTLING.
+    #
+    # Child .1 only opens that gap. Child .2 is the half that closes it again
+    # -- it reads the screen after the application settles and repaints. Ship
+    # this flag ON only when both children have landed: child .1 alone leaves
+    # the user with no numbers after every click, which is the option David
+    # rejected. The integration reads the value from ClickConfig; this class
+    # does NOT read config.
+    settle_after_click: bool = False
 
     state: OverlayState = OverlayState.CLOSED
     overlay_session_id: int = 0
@@ -402,6 +432,7 @@ class ClickOverlayStateMachine:
             OverlayState.PAINT_IN_FLIGHT: float(self.paint_deadline_ms),
             OverlayState.PAINTED: _NO_TIMEOUT,
             OverlayState.REFRESH_IN_FLIGHT: float(self.walk_deadline_ms),
+            OverlayState.POST_CLICK_SETTLING: float(self.settle_deadline_ms),
             OverlayState.PAUSED: _NO_TIMEOUT,
             OverlayState.ERROR: _NO_TIMEOUT,
         }
@@ -560,13 +591,24 @@ class ClickOverlayStateMachine:
     def _dispatch_build(
         self, reason: BuildReason, snapshot_id: Optional[str] = None
     ) -> Effect:
-        # ``snapshot_id`` is meaningful only for ``BuildReason.AUTO_OPEN``, where
-        # the integration re-paints an EXISTING click snapshot via
-        # ``show_numbered_overlay``. AUTO_OPEN fires from CLOSED before the
-        # machine has pinned anything, so the reuse id cannot be read from
-        # ``self.pinned_snapshot_id`` at dispatch time -- it must travel ON the
-        # effect (wh-n29v.96.1). Every other reason is a fresh walk
-        # (``start_overlay_walk``) and leaves this ``None``.
+        # ``snapshot_id`` is meaningful for exactly two reasons, and means a
+        # different thing in each.
+        #
+        # ``BuildReason.AUTO_OPEN``: the REUSE target. The integration
+        # re-paints an EXISTING click snapshot via ``show_numbered_overlay``.
+        # AUTO_OPEN fires from CLOSED before the machine has pinned anything,
+        # so the reuse id cannot be read from ``self.pinned_snapshot_id`` at
+        # dispatch time -- it must travel ON the effect (wh-n29v.96.1).
+        #
+        # ``BuildReason.SETTLE``: the COMPARE target, the snapshot pinned
+        # before the click (wh-overlay-slow-uia-stale-badges.2). It rides the
+        # effect for the same reason: the performer is async, and by the time
+        # it runs the pin may have moved. Reading ``self.pinned_snapshot_id``
+        # there would compare against whatever is pinned then, not against
+        # what was on screen when the user clicked.
+        #
+        # Every other reason is a fresh walk (``start_overlay_walk``) with
+        # nothing to reuse and nothing to compare, and leaves this ``None``.
         return Effect(
             kind=EffectKind.DISPATCH_BUILD,
             overlay_session_id=self.overlay_session_id,
@@ -576,14 +618,14 @@ class ClickOverlayStateMachine:
         )
 
     def _dispatch_paint(
-        self, snapshot_id: Optional[str], *, immediate_clear: bool = False
+        self, snapshot_id: Optional[str], *, audit_delivery: bool = False
     ) -> Effect:
         return Effect(
             kind=EffectKind.DISPATCH_PAINT,
             overlay_session_id=self.overlay_session_id,
             paint_generation=self.paint_generation,
             snapshot_id=snapshot_id,
-            immediate_clear=immediate_clear,
+            audit_delivery=audit_delivery,
         )
 
     def _dispatch_clear(self) -> Effect:
@@ -749,6 +791,89 @@ class ClickOverlayStateMachine:
         effects: list[Effect] = [self._cancel_timer(), self._dispatch_clear()]
         effects.extend(self._unpin_all_pinned())
         self._enter_closed()
+        return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
+
+    def _enter_post_click_settling(self) -> ApplyResult:
+        """painted -> post_click_settling: clear the badges, keep the session.
+
+        The Option B transition (wh-overlay-slow-uia-stale-badges.1). Before
+        this, ``click_complete`` called ``_refresh``, which kept the OLD
+        badges on screen for the whole re-walk and kept them there for good
+        when the re-walk failed (``_refresh_build_failed`` ->
+        ``_refresh_fall_back`` is non-destructive by design). That is the
+        stale-badge defect: on 2026-08-11 a number spoken 19 s later resolved
+        against badges built before the click.
+
+        Deliberately different from ``_hide_to_closed`` in three ways, each
+        one load-bearing:
+
+          * The snapshot stays PINNED. Child .2 compares the next read
+            against this list to decide whether the click changed anything,
+            and the comparison needs the list to still exist in the Input
+            store.
+          * ``_enter_closed`` is NOT called, so the tracked window identity,
+            the keepalive and the session bookkeeping survive for the
+            re-read.
+          * The clear is stamped with the generation the GUI painted, which
+            is what the GUI matches it against, and only THEN is the
+            generation bumped for the settle build. Child .1 reserved the
+            bump for this build and child .2 spends it here. The order is
+            load-bearing: bumping first would stamp the clear with a
+            generation the GUI never painted, and the GUI would drop it,
+            leaving the pre-click badges on screen for the whole re-read --
+            the stale-badge defect this bead exists to close.
+
+        A timer is armed because this state must not last forever. The
+        settle build carries its own bound (the detector's ``max_ms``)
+        inside the Input process, and the integration's ``send_request``
+        now carries ``[click] screen_read_timeout_ms``
+        (wh-overlay-slow-uia-stale-badges.3). ``settle_deadline_ms`` is
+        derived from that same key (see ``make_click_overlay_state_machine``),
+        with enough margin that it is always >= the send_request bound by
+        construction (wh-overlay-slow-uia-stale-badges.3.1.1), so raising
+        ``screen_read_timeout_ms`` cannot undercut it the way raising
+        ``response_timeout_ms`` once could. This timer is still the bound
+        the state owns, because the detector's own ``max_ms`` needs a live
+        Input process to honour it.
+        """
+
+        effects: list[Effect] = [self._cancel_timer(), self._dispatch_clear()]
+        self._bump_generation()
+        self.state = OverlayState.POST_CLICK_SETTLING
+        # wh-overlay-slow-uia-stale-badges.2.2.3 (codex round 4). ARM_TIMER
+        # comes BEFORE the build, and the order is load-bearing.
+        # ``_dispatch_overlay_effects`` performs one batch in order under a
+        # single lock, and DISPATCH_BUILD awaits the Input round trip. With
+        # the build first, the timer was armed only after that round trip
+        # ended, so ``settle_deadline_ms`` bounded nothing and the real bound
+        # was ``response_timeout_ms`` -- a key with a minimum of 100 and no
+        # ceiling. Arming first makes the deadline start when the state does.
+        #
+        # It must still come AFTER ``_bump_generation``: ``_arm_timer``
+        # stamps the CURRENT pair, and the timer callback feeds its TIMEOUT
+        # at that pair, which the machine's generation gate drops if the
+        # generation has since moved. Armed before the bump, the timer could
+        # never fire into this state.
+        #
+        # crewcut: every other DISPATCH_BUILD transition still emits
+        # ARM_TIMER after its build -- _restart_walk, _refresh,
+        # _refresh_supersede, the CLOSED show and auto-open, the
+        # POST_CLICK_SETTLING show, the PAUSED resume and show, and the ERROR
+        # show. Their deadlines have the same late start. Only this state is
+        # fixed here, because only this state advertises an outer bound for a
+        # read the user cannot see and refuses spoken numbers for its whole
+        # duration. To remove the limit, move ARM_TIMER ahead of
+        # DISPATCH_BUILD in each of those transitions the same way, keeping
+        # each one after its own generation bump, and extend the mutation
+        # gate with one restore-the-old-order mutation per transition.
+        effects.append(self._arm_timer(OverlayState.POST_CLICK_SETTLING))
+        # The pre-click pin is the comparison target and rides the effect.
+        # Nothing above unpins -- the clear removes badges from the GUI and the
+        # bump only advances the generation -- so this is still the snapshot
+        # that was on screen when the user clicked.
+        effects.append(
+            self._dispatch_build(BuildReason.SETTLE, self.pinned_snapshot_id)
+        )
         return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
 
     def _unpin_all_pinned(self) -> list[Effect]:
@@ -966,8 +1091,9 @@ class ClickOverlayStateMachine:
                 # (standalone "show numbers"), error -> closed (wh-n29v.16.1).
                 return self._error_to_closed(emit_standalone_notice=True)
             if self.auto_hide_in_flight:
-                # Mic paused mid-walk: pin, paint+immediate-clear (nets
-                # hidden), clear flag, move to paused.
+                # Mic paused mid-walk: pin, clear the screen, clear the flag,
+                # move to paused. No paint -- the overlay must stay hidden
+                # (wh-overlay-slow-uia-stale-badges.21.1).
                 return self._resolve_in_flight_to_paused(event.snapshot_id)
             # Normal: -> paint_in_flight, pin + dispatch paint.
             self.pinned_snapshot_id = event.snapshot_id
@@ -1052,6 +1178,12 @@ class ClickOverlayStateMachine:
         if kind is OverlayEventKind.FOCUS_CHANGE:
             return self._refresh(BuildReason.REFRESH)
         if kind is OverlayEventKind.CLICK_COMPLETE:
+            # wh-overlay-slow-uia-stale-badges.1. The flag is OFF by default,
+            # which keeps the shipped refresh path: the old badges stay on
+            # screen for the whole re-walk. Turn the flag on only when child
+            # .2 has landed to bring the numbers back.
+            if self.settle_after_click:
+                return self._enter_post_click_settling()
             return self._refresh(BuildReason.REFRESH)
         if kind is OverlayEventKind.HIDE_NUMBERS:
             return self._hide_to_closed()
@@ -1070,14 +1202,164 @@ class ClickOverlayStateMachine:
         if kind is OverlayEventKind.MIC_RESUME:
             return ApplyResult(OverlayOutcome.NO_OP)
         if kind is OverlayEventKind.PAINT_ACK:
+            if event.paint_state is PaintAckState.EXPIRED:
+                # wh-overlay-slow-uia-stale-badges.9: the GUI's badge lease
+                # ran out and the GUI destroyed the badge windows itself.
+                # The user sees nothing, so keeping the machine in painted
+                # would be a phantom overlay. Close exactly like
+                # hide_numbers; the defensive clear echo covers a partial
+                # GUI teardown (a DestroyWindow failure kept a window
+                # alive).
+                return self._hide_to_closed()
             # A stale-but-current-gen painted ack in painted is a no-op
             # (the table marks paint-ack "invalid (stale)" -- a duplicate
             # current-gen painted ack changes nothing). A cleared ack is
             # bookkeeping. A failed ack here would be a protocol violation,
             # but painted has NO path to error (r2.12), so treat any
-            # paint-ack as a NO_OP.
+            # other paint-ack as a NO_OP.
             return ApplyResult(OverlayOutcome.NO_OP)
-        # build_response / timeout / auto_open / focused_hwnd_destroyed
+        if kind is OverlayEventKind.BUILD_RESPONSE:
+            # wh-overlay-slow-uia-stale-badges.19. The refresh fall-back
+            # (``_refresh_fall_back``) returns the machine to painted at the
+            # SAME pair, without bumping the generation, so a build response
+            # for the refresh THIS machine dispatched passes the pre-table
+            # generation gate and lands here. That is a late completion of the
+            # machine's own work, exactly like the late generation-bearing
+            # events the closed and error handlers already consume
+            # (wh-n29v.19.1, wh-n29v.70.3), so treat it as a stale NO_OP.
+            # ``_invalid`` was actively harmful here: it entered error with NO
+            # clear, so the still-visible badges lingered until the GUI badge
+            # lease expired and the GUI tore them down itself, while "click N"
+            # answered numbers_not_showing. The fall-back already restored
+            # the prior (visible) pin, so there is nothing to undo: the reply's
+            # snapshot is deliberately ignored, and the integration's own
+            # commit fence (main.py ``_overlay_dispatch_build``) normally
+            # drops the reply before it ever reaches this cell.
+            return ApplyResult(OverlayOutcome.NO_OP)
+        # timeout / auto_open / focused_hwnd_destroyed
+        return self._invalid(event)
+
+    def _on_post_click_settling(self, event: OverlayEvent) -> ApplyResult:
+        """The gap between a successful badge click and the new numbers.
+
+        No badges are on screen. The snapshot and the session bookkeeping are
+        still alive so child .2 can re-read and repaint into this session.
+        """
+
+        kind = event.kind
+        if kind is OverlayEventKind.BUILD_RESPONSE:
+            # The answer to the settle build this state dispatched on entry.
+            # ``apply`` has already dropped anything stamped with another
+            # pair, so this response belongs to THIS read.
+            if not event.build_ok:
+                # The re-read could not be produced at all -- the window
+                # closed, the walk failed, the request timed out. Give up the
+                # same way the TIMEOUT arm does: the badges are already gone,
+                # so the only cost is that the user says "show numbers"
+                # again, and closing is what keeps the pre-click pin from
+                # outliving the session. Deliberately NO notice, matching
+                # TIMEOUT: this state is entered by a click that SUCCEEDED,
+                # so the user has already seen the thing they asked for
+                # happen, and a failure notice here would report the
+                # invisible half.
+                return self._hide_to_closed()
+            if event.snapshot_id == self.pinned_snapshot_id:
+                # Nothing changed. The Input side owns the comparison --
+                # it holds both match lists -- and says "unchanged" by
+                # answering with the SAME snapshot id it was already
+                # holding, so the machine needs no second copy of the
+                # comparison rule. Repaint the snapshot that is already
+                # pinned: re-pinning would put a second pin of one id
+                # through the self-audit, and unpinning would destroy the
+                # list the badges are about to be drawn from.
+                self.state = OverlayState.PAINT_IN_FLIGHT
+                return ApplyResult(
+                    OverlayOutcome.ACCEPTED,
+                    (
+                        self._cancel_timer(),
+                        self._dispatch_paint(event.snapshot_id),
+                        self._arm_timer(OverlayState.PAINT_IN_FLIGHT),
+                    ),
+                )
+            # The content changed. Unpin the pre-click snapshot BEFORE
+            # pinning the new one: the order is what keeps the pin
+            # self-audit quiet, because the audit refuses a pin while
+            # another is outstanding, and it is also what stops a spoken
+            # number resolving against the pre-click list in the gap.
+            effects: list[Effect] = [self._cancel_timer()]
+            unpin = self._unpin_current()
+            if unpin is not None:
+                effects.append(unpin)
+            self.pinned_snapshot_id = event.snapshot_id
+            self.state = OverlayState.PAINT_IN_FLIGHT
+            effects.append(self._pin(event.snapshot_id))
+            effects.append(self._dispatch_paint(event.snapshot_id))
+            effects.append(self._arm_timer(OverlayState.PAINT_IN_FLIGHT))
+            return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
+        if kind is OverlayEventKind.TIMEOUT:
+            # Nothing ended the gap. Give up cleanly: unpin, close, and let
+            # the user say "show numbers". The badges are already gone, so
+            # the only cost is the spoken command.
+            return self._hide_to_closed()
+        if kind is OverlayEventKind.HIDE_NUMBERS:
+            return self._hide_to_closed()
+        if kind is OverlayEventKind.CLICK_N:
+            # The router refuses the number for this state (NUMBERS_UPDATING).
+            # Nothing changes in the machine.
+            return ApplyResult(OverlayOutcome.NO_OP)
+        if kind is OverlayEventKind.FOCUS_CHANGE:
+            # A click that opens a dialog CHANGES the foreground window, and
+            # that is the common case for "click N". Cancelling here would
+            # make it behave like Option A, which David rejected. The machine
+            # stays; the integration picks the window to read and revalidates
+            # its identity before it paints (child .2).
+            return ApplyResult(OverlayOutcome.NO_OP)
+        if kind is OverlayEventKind.SHOW_NUMBERS:
+            # The user got impatient and asked out loud. Read now instead of
+            # waiting for the application to settle.
+            #
+            # Unpin and walk fresh; do NOT call _refresh
+            # (wh-overlay-slow-uia-stale-badges.13.1). _refresh keeps the pin
+            # because the previous paint STAYS VISIBLE during a refresh, and
+            # every refresh failure runs _refresh_fall_back, which restores
+            # that pin and returns to PAINTED. Out of this state the previous
+            # paint is NOT visible -- entry cleared it -- so that fall-back
+            # would leave the machine in PAINTED holding the pre-click pin
+            # with no badges on screen, and the next spoken number would
+            # resolve against the pre-click list. This mirrors the
+            # SHOW_NUMBERS cell of _on_paused, the other hidden state.
+            effects: list[Effect] = [self._cancel_timer()]
+            unpin = self._unpin_current()
+            if unpin is not None:
+                effects.append(unpin)
+            self.pinned_snapshot_id = None
+            self._bump_generation()
+            self.state = OverlayState.WALK_IN_FLIGHT
+            effects.append(self._dispatch_build(BuildReason.SHOW_NUMBERS))
+            effects.append(self._arm_timer(OverlayState.WALK_IN_FLIGHT))
+            return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
+        if kind is OverlayEventKind.MIC_PAUSE:
+            # Close, do NOT park in paused
+            # (wh-overlay-slow-uia-stale-badges.13.1). _on_paused resumes by
+            # repainting pinned_snapshot_id, which here is the PRE-CLICK
+            # snapshot -- the resume would put the stale numbers back on
+            # screen. Clearing the pin first does not help: the machine reads
+            # snapshot_valid off the event, and the integration validates only
+            # the window identity, so a resume would still take the restore
+            # leg and paint nothing. There are no badges on screen to preserve
+            # in this state, so closing is the honest outcome; the user says
+            # "show numbers" after the microphone resumes.
+            return self._hide_to_closed()
+        if kind in (
+            OverlayEventKind.MIC_RESUME,
+            OverlayEventKind.PAINT_ACK,
+            OverlayEventKind.CLICK_COMPLETE,
+        ):
+            # A cleared ack for the clear this state dispatched is pure
+            # bookkeeping. A second click_complete is a late Input-side result
+            # for a click this state already consumed.
+            return ApplyResult(OverlayOutcome.NO_OP)
+        # auto_open / focused_hwnd_destroyed
         return self._invalid(event)
 
     def _on_refresh_in_flight(self, event: OverlayEvent) -> ApplyResult:
@@ -1101,9 +1383,11 @@ class ClickOverlayStateMachine:
                 # A failed refresh build is non-destructive: keep the prior
                 # valid overlay. Honour auto_hide_in_flight.
                 return self._refresh_build_failed()
-            # Refresh build-response: dispatch paint (+immediate clear if
-            # auto_hide), pin new + unpin old, STAY refresh_in_flight (the
-            # paint-ack drives the move to painted/paused).
+            # Refresh build-response: pin the new snapshot, then either
+            # dispatch the paint and STAY refresh_in_flight (the paint-ack
+            # drives the move to painted), or -- while auto_hide -- resolve
+            # straight to paused with no paint at all
+            # (wh-overlay-slow-uia-stale-badges.21.1).
             return self._refresh_build_ok(event.snapshot_id)
         if kind is OverlayEventKind.PAINT_ACK:
             if event.paint_state is PaintAckState.PAINTED:
@@ -1119,10 +1403,22 @@ class ClickOverlayStateMachine:
                     OverlayOutcome.ACCEPTED, tuple(effects)
                 )
             if event.paint_state is PaintAckState.FAILED:
-                # Non-destructive: keep the prior overlay (back to painted),
-                # or to paused if auto_hide. Unpin only the failed new
-                # snapshot; the prior pinned snapshot is restored.
-                return self._refresh_paint_failed()
+                if self.auto_hide_in_flight:
+                    # Auto-hide leg (wh-overlay-slow-uia-stale-badges.18.7):
+                    # the mic-pause already dispatched a clear, the restored
+                    # prior pin is what mic-resume repaints, and PAUSED stops
+                    # the keepalive renew, so the fall-back stays bounded.
+                    return self._refresh_paint_failed()
+                # No auto-hide (wh-overlay-slow-uia-stale-badges.18.7): a
+                # failed refresh paint never preserves the prior list --
+                # success monitors already show the new generation and the
+                # manager destroyed each failed monitor's window -- so the
+                # PAINTED fall-back would keep the keepalive renewing a
+                # lease over a destroyed or mixed display. Fail safe with
+                # the PAINT_IN_FLIGHT x FAILED contract: clear, unpin both
+                # snapshots, close (v4 line 279 fires no standalone notice
+                # for the paint phase).
+                return self._error_to_closed(emit_standalone_notice=False)
             return ApplyResult(OverlayOutcome.NO_OP)
         if kind is OverlayEventKind.SHOW_NUMBERS:
             return self._refresh_supersede(BuildReason.SUPERSEDE)
@@ -1158,10 +1454,54 @@ class ClickOverlayStateMachine:
             if event.snapshot_valid:
                 # Restore: -> painted, re-emit a paint of the cached
                 # snapshot.
+                #
+                # BUMP FIRST (wh-overlay-slow-uia-stale-badges.17). Every
+                # path into paused dispatched a clear at the pair this
+                # machine still holds (_on_painted MIC_PAUSE,
+                # _paint_ack_to_paused, _resolve_in_flight_to_paused), and
+                # the GUI gate refuses a paint whose pair is <= the pair of
+                # the last accepted clear (overlay_paint_window.py
+                # GenerationGate.accept_paint, the _cleared_at check --
+                # wh-n29v.15.1 put it there so a late paint cannot re-present
+                # a list an explicit clear removed). A restore paint at the
+                # unchanged pair was therefore dropped GUI-side while this
+                # machine moved to PAINTED and routed "click N" to badges the
+                # user could not see. The restore IS a new paint cycle, so it
+                # takes a new generation, exactly like the stale branch below.
+                #
+                # The pair a badge click carries does NOT follow this bump:
+                # main.py _reconcile_overlay_visible_painted_pair keeps the
+                # recorded pair when the machine's pin still equals the
+                # memoized pin (wh-overlay-slow-uia-stale-badges.16.1), which
+                # is precisely this restore case, so a click still carries the
+                # pair of the list the user actually read. The GUI arms its
+                # badge lease at the newer pair the paint presented, and Logic
+                # renews at the older recorded pair, which the renew rule
+                # accepts (same session, pair <= armed -- gui.py
+                # _handle_overlay_lease_renew, wh-overlay-slow-uia-stale
+                # -badges.18.5).
+                #
+                # AUDIT THE DELIVERY (wh-overlay-slow-uia-stale-badges.21.3).
+                # This transition commits PAINTED synchronously, so it is the
+                # only paint the machine emits with no ack-expecting state and
+                # no deadline behind it. Every other paint lands in
+                # paint_in_flight / refresh_in_flight, where a lost paint shows
+                # up as a missing ack and the armed deadline recovers it. A
+                # lost restore paint would instead leave the machine PAINTED
+                # over an empty screen, and the router would resolve "click N"
+                # against the pinned list. The display-side badge lease cannot
+                # cover it either: no paint was presented, so no lease was ever
+                # armed. ``audit_delivery`` asks the integration to confirm
+                # this one paint reached the screen.
+                self._bump_generation()
                 self.state = OverlayState.PAINTED
                 return ApplyResult(
                     OverlayOutcome.ACCEPTED,
-                    (self._dispatch_paint(self.pinned_snapshot_id),),
+                    (
+                        self._dispatch_paint(
+                            self.pinned_snapshot_id, audit_delivery=True
+                        ),
+                    ),
                 )
             # Stale / HWND gone: unpin old, fresh walk -> walk_in_flight.
             effects: list[Effect] = []
@@ -1200,18 +1540,42 @@ class ClickOverlayStateMachine:
             return ApplyResult(OverlayOutcome.HELD)
         if kind is OverlayEventKind.PAINT_ACK:
             # A generation-matching paint-ack landing in paused is the
-            # acknowledgement of the hide that drove the machine here: entry to
-            # paused dispatches a clear (_on_painted(MIC_PAUSE),
-            # _paint_ack_to_paused) -- and the walk-in-flight->paused resolve
-            # dispatches a paint+immediate-clear plus a clear
-            # (_resolve_in_flight_to_paused) -- so the GUI emits painted /
-            # cleared (or a failed immediate-clear paint) at the SAME
-            # generation. It already passed the generation gate, so it belongs
+            # acknowledgement of the hide that drove the machine here: EVERY
+            # entry to paused dispatches a clear at the machine's current pair
+            # (_on_painted(MIC_PAUSE), _paint_ack_to_paused, and
+            # _resolve_in_flight_to_paused), so the GUI emits cleared -- or a
+            # painted / failed ack for a paint dispatched before the pause --
+            # at the SAME generation. It already passed the generation gate, so it belongs
             # to this paused session and is bookkeeping only: never a state
             # driver and never an error (mirrors the closed handler; wh-n29v.69.1).
             return ApplyResult(OverlayOutcome.NO_OP)
-        # build_response / click_complete / auto_open are genuine protocol
-        # violations in paused.
+        if kind is OverlayEventKind.BUILD_RESPONSE:
+            # wh-overlay-slow-uia-stale-badges.22, the mirror of the painted
+            # cell added in .19. PAUSED and PAINTED share one entry path: the
+            # refresh fall-back (``_refresh_fall_back``) lands in PAUSED
+            # instead of PAINTED whenever ``auto_hide_in_flight`` is set, and
+            # it returns at the SAME pair without bumping the generation. So a
+            # build response for the refresh THIS machine dispatched passes
+            # the pre-table generation gate and reaches this row, exactly as
+            # it reaches the painted row. It is a late completion of the
+            # machine's own work, not a protocol violation. ``_invalid`` was
+            # the wrong answer for the same reason it was wrong on the painted
+            # side: it enters error with NO clear, so a still-pinned list
+            # outlives the session while "click N" answers
+            # numbers_not_showing. The fall-back already restored the prior
+            # pin, so there is nothing to undo and the reply's snapshot is
+            # deliberately ignored.
+            #
+            # This corrects the TABLE; it changes no shipped behaviour today.
+            # The integration's commit fence (main.py
+            # ``_machine_still_awaits_this_build``) admits only
+            # WALK_IN_FLIGHT, REFRESH_IN_FLIGHT and POST_CLICK_SETTLING, so
+            # the shipped sender drops a paused reply before it gets here.
+            # The table should be right on its own rather than right because
+            # one caller happens to guard it -- a second caller added later
+            # would otherwise reopen the hole.
+            return ApplyResult(OverlayOutcome.NO_OP)
+        # click_complete / auto_open are genuine protocol violations in paused.
         return self._invalid(event)
 
     def _on_error(self, event: OverlayEvent) -> ApplyResult:
@@ -1278,9 +1642,22 @@ class ClickOverlayStateMachine:
     ) -> ApplyResult:
         """walk_in_flight build-response while auto_hide -> paused, hidden.
 
-        Pin the freshly built snapshot, paint + immediate clear at the same
-        generation (nets invisible), clear ``auto_hide_in_flight``, move to
-        ``paused``.
+        Pin the freshly built snapshot, clear the screen at the current
+        generation, clear ``auto_hide_in_flight``, move to ``paused``.
+
+        NO paint (wh-overlay-slow-uia-stale-badges.21.1). This path used to
+        emit a paint flagged ``immediate_clear`` -- "do not present this" --
+        followed by the clear. Nothing read the flag: the integration sent the
+        paint, the display gate accepted it (no clear had run at this pair
+        yet), and the display composited one visible frame and armed a badge
+        lease that the same batch's clear then tore down. The user paused the
+        microphone and saw the badges flash. The pause hides the overlay, so
+        the honest effect stream is the pin plus the clear.
+
+        The clear is still load-bearing even though this generation painted
+        nothing: ``_restart_walk`` reaches ``walk_in_flight`` from a PAINTED
+        overlay at a lower pair, so badges from the previous generation can be
+        on screen, and this clear is what removes them.
         """
 
         self.pinned_snapshot_id = snapshot_id
@@ -1291,21 +1668,34 @@ class ClickOverlayStateMachine:
             (
                 self._cancel_timer(),
                 self._pin(snapshot_id),
-                self._dispatch_paint(snapshot_id, immediate_clear=True),
                 self._dispatch_clear(),
             ),
         )
 
     def _paint_ack_to_paused(self) -> ApplyResult:
-        """paint_in_flight / refresh_in_flight painted ack while auto_hide.
+        """Resolve a successful auto-hide paint / refresh build to ``paused``.
 
-        The snapshot was already pinned when the paint was dispatched (or
-        in the refresh build-response). This is a refresh SUCCESS path too,
-        so when a refresh deferred the prior-snapshot unpin
+        Three callers: the ``paint_in_flight`` painted ack, the
+        ``refresh_in_flight`` painted ack (both for a paint dispatched BEFORE
+        the mic paused, which the display could still present), and
+        ``_refresh_build_ok`` when the mic paused BEFORE the build reply, where
+        no paint ships at all and this is the direct resolution
+        (wh-overlay-slow-uia-stale-badges.21.1).
+
+        The snapshot was already pinned when the paint was dispatched (or in
+        the refresh build-response). This is a refresh SUCCESS path too, so
+        when a refresh deferred the prior-snapshot unpin
         (``_refresh_build_ok``), ship it now so the new snapshot is the sole
-        pinned one (Finding 1). For the ``paint_in_flight`` caller nothing
-        is deferred and the commit is a no-op. Keep the overlay hidden
-        (dispatch clear), clear ``auto_hide_in_flight``, move to ``paused``.
+        pinned one (Finding 1). For the ``paint_in_flight`` caller nothing is
+        deferred and the commit is a no-op. Keep the overlay hidden (dispatch
+        clear), clear ``auto_hide_in_flight``, move to ``paused``.
+
+        The clear is dispatched unconditionally, even though every caller's
+        mic-pause cell already dispatched one at this same pair. It is the
+        machine's guarantee that entry to ``paused`` leaves the screen empty
+        at the pair the machine holds -- which is what the restore's
+        bump-before-paint depends on (``_on_paused`` MIC_RESUME) -- and a
+        repeat clear at an already-cleared pair is a display-side no-op.
         """
 
         effects: list[Effect] = [self._cancel_timer()]
@@ -1321,17 +1711,34 @@ class ClickOverlayStateMachine:
     def _refresh_build_ok(self, snapshot_id: Optional[str]) -> ApplyResult:
         """refresh_in_flight build-response (ok): pin new, DEFER prior unpin.
 
-        Pin the new snapshot and dispatch the paint (+immediate clear if
-        auto_hide), but DEFER unpinning the prior (still-visible) snapshot
-        until the refresh paint succeeds. The prior id is recorded in
-        ``prior_pinned_snapshot_id`` / ``_prior_pin_deferred`` so that a
-        refresh FAILURE (failed paint-ack or timeout) can restore the prior
-        snapshot and unpin only the new failed one, keeping the visible
-        overlay pinned (Finding 1). STAY in ``refresh_in_flight``; the
-        paint-ack drives the move to painted / paused, and the prior unpin
-        ships on that successful paint-ack. The timer keeps running for the
-        paint leg under the ``walk_deadline_ms`` budget the design assigns
-        refresh_in_flight.
+        Pin the new snapshot and dispatch the paint, but DEFER unpinning the
+        prior (still-visible) snapshot until the refresh paint succeeds. The
+        prior id is recorded in ``prior_pinned_snapshot_id`` /
+        ``_prior_pin_deferred`` so that a refresh FAILURE (failed paint-ack or
+        timeout) can restore the prior snapshot and unpin only the new failed
+        one, keeping the visible overlay pinned (Finding 1). STAY in
+        ``refresh_in_flight``; the paint-ack drives the move to painted, and
+        the prior unpin ships on that successful paint-ack. The timer keeps
+        running for the paint leg under the ``walk_deadline_ms`` budget the
+        design assigns refresh_in_flight.
+
+        AUTO-HIDE LEG (wh-overlay-slow-uia-stale-badges.21.1): resolve to
+        ``paused`` HERE instead, and emit no paint. The mic-pause cell of
+        ``_on_refresh_in_flight`` already dispatched a clear at THIS pair, and
+        the display gate refuses a paint whose pair is ``<=`` the pair of the
+        last accepted clear (``overlay_paint_window.GenerationGate
+        .accept_paint``). A refused paint returns ``None`` from
+        ``OverlayPaintWindowManager.paint`` and produces NO
+        ``overlay_state_changed`` reply, so the paint-ack this state used to
+        wait for could never arrive: the machine parked in
+        ``refresh_in_flight`` for the whole ``walk_deadline_ms`` and only the
+        timeout fall-back released it. That fall-back also treated the refresh
+        as FAILED -- it unpinned the new snapshot and restored the prior one --
+        so mic-resume repainted the pre-refresh list the refresh existed to
+        replace. Resolving now commits the refresh (the new snapshot becomes
+        the sole pin), reaches ``paused`` at once instead of up to
+        ``walk_deadline_ms`` later, and keeps the pin inside the keepalive
+        state set so its time-to-live keeps sliding.
         """
 
         # Record the prior (still-visible) snapshot for deferred unpin.
@@ -1346,11 +1753,17 @@ class ClickOverlayStateMachine:
         self._prior_pin_deferred = True
         self.pinned_snapshot_id = snapshot_id
         effects.append(self._pin(snapshot_id))
-        effects.append(
-            self._dispatch_paint(
-                snapshot_id, immediate_clear=self.auto_hide_in_flight
+        if self.auto_hide_in_flight:
+            # Nothing to present. ``_paint_ack_to_paused`` is the same
+            # resolution the ack would have driven: commit the deferred prior
+            # unpin, cancel the refresh timer, keep the screen clear, and move
+            # to paused. Reusing it keeps ONE definition of "a refresh
+            # succeeded while the microphone is paused".
+            resolved = self._paint_ack_to_paused()
+            return ApplyResult(
+                OverlayOutcome.ACCEPTED, tuple(effects) + resolved.effects
             )
-        )
+        effects.append(self._dispatch_paint(snapshot_id))
         # state stays REFRESH_IN_FLIGHT
         return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
 
@@ -1385,15 +1798,20 @@ class ClickOverlayStateMachine:
         return self._refresh_fall_back()
 
     def _refresh_paint_failed(self) -> ApplyResult:
-        """refresh_in_flight paint-ack (failed): non-destructive (Finding 1).
+        """refresh_in_flight paint-ack (failed), AUTO-HIDE leg only.
 
-        The build succeeded (``_refresh_build_ok`` pinned the new snapshot
-        and deferred the prior unpin), but the paint failed. Restore the
-        prior (still-visible) snapshot as the pinned one and unpin the new
-        FAILED snapshot, so the visible overlay stays correctly pinned and a
-        later mic-resume restores the right snapshot. Fall back to painted /
-        paused. This is the inverse of the previous (buggy) behaviour that
-        left the failed snapshot pinned and the visible one unpinned.
+        Since wh-overlay-slow-uia-stale-badges.18.7 the caller routes a
+        live-pair failed paint-ack here ONLY while ``auto_hide_in_flight``
+        is set; without auto-hide it closes via ``_error_to_closed``. A
+        failed refresh paint never preserves the prior list (success
+        monitors already show the new generation; the manager destroyed
+        each failed monitor's window), so "the prior is still visible" is
+        false and PAINTED would let the keepalive renew a lease over a
+        destroyed or mixed display. The auto-hide leg is safe to fall back:
+        the mic-pause already cleared the screen, PAUSED stops the
+        keepalive renew, and the restored prior pin is exactly what
+        mic-resume repaints. Restore the prior snapshot as the pinned one
+        and unpin the new FAILED snapshot, then fall back to paused.
         """
 
         return self._refresh_fall_back()
@@ -1412,17 +1830,25 @@ class ClickOverlayStateMachine:
     def _refresh_fall_back(self) -> ApplyResult:
         """Shared non-destructive refresh fall-back to painted / paused.
 
-        Every refresh failure (failed build-response, failed paint-ack, or
-        the refresh timeout) is non-destructive by design -- the existing
-        usable overlay is never torn down. When the build had already
-        succeeded (``_prior_pin_deferred`` set), the NEW snapshot is the one
-        currently in ``pinned_snapshot_id``; that new snapshot failed, so
-        unpin it and RESTORE ``pinned_snapshot_id`` to the prior visible
-        snapshot, preserving the "pinned == visible" invariant (Finding 1).
-        When no build succeeded (no deferred prior), the pin is already the
-        visible overlay and is left untouched. If ``auto_hide_in_flight`` is
-        set, move to ``paused`` (kept hidden) and clear the flag; otherwise
-        move back to ``painted``. Cancels the refresh timer.
+        Routes here: a failed build-response, the refresh timeout, and the
+        AUTO-HIDE leg of a failed paint-ack. The non-destructive premise
+        ("the prior list is still usable") holds for the first two because
+        no paint reached the GUI, and for the auto-hide paint leg because
+        the mic-pause already cleared the screen and PAUSED stops the
+        keepalive renew. It does NOT hold for a failed paint-ack without
+        auto-hide -- a failed refresh paint never preserves the prior list
+        (success monitors already show the new generation; the manager
+        destroyed each failed monitor's window) -- so that leg closes via
+        ``_error_to_closed`` instead (wh-overlay-slow-uia-stale-badges
+        .18.7). When the build had already succeeded (``_prior_pin_
+        deferred`` set), the NEW snapshot is the one currently in
+        ``pinned_snapshot_id``; that new snapshot failed, so unpin it and
+        RESTORE ``pinned_snapshot_id`` to the prior snapshot, preserving
+        the "pinned == restorable" invariant (Finding 1). When no build
+        succeeded (no deferred prior), the pin is already the prior overlay
+        and is left untouched. If ``auto_hide_in_flight`` is set, move to
+        ``paused`` (kept hidden) and clear the flag; otherwise move back to
+        ``painted``. Cancels the refresh timer.
         """
 
         effects: list[Effect] = [self._cancel_timer()]
@@ -1451,6 +1877,7 @@ _DISPATCH = {
     OverlayState.PAINT_IN_FLIGHT: ClickOverlayStateMachine._on_paint_in_flight,
     OverlayState.PAINTED: ClickOverlayStateMachine._on_painted,
     OverlayState.REFRESH_IN_FLIGHT: ClickOverlayStateMachine._on_refresh_in_flight,
+    OverlayState.POST_CLICK_SETTLING: ClickOverlayStateMachine._on_post_click_settling,
     OverlayState.PAUSED: ClickOverlayStateMachine._on_paused,
     OverlayState.ERROR: ClickOverlayStateMachine._on_error,
 }

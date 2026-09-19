@@ -441,8 +441,22 @@ class UtteranceClipboardManager:
         Used for commands that intentionally modify the clipboard (copy, cut).
         The flag is automatically cleared after command execution by the
         command engine's finally block (clear_skip_flag).
+
+        Refused when no utterance is active
+        (wh-overlay-slow-uia-stale-badges.14.15): the flag is unscoped, so a
+        skip delivered after its utterance already ended (safety timeout,
+        lifecycle delivery failure) used to persist and make the NEXT
+        unrelated utterance keep WheelHouse's clipboard write instead of
+        restoring the user's.
         """
-        self._skip_restore = True
+        with self._lock:
+            if not self._in_utterance:
+                logger.warning(
+                    "skip_clipboard_restore ignored -- no active utterance "
+                    "(late or orphaned request)"
+                )
+                return
+            self._skip_restore = True
         logger.debug("Clipboard restoration will be skipped for this utterance")
 
     def clear_skip_flag(self) -> None:

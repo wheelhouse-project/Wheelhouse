@@ -96,10 +96,19 @@ class RuntimeConfig:
     context_size: int
     gpu_layers: int
     startup_timeout_seconds: int
+    # The name the server reports for its one model, from [ai.server] model.
+    # Empty means "no alias": the server then reports the model file path,
+    # which never matches the configured name, and the AI Model menu shows
+    # the one model twice (wh-ai-model-alias). Not validated as a fault: the
+    # server runs fine without an alias, so a bad value degrades the menu,
+    # not the runtime.
+    model_alias: str = ""
     invalid_key: Optional[str] = None
 
     @classmethod
-    def from_raw(cls, raw: Any, base_url: str) -> "RuntimeConfig":
+    def from_raw(
+        cls, raw: Any, base_url: str, model_alias: Any = ""
+    ) -> "RuntimeConfig":
         """Validate a raw ``[ai.runtime]`` table; never raises.
 
         ``raw`` is typed ``Any`` deliberately: ``ConfigService`` returns
@@ -116,7 +125,7 @@ class RuntimeConfig:
                 )
             return _disabled("<not-a-table>" if raw is not None else None)
         try:
-            return cls._validate(raw, base_url)
+            return cls._validate(raw, base_url, model_alias)
         except Exception:  # noqa: BLE001 -- the contract is to NEVER raise
             logger.exception(
                 "[ai.runtime] validation failed unexpectedly; Wheelhouse will "
@@ -125,7 +134,9 @@ class RuntimeConfig:
             return _disabled("<unexpected>")
 
     @classmethod
-    def _validate(cls, raw: dict, base_url: str) -> "RuntimeConfig":
+    def _validate(
+        cls, raw: dict, base_url: str, model_alias: Any
+    ) -> "RuntimeConfig":
         # An absent section is not a fault: the overwhelmingly common case is
         # an external server, which is what the AI subsystem shipped with.
         if "enabled" not in raw:
@@ -179,6 +190,9 @@ class RuntimeConfig:
             context_size=context_size,
             gpu_layers=gpu_layers,
             startup_timeout_seconds=startup_timeout,
+            model_alias=(
+                model_alias.strip() if isinstance(model_alias, str) else ""
+            ),
             invalid_key=None,
         )
 

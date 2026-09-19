@@ -32,7 +32,6 @@ consumed unmodified from PyPI under the terms named:
 | pystray | LGPL-3.0 | System tray icon |
 | certifi | MPL-2.0 | Mozilla CA certificate bundle |
 | tqdm | MPL-2.0 AND MIT | Progress bars (dependency of ML libraries) |
-| pyttsx3 | MPL-2.0 | Text-to-speech |
 
 WheelHouse does not modify, statically link, or vendor any of these
 packages; they are dynamically imported Python libraries installed from

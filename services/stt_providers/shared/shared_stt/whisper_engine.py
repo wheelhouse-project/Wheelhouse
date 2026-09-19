@@ -7,14 +7,61 @@ stability detection to determine which words are confirmed.
 Reference: docs/design/chunked_streaming_engine_design.md
 """
 import logging
+import math
 import re
+import time
 
 import numpy as np
 from faster_whisper import WhisperModel
 
 from shared_stt.redact import redact_transcript
+from shared_stt.transcript_rules import has_capital_evidence
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_threshold(
+    name: str, value, default: float, *, allow_neg_infinite: bool = False
+) -> float:
+    """wh-7ou.6.1.2: read a numeric tunable defensively.
+
+    These thresholds are first USED mid-utterance (at final inference), so a
+    malformed config value -- a quoted TOML number, a list, garbage text --
+    must not survive to that comparison: a TypeError there loses the
+    utterance and exits the provider's audio loop. A quoted number coerces
+    cleanly; anything float() cannot read (or a bool, NaN, an int too large
+    for float, or an infinity where the documented semantics do not use one)
+    falls back to the default with a warning, matching the degrade-never-raise
+    pattern config validation uses elsewhere in this project
+    (ClickConfig.from_raw). Booleans are rejected before conversion because
+    TOML true/false float() to 1.0/0.0, which would silently disable a
+    criterion instead of surfacing the config mistake (wh-7ou.6.1.7). Only
+    NEGATIVE infinity is a documented off-switch; TOML `inf` parses positive
+    and would suppress every final (wh-7ou.6.1.6).
+    """
+    if isinstance(value, bool):
+        logger.warning(
+            "[engine_config] %s=%r is a boolean, not a number; using default %s",
+            name, value, default,
+        )
+        return default
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning(
+            "[engine_config] %s=%r is not a number; using default %s",
+            name, value, default,
+        )
+        return default
+    if math.isnan(coerced) or (
+        math.isinf(coerced) and not (allow_neg_infinite and coerced < 0)
+    ):
+        logger.warning(
+            "[engine_config] %s=%r is not usable; using default %s",
+            name, value, default,
+        )
+        return default
+    return coerced
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +157,12 @@ class WhisperStreamingEngine:
     On endpoint (trailing silence), a final inference promotes all words.
     """
 
+    # wh-7ou.7.1.2: calibration mode auto-disables this long after the last
+    # enable, so a crashed Logic process (whose disconnect the WSForwarder
+    # reset may miss on a half-open connection) can never leave the
+    # hallucination filter bypassed indefinitely.
+    _CALIBRATION_MODE_TIMEOUT_S = 600.0
+
     def __init__(
         self,
         model_size_or_path: str = "large-v3-turbo",
@@ -123,6 +176,8 @@ class WhisperStreamingEngine:
         sample_rate: int = 16000,
         max_buffer_duration_s: float = 30.0,
         hallucination_logprob_threshold: float = -0.5,
+        single_word_min_probability: float = 0.6,
+        single_word_max_no_speech_prob: float = 0.03,
         hotwords: str | None = None,
     ):
         self._model = WhisperModel(model_size_or_path, device=device, compute_type=compute_type)
@@ -176,8 +231,45 @@ class WhisperStreamingEngine:
         # on non-speech audio (throat clears, coughs) never achieve Whisper's
         # confidence band for articulated speech (~-0.2 to -0.5); training-data
         # priors fire at ~-0.6 to -0.9. Set to -inf to disable.
-        self._hallucination_logprob_threshold = hallucination_logprob_threshold
+        # allow_neg_infinite: -inf is that documented off-switch.
+        self._hallucination_logprob_threshold = _coerce_threshold(
+            "hallucination_logprob_threshold",
+            hallucination_logprob_threshold,
+            -0.5,
+            allow_neg_infinite=True,
+        )
         self._peak_avg_logprob: float = -float("inf")
+
+        # wh-7ou.6 single-word rescue: avg_logprob is systematically lower on
+        # one-word utterances than on phrases (field data 2026-08-06: real
+        # 'comma' peaked -0.596..-0.643 against the -0.55 threshold, on the
+        # same voice/mic the threshold was calibrated with), so a suppressed
+        # single-word final gets a second chance judged on the word's OWN
+        # decode probability plus the final segments' no_speech_prob.
+        # min_probability=0.0 ignores the word-probability criterion;
+        # max_no_speech_prob=1.0 ignores the no-speech criterion;
+        # min_probability=2.0 disables the rescue entirely.
+        self._single_word_min_probability = _coerce_threshold(
+            "single_word_min_probability", single_word_min_probability, 0.6
+        )
+        self._single_word_max_no_speech_prob = _coerce_threshold(
+            "single_word_max_no_speech_prob", single_word_max_no_speech_prob, 0.03
+        )
+
+        # wh-7ou.7.1.1: measurement block computed by _run_final_inference and
+        # read by AudioProcessor via get_final_confidence(); None until a
+        # final inference has run in the current utterance.
+        self._final_confidence: dict | None = None
+
+        # wh-7ou.7.1.2 calibration mode (spec Section 5.2): while enabled,
+        # _run_final_inference delivers a final the hallucination filter
+        # would suppress, so the voice-calibration session receives every
+        # final with its text. Deliberately NOT cleared by reset() -- a
+        # session spans many utterances. Cleared by set_calibration_mode
+        # (False), by the WSForwarder disconnect reset, and by the timeout
+        # above.
+        self._calibration_mode: bool = False
+        self._calibration_mode_enabled_at: float = 0.0
 
     def process_audio(self, audio_bytes: bytes) -> None:
         """Process an audio chunk (float32 bytes).
@@ -270,6 +362,49 @@ class WhisperStreamingEngine:
             self._model = None
             logger.info("WhisperModel released")
 
+    def set_calibration_mode(self, enabled: bool) -> None:
+        """wh-7ou.7.1.2: enable or disable the calibration suppression bypass.
+
+        Driven by the Logic process's set_calibration_mode WebSocket command
+        (and, with False, by the WSForwarder disconnect reset). Enabling
+        while already enabled restarts the ten-minute safety window, so the
+        Logic process can keep a long session alive by re-sending. Survives
+        the per-utterance reset(); see _CALIBRATION_MODE_TIMEOUT_S for why
+        it cannot outlive a crashed Logic process.
+        """
+        if enabled:
+            self._calibration_mode = True
+            self._calibration_mode_enabled_at = time.monotonic()
+            logger.info(
+                "[calibration_mode] enabled (auto-off after %.0fs)",
+                self._CALIBRATION_MODE_TIMEOUT_S,
+            )
+        else:
+            if self._calibration_mode:
+                logger.info("[calibration_mode] disabled")
+            self._calibration_mode = False
+
+    def _calibration_mode_active(self) -> bool:
+        """True while the bypass applies; lazily enforces the safety timeout.
+
+        Checked at final inference (the only place the mode changes
+        behavior), so no timer thread is needed: once the window has
+        passed, the very next final is filtered normally and the stale
+        flag is cleared.
+        """
+        if not self._calibration_mode:
+            return False
+        elapsed = time.monotonic() - self._calibration_mode_enabled_at
+        if elapsed > self._CALIBRATION_MODE_TIMEOUT_S:
+            self._calibration_mode = False
+            logger.warning(
+                "[calibration_mode] safety timeout after %.0fs; "
+                "suppression restored",
+                elapsed,
+            )
+            return False
+        return True
+
     def reset(self) -> None:
         """Reset all state for a new utterance."""
         self._audio_buffer = []
@@ -283,6 +418,7 @@ class WhisperStreamingEngine:
         self._finalized = False
         self.last_result = ""
         self._peak_avg_logprob = -float("inf")
+        self._final_confidence = None
 
     # ------------------------------------------------------------------
     # Internal methods
@@ -324,7 +460,13 @@ class WhisperStreamingEngine:
             language=self._language,
             beam_size=self._beam_size,
             hotwords=self._hotwords,
+            # wh-7ou.6: per-word probabilities are read only here, by the
+            # single-word rescue; interim passes skip the alignment cost.
+            word_timestamps=True,
         )
+        # Materialized because the rescue re-reads the segments after
+        # _extract_text has consumed the faster-whisper generator.
+        segments = list(segments)
 
         text = self._extract_text(segments)
         current_words = text.split() if text else []
@@ -336,21 +478,190 @@ class WhisperStreamingEngine:
         # clears confirmed_words so get_result() returns empty; is_endpoint
         # still fires (self._finalized = True) so audio_processor can reset
         # and emit an AGC failure signal.
+        # wh-7ou.6: a one-word transcript gets a second chance first (see
+        # _single_word_rescue) -- the segment-average confidence this
+        # threshold judges is systematically lower on single words.
+        suppressed = False
+        rescued = False
         if self._peak_avg_logprob < self._hallucination_logprob_threshold:
-            logger.info(
-                "[hallucination_suppressed] peak_logprob=%.3f < threshold=%.3f "
-                "suppressed_text=%r",
-                self._peak_avg_logprob,
-                self._hallucination_logprob_threshold,
-                redact_transcript(text),
-            )
-            self._confirmed_words = []
+            if len(current_words) == 1 and self._single_word_rescue(segments):
+                self._confirmed_words = current_words
+                rescued = True
+            elif self._calibration_mode_active():
+                # wh-7ou.7.1.2: calibration bypass. The flag still reports
+                # the filter's verdict (a suppressed=true final that
+                # actually arrives is the noise sample calibration wants);
+                # only the drop is skipped. Numbers-only log line, per the
+                # calibration privacy discipline.
+                suppressed = True
+                self._confirmed_words = current_words
+                logger.info(
+                    "[calibration_mode] suppression bypassed: "
+                    "peak_logprob=%.3f < threshold=%.3f word_count=%d",
+                    self._peak_avg_logprob,
+                    self._hallucination_logprob_threshold,
+                    len(current_words),
+                )
+            else:
+                suppressed = True
+                logger.info(
+                    "[hallucination_suppressed] peak_logprob=%.3f < threshold=%.3f "
+                    "suppressed_text=%r",
+                    self._peak_avg_logprob,
+                    self._hallucination_logprob_threshold,
+                    redact_transcript(text),
+                )
+                self._confirmed_words = []
         elif current_words:
             # Promote all words (bypass 2-run requirement)
             self._confirmed_words = current_words
 
+        # wh-7ou.7.1.1: measurement block for this final, attached to every
+        # final (not only during calibration) via get_final_confidence().
+        self._final_confidence = self._build_final_confidence(
+            segments, len(current_words), suppressed, rescued
+        )
+
         self._finalized = True
         self._has_new_result = True
+
+    def _build_final_confidence(
+        self, segments, word_count: int, suppressed: bool, rescued: bool
+    ) -> dict:
+        """wh-7ou.7.1.1: measurement block for the just-run final inference.
+
+        Read by AudioProcessor (get_final_confidence) and attached to the
+        final WebSocket message as the optional "confidence" object, so the
+        Logic process can calibrate the single-word rescue thresholds without
+        reading provider logs. A value that is missing or not a finite
+        probability in [0, 1] reports None rather than a guess (the same
+        refusal discipline as _single_word_rescue), and the -inf peak
+        sentinel reports None because it is not JSON-serializable. The log
+        line prints numbers only, never transcript text.
+        """
+        min_word_prob: float | None = None
+        try:
+            word_probs = [
+                float(w.probability)
+                for seg in segments
+                for w in (getattr(seg, "words", None) or [])
+            ]
+            if word_probs and all(
+                math.isfinite(p) and 0.0 <= p <= 1.0 for p in word_probs
+            ):
+                min_word_prob = min(word_probs)
+        except Exception:
+            min_word_prob = None
+        max_no_speech: float | None = None
+        try:
+            no_speech_probs = [
+                float(getattr(seg, "no_speech_prob", None)) for seg in segments
+            ]
+            if no_speech_probs and all(
+                math.isfinite(p) and 0.0 <= p <= 1.0 for p in no_speech_probs
+            ):
+                max_no_speech = max(no_speech_probs)
+        except Exception:
+            max_no_speech = None
+        peak_avg_logprob = (
+            self._peak_avg_logprob
+            if math.isfinite(self._peak_avg_logprob)
+            else None
+        )
+        logger.info(
+            "[final_confidence] min_word_prob=%s max_no_speech=%s "
+            "peak_logprob=%s word_count=%d suppressed=%s rescued=%s",
+            "none" if min_word_prob is None else format(min_word_prob, ".3f"),
+            "none" if max_no_speech is None else format(max_no_speech, ".3f"),
+            "none" if peak_avg_logprob is None else format(peak_avg_logprob, ".3f"),
+            word_count,
+            suppressed,
+            rescued,
+        )
+        return {
+            "min_word_probability": min_word_prob,
+            "max_no_speech_prob": max_no_speech,
+            "peak_avg_logprob": peak_avg_logprob,
+            "word_count": word_count,
+            "suppressed": suppressed,
+            "rescued": rescued,
+        }
+
+    def get_final_confidence(self) -> dict | None:
+        """wh-7ou.7.1.1: measurement block for the last final inference.
+
+        None until a final inference has run in the current utterance;
+        cleared by reset(). AudioProcessor reads this via getattr, so
+        engines without the method (Parakeet, the cloud providers) need no
+        change.
+        """
+        return self._final_confidence
+
+    def _single_word_rescue(self, segments) -> bool:
+        """wh-7ou.6: second chance for a suppressed one-word final transcript.
+
+        Judged on the final inference only, using two signals:
+        - every decoded word's probability must be at least
+          single_word_min_probability (the word itself was heard clearly,
+          regardless of the low segment average), and
+        - every segment's no_speech_prob must be at most
+          single_word_max_no_speech_prob (the audio was near-certainly
+          speech; field data 2026-08-06: real one-word finals 0.008-0.017,
+          cough-driven 'Thank you.' hallucinations 0.044-0.089).
+
+        Missing, unreadable, or out-of-range word-level data keeps the
+        suppression (wh-7ou.6.1.1). Every
+        decision is logged so users can calibrate the two thresholds from
+        live [single_word_rescue] lines.
+        """
+        try:
+            words = [w for seg in segments for w in (getattr(seg, "words", None) or [])]
+            if not words:
+                logger.info(
+                    "[single_word_rescue] no word-level data; keeping suppression"
+                )
+                return False
+            word_probs = [float(w.probability) for w in words]
+            no_speech_probs = [
+                float(getattr(seg, "no_speech_prob", 1.0)) for seg in segments
+            ]
+            # wh-7ou.6.1.1: min()/max() skip a NaN that follows a finite
+            # value, and an out-of-range score (an infinity, a negative)
+            # can satisfy a one-sided comparison, so malformed data is
+            # rejected before aggregation: every value must be a finite
+            # probability in [0, 1] or the rescue refuses.
+            if not all(
+                math.isfinite(p) and 0.0 <= p <= 1.0
+                for p in word_probs + no_speech_probs
+            ):
+                logger.warning(
+                    "[single_word_rescue] non-finite or out-of-range "
+                    "confidence value; keeping suppression"
+                )
+                return False
+            min_prob = min(word_probs)
+            max_no_speech = max(no_speech_probs)
+            rescued = (
+                min_prob >= self._single_word_min_probability
+                and max_no_speech <= self._single_word_max_no_speech_prob
+            )
+        except Exception as e:
+            logger.warning(
+                "[single_word_rescue] could not read word data (%s); "
+                "keeping suppression", e,
+            )
+            return False
+        logger.info(
+            "[single_word_rescue] %s: min_word_prob=%.3f (need >= %.2f) "
+            "max_no_speech=%.3f (need <= %.2f) peak_logprob=%.3f",
+            "RESCUED" if rescued else "not rescued",
+            min_prob,
+            self._single_word_min_probability,
+            max_no_speech,
+            self._single_word_max_no_speech_prob,
+            self._peak_avg_logprob,
+        )
+        return rescued
 
     def _update_stability(self, current_words: list[str]) -> None:
         """Update confirmed words using LocalAgreement-2.
@@ -426,9 +737,13 @@ class WhisperStreamingEngine:
         # Remove punctuation, keeping periods between digits (e.g., "3.14", "2.0")
         text = re.sub(r'(?<!\d)\.|\.(?!\d)|[,!?;:]', '', text)
 
-        # Lowercase only the first character (sentence-start normalization)
-        # Preserves proper noun capitalization within the text
-        if text:
+        # Lowercase only the first character (sentence-start normalization).
+        # Preserves proper noun capitalization within the text, and leaves
+        # the first character alone when the utterance carries a capital
+        # that is not merely positional (wh-first-char-lowercase). This is
+        # the second copy of the rule; transcript_rules.py holds the first
+        # and owns the shared condition.
+        if text and not has_capital_evidence(text):
             text = text[0].lower() + text[1:]
 
         # Always capitalize the pronoun "I" and its contractions (I'm, I've, I'd, I'll)

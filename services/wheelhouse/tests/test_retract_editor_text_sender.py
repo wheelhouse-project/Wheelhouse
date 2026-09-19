@@ -180,6 +180,110 @@ def test_whole_utterance_echo_match_no_warning(caplog):
     )
 
 
+def _drive_result(
+    response_builder, chars_requested=5, whole_utterance=True, timeout_s=1.0,
+):
+    """Run retract_editor_text against a GUI stub whose response payload
+    comes from response_builder(payload); return the method's return
+    value. A builder returning None leaves the future unresolved, which
+    exercises the timeout path."""
+    from main import LogicController
+
+    async def _drive():
+        loop = asyncio.get_running_loop()
+        futures = {}
+
+        class _Pending:
+            def register(self, request_id, generation):
+                fut = loop.create_future()
+                futures[request_id] = fut
+                return fut
+
+            def pop(self, request_id):
+                futures.pop(request_id, None)
+
+        class _Queue:
+            def put_nowait(self, payload):
+                response = response_builder(payload)
+                if response is not None:
+                    futures[payload["request_id"]].set_result(response)
+
+        stub = SimpleNamespace(
+            _editor_rebuild_fanout=SimpleNamespace(observed_generation=0),
+            _retract_pending=_Pending(),
+            state_manager=SimpleNamespace(state_to_gui_queue=_Queue()),
+            _retract_timeout_s=timeout_s,
+        )
+        return await LogicController.retract_editor_text(
+            stub,
+            chars_requested=chars_requested,
+            utterance_id="66",
+            replay_text="final",
+            whole_utterance=whole_utterance,
+        )
+
+    return _run(_drive())
+
+
+def _echo(payload, failure_reason="", **overrides):
+    """A well-formed GUI response echoing the request."""
+    response = {
+        "chars_requested": payload["chars_requested"],
+        "chars_removed": payload["chars_requested"],
+        "replay_chars": 5,
+        "failure_reason": failure_reason,
+        "whole_utterance": payload["whole_utterance"],
+    }
+    response.update(overrides)
+    return response
+
+
+class TestReturnContract:
+    """Codex round-2 finding wh-whole-utterance-command-matching.1.1:
+    the sender must tell its caller whether the GUI confirmed the
+    retract-and-replay. True only on a validated success (echo checks
+    passed, empty failure_reason); False on every other outcome, so the
+    caller can refuse to advance state the GUI never installed."""
+
+    def test_success_returns_true(self):
+        assert _drive_result(lambda p: _echo(p)) is True
+
+    def test_declined_failure_returns_false(self):
+        assert _drive_result(
+            lambda p: _echo(p, failure_reason="replay_failed"),
+        ) is False
+
+    def test_stale_generation_returns_false(self):
+        assert _drive_result(
+            lambda p: _echo(p, failure_reason="stale_generation"),
+        ) is False
+
+    def test_underrun_returns_false(self):
+        assert _drive_result(
+            lambda p: _echo(p, failure_reason="ledger_underrun"),
+        ) is False
+
+    def test_timeout_returns_false(self):
+        assert _drive_result(lambda p: None, timeout_s=0.05) is False
+
+    def test_chars_echo_mismatch_returns_false(self):
+        assert _drive_result(
+            lambda p: _echo(p, chars_requested=p["chars_requested"] + 1),
+        ) is False
+
+    def test_whole_utterance_echo_mismatch_returns_false(self):
+        assert _drive_result(
+            lambda p: _echo(p, whole_utterance=not p["whole_utterance"]),
+        ) is False
+
+    def test_counted_zero_returns_false(self):
+        """The counted-mode early return sends nothing and retracts
+        nothing, so it must not read as a confirmed replay."""
+        assert _drive_result(
+            lambda p: _echo(p), chars_requested=0, whole_utterance=False,
+        ) is False
+
+
 def test_response_handler_passes_whole_utterance_to_future():
     """Reviewer_0 finding .1.2 (payload half): the response handler must
     include whole_utterance in the payload it completes the future with,

@@ -15,10 +15,13 @@ manager passes in and how it wires the signals.
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
+import os
+from pathlib import Path
+import sys
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent, QShowEvent
+from PySide6.QtGui import QCloseEvent, QShowEvent, QFont, QFontDatabase, QFontInfo
 from PySide6.QtWidgets import QMessageBox, QPushButton
 
 # wh-pytest-flaky-segfault: constructing the dialog builds real Qt widgets;
@@ -189,12 +192,14 @@ def _fake_editor_class(manager, record):
     the manager's ``_editor_dialog`` value while exec() runs."""
 
     class FakeEditor:
-        def __init__(self, hotword, parent=None, entry=None, pattern_id=None):
+        def __init__(self, hotword, parent=None, entry=None,
+                     pattern_id=None, keep_identity=False):
             record.update(
                 hotword=hotword,
                 parent=parent,
                 entry=entry,
                 pattern_id=pattern_id,
+                keep_identity=keep_identity,
                 editor=self,
             )
             self.pattern_action = MagicMock()
@@ -203,6 +208,9 @@ def _fake_editor_class(manager, record):
             self._try_timer = MagicMock()
             self._save_timeout_timer = MagicMock()
             self.deleteLater = MagicMock()
+            # _open_editor applies the manager's current zoom level
+            # (wh-pattern-font-size) before exec().
+            self.setFont = MagicMock()
 
         def exec(self):
             record["editor_during_exec"] = manager._editor_dialog
@@ -298,6 +306,10 @@ class TestOpenEditorWiring:
         assert record["parent"] is dialog
         assert record["entry"] == pat
         assert record["pattern_id"] == "uid-deploy"
+        # An in-place edit needs no identity flag: update_pattern reads the
+        # doc_id from the block on disk, so the editor cannot move a rule
+        # onto a different built-in (wh-pattern-override-doc-id A2).
+        assert record["keep_identity"] is False
         # Same lifecycle as Add: _editor_dialog set around exec, then cleared.
         assert record["editor_during_exec"] is record["editor"]
         assert dialog._editor_dialog is None
@@ -313,6 +325,10 @@ class TestOpenEditorWiring:
             dialog._duplicate_btn.click()
         assert record["entry"] == pat
         assert record["pattern_id"] is None
+        # A duplicate is a rule of its own. Carrying the original's doc_id
+        # would put two rules on one built-in, with the file order deciding
+        # which wins (wh-pattern-override-doc-id A2).
+        assert record["keep_identity"] is False
         assert dialog._editor_dialog is None
 
     def test_customize_opens_editor_without_pattern_id(self):
@@ -325,6 +341,13 @@ class TestOpenEditorWiring:
             dialog._customize_btn.click()
         assert record["entry"] == pat
         assert record["pattern_id"] is None
+        # The ONE caller that keeps the identity: the copy carries the
+        # built-in's doc_id, which is what keeps it overriding that
+        # built-in after a release rewrites the built-in's expression
+        # (wh-pattern-override-doc-id A2). This assertion and the
+        # Duplicate one above are the seam between the two buttons; they
+        # opened the editor with the same call until then.
+        assert record["keep_identity"] is True
         assert dialog._editor_dialog is None
 
 
@@ -1216,8 +1239,36 @@ class TestEditorDialogCleanup:
         assert manager.findChildren(CreatePatternDialog) == []
 
 
+@pytest.fixture
+def _offscreen_windows_layout_font(qapp):
+    """Give the headless Windows layout check real glyphs, without installing fonts.
+
+    Qt's offscreen backend does not discover Windows desktop fonts and PySide
+    ships none. An empty database measures missing-glyph boxes instead of labels.
+    Register the installed UI font only for this check; retain its point size.
+    """
+    if sys.platform != "win32" or qapp.platformName() != "offscreen":
+        yield
+        return
+    original_font = QFont(qapp.font())
+    font_path = Path(os.environ["SystemRoot"]) / "Fonts" / "segoeui.ttf"
+    font_id = QFontDatabase.addApplicationFont(str(font_path))
+    assert font_id >= 0, f"Cannot load installed Windows layout font: {font_path}"
+    try:
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        assert families, "the offscreen layout font must contain a real family"
+        font = QFont(original_font)
+        font.setFamily(families[0])
+        qapp.setFont(font)
+        assert QFontInfo(qapp.font()).family() == families[0]
+        yield
+    finally:
+        qapp.setFont(original_font)
+        assert QFontDatabase.removeApplicationFont(font_id)
+
+
 class TestManagerMinimumSize:
-    def test_detail_buttons_fit_within_right_pane_at_minimum(self):
+    def test_detail_buttons_fit_within_right_pane_at_minimum(self, _offscreen_windows_layout_font):
         # 800px minimum: left pane takes ~260, leaving ~520 for the detail
         # panel. The widest visible button sets (built-in selected; user
         # override selected) must fit without clipping.

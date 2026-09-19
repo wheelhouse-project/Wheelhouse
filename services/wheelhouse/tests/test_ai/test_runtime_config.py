@@ -58,6 +58,42 @@ class TestThePortComesFromTheServerAddress:
         assert cfg.enabled is False
         assert cfg.invalid_key == "ai.server.base_url"
 
+
+class TestTheModelAliasComesFromTheServerSection:
+    """[ai.server] model is the name the AI Model menu shows. Handing it to
+    llama-server as an alias makes the live model list report that name
+    instead of the model file path, so the menu shows one entry, not two
+    (wh-ai-model-alias)."""
+
+    def test_the_alias_is_carried_through(self):
+        cfg = RuntimeConfig.from_raw(
+            _raw(), "http://127.0.0.1:8899/v1", model_alias="gemma-4-e4b"
+        )
+        assert cfg.model_alias == "gemma-4-e4b"
+
+    def test_the_alias_defaults_to_empty(self):
+        cfg = RuntimeConfig.from_raw(_raw(), "http://127.0.0.1:8899/v1")
+        assert cfg.model_alias == ""
+
+    def test_a_non_string_alias_becomes_empty_not_a_fault(self):
+        """A bad [ai.server] model must not stop the server from starting.
+
+        The server runs fine without an alias; the client validates the model
+        name on its own path. Faulting here would turn a cosmetic menu problem
+        into no local AI at all."""
+        cfg = RuntimeConfig.from_raw(
+            _raw(), "http://127.0.0.1:8899/v1", model_alias=42
+        )
+        assert cfg.enabled is True
+        assert cfg.invalid_key is None
+        assert cfg.model_alias == ""
+
+    def test_surrounding_whitespace_is_removed(self):
+        cfg = RuntimeConfig.from_raw(
+            _raw(), "http://127.0.0.1:8899/v1", model_alias="  gemma-4-e4b  "
+        )
+        assert cfg.model_alias == "gemma-4-e4b"
+
     def test_a_non_loopback_host_disables_the_runtime(self):
         """We start the server ourselves, so it can only be on this machine."""
         cfg = RuntimeConfig.from_raw(_raw(), "http://192.168.1.50:8899/v1")

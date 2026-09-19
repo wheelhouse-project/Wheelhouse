@@ -31,7 +31,27 @@ silence_rms_threshold = 0.01
 # suppressed. Watch `[hallucination_suppressed]` log lines to observe peaks.
 # Set to a large negative number (e.g. -999) to disable the filter entirely.
 # If tuning does not work for your voice, switch to google_stt in the tray.
-hallucination_logprob_threshold = -0.55
+hallucination_logprob_threshold = -0.6
+# wh-7ou.6 single-word rescue: one-word utterances ("comma", "period") score
+# systematically lower on avg_logprob than phrases, so real single words can
+# fall below the threshold above (field data 2026-08-06: real 'comma' peaked
+# -0.596 to -0.643 on the same voice/mic the threshold was calibrated with).
+# When a final transcript of exactly ONE word would be suppressed, it is
+# rescued anyway if BOTH hold on the final inference:
+#   - every decoded word's own probability >= single_word_min_probability
+#     (0.6 is an uncalibrated starting point -- word probabilities were not
+#     in the logs this feature was designed from; tune from the
+#     `[single_word_rescue]` log line, which prints the observed values on
+#     every decision)
+#   - every segment's no_speech_prob <= single_word_max_no_speech_prob
+#     (calibrated: real one-word finals measured 0.008-0.017; cough-driven
+#     "Thank you." hallucinations measured 0.044-0.089)
+# Off-switches: min_probability = 0.0 ignores the word-probability check;
+# max_no_speech_prob = 1.0 ignores the no-speech check; min_probability = 2.0
+# disables the rescue entirely (a probability can never reach 2.0).
+# Takes effect at the next service restart.
+single_word_min_probability = 0.15
+single_word_max_no_speech_prob = 0.03
 
 [client]
 rate = 16000
@@ -63,3 +83,10 @@ initial_noise_floor = 0.01
 # experiments, and verify decode quality with your hint list first.
 # Takes effect at the next service restart.
 enabled = false
+
+[debug]
+# wh-audit13-preengine-load-review.1. When on, the shared audio code
+# writes one [load-diag] work_scope=silence or work_scope=wake_word line
+# every ten seconds of silence or wake listening. Turn it on for a load
+# test, off afterwards. Same key as the Parakeet provider's config.toml.
+log_load_diagnostics = false

@@ -7,11 +7,36 @@ requires-python = ">=3.12,<3.13"
 authors = [{name = "WheelHouse"}]
 dependencies = [
     "websockets>=13.0,<16",
+    # crewcut: sounddevice stays although no provider captures through it
+    # any more. wh-portaudio-capture-removal deleted the capture code
+    # (shared_audio/microphone.py and shared_audio/capture/
+    # sounddevice_capture.py); what still needs the package is PLAYBACK in
+    # tools/stt_load_test/run.py line 731 ("import sounddevice as sd"),
+    # plus the ad-hoc provider script test_audio_levels.py.
+    # So every provider environment installs PortAudio for a
+    # tool none of them runs at capture time. Remove the dependency here
+    # once the load-test tool owns it -- give tools/stt_load_test its own
+    # pyproject, or move the playback to a package that is not a provider
+    # dependency -- and then delete this comment.
     "sounddevice>=0.5",
     "numpy>=2.0",
     # 3.3.0 has no Windows wheel, source build fails (LNK1104)
     "pysilero-vad>=3.0,<3.3",
     "openwakeword>=0.6.0,<0.7",
+    # The WinRT AudioGraph capture path (shared_audio/capture/
+    # winrt_capture.py) is the only capture path any provider may use, so
+    # winsdk is a dependency of the shared package rather than of each
+    # provider (wh-capture-winrt-required). It used to be pinned in the
+    # Parakeet and Google pyprojects and absent from Distil-Whisper, which
+    # is why that provider could never take the WinRT path at all.
+    # Windows-only by nature, and pinned exactly because every published
+    # winsdk version is a pre-release: there is no stable release to float
+    # to (checked on PyPI 2026-09-03, latest 1.0.0b10). The exact pin is
+    # also what keeps the resolver quiet: uv accepts a pre-release named by
+    # an == specifier, while a global --prerelease=allow discards its
+    # preference for the versions already locked and re-resolves every
+    # other package as well.
+    "winsdk==1.0.0b10 ; sys_platform == 'win32'",
 ]
 
 [dependency-groups]

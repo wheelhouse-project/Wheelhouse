@@ -185,6 +185,12 @@ def test_bounds_list_normalizes_to_tuple():
         "trace_id": "t",
         "overlay_session_id": 1,
         "paint_generation": 0,
+        # The read-window identity is required on the wire, like every other
+        # field here (wh-overlay-slow-uia-stale-badges.2.2.1).
+        "foreground_window": 4242,
+        "foreground_pid": 99,
+        "foreground_process_name": "notepad.exe",
+        "foreground_window_creation_time": 1700000000000,
     }
     restored = StartOverlayWalkResponse.from_dict(payload)
     assert restored.snapshot_summary is not None

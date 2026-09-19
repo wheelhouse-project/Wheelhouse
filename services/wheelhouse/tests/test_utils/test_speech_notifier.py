@@ -17,7 +17,7 @@ class TestSpeechNotifier:
 
     @pytest.fixture
     def mock_notification(self):
-        with patch("utils.speech_notifier.notification") as m:
+        with patch("plyer.notification") as m:
             yield m
 
     def test_notify_speech_disabled(self, mock_notification):

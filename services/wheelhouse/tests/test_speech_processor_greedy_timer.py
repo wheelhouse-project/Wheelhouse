@@ -48,14 +48,6 @@ class _MockApp:
         return {"status": "success"}
 
 
-class _MockContextMirror:
-    def init_reader(self):
-        pass
-
-    def read_context(self):
-        return {"app_name": "TestApp", "window_title": "Test Window", "timestamp": 0.0}
-
-
 @pytest.fixture
 def catalog():
     return PatternCatalog(str(patterns_path))
@@ -91,7 +83,6 @@ async def test_greedy_timer_uses_configured_value_through_processor(catalog, tex
         command_timeout_ms=700,
         greedy_timeout_ms=1234,
     )
-    processor.context_mirror = _MockContextMirror()
 
     timer_calls: list[int] = []
 
@@ -146,7 +137,6 @@ async def test_non_greedy_buffer_keeps_standard_timer_through_processor(catalog,
         command_timeout_ms=700,
         greedy_timeout_ms=1234,
     )
-    processor.context_mirror = _MockContextMirror()
 
     timer_calls: list[int] = []
     processor._start_timeout = lambda duration_ms: timer_calls.append(duration_ms)

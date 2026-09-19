@@ -20,6 +20,7 @@ import pytest
 
 from ui.context import UIContext
 from ui.router import InsertionRouter
+from ui.target_identity import TargetIdentity
 from ui.text_target import TextTargetPredicate, TextTargetVerdict
 
 
@@ -131,9 +132,14 @@ class TestGetStrategy:
 class TestPredicateRouting:
     """The shared text-target predicate decides accept vs. reject.
 
-    Reject routes to RejectedInsertionStrategy regardless of length;
+    Reject short-circuits the length check regardless of length;
     accept routes to VerifiedUnicode / Standard by the existing length
-    check.
+    check. Which strategy a reject selects depends on whether a
+    ClipboardOnlyStrategy is wired: since wh-paste-when-unverified.2 it
+    is ClipboardOnlyStrategy when one is, and RejectedInsertionStrategy
+    when it is not. The routers built in this class mostly wire none,
+    so they keep showing the RejectedInsertionStrategy answer;
+    TestUnverifiedTargetPaste below covers the wired case.
     """
 
     def test_predicate_rejection_routes_to_rejected(self, strategies):
@@ -193,14 +199,20 @@ class TestPredicateRouting:
         assert result is strategies["rejected"]
         strategies["rejected"].set_pending_verdict.assert_called_once_with(verdict)
 
-    def test_unknown_soft_reject_routes_to_rejected_with_verdict(self, strategies):
-        """wh-soft-allow-verdict-tier: an unknown soft-reject (reason
+    def test_unknown_soft_reject_routes_to_clipboard_only(self, strategies):
+        """wh-paste-when-unverified.2: an unknown soft-reject (reason
         ``default_reject_paste_capable_class``) routes to
-        RejectedInsertionStrategy and the router passes the verdict via
-        set_pending_verdict so the strategy can emit text_target_rejected.
-        ClipboardOnlyStrategy is reserved for known-tuple accepts. Even
-        when clipboard_only_strategy is wired, an unknown soft-reject
-        must NOT silently paste -- it must front the override toast."""
+        ClipboardOnlyStrategy when that strategy is wired, so the words
+        are pasted instead of dropped.
+
+        This replaces the wh-soft-allow-verdict-tier expectation that
+        the same verdict reached RejectedInsertionStrategy with a
+        pending verdict. The rejection toast and its Try-it-anyway
+        button are what that route existed to front, and every
+        rejection notice is switched off (wh-dictation-gate-ux interim
+        disable), so the route dropped the words silently. No pending
+        verdict may be parked on the rejected strategy either -- it is
+        not the strategy being returned."""
 
         verdict = TextTargetVerdict(
             verdict=False,
@@ -222,8 +234,8 @@ class TestPredicateRouting:
             verified_unicode_max_chars=50,
         )
         result = router.get_strategy(_focusable_ctx(), "hello")
-        assert result is strategies["rejected"]
-        strategies["rejected"].set_pending_verdict.assert_called_once_with(verdict)
+        assert result is clipboard_only
+        strategies["rejected"].set_pending_verdict.assert_not_called()
 
     def test_known_soft_allow_tuple_routes_to_clipboard_only(self, strategies):
         """wh-soft-allow-verdict-tier: a predicate accept with reason
@@ -473,6 +485,266 @@ class TestPredicateRouting:
             and "rejected text target" in r.getMessage()
         ]
         assert info_records == []
+
+
+# --- TestUnverifiedTargetPaste (wh-paste-when-unverified.2) ----------------
+
+
+class TestUnverifiedTargetPaste:
+    """A text-target reject pastes with Ctrl+V instead of dropping.
+
+    wh-paste-when-unverified.2: every reject outcome of the text-target
+    check selects ClipboardOnlyStrategy when that strategy is wired.
+    The elevated-window refusal is NOT one of them -- it lives in its
+    own branch above the predicate and still returns
+    RejectedInsertionStrategy (see TestElevationRouting).
+
+    A reject must never fall through to the default length-based
+    branch: that branch sends keystrokes for 50 characters or fewer,
+    and keystrokes into a browser page body are the one recorded harm
+    in this area (wh-fc1x.1, one page scroll per word in Brave).
+
+    RejectedInsertionStrategy stays the answer when no
+    ClipboardOnlyStrategy is wired (legacy fixtures only).
+    """
+
+    def _router(self, strategies, verdict, *, clipboard_only):
+        return InsertionRouter(
+            standard_strategy=strategies["standard"],
+            flutter_strategy=strategies["flutter"],
+            simple_paste_strategy=strategies["simple_paste"],
+            rejected_strategy=strategies["rejected"],
+            text_target_predicate=_stub_predicate(verdict),
+            verified_unicode_strategy=strategies["verified_unicode"],
+            verified_unicode_max_chars=50,
+            clipboard_only_strategy=clipboard_only,
+        )
+
+    @staticmethod
+    def _verdict(reason):
+        return TextTargetVerdict(
+            verdict=False, reason=reason,
+            control_type="ListItemControl", class_name="UIItem",
+            process_name="chrome.exe",
+        )
+
+    @pytest.mark.parametrize("reason", [
+        "default_reject",
+        "default_reject_paste_capable_class",
+        "denylist_class_name",
+        "denylist_control_type",
+        "not_focusable",
+        "stale_com",
+        "no_focused_control",
+    ])
+    def test_every_reject_reason_routes_to_clipboard_only(
+        self, strategies, reason,
+    ):
+        """`not_focusable` is the 2026-09-17 Google search-box case: the
+        open suggestion list reports the highlighted row as the focused
+        element while keyboard focus stays in the box, and the words
+        were dropped three times."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, self._verdict(reason), clipboard_only=clipboard_only,
+        )
+        assert router.get_strategy(_focusable_ctx(), "hello") is clipboard_only
+
+    def test_reject_does_not_set_a_pending_verdict_when_pasting(
+        self, strategies,
+    ):
+        """No stale pending verdict may be parked on the rejected
+        strategy: it is not the strategy being returned, and a verdict
+        left there would be consumed by a later insert that really does
+        route to it (the elevated refusal)."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, self._verdict("default_reject"),
+            clipboard_only=clipboard_only,
+        )
+        router.get_strategy(_focusable_ctx(), "hello")
+        strategies["rejected"].set_pending_verdict.assert_not_called()
+
+    def test_reject_never_reaches_the_length_based_branch(self, strategies):
+        """Short text would otherwise take VerifiedUnicode (keystrokes)
+        and long text StandardStrategy. Neither may be selected."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, self._verdict("not_focusable"),
+            clipboard_only=clipboard_only,
+        )
+        assert router.get_strategy(_focusable_ctx(), "hi") is clipboard_only
+        assert (
+            router.get_strategy(_focusable_ctx(), "x" * 200) is clipboard_only
+        )
+
+    def test_reject_keeps_the_debug_telemetry_line(self, caplog, strategies):
+        """The DEBUG telemetry line survives the new route so the paste
+        decision stays traceable. wh-ix1z.7 keeps it at DEBUG, not INFO.
+        """
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, self._verdict("not_focusable"),
+            clipboard_only=clipboard_only,
+        )
+        with caplog.at_level("DEBUG", logger="ui.router"):
+            selected = router.get_strategy(_focusable_ctx(), "hi")
+        assert selected is clipboard_only
+        assert any(
+            "rejected text target" in r.getMessage()
+            and "not_focusable" in r.getMessage()
+            for r in caplog.records
+            if r.name == "ui.router" and r.levelname == "DEBUG"
+        )
+
+    def test_reject_without_clipboard_only_still_returns_rejected(
+        self, strategies,
+    ):
+        """The None case. Legacy fixtures wire no ClipboardOnlyStrategy
+        and keep the old behaviour: RejectedInsertionStrategy, with the
+        verdict handed over so the strategy can emit its event."""
+        verdict = self._verdict("default_reject_paste_capable_class")
+        router = self._router(strategies, verdict, clipboard_only=None)
+        assert (
+            router.get_strategy(_focusable_ctx(), "hello")
+            is strategies["rejected"]
+        )
+        strategies["rejected"].set_pending_verdict.assert_called_once_with(
+            verdict,
+        )
+
+
+# --- TestEmptyIdentityRejectStaysSilent (wh-paste-when-unverified.3) -------
+
+
+class TestEmptyIdentityRejectStaysSilent:
+    """A reject whose captured identity is EMPTY must not be pasted.
+
+    ui/context.py calls capture_target_identity on every capture, and
+    that function returns the all-zero ``TargetIdentity()`` -- never
+    None -- both when there is no focused control and when reading the
+    control raises. ``TargetIdentity.is_current()`` returns False on its
+    first line for an all-zero record, with no Windows call, so the
+    ClipboardOnlyStrategy paste would be refused before the send EVERY
+    time rather than sometimes, and verified_paste logs that refusal at
+    ERROR. An ERROR record IS a Windows notification
+    (ErrorNotificationHandler sits on the root logger), so pasting such
+    a reject turns a silent drop into a visible failure.
+
+    RejectedInsertionStrategy already produces exactly what is wanted
+    here -- DEBUG only, no notice, success=True, rejected_reason set --
+    so the router returns it and deliberately parks NO pending verdict:
+    a verdict left on a strategy the router did not return would be
+    consumed by the next insert that really does route there (the
+    elevated refusal).
+
+    The boundary: only the EMPTY record. An identity that was captured
+    properly and then went stale keeps the existing verified_paste
+    refusal and its ERROR, because a genuinely stale target is a real
+    failure worth reporting.
+    """
+
+    # Both reasons arrive at the router carrying the same empty record:
+    # ui/text_target.py answers no_focused_control for a None control
+    # and stale_com for one whose reads raise, and
+    # capture_target_identity returns TargetIdentity() for both.
+    EMPTY_IDENTITY_REASONS = ["no_focused_control", "stale_com"]
+
+    def _router(self, strategies, reason, *, clipboard_only):
+        verdict = TextTargetVerdict(
+            verdict=False, reason=reason,
+            control_type="ListItemControl", class_name="UIItem",
+            process_name="chrome.exe",
+        )
+        return InsertionRouter(
+            standard_strategy=strategies["standard"],
+            flutter_strategy=strategies["flutter"],
+            simple_paste_strategy=strategies["simple_paste"],
+            rejected_strategy=strategies["rejected"],
+            text_target_predicate=_stub_predicate(verdict),
+            verified_unicode_strategy=strategies["verified_unicode"],
+            verified_unicode_max_chars=50,
+            clipboard_only_strategy=clipboard_only,
+        )
+
+    @staticmethod
+    def _ctx(identity):
+        ctrl = MagicMock()
+        ctrl.IsKeyboardFocusable = True
+        return UIContext(
+            focused_control=ctrl, is_flutter=False, is_terminal=False,
+            process_name="chrome.exe", class_name="Chrome_WidgetWin_1",
+            target_identity=identity,
+        )
+
+    @pytest.mark.parametrize("reason", EMPTY_IDENTITY_REASONS)
+    def test_empty_identity_reject_returns_rejected(self, strategies, reason):
+        """The paste would be refused before the send every time, so the
+        router must not select it."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, reason, clipboard_only=clipboard_only,
+        )
+        selected = router.get_strategy(self._ctx(TargetIdentity()), "hello")
+        assert selected is strategies["rejected"]
+
+    @pytest.mark.parametrize("reason", EMPTY_IDENTITY_REASONS)
+    def test_empty_identity_reject_parks_no_pending_verdict(
+        self, strategies, reason,
+    ):
+        """A pending verdict is what makes RejectedInsertionStrategy emit
+        its rejection notice and escalate to INFO. Without one the drop
+        is silent, which is the whole point of this route."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, reason, clipboard_only=clipboard_only,
+        )
+        router.get_strategy(self._ctx(TargetIdentity()), "hello")
+        strategies["rejected"].set_pending_verdict.assert_not_called()
+
+    def test_empty_identity_reject_logs_nothing_above_debug(
+        self, caplog, strategies,
+    ):
+        """The routing decision itself must add no record a user would
+        see. DEBUG telemetry stays; WARNING and above do not appear."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, "no_focused_control", clipboard_only=clipboard_only,
+        )
+        with caplog.at_level("DEBUG", logger="ui.router"):
+            router.get_strategy(self._ctx(TargetIdentity()), "hello")
+        assert [
+            r.getMessage() for r in caplog.records
+            if r.name == "ui.router" and r.levelno > 10
+        ] == []
+
+    def test_captured_identity_reject_still_pastes(self, strategies):
+        """The guard is for the EMPTY record only. A reject whose
+        identity was really captured keeps the wh-paste-when-
+        unverified.2 paste and its pre-send proof."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, "not_focusable", clipboard_only=clipboard_only,
+        )
+        identity = TargetIdentity(
+            hwnd=0x101, root=0x102, process_id=4242, tag=7,
+            root_tag=8, foreground_root=0x102, foreground_tag=8,
+        )
+        assert (
+            router.get_strategy(self._ctx(identity), "hello") is clipboard_only
+        )
+
+    def test_missing_identity_reject_still_pastes(self, strategies):
+        """None is NOT the empty record. Legacy fixtures build a
+        UIContext without an identity and must keep pasting; production
+        contexts always carry one."""
+        clipboard_only = MagicMock(name="ClipboardOnlyStrategy")
+        router = self._router(
+            strategies, "default_reject", clipboard_only=clipboard_only,
+        )
+        assert (
+            router.get_strategy(self._ctx(None), "hello") is clipboard_only
+        )
 
 
 # --- TestLegacyFocusableCheck (router built without a predicate) -----------

@@ -95,7 +95,7 @@ class TestShutdownServicesRemoteSTT:
 
         mock_launcher = MagicMock()
         mock_launcher.shutdown_all_providers = AsyncMock(
-            return_value={"google_stt": True, "zipformer": False}
+            return_value={"google_stt": True, "parakeet_tdt": False}
         )
         service_manager.remote_stt_launcher = mock_launcher
 

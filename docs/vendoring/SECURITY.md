@@ -23,6 +23,44 @@ _Historical: the Parakeet ITN (Inverse Text Normalization) feature previously ve
 
 _Historical: `llama-cpp-python` was vendored as a Vulkan wheel for in-process AI inference. The AI thin-client redesign (wh-ai-thin-client, 2026-06-18) removed all in-process model loading, so that wheel and its support wheels were removed; AI now talks to an external server (Ollama or any OpenAI-compatible endpoint)._
 
+## Model artifacts
+
+Not every artifact the installer delivers is a wheel. A speech model's
+vocabulary file is generated from a published checkpoint rather than
+compiled, so it gets its own table. Item 1 of the vendoring discipline
+above applies to it unchanged: a committed plain-text `.sha256` sidecar
+beside the file, holding only the lowercase 64-character hash.
+
+The one difference from a wheel is that these files are COMMITTED, not
+gitignored. They are small text files, so a clone can verify itself, and
+the installer delivers a committed file to an existing installation
+without downloading anything.
+
+| Artifact | Source | Generated from | Recipe | Checksum |
+|----------|--------|----------------|--------|----------|
+| `bpe.vocab` (at `services/stt_providers/sherpa_offline_parakeet_stt_server/model_assets/`) | The sentencepiece tokenizer of [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), revision `541d1f99c6b0c3cd0b11a95167540bb8edefd82b`. Model licensed CC-BY-4.0 by NVIDIA; attribution required wherever it is redistributed. | `..._tokenizer.model` (360,916 bytes, sha256 `eacec2b0a77f336d4a2ca4a25a7047575d3c2b74de47e997f4c205126ed3135e`), read out of `parakeet-tdt-0.6b-v3.nemo` with an HTTP range request. The `.nemo` is an uncompressed tar and the tokenizer sits in its first 680 KB, so the 2.51 GB weights member is never transferred. | `scripts/nemo/generate_bpe_vocab.py` from k2-fsa/sherpa-onnx at tag `v1.13.3` (3,533 bytes, sha256 `d898c4261b480fa189a6d5375fb308703dc6fd7a82f805fbcf6f01ede91fe73c`), unmodified, its `generate_bpe_vocab_from_tokenizer` called with a `sentencepiece` 0.2.2 processor over that tokenizer. Isolated scratch venv, CPython 3.12.10, no NeMo and no torch. Output converted from CRLF to LF before commit. | LF form, 117,408 bytes, sha256 `41d5e71b3591642eff088151efd7acd4e750124cc0054c8ba9fa3245187a4804`. **Whole-file digest not verified; tokens.txt match verified.** |
+
+**What "whole-file digest not verified" means here.** HuggingFace publishes
+a SHA-256 for the whole checkpoint
+(`3cbdc85877e668ca7b82d0d56770eb1fac76691f55d6b97545e8d61ca588d10d`,
+2,509,332,480 bytes), and a range request that transfers 2 MB cannot be
+checked against a digest of 2.51 GB. What replaces it is a match against
+the shipped model's own token list: all 8192 pieces of `bpe.vocab` appear
+in `tokens.txt` in the same order, the only extra row there is `<blk>`,
+and the `tokens.txt` inside the release archive and the copy on the
+HuggingFace mirror have the same SHA-256
+(`d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d`).
+A tampered range would have to reproduce that list piece for piece. To
+upgrade this to a verified publisher digest, download the full 2.51 GB
+checkpoint once, check it against the digest above, and confirm the
+extracted tokenizer still hashes to `eacec2b0...3135e`.
+
+The line ending is part of the checksum. The generator opens its output in
+Python text mode, so it writes CRLF on Windows and LF elsewhere. The
+committed form is LF, which is also what `.gitattributes` (`* text=auto
+eol=lf`) checks out on every machine, so the recorded hash matches the
+working-tree file anywhere.
+
 ## Re-vendoring procedure (Vulkan wheels)
 
 The Vulkan wheels are custom builds, not PyPI downloads. To re-vendor (new upstream version, new Vulkan SDK, or a fresh machine):

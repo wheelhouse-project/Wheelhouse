@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
 
+from tests.test_ai.test_silent_actions import notifications
+
 from ai.providers.openai_compat import ChatResult, ChatStatus
 
 
@@ -63,8 +65,6 @@ def _make_ai_service(*, fix_response="corrected text", help_response="help answe
     ai.fix_text = AsyncMock(return_value=_result(fix_response))
     ai.ask_help = AsyncMock(return_value=help_response)
     ai.new_help_conversation = AsyncMock(return_value=help_response)
-    ai.speak = AsyncMock()
-    ai.speak_brief = AsyncMock()
     ai.cancel_requested = False
     ai._provider = MagicMock()  # Provider is set
 
@@ -155,7 +155,9 @@ class TestFixTextAI:
         # Mock IPC: capture returns text, replace succeeds
         app = actions.speech_handler.app
         app.send_request = AsyncMock(side_effect=[
-            {"text": "original text"},  # capture
+            # capture
+            {"text": "original text", "capture_token": "tok-1",
+             "target_hwnd": 4321},
             {"success": True},           # replace
         ])
 
@@ -167,11 +169,18 @@ class TestFixTextAI:
         assert app.send_request.call_count == 2
         replace_call = app.send_request.call_args_list[1]
         assert replace_call[0] == ("replace_selected_text",)
-        assert replace_call[1] == {"params": {"text": "Corrected text"}}
+        # wh-review-pattern-fixes.45: the replacement carries the
+        # identity of the control the capture read from, so the Input
+        # process can refuse a paste after a focus change.
+        assert replace_call[1] == {"params": {
+            "text": "Corrected text",
+            "capture_token": "tok-1",
+            "target_hwnd": 4321,
+        }}
 
     @pytest.mark.asyncio
     async def test_no_text_captured(self):
-        """Speaks 'No text to correct' when capture returns empty."""
+        """Shows 'No text to correct' when capture returns empty."""
         ai = _make_ai_service()
         actions = _make_actions(ai_service=ai)
 
@@ -180,8 +189,8 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        ai.speak.assert_awaited_once()
-        assert "no text" in ai.speak.call_args[0][0].lower()
+        assert notifications(actions)
+        assert "no text" in " ".join(notifications(actions)).lower()
         ai.fix_text.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -195,7 +204,7 @@ class TestFixTextAI:
 
     @pytest.mark.asyncio
     async def test_concurrent_rejection(self):
-        """Speaks 'Already processing' when lock is held."""
+        """Shows 'Already processing' when lock is held."""
         ai = _make_ai_service()
         actions = _make_actions(ai_service=ai)
 
@@ -206,12 +215,12 @@ class TestFixTextAI:
         finally:
             ai._processing_lock.release()
 
-        ai.speak.assert_awaited_once()
-        assert "already processing" in ai.speak.call_args[0][0].lower()
+        assert notifications(actions)
+        assert "already processing" in " ".join(notifications(actions)).lower()
 
     @pytest.mark.asyncio
     async def test_correction_failed(self):
-        """Speaks a failure notice when fix_text returns a non-OK ChatResult.
+        """Shows a failure notice when fix_text returns a non-OK ChatResult.
 
         recheck_ready() returns True here (server is reachable) so the wording
         is the generic 'Correction failed' rather than 'isn't responding'.
@@ -226,11 +235,11 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        # Should speak failure, not try to replace
-        assert any("failed" in str(c).lower() for c in ai.speak.call_args_list)
+        # Should show failure, not try to replace
+        assert any("failed" in str(c).lower() for c in notifications(actions))
 
     @pytest.mark.asyncio
-    async def test_model_not_found_speaks_distinct_notice(self):
+    async def test_model_not_found_shows_distinct_notice(self):
         """MODEL_NOT_FOUND gets its own wording naming the model problem
         (wh-75m), not the generic 'Correction failed'. The server DID
         respond (404 on the model), so no reachability re-probe runs."""
@@ -245,13 +254,13 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        spoken = " ".join(str(c) for c in ai.speak.call_args_list).lower()
-        assert "model" in spoken
-        assert "correction failed" not in spoken
+        displayed = " ".join(str(c) for c in notifications(actions)).lower()
+        assert "model" in displayed
+        assert "correction failed" not in displayed
         ai.recheck_ready.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_reasoning_exhausted_speaks_distinct_notice(self):
+    async def test_reasoning_exhausted_shows_distinct_notice(self):
         """EMPTY + finish_reason == 'length' is the reasoning-model
         signature: HTTP 200, no content, whole budget spent on hidden
         thinking (wh-ai-reasoning-model-empty). Gets its own wording and
@@ -269,9 +278,9 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        spoken = " ".join(str(c) for c in ai.speak.call_args_list).lower()
-        assert "reasoning" in spoken
-        assert "correction failed" not in spoken
+        displayed = " ".join(str(c) for c in notifications(actions)).lower()
+        assert "reasoning" in displayed
+        assert "correction failed" not in displayed
         ai.recheck_ready.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -291,13 +300,13 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        spoken = " ".join(str(c) for c in ai.speak.call_args_list).lower()
-        assert "reasoning" not in spoken
-        assert "failed" in spoken
+        displayed = " ".join(str(c) for c in notifications(actions)).lower()
+        assert "reasoning" not in displayed
+        assert "failed" in displayed
 
     @pytest.mark.asyncio
     async def test_correction_failed_server_down_says_not_responding(self):
-        """On a non-OK result with recheck_ready() False, speaks the
+        """On a non-OK result with recheck_ready() False, shows the
         'isn't responding' wording (s7 / decision 27)."""
         ai = _make_ai_service()
         ai.fix_text = AsyncMock(return_value=_result(ok=False))
@@ -312,12 +321,12 @@ class TestFixTextAI:
         ai.recheck_ready.assert_awaited_once()
         assert any(
             "isn't responding" in str(c) or "not responding" in str(c).lower()
-            for c in ai.speak.call_args_list
+            for c in notifications(actions)
         )
 
     @pytest.mark.asyncio
-    async def test_not_ready_speaks_graceful_notice(self):
-        """When is_ready() is False, fix_text_ai speaks a graceful-off notice
+    async def test_not_ready_shows_graceful_notice(self):
+        """When is_ready() is False, fix_text_ai shows a graceful-off notice
         (today it was silent) and does not attempt correction (s7)."""
         ai = _make_ai_service(ready=False)
         actions = _make_actions(ai_service=ai)
@@ -327,14 +336,14 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        ai.speak.assert_awaited()
-        assert any("not available" in str(c).lower() for c in ai.speak.call_args_list)
+        assert notifications(actions)
+        assert any("not available" in str(c).lower() for c in notifications(actions))
         # No capture/correction attempted.
         ai.fix_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_changes_needed(self):
-        """Speaks 'No changes needed' when corrected == original."""
+        """Shows 'No changes needed' when corrected == original."""
         ai = _make_ai_service(fix_response="same text")
         actions = _make_actions(ai_service=ai)
 
@@ -343,13 +352,13 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        # Should speak "no changes" and NOT send replace
-        assert any("no changes" in str(c).lower() for c in ai.speak_brief.call_args_list)
+        # Should show "no changes" and NOT send replace
+        assert any("no changes" in str(c).lower() for c in notifications(actions))
         assert app.send_request.call_count == 1  # Only capture, no replace
 
     @pytest.mark.asyncio
     async def test_cancelled_after_correction(self):
-        """Speaks 'Cancelled' when fix_text returns CANCELLED status.
+        """Shows 'Cancelled' when fix_text returns CANCELLED status.
 
         The real fix_text returns ChatStatus.CANCELLED (not OK) when
         cancel_requested is set -- it clears the flag itself and returns
@@ -371,18 +380,18 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        # Should speak cancelled, NOT send replace
-        assert any("cancel" in str(c).lower() for c in ai.speak_brief.call_args_list)
+        # Should show cancelled, NOT send replace
+        assert any("cancel" in str(c).lower() for c in notifications(actions))
         assert app.send_request.call_count == 1  # Only capture
 
     @pytest.mark.asyncio
     async def test_large_text_warning(self):
-        """Speaks the word-count notice for text over 200 words.
+        """Shows the word-count notice for text over 200 words.
 
         The old seconds-based time estimate was dropped in Phase B -- the thin
         client has no local-tier basis for a seconds estimate (design s4). The
         word-count notice is retained; the assertion below confirms no
-        'second' wording is spoken.
+        'second' wording is displayed.
         """
         ai = _make_ai_service(fix_response="corrected")
         actions = _make_actions(ai_service=ai)
@@ -396,10 +405,10 @@ class TestFixTextAI:
 
         await actions.fix_text_ai()
 
-        # Word-count notice spoken; no time-estimate call or wording.
-        speak_calls = [str(c) for c in ai.speak.call_args_list]
-        assert any("250" in c or "word" in c for c in speak_calls)
-        assert not any("second" in c.lower() for c in speak_calls)
+        # Word-count notice displayed; no time-estimate call or wording.
+        notices = [str(c) for c in notifications(actions)]
+        assert any("250" in c or "word" in c for c in notices)
+        assert not any("second" in c.lower() for c in notices)
 
 
 # =========================================================================
@@ -496,8 +505,8 @@ class TestWheelhouseHelpOnline:
             mock_open.assert_called_once_with("https://example.com/gem")
 
     @pytest.mark.asyncio
-    async def test_speaks_when_gem_url_not_configured(self):
-        """wheelhouse_help_online speaks error when gem_url is empty."""
+    async def test_shows_when_gem_url_not_configured(self):
+        """wheelhouse_help_online shows error when gem_url is empty."""
         ai = _make_ai_service()
         actions = _make_actions(ai_service=ai)
 
@@ -510,8 +519,8 @@ class TestWheelhouseHelpOnline:
 
         await actions.wheelhouse_help_online()
 
-        ai.speak_brief.assert_awaited_once()
-        assert "not configured" in ai.speak_brief.call_args[0][0].lower()
+        assert notifications(actions)
+        assert "not configured" in " ".join(notifications(actions)).lower()
 
 
 # =========================================================================

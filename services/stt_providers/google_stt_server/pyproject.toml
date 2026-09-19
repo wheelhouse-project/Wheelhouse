@@ -16,7 +16,9 @@ dependencies = [
     "numpy>=2.0",
     "setuptools>=80.9.0,<81",
     "tomlkit>=0.13.2,<0.14",
-    "winsdk>=1.0.0b10,<2",
+    # winsdk is NOT pinned here. The WinRT capture path is shared, so
+    # wheelhouse-shared owns that pin for every provider
+    # (wh-capture-winrt-required).
     "pysilero-vad",
 ]
 

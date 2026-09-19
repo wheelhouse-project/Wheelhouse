@@ -27,14 +27,25 @@ Supported Operations:
 """
 import logging
 import time
+import uuid
 import pyperclip
 import win32gui
 import win32con
 import win32process
 from multiprocessing import Queue
-from typing import Optional
-from utils.win_input_sender import press_keys, type_string, send_backspaces
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from utils.win_input_sender import (
+    VK_CODE_MAP,
+    WHEEL_REFUSALS_THAT_LOG_ERROR,
+    _send_modifier_keyups,
+    press_keys,
+    send_backspaces,
+    type_string,
+    type_string_verified,
+    verified_press_keys,
+)
 from utils.clipboard_manager import clipboard_context
+from utils.logging_setup import get_notifier_worker
 from utils.redact import redact_transcript
 
 from .text_perfector import TextPerfector
@@ -45,13 +56,30 @@ from .utterance_clipboard_manager import UtteranceClipboardManager
 from .shadow_buffer import ShadowBufferManager
 from .terminal_editor_proxy import TerminalEditorProxy
 from .response_handler import ResponseHandler
+from .continuous_scroll import (
+    NOTICE_TITLE,
+    ContinuousScroller,
+    send_notice,
+)
+from . import settle_detector
 from .hwnd_utils import (
     normalize_hwnd_for_foreground_compare,
+    read_hwnd_provenance,
     resolve_same_process_browser_names,
+    top_level_hwnd_from_control,
 )
+
+if TYPE_CHECKING:  # pragma: no cover -- typing only, no runtime import cost
+    from ui.element_types import ClickGesture
 
 # New Router/Strategy Components
 from .context import capture_context
+from .phrase_select_notice import notify_outcome
+from .uia_phrase_select import (
+    PHRASE_FAILED,
+    read_focused_control,
+    select_phrase_in_control,
+)
 from .elevation_check import target_elevation_state
 from .router import InsertionRouter
 from .strategies.base import InsertionMode, InsertionOptions
@@ -71,6 +99,24 @@ from speech.text_transforms import auto_compress_spelled_letters
 
 logger = logging.getLogger(__name__)
 
+# Transient stale-window UIA/COM error classes (wh-overlay-walk-theme-error).
+# Same guarded pair as ui/uia_walker.py and ui/element_finder.py duplicate
+# (the base-package comtypes import does not trigger type-library generation;
+# OSError covers Win32/ctypes failures and hosts without comtypes). A walk can
+# raise these when the focused window is rebuilding -- a Windows theme switch
+# recreates the shell window and every walker retry can land inside the
+# rebuild, surfacing COMError -2147220991 ("An event was unable to invoke any
+# of the subscribers"). The walk-running handlers log this class at WARNING
+# and map it to a normal execution_failed: it self-heals on the next
+# focus-hook re-walk, and an ERROR record would pop a Windows notification
+# box (utils/error_notifier.py) in the user's face for a blip.
+try:
+    from comtypes import COMError as _COMError  # type: ignore[import-not-found]
+
+    _TRANSIENT_WALK_ERRORS: tuple[type[BaseException], ...] = (OSError, _COMError)
+except Exception:  # noqa: BLE001 -- no comtypes -> OSError covers the test fakes
+    _TRANSIENT_WALK_ERRORS = (OSError,)
+
 
 class PasteFailedError(RuntimeError):
     """Raised by raw_insert_text when the underlying strategy reports failure.
@@ -85,13 +131,6 @@ class PasteFailedError(RuntimeError):
     was silently ignored, leaving the caller's Future to resolve with a
     heuristic success while the dictated text leaked onto the clipboard.
     """
-
-
-# Keys that invalidate shadow buffer cache
-CACHE_INVALIDATING_KEYS = {
-    'backspace', 'enter', 'delete', 'tab', 'left', 'right', 'up', 'down',
-    'home', 'end', 'pageup', 'pagedown'
-}
 
 
 # ---------------------------------------------------------------------------
@@ -205,28 +244,191 @@ def _win32_on_screen(x: int, y: int) -> bool:
         return False
 
 
-def _win32_coordinate_click(x: int, y: int) -> tuple[bool, int]:
+def _win32_coordinate_click(x: int, y: int) -> tuple[bool, int, str | None]:
     """SendInput-backed coordinate click for the executor's fallback seam.
 
     Wires the real :func:`utils.win_input_sender.click_at` into
     ``ClickExecutor`` (wh-l4h.1). ``click_at`` is itself fail-closed (it
     verifies the cursor landed before synthesising any button event and
-    returns ``(False, 0)`` on a wrong landing) and fail-soft (any internal
-    Win32/ctypes error returns ``(False, 0)``). This wrapper adds defence in
-    depth so an import or call error at the seam boundary cannot escape into
-    the click path -- it mirrors the sibling ``_win32_*`` seams. The executor
-    also catches a raising seam, so this is belt-and-braces.
+    returns ``(False, 0, None)`` on a wrong landing) and fail-soft (any
+    internal Win32/ctypes error returns ``(False, 0, None)``). This wrapper
+    adds defence in depth so an import or call error at the seam boundary
+    cannot escape into the click path -- it mirrors the sibling ``_win32_*``
+    seams. The executor also catches a raising seam, so this is
+    belt-and-braces.
 
-    Returns ``(succeeded, events_sent)`` where ``events_sent`` counts only the
-    LEFTDOWN/LEFTUP pair, so the executor's ``events_sent < 2`` short-send
-    check stays meaningful.
+    Returns ``(succeeded, events_sent, reason)`` where ``events_sent`` counts
+    only the LEFTDOWN/LEFTUP pair, so the executor's ``events_sent < 2``
+    short-send check stays meaningful, and ``reason`` is ``"release_failed"``
+    when a partial batch's compensating release was refused too
+    (wh-mouse-grid.1.5).
     """
     try:
         from utils.win_input_sender import click_at
 
         return click_at(int(x), int(y))
     except Exception:  # noqa: BLE001 -- fail soft, never propagate
-        return (False, 0)
+        return (False, 0, None)
+
+
+def _win32_click_point(
+    x, y, button: str, click_count: int,
+) -> tuple[bool, str | None]:
+    """SendInput-backed grid click for the ``click_point`` handler's seam.
+
+    Wires the real :func:`utils.win_input_sender.click_point`
+    (wh-input-mouse-primitives). The primitive validates its own arguments and
+    never raises, so the arguments are passed through UNCONVERTED -- coercing
+    them here would turn a malformed IPC value into a raise instead of the
+    ``invalid_point`` / ``invalid_button`` / ``invalid_click_count`` refusal
+    the primitive reports. The try/except is defence in depth for an import
+    failure on a degraded host, mirroring the sibling ``_win32_*`` seams.
+    """
+    try:
+        from utils.win_input_sender import click_point
+
+        return click_point(x, y, button=button, click_count=click_count)
+    except Exception:  # noqa: BLE001 -- fail soft, never propagate
+        logger.error("_win32_click_point: seam failed", exc_info=True)
+        return (False, "sendinput_error")
+
+
+def _win32_move_pointer(x, y) -> tuple[bool, str | None]:
+    """SendInput-backed pointer park for the ``move_pointer`` handler's seam.
+
+    Wires the real :func:`utils.win_input_sender.move_pointer_to`. Same
+    pass-through and fail-soft contract as :func:`_win32_click_point`.
+    """
+    try:
+        from utils.win_input_sender import move_pointer_to
+
+        return move_pointer_to(x, y)
+    except Exception:  # noqa: BLE001 -- fail soft, never propagate
+        logger.error("_win32_move_pointer: seam failed", exc_info=True)
+        return (False, "sendinput_error")
+
+
+def _win32_scroll_wheel(direction, clicks) -> tuple[bool, str | None]:
+    """SendInput-backed wheel turn for the ``scroll_wheel`` handler's seam.
+
+    Wires the real :func:`utils.win_input_sender.scroll_wheel`
+    (wh-voice-access-parity.2.3). Same pass-through contract as
+    :func:`_win32_click_point`: the primitive validates its own arguments and
+    reports ``invalid_direction`` / ``invalid_clicks`` rather than raising, so
+    nothing is coerced here.
+
+    The fail-soft record is where this seam DIFFERS from its siblings -- it
+    is a WARNING, for the reason the except branch below states.
+    """
+    try:
+        from utils.win_input_sender import scroll_wheel
+
+        return scroll_wheel(direction, clicks)
+    except Exception:  # noqa: BLE001 -- fail soft, never propagate
+        # WARNING, not ERROR, and this seam alone among the ``_win32_*``
+        # seams (wh-wheel-refusal-notice.1.3). Both wheel callers write
+        # their own notice for a reason outside
+        # ``WHEEL_REFUSALS_THAT_LOG_ERROR``, and "sendinput_error" is
+        # outside it: the discrete scroll calls
+        # ``_say_the_wheel_would_not_turn``, and the continuous scroller
+        # stops with ``WHEEL_FAILED_MESSAGE``. An ERROR record here adds
+        # the generic ErrorNotificationHandler box beside that notice,
+        # which is the duplicate this bead removes.
+        #
+        # The sibling seams (_win32_click_point, _win32_move_pointer,
+        # _win32_drag_pointer) keep their ERROR, and NOT because it is
+        # right. An earlier version of this comment said their callers
+        # never report to the user; that was false, and correcting it is
+        # wh-wheel-refusal-notice.1.4. Their handlers answer with a
+        # MouseActionResponse, and main.py::_send_mouse_action turns
+        # every non-ok response into _forward_click_notice, so a refused
+        # grid click, move or drag ALREADY shows an action-specific
+        # notice -- and the ERROR record adds the generic box beside it.
+        # That is the same duplicate this bead removes for the wheel.
+        #
+        # It is left alone here on purpose: the pointer paths are the
+        # mouse-grid subsystem, this bead's acceptance criteria are the
+        # wheel, and the change reaches code no test on this branch
+        # exercises. It was escalated to the product owner rather than
+        # fixed or filed, because pre-existing behaviour is his to
+        # classify. Do NOT read this comment as saying the pointer
+        # records are correct.
+        logger.warning("_win32_scroll_wheel: seam failed", exc_info=True)
+        return (False, "sendinput_error")
+
+
+def _win32_drag_pointer(
+    start_x, start_y, end_x, end_y, duration_ms,
+) -> tuple[bool, str | None]:
+    """SendInput-backed drag for the ``perform_drag`` handler's seam.
+
+    Wires the real :func:`utils.win_input_sender.drag_pointer`, which owns the
+    whole gesture (button down, interpolated movement, guaranteed release) so
+    no IPC boundary sits between the press and the release. Same pass-through
+    and fail-soft contract as :func:`_win32_click_point`.
+    """
+    try:
+        from utils.win_input_sender import drag_pointer
+
+        return drag_pointer(
+            start_x, start_y, end_x, end_y, duration_ms=duration_ms,
+        )
+    except Exception:  # noqa: BLE001 -- fail soft, never propagate
+        logger.error("_win32_drag_pointer: seam failed", exc_info=True)
+        return (False, "sendinput_error")
+
+
+def _parse_gesture(value: object) -> "ClickGesture":
+    """Map a request's gesture field onto a ClickGesture, never raising.
+
+    The numbered-badge request carries the gesture as a bare payload value
+    (wh-click-gesture-param), so it arrives as whatever Logic put there --
+    including nothing at all from an older Logic build. Anything unrecognised
+    degrades to the DEFAULT gesture: today's Invoke behaviour, which sends no
+    synthetic mouse input. Guessing a physical gesture from a malformed value
+    is the one outcome this must never produce.
+    """
+    from ui.element_types import DEFAULT_GESTURE, ClickGesture
+
+    if not value:
+        return DEFAULT_GESTURE
+    try:
+        return ClickGesture(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "click_snapshot_item: unrecognised gesture %r; using the default "
+            "Invoke behaviour", value,
+        )
+        return DEFAULT_GESTURE
+
+
+def _win32_gesture_click(
+    x: int, y: int, button: str, click_count: int
+) -> tuple[bool, int, str | None]:
+    """SendInput-backed gesture click for the executor's gesture seam.
+
+    The wh-click-gesture-param sibling of :func:`_win32_coordinate_click`: same
+    fail-soft wrapper, same underlying :func:`utils.win_input_sender.click_at`,
+    but carrying the spoken gesture's button and click count. It is a SEPARATE
+    seam so the default gesture keeps calling the two-argument seam with an
+    unchanged argument list.
+
+    ``click_at`` fails closed on an unknown button or a non-positive count
+    (``(False, 0, None)``, no input sent), so a malformed gesture cannot reach
+    SendInput. Returns ``(succeeded, events_sent, reason)`` where
+    ``events_sent`` counts two events per click (what the executor's
+    short-send check expects) and ``reason`` is ``"release_failed"`` when a
+    partial batch's compensating release was refused too
+    (wh-mouse-grid.1.5).
+    """
+    try:
+        from utils.win_input_sender import click_at
+
+        return click_at(
+            int(x), int(y), button=button, click_count=int(click_count)
+        )
+    except Exception:  # noqa: BLE001 -- fail soft, never propagate
+        return (False, 0, None)
 
 
 def _win32_root_window_at_point(x: int, y: int) -> int:
@@ -272,6 +474,50 @@ def _uia_point_hits_winner(automation, winner, x: int, y: int) -> bool:
 # retry storm the finding describes. It is distinct from None (root not yet
 # built) and from a real root object.
 _AUTOMATION_UNAVAILABLE = object()
+
+# wh-wheel-refusal-notice: what a refused DISCRETE spoken scroll tells the
+# user. David chose these words (QUESTIONS-2026-08-30 item 8). He wrote
+# them lowercase; they ship capitalized because a screen reader reads the
+# notice out as a sentence. The continuous scroll keeps its own separate
+# wording.
+SCROLL_REFUSED_MESSAGE = "Scrolling failed"
+
+# wh-keyboard-refusal-notice. What the user reads when a spoken key press,
+# hotkey or typing action did not reach the target application. Each names
+# the action and the cause, because "something went wrong" tells a hands-free
+# user nothing about what to try next.
+#
+# The typed text NEVER appears in TYPING_REFUSED_MESSAGE. The counts are the
+# report: the text is the user's own dictated content, and a notice sits on
+# screen where anyone in the room can read it.
+PRESS_KEY_UNKNOWN_MESSAGE = (
+    "Cannot press {keys}: Wheelhouse does not know that key name"
+)
+PRESS_KEY_REFUSED_MESSAGE = "Pressing {keys} did not work"
+HOTKEY_UNKNOWN_MESSAGE = (
+    "Cannot run the {chord} shortcut: Wheelhouse does not know {keys}"
+)
+HOTKEY_REFUSED_MESSAGE = "The {chord} shortcut did not work"
+TYPING_REFUSED_MESSAGE = "Typing stopped after {sent} of {total} characters"
+
+# The wheel refusals that report themselves through the generic [ERROR]
+# box, and so must NOT get a written notice as well. It is EMPTY, and the
+# reason it is empty is worth keeping (wh-wheel-refusal-notice.1.7): the
+# box comes from ErrorNotificationHandler, which drops a repeat of the
+# same (logger, level, message) inside ten seconds, so an ERROR record is
+# not proof the user was told anything. An earlier version of this
+# comment said a listed reason "already shows the generic [ERROR] box"
+# and could therefore be left silent here; that reasoning cost the user
+# every notice for a repeated refusal. No wheel refusal logs an ERROR any
+# more, and every one of them is reported by the caller's own written
+# notice.
+#
+# The primitive owns the list, and this module reads it rather than repeating
+# it (wh-wheel-refusal-notice.1.1). The decision is about the primitive's own
+# log level, and a hand-copied list here could drift: a refusal reason added
+# later could log at ERROR over there and never reach a copy over here, which
+# brings the duplicate box straight back.
+_WHEEL_VALIDATION_REFUSALS = WHEEL_REFUSALS_THAT_LOG_ERROR
 
 
 def _win32_foreground_probe():
@@ -376,6 +622,90 @@ def _capture_click_foreground():
     )
 
 
+def _stop_command_on_failed_focus_read(context, action_name: str) -> None:
+    """Re-raise a failed focused-control read for the COMMAND actions.
+
+    wh-insert-focus-read-stall.1.4 (codex round 3). Before this branch
+    ``capture_context`` let the COM error from the focused-control read
+    escape, and each command action's own ``except Exception`` arm caught
+    it before any key was sent. The read no longer raises, so without
+    this the four command paths carry on with a control of None and send
+    Ctrl+C, a key, or a chord into whatever window then holds the
+    foreground -- usually the window the person just moved to, because a
+    stalled read is what gave them time to move.
+
+    Re-raising the ORIGINAL exception, rather than refusing here, is what
+    makes the outcome identical to the pre-branch one: the same except
+    arm runs, at the same log level, and formats the same error. The
+    level differs between the actions on purpose.
+    ``transform_selection`` and ``wrap_or_insert`` log at ERROR, which
+    ErrorNotificationHandler turns into a Windows notice;
+    ``press_key_action`` and ``hotkey_action`` log at WARNING and show
+    nothing.
+
+    The dictation INSERTION paths must NOT call this. Pasting the word
+    into the unchanged window is the purpose of
+    wh-insert-focus-read-stall, so ``_execute_insert_with_ack`` and
+    ``raw_insert_text`` keep the new behaviour.
+
+    ``read_error`` is None only if a caller builds the context by hand
+    with ``focus_read_failed`` set, which production code does not do.
+    The RuntimeError covers that case so the guard can never fall
+    through and let a key be sent.
+    """
+    if not context.focus_read_failed:
+        return
+    if context.read_error is None:
+        raise RuntimeError(
+            f"{action_name}: the focused-control read failed and no error "
+            "was recorded; refusing to send."
+        )
+    raise context.read_error
+
+
+def _captured_hwnd_from_control(focused_control) -> Optional[int]:
+    """Resolve a captured control to the window handle the proof compares.
+
+    wh-review-pattern-fixes.45: the three selection paths record the
+    control they copied from and must compare it later against
+    ``GetForegroundWindow()``. Read the raw handle through the shared
+    helper, then normalize it here so the value matches what the
+    strategies and ``verified_paste`` produce for the same control.
+    Returns None on any failure; every consumer treats None as "cannot
+    prove" and sends nothing.
+    """
+    hwnd = top_level_hwnd_from_control(focused_control)
+    if not hwnd:
+        return None
+    return normalize_hwnd_for_foreground_compare(hwnd)
+
+
+class CapturedTarget(NamedTuple):
+    """The control a selection was copied from, and its top-level window.
+
+    wh-review-pattern-fixes.45: three paths copy a selection out of one
+    control and then deliver a replacement somewhere else --
+    ``transform_selection``, the selection branch of ``wrap_or_insert``,
+    and the AI correction flow. Each one now carries this pair from the
+    copy to the send, and the send only happens when the pair still
+    holds the foreground.
+
+    ``control`` is a live UIA control object. It cannot cross a process
+    boundary, so the AI flow keeps it in the Input process and hands the
+    Logic process a token instead (see
+    ``UIActionHandler.capture_selected_text``).
+
+    ``hwnd`` is a plain integer, already root-normalized by
+    ``_captured_hwnd_from_control``. It does cross a process boundary, so the AI
+    flow sends it to the Logic process and requires it back unchanged.
+    It is None when the control could not be resolved to a window; every
+    consumer treats that as "cannot prove" and refuses to send.
+    """
+
+    control: Any
+    hwnd: Optional[int]
+
+
 class UIActionHandler:
     """Orchestrates all UI interactions by delegating to specialist classes.
 
@@ -389,12 +719,19 @@ class UIActionHandler:
     pickled for inter-process communication.
     """
 
-    def __init__(self, response_queue: Queue, config: dict):
+    def __init__(self, response_queue: Queue, config: dict, *, shutdown_event=None):
         """Initialize UI action handler with all specialist components.
 
         Args:
             response_queue: Queue for sending action responses
             config: Configuration dictionary (not ConfigService - can't pickle)
+            shutdown_event: The Input process's shared shutdown signal, passed
+                on to the continuous scroller so its timer thread can stop
+                itself when the process is asked to close
+                (wh-voice-access-parity.2.3.3.2.10). Keyword-only and
+                optional: the command loop is not the only caller that builds
+                this class, and a handler built without the signal keeps the
+                behaviour it had before.
         """
         self.response_queue = response_queue
         self.config = config
@@ -413,10 +750,79 @@ class UIActionHandler:
         # strictly-older generation within the latest session) is stale.
         self._latest_pin_watermark: Optional[tuple[int, int]] = None
 
+        # wh-overlay-slow-uia-stale-badges.8 part 4: one EXECUTED click per
+        # (overlay_session_id, paint_generation). The pair of the last click
+        # that returned ok; a later click carrying a pair that is not STRICTLY
+        # newer is refused (stale_overlay_generation) -- that list was
+        # consumed by the click that changed the screen. A single bounded
+        # pair, not a per-session dict, for the same reason as
+        # _latest_pin_watermark above (wh-n29v.42.1): overlay_session_id is
+        # monotonic and the overlay machine is single. Ordering alone cannot
+        # give Input a "current" generation (the command loop is FIFO, so an
+        # arriving pair is always >= any watermark it could keep from paints),
+        # which is why the guard keys on EXECUTION, the one event that
+        # invalidates a painted list.
+        self._last_executed_click_pair: Optional[tuple[int, int]] = None
+
+        # wh-input-mouse-primitives: the SendInput seams for the mouse-grid
+        # pointer actions (click_point / move_pointer / perform_drag). Set as
+        # attributes rather than called directly so the test suite can inject
+        # a fake and never synthesise real input; production keeps the
+        # module-level Win32-backed wrappers above.
+        self._mouse_click_seam = _win32_click_point
+        self._mouse_move_seam = _win32_move_pointer
+        self._mouse_drag_seam = _win32_drag_pointer
+        # wh-voice-access-parity.2.3: the SendInput seam for the spoken scroll
+        # commands. Same injection reason as the three pointer seams above,
+        # though the wheel is not a grid action and is not gated by the
+        # voice-clicking config (see ``scroll_wheel``).
+        self._mouse_scroll_seam = _win32_scroll_wheel
+        # wh-voice-access-parity.2.3.3: the one continuous scroll this process
+        # may have running. It turns the wheel through ``_turn_the_wheel``
+        # rather than through the seam directly, so it reads
+        # ``_mouse_scroll_seam`` at call time -- a test that injects a fake
+        # seam is then not silently bypassed by the continuous commands.
+        # The shutdown signal goes with it: the timer thread outlives the
+        # command that started it, so it is the one part of this class that
+        # has to notice the process closing on its own
+        # (wh-voice-access-parity.2.3.3.2.10).
+        self._continuous_scroller = ContinuousScroller(
+            self._turn_the_wheel, shutdown_event=shutdown_event,
+        )
+
+        # wh-review-pattern-fixes.45: the one selection target the AI
+        # correction flow captured, held as (token, CapturedTarget).
+        # ``capture_selected_text`` writes it and returns the token to
+        # the Logic process; ``replace_selected_text`` requires the same
+        # token back and then clears the slot. One slot is enough
+        # because the Logic side holds ``AIService._processing_lock``
+        # across the whole capture-model-replace sequence, so only one
+        # transform can be in flight. A second capture overwrites the
+        # slot, which invalidates the older token -- the correct result,
+        # because the older capture no longer describes the screen.
+        self._captured_selection_target: Optional[
+            tuple[str, CapturedTarget]
+        ] = None
+
+        # wh-review-pattern-fixes.45: True when the last
+        # ``_execute_insert_with_ack`` call refused to route because the
+        # captured target had lost the foreground. ``transform_selection``
+        # reads it to speak the specific reason instead of the generic
+        # paste-failure message.
+        self.last_insert_refused_for_focus_drift = False
+
         # Initialize all specialist components
         self.text_perfector = TextPerfector()
         self.clipboard = ClipboardOperations(config)
-        self.window_manager = WindowFocusManager()
+        # wh-ensure-focused-same-process-fallback: the focus manager needs
+        # the same merged browser set the foreground checks use, so its
+        # ensure_focused same-process fallback stays scoped to the
+        # [ui_actions.foreground_check].same_process_browser_names list.
+        # Resolved once here; VerifiedUnicodeStrategy below reuses it.
+        same_process_names = resolve_same_process_browser_names(config)
+        self.window_manager = WindowFocusManager(
+            same_process_browser_names=same_process_names,
+        )
         self.selection_transformer = SelectionTransformer()
         self.utterance_manager = UtteranceClipboardManager(
             timeout_seconds=config.get("ui_actions", {})
@@ -529,8 +935,9 @@ class UIActionHandler:
         # resolved frozenset to the strategy so its construction uses
         # the same merged set the verified_paste post-paste check uses
         # (ClipboardOperations resolves the same key in its own
-        # __init__ from the same config dict).
-        same_process_names = resolve_same_process_browser_names(config)
+        # __init__ from the same config dict). The set itself was
+        # resolved once next to the WindowFocusManager construction
+        # above (wh-ensure-focused-same-process-fallback).
         self.verified_unicode_strategy = VerifiedUnicodeStrategy(
             self.buffer_manager,
             self.text_perfector,
@@ -581,6 +988,13 @@ class UIActionHandler:
 
         # Letter buffer for auto-compression of spelled letters
         self._letter_buffer: list[str] = []
+
+        # wh-paste-when-unverified.2: whether the most recent insertion
+        # attempt was refused before the send (a rejection) rather than
+        # failing some other way. end_utterance reads it to pick the log
+        # level for a failed final letter-buffer flush -- see the
+        # comment there for why the level matters.
+        self._last_insert_was_rejected: bool = False
 
         # Retraction state (reset per utterance)
         self._user_interacted_during_utterance: bool = False
@@ -773,8 +1187,32 @@ class UIActionHandler:
         Args:
             utterance_id: The ID of the utterance ending (optional)
         """
-        # Flush any buffered letters with compression before ending utterance
-        self._flush_letter_buffer()
+        # Flush any buffered letters with compression before ending utterance.
+        # wh-review-pattern-fixes.23: end_utterance never receives a
+        # request_id (it is not in _HANDLES_OWN_RESPONSE; the generic
+        # dispatcher owns its response), so the log is its existing
+        # failure channel. A failed final flush must not vanish, and it
+        # must not abort the clipboard-restore cleanup below either --
+        # continue after logging.
+        #
+        # wh-paste-when-unverified.2: the level depends on WHY nothing
+        # was delivered. An ERROR record IS a Windows notification --
+        # ErrorNotificationHandler (utils/error_notifier.py) is a
+        # logging handler at ERROR level that utils/logging_setup.py
+        # attaches to the root logger -- so a deliberate pre-send
+        # refusal must log at WARNING. Every other failure keeps ERROR.
+        if not self._flush_letter_buffer():
+            if self._last_insert_was_rejected:
+                logger.warning(
+                    "end_utterance: final letter-buffer flush was "
+                    "refused before the send; the buffered letters "
+                    "were not delivered."
+                )
+            else:
+                logger.error(
+                    "end_utterance: final letter-buffer flush failed; the "
+                    "buffered letters were not delivered."
+                )
 
         # Skip clipboard restore when a submit is still pasting.
         # Clipboard operations (win32clipboard) on the main thread race with
@@ -822,6 +1260,16 @@ class UIActionHandler:
         """Retract pasted text by sending backspaces.
 
         Checks safety gates before retracting (wh-t81d9.1):
+        0. Nothing pasted and no buffered letters -> block
+           (nothing_to_retract) BEFORE every other gate
+           (wh-click-number-dictation). The gates below protect the
+           backspace side effect; with zero pasted characters there is no
+           side effect, and they can misfire on stale state from a
+           PREVIOUS utterance -- the live case was a command-buffered
+           utterance (nothing typed) whose remembered paste target came
+           from an earlier utterance while the foreground had legitimately
+           changed, so retract answered focus_drifted and SpeechProcessor
+           dropped the corrected final instead of replaying it.
         1. User interaction during utterance -> block (user_interacted)
         2. SimplePaste strategy was used -> block (simple_paste)
         3. Optimistic paste under clipboard contention -> block
@@ -829,7 +1277,9 @@ class UIActionHandler:
         4. Remembered target HWND no longer foreground -> block
            (focus_drifted).
         5. Nothing pasted and no buffered letters -> block
-           (nothing_to_retract).
+           (nothing_to_retract). Kept as the in-order fallback for the
+           counter the Qt branch below selects; gate 0 already caught the
+           both-counters-zero case.
         6. Grapheme-unsafe paste against a Qt-backed target -> block
            (qt_grapheme_unsafe).
         7. Buffered letters but no paste -> drop letter buffer, report
@@ -848,6 +1298,14 @@ class UIActionHandler:
             'reason' (explanation), and optionally 'chars' (count
             retracted) or 'chars_sent' (partial-delivery count).
         """
+        if (
+            self.clipboard.accumulated_paste_chars == 0
+            and self.clipboard.accumulated_paste_clusters == 0
+            and not self._letter_buffer
+        ):
+            logger.info("Retraction blocked: no characters pasted")
+            return {"status": "not_retracted", "reason": "nothing_to_retract"}
+
         if self._user_interacted_during_utterance:
             logger.info("Retraction blocked: user interacted during utterance")
             return {"status": "not_retracted", "reason": "user_interacted"}
@@ -1001,6 +1459,11 @@ class UIActionHandler:
         # editor's content was actually deleted, so refuse to claim
         # success (wh-t81d9.1).
         logger.info(f"Retracting {char_count} characters via backspaces")
+        # wh-review-pattern-fixes.8: invalidate before the backspace
+        # dispatch (was after it), so the partial_send outcome below also
+        # leaves the buffer invalid -- an unknown number of backspaces
+        # landed (see the hotkey_action block comment for the rationale).
+        self.buffer_manager.invalidate()
         delivered = send_backspaces(char_count)
         if not delivered:
             logger.error(
@@ -1014,7 +1477,6 @@ class UIActionHandler:
             }
 
         self.clipboard.reset_paste_counter()
-        self.buffer_manager.invalidate()
         # Drop any pending letter buffer so end_utterance does not flush
         # stale letters on top of the replayed final (wh-j3mgc).
         if had_buffered_letters:
@@ -1030,34 +1492,57 @@ class UIActionHandler:
         """Check if text is a single alphabetic letter."""
         return len(text) == 1 and text.isalpha()
 
-    def _flush_letter_buffer(self):
+    def _flush_letter_buffer(self) -> bool:
         """Flush buffered letters with auto-compression applied.
-        
+
         If buffer has 3+ letters, compresses them to a single word.
         Otherwise, outputs letters as-is separated by spaces.
+
+        Returns the delivery outcome (wh-review-pattern-fixes.23): True
+        when nothing was buffered or the direct insert delivered the
+        compressed text; False when delivery failed. On failure the
+        letters are NOT re-buffered and the flush is NOT replayed -- a
+        False strategy result can mean partial delivery, so a blind
+        replay could double-insert. Instead the shadow buffer is
+        invalidated (the conservative-state model from the
+        ClipboardOnly branch in _execute_insert_with_ack) so the next
+        compose re-syncs via UIA, and the caller decides how to
+        surface the failure.
         """
         if not self._letter_buffer:
-            return
-        
+            return True
+
         # Join letters with spaces and apply compression
         buffered_text = " ".join(self._letter_buffer)
         compressed_text = auto_compress_spelled_letters(buffered_text)
-        
+
         logger.info(f"[LETTER_BUFFER] Flushing: '{redact_transcript(buffered_text)}' -> '{redact_transcript(compressed_text)}'")
-        
+
         # Clear buffer before inserting to prevent recursion
         self._letter_buffer.clear()
-        
-        # Insert the compressed text directly (bypass buffering logic)
-        self._do_direct_insert(compressed_text, request_id=None)
 
-    def _do_direct_insert(self, text: str, request_id: Optional[str] = None):
-        """Insert text directly without letter buffering."""
+        # Insert the compressed text directly (bypass buffering logic)
+        delivered = self._do_direct_insert(compressed_text, request_id=None)
+        if not delivered:
+            logger.warning(
+                "[LETTER_BUFFER] Flush delivery failed; buffered letters "
+                "were not (or only partially) delivered."
+            )
+            self.buffer_manager.invalidate()
+        return delivered
+
+    def _do_direct_insert(self, text: str, request_id: Optional[str] = None) -> bool:
+        """Insert text directly without letter buffering.
+
+        Returns the delivery outcome from _execute_insert_with_ack
+        (wh-review-pattern-fixes.23): True only when the strategy
+        delivered the text.
+        """
         if self.utterance_manager.is_in_utterance():
-            self._execute_insert_with_ack(text, request_id)
+            return self._execute_insert_with_ack(text, request_id)
         else:
             with clipboard_context(restore_delay=0.05):
-                self._execute_insert_with_ack(text, request_id)
+                return self._execute_insert_with_ack(text, request_id)
 
     # ========================================================================
     # PUBLIC API - Main Text Insertion
@@ -1068,8 +1553,10 @@ class UIActionHandler:
         insertion_string: str,
         request_id: Optional[str] = None,
         target_hwnd: Optional[int] = None,
+        *,
+        defer_single_letter: bool = True,
         **kwargs,
-    ):
+    ) -> bool:
         """Acts as a dispatcher for dictation, routing to appropriate handler.
 
         Decision Flow (order matters!):
@@ -1091,10 +1578,45 @@ class UIActionHandler:
                 ``focus_confirmed`` ack could race a user click back to
                 the terminal and the drained words would land in the
                 shell prompt.
+            defer_single_letter: When True (default), a single
+                alphabetic letter is appended to the letter buffer for
+                deferred delivery and this call returns True without
+                touching the screen -- the deliberate design for
+                ordinary dictation (wh-review-pattern-fixes.11). When
+                False, a single letter skips the letter-buffer branch
+                and takes the normal flush-then-strategy path: any
+                pending buffered letters flush first (preserving
+                dictation order), then the letter goes through a real
+                insertion strategy, which owns the Schema A response.
+                wrap_or_insert's Priority 2 empty-delimiter call passes
+                False (wh-review-pattern-fixes.16): buffering a
+                single-letter delimiter would insert nothing physically,
+                return True, and let the caller's left-arrow press shift
+                the caret before the deferred flush lands the letter.
+
+        Returns:
+            The delivery outcome (wh-review-pattern-fixes.11). True means
+            the chosen strategy delivered the text. False means nothing
+            landed: a strategy failure, a handled insertion exception, a
+            foreground-mismatch refusal, or a pre-send rejection
+            (RejectedInsertionStrategy resolves the Future as a success,
+            but it delivers no text). Callers that chain a dependent
+            action on the inserted text (wrap_or_insert's caret move)
+            must gate on this value. The buffered single-letter path
+            returns True: the letter is accepted for deferred delivery
+            and the emitted response already reports success.
+            wh-review-pattern-fixes.23: a failed letter-buffer flush
+            also returns False -- the buffered letters did not land, so
+            the current insertion is skipped (order preservation) and
+            the request_id gets a Schema A error.
         """
         # LETTER BUFFERING: Buffer single letters for auto-compression
-        # When we see a non-single-letter word, flush buffer first
-        if self._is_single_letter(insertion_string):
+        # When we see a non-single-letter word, flush buffer first.
+        # wh-review-pattern-fixes.16: defer_single_letter=False skips the
+        # buffering branch so the letter falls through to the else arm
+        # below -- which flushes any pending buffered letters first and
+        # then routes the letter through a real insertion strategy.
+        if defer_single_letter and self._is_single_letter(insertion_string):
             self._letter_buffer.append(insertion_string)
             logger.debug(f"[LETTER_BUFFER] Buffered letter: '{redact_transcript(insertion_string)}', buffer now: {len(self._letter_buffer)} letters")
             # Single letters defer the actual paste until the buffer flushes,
@@ -1105,11 +1627,34 @@ class UIActionHandler:
                 "intelligent_insert_text",
                 ResponseHandler.PATH_HEURISTIC_DONE,
             )
-            return
+            return True
         else:
             # Non-single-letter word: flush any buffered letters first
             if self._letter_buffer:
-                self._flush_letter_buffer()
+                if not self._flush_letter_buffer():
+                    # wh-review-pattern-fixes.23: the buffered letters
+                    # did not land. Skip the current insertion instead
+                    # of writing it after the lost letters -- delivering
+                    # the word now would put out-of-order text on
+                    # screen, which no later replay can repair. A clean
+                    # failure leaves the target unchanged (beyond any
+                    # partial flush delivery, which the flush already
+                    # marked by invalidating the shadow buffer) so the
+                    # caller can replay the corrected final. Emit the
+                    # single Schema A error this request_id is owed
+                    # (no-op when request_id is None, e.g.
+                    # wrap_or_insert Priority 2, which owns its own
+                    # response and gates on the False return).
+                    logger.warning(
+                        "intelligent_insert_text: letter-buffer flush "
+                        "failed; skipping insertion of the current text."
+                    )
+                    self.response.send_error(
+                        request_id,
+                        "intelligent_insert_text",
+                        "letter buffer flush failed; insertion skipped",
+                    )
+                    return False
 
         # wh-pkhrp.3.10: TOCTOU narrowing. If the caller pinned the
         # expected target HWND (Phase 3 redirect drain), verify the
@@ -1132,7 +1677,7 @@ class UIActionHandler:
                     "intelligent_insert_text",
                     "foreground_mismatch",
                 )
-                return
+                return False
 
         # wh-4z4g9: dirty tracking moved to _execute_insert_with_ack so it
         # only fires when the chosen strategy actually wrote the system
@@ -1141,10 +1686,12 @@ class UIActionHandler:
         # a Unicode-only utterance that never touched the clipboard.
 
         if self.utterance_manager.is_in_utterance():
-            self._execute_insert_with_ack(insertion_string, request_id)
+            return self._execute_insert_with_ack(insertion_string, request_id)
         else:
             with clipboard_context(restore_delay=0.05):
-                self._execute_insert_with_ack(insertion_string, request_id)
+                return self._execute_insert_with_ack(
+                    insertion_string, request_id
+                )
 
     def _foreground_matches_target(self, target_hwnd: int) -> bool:
         """Return True when the foreground HWND matches ``target_hwnd``.
@@ -1196,8 +1743,64 @@ class UIActionHandler:
         strategy. ``action_name`` lets callers like ``verbatim_insert_text``
         emit a Schema A response that the demuxer / pipeline tracing can
         attribute correctly.
+
+        Returns the delivery outcome (wh-review-pattern-fixes.11): True
+        only when the strategy delivered the text. A pre-send rejection
+        emits a Schema A success (PATH_INSERT_REJECTED, wh-zndq) but
+        delivers nothing, so it returns False, as do strategy failures
+        and handled exceptions.
+
+        wh-review-pattern-fixes.45: when ``options`` carries a captured
+        target, this method proves that target still holds the
+        foreground BEFORE it captures a fresh context. Without the
+        proof, a selection copied from control A and transformed here
+        would route against whatever control the fresh capture returned,
+        and the transformation would replace a selection in a different
+        window. Ordinary dictation supplies no captured target and is
+        unaffected.
         """
+        self.last_insert_refused_for_focus_drift = False
+        # wh-paste-when-unverified.2: cleared per attempt so a refusal
+        # recorded below cannot leak into the next insertion, nor into
+        # an attempt that ends in the focus-drift refusal or the
+        # exception handler (neither of which reads a result).
+        self._last_insert_was_rejected = False
         try:
+            # wh-review-pattern-fixes.45: prove the captured target
+            # first. The proof activates the captured window, focuses
+            # the captured control, and then compares the foreground
+            # against the captured HWND. It is the same proof
+            # verified_paste and VerifiedUnicodeStrategy run before
+            # their own sends (wh-review-pattern-fixes.41), so there is
+            # one comparison in the code, not three.
+            captured_control = (
+                options.captured_target_control if options else None
+            )
+            captured_hwnd = (
+                options.captured_target_hwnd if options else None
+            )
+            if captured_control is not None or captured_hwnd is not None:
+                if not self.clipboard.prove_captured_target_is_foreground(
+                    self.window_manager,
+                    captured_hwnd,
+                    captured_control,
+                    caller=action_name,
+                ):
+                    self.last_insert_refused_for_focus_drift = True
+                    logger.error(
+                        "%s: the captured selection target "
+                        "(hwnd=%s) no longer holds the foreground; "
+                        "refusing to insert.",
+                        action_name, captured_hwnd,
+                    )
+                    self.response.send_error(
+                        request_id,
+                        action_name,
+                        "captured target lost the foreground; "
+                        "nothing was inserted",
+                    )
+                    return False
+
             # Capture Context
             context = capture_context()
 
@@ -1271,6 +1874,36 @@ class UIActionHandler:
                 # the invalidation here so the next compose re-syncs
                 # via UIA before any TextPerfector pass.
                 self.buffer_manager.invalidate()
+            elif isinstance(strategy, RejectedInsertionStrategy):
+                # wh-paste-when-unverified.3.4: a rejected insert
+                # delivered NOTHING, and that is exactly why the
+                # retraction gate has to close. The remembered window
+                # moved to the newly focused control a few lines above
+                # this, BEFORE the routing decision, so by now it names
+                # a window this insert never wrote to. The retraction's
+                # own focus check compares the remembered window against
+                # the foreground and would therefore pass, and the
+                # backspaces would delete text the program did not
+                # write -- characters credited in the PREVIOUS window
+                # are still on the counter. Blocking the retraction
+                # costs a correction spoken after a rejected insert; a
+                # rejected insert put nothing on screen for that
+                # correction to walk back.
+                #
+                # Deliberately set for EVERY RejectedInsertionStrategy,
+                # not only the empty-identity silent drop: the elevated-
+                # window refusal returns the same object and carries the
+                # same hazard. No buffer_manager.invalidate() here --
+                # nothing was written, so the shadow buffer's mirror of
+                # the target is still whatever it was.
+                self._used_simple_paste = True
+
+            # wh-paste-when-unverified.2: record WHY this insertion did
+            # not deliver, at the one place the handler reads the
+            # result. A pre-send refusal is a deliberate no-op; every
+            # other non-delivery is a fault. end_utterance needs the
+            # difference to pick its log level.
+            self._last_insert_was_rejected = result.was_rejected
 
             if result.success:
                 # wh-zndq: a pre-send rejection (RejectedInsertionStrategy)
@@ -1308,7 +1941,10 @@ class UIActionHandler:
                     action_name,
                     "strategy returned False",
                 )
-            return result.success
+            # wh-review-pattern-fixes.11: report delivery, not the Schema A
+            # status. A rejected result has success=True (the Future
+            # resolves cleanly) but no text landed.
+            return result.success and not result.was_rejected
 
         except Exception as e:
             logger.error(f"Error in {action_name}: {e}", exc_info=True)
@@ -1325,6 +1961,7 @@ class UIActionHandler:
         self,
         text: str,
         request_id: Optional[str] = None,
+        captured_target: Optional[CapturedTarget] = None,
     ) -> bool:
         """Insert ``text`` verbatim through the strategy router (wh-iti5).
 
@@ -1348,15 +1985,35 @@ class UIActionHandler:
         ``mark_clipboard_dirty()`` runs as a safety net so
         ``end_utterance`` restores even if a synchronous restore racy.
 
-        Returns the strategy's success bool. When ``request_id`` is not
+        Returns the delivery outcome (wh-review-pattern-fixes.11): True
+        only when the strategy delivered the text. A pre-send rejection
+        returns False even though its Schema A response is a success,
+        so ``transform_selection`` reports a paste failure instead of a
+        false "Successfully transformed". When ``request_id`` is not
         None, also emits a Schema A response so the caller's Future
         resolves; pass ``None`` to suppress emission when the caller
         owns its own response.
+
+        wh-review-pattern-fixes.45: ``captured_target`` names the
+        control the caller copied the selection from. Both selection
+        callers pass it. ``_execute_insert_with_ack`` proves it holds
+        the foreground before it routes, and ``SimplePasteStrategy``
+        forwards it to ``verified_paste`` for the second proof
+        immediately before Ctrl+V. Leave it None only when there is no
+        captured source control to compare against.
         """
         return self._execute_insert_with_ack(
             text,
             request_id,
-            options=InsertionOptions(mode=InsertionMode.VERBATIM),
+            options=InsertionOptions(
+                mode=InsertionMode.VERBATIM,
+                captured_target_control=(
+                    captured_target.control if captured_target else None
+                ),
+                captured_target_hwnd=(
+                    captured_target.hwnd if captured_target else None
+                ),
+            ),
             action_name="verbatim_insert_text",
         )
 
@@ -1387,10 +2044,47 @@ class UIActionHandler:
         try:
             # Capture Context for Flutter detection
             context = capture_context()
+            _stop_command_on_failed_focus_read(context, "transform_selection")
             focused_control = context.focused_control
             is_flutter = context.is_flutter
-            
+            # wh-review-pattern-fixes.45: record the control the
+            # selection is about to be copied from, and the top-level
+            # window it belongs to. The paste-back below travels through
+            # verbatim_insert_text, which captures a FRESH context and
+            # routes against whatever control that returns. Without this
+            # pair the transformed text lands in whatever window holds
+            # the foreground when the paste fires.
+            captured_target = CapturedTarget(
+                control=focused_control,
+                hwnd=_captured_hwnd_from_control(focused_control),
+            )
+
             with clipboard_context(restore_delay=0.05):
+                # wh-review-pattern-fixes.25 (sibling of the
+                # wrap_or_insert selection branch): a single letter
+                # deferred earlier in this utterance can still sit in
+                # _letter_buffer. This method copies and replaces the
+                # selection through verbatim_insert_text, which never
+                # flushes the buffer, so the transform would mutate a
+                # selection the letter should already have replaced.
+                # Flush BEFORE the sentinel write and the Ctrl+C copy.
+                # After a delivered flush the letter has consumed the
+                # selection, so the sentinel poll below finds no
+                # selection and returns without a transform -- the
+                # natural re-evaluation.
+                if self._letter_buffer:
+                    if not self._flush_letter_buffer():
+                        # Fail closed (finding .23 design): do not copy
+                        # or mutate the selection; the finally block
+                        # emits the one failure response.
+                        message = (
+                            "Letter buffer flush failed; selection not "
+                            "touched"
+                        )
+                        logger.warning(f"transform_selection: {message}")
+                        success = False
+                        return
+
                 # wh-r7al.2: this branch writes the system clipboard
                 # (sentinel below, then verified_paste after the
                 # transformation). The inner clipboard_context restores
@@ -1428,7 +2122,31 @@ class UIActionHandler:
                 if is_flutter and focused_control and focused_control.Exists(0, 0):
                     focused_control.SendKeys('{Ctrl}c')
                 else:
-                    press_keys('ctrl', 'c')
+                    # wh-review-pattern-fixes.35: the copy must be
+                    # verified. press_keys discards the SendInput
+                    # count, and an undelivered Ctrl+C leaves the
+                    # sentinel unchanged -- indistinguishable from a
+                    # genuine empty selection, so the method would
+                    # report the false result "No text selected". Fail
+                    # closed on a short delivery: release a
+                    # possibly-held Ctrl (down accepted, up dropped --
+                    # wh-eolas.2.5 shape) and report a copy failure.
+                    ok, accepted, expected = verified_press_keys(
+                        'ctrl', 'c'
+                    )
+                    if not ok:
+                        _send_modifier_keyups(('ctrl',))
+                        message = (
+                            "Copy shortcut delivery failed; selection "
+                            "not touched"
+                        )
+                        logger.error(
+                            "transform_selection: Ctrl+C SendInput "
+                            "short delivery (sent %d/%d); %s.",
+                            accepted, expected, message,
+                        )
+                        success = False
+                        return
 
                 # Poll clipboard until it changes from sentinel (or timeout)
                 start_time = time.time()
@@ -1469,13 +2187,26 @@ class UIActionHandler:
                 # so verbatim_insert_text suppresses its Schema A emission;
                 # transform_selection emits its own legacy-format response
                 # below.
+                # wh-review-pattern-fixes.45: carry the capture-time
+                # control and window so the paste-back can only land in
+                # the field the selection came from.
                 success = self.verbatim_insert_text(
                     transformed_text, request_id=None,
+                    captured_target=captured_target,
                 )
 
                 if success:
                     message = f"Successfully transformed selection with {transformation_type}"
                     logger.info(message)
+                elif self.last_insert_refused_for_focus_drift:
+                    # wh-review-pattern-fixes.45: name the real reason.
+                    # Nothing was sent, so the user's selection is still
+                    # on screen and their text is unchanged.
+                    message = (
+                        "The window changed after the copy; the "
+                        "selection was not transformed"
+                    )
+                    logger.error(message)
                 else:
                     message = "Failed to paste transformed text"
                     logger.error(message)
@@ -1522,9 +2253,10 @@ class UIActionHandler:
         try:
             # Capture Context for Flutter detection
             context = capture_context()
+            _stop_command_on_failed_focus_read(context, "wrap_or_insert")
             focused_control = context.focused_control
             is_flutter = context.is_flutter
-            
+
             with clipboard_context(restore_delay=0.05):
                 # If no captured text AND no recent paste activity, check for selection
                 # (User said "quote" without text, may have selected text manually)
@@ -1533,7 +2265,40 @@ class UIActionHandler:
                 time_since_last_paste = time.time() - self.utterance_manager._last_paste_time
                 check_selection = not text_stripped and time_since_last_paste > 5.0
                 logger.info(f"[WRAP_CHECK] text_stripped={bool(text_stripped)}, time_since_last_paste={time_since_last_paste:.1f}s, check_selection={check_selection}")
-                
+
+                # wh-review-pattern-fixes.25: a single letter deferred
+                # earlier in this utterance can still sit in
+                # _letter_buffer (the router classifies it as DICTATE
+                # and intelligent_insert_text buffers it). The selection
+                # branch below copies and replaces the selection through
+                # verbatim_insert_text, which never flushes the buffer,
+                # so the wrap would land AHEAD of the earlier letter and
+                # wrap a selection the letter should already have
+                # replaced. Flush BEFORE any selection capture. The
+                # other branches flush inside intelligent_insert_text.
+                if check_selection and self._letter_buffer:
+                    if not self._flush_letter_buffer():
+                        # Fail closed (finding .23 design): the letters
+                        # did not land and must not be replayed blind.
+                        # Do not copy or mutate the selection, leave the
+                        # caret alone, emit the one Schema A error this
+                        # request_id is owed.
+                        logger.warning(
+                            "wrap_or_insert: letter-buffer flush failed "
+                            "before selection capture; selection not "
+                            "touched."
+                        )
+                        self.response.send_error(
+                            request_id,
+                            "wrap_or_insert",
+                            "letter buffer flush failed; selection not touched",
+                        )
+                        return
+                    # The delivered flush letter replaced the selection,
+                    # so the correct branch is now the empty-delimiter
+                    # insertion path (Priority 2), not the wrap.
+                    check_selection = False
+
                 if check_selection:
                     # wh-r7al.2: this branch writes the system clipboard
                     # via Ctrl+C (selection capture) and verified_paste
@@ -1548,29 +2313,93 @@ class UIActionHandler:
                     # safety net.
                     self.utterance_manager.mark_clipboard_dirty()
 
-                    # Save original clipboard
-                    original_clipboard = pyperclip.paste()
+                    # wh-review-pattern-fixes.31: probe with a unique
+                    # sentinel (the pattern transform_selection and
+                    # capture_selected_text already use), NOT a
+                    # comparison against the pre-copy clipboard value.
+                    # When the selected text equals the current
+                    # clipboard content, a successful Ctrl+C changes
+                    # nothing; the original-value comparison then timed
+                    # out, concluded "no selection", and Priority 2
+                    # inserted empty fences OVER the still-active
+                    # selection. The sentinel is unique per call, so a
+                    # successful copy always changes the polled value.
+                    sentinel = f"__SENTINEL__{time.time()}"
+                    if not self.clipboard._safe_copy(sentinel):
+                        # Fail closed: without the sentinel the probe
+                        # cannot distinguish selection from
+                        # no-selection, and falling through would
+                        # insert empty fences over a possibly-active
+                        # selection -- the exact data loss this branch
+                        # exists to avoid.
+                        logger.error(
+                            "wrap_or_insert: clipboard sentinel write "
+                            "failed; selection state unknown, nothing "
+                            "touched."
+                        )
+                        self.response.send_error(
+                            request_id,
+                            "wrap_or_insert",
+                            "could not write clipboard sentinel; "
+                            "selection not touched",
+                        )
+                        return
+                    # Forward the sentinel's seq so the deferred-restore
+                    # ownership baseline reflects the latest WheelHouse
+                    # write (same as transform_selection, wh-fz7j.4).
+                    self.utterance_manager.mark_clipboard_dirty(
+                        write_seq=self.clipboard.last_clipboard_write_seq
+                    )
 
                     # Send Ctrl+C to copy any selection
                     if is_flutter and focused_control and focused_control.Exists(0, 0):
                         focused_control.SendKeys('{Ctrl}c')
                     else:
-                        press_keys('ctrl', 'c')
-                    
-                    # Poll clipboard to see if it changed
+                        # wh-review-pattern-fixes.35: verified copy.
+                        # An undelivered Ctrl+C leaves the sentinel
+                        # unchanged, the poll times out, and Priority 2
+                        # inserts empty fences OVER the still-active
+                        # selection -- the exact data loss this branch
+                        # exists to avoid. Fail closed on a short
+                        # delivery: release a possibly-held Ctrl and
+                        # emit the one Schema A error this request_id
+                        # is owed (same shape as the sentinel-write
+                        # failure above).
+                        ok, accepted, expected = verified_press_keys(
+                            'ctrl', 'c'
+                        )
+                        if not ok:
+                            _send_modifier_keyups(('ctrl',))
+                            logger.error(
+                                "wrap_or_insert: Ctrl+C SendInput "
+                                "short delivery (sent %d/%d); "
+                                "selection state unknown, nothing "
+                                "touched.",
+                                accepted, expected,
+                            )
+                            self.response.send_error(
+                                request_id,
+                                "wrap_or_insert",
+                                "copy shortcut delivery failed; "
+                                "selection not touched",
+                            )
+                            return
+
+                    # Poll clipboard until it changes from the sentinel
+                    # (or timeout -> no selection)
                     start_time = time.time()
                     timeout = self.clipboard.clipboard_verification_timeout
-                    current_clipboard = original_clipboard
+                    current_clipboard = sentinel
                     poll_count = 0
-                    
-                    while current_clipboard == original_clipboard:
+
+                    while current_clipboard == sentinel:
                         time.sleep(0.005)  # 5ms polling interval
                         current_clipboard = pyperclip.paste()
                         poll_count += 1
                         if time.time() - start_time > timeout:
                             break  # Timeout - no selection detected
-                    
-                    if current_clipboard != original_clipboard:
+
+                    if current_clipboard != sentinel:
                         # Selection found - wrap it. wh-iti5: route through
                         # verbatim_insert_text so the strategy router
                         # handles delivery (terminal-editor IPC when the
@@ -1585,9 +2414,22 @@ class UIActionHandler:
                         # content instead of the wrapped selection.
                         # verbatim_insert_text emits the Schema A
                         # response; no extra emission needed here.
+                        #
+                        # wh-review-pattern-fixes.45: carry the control
+                        # the selection was copied from. Without it
+                        # verbatim_insert_text captures a fresh context
+                        # and wraps whatever the foreground window has
+                        # selected now, which is the same defect
+                        # transform_selection had.
                         logger.info(f"Wrapping selected text: '{redact_transcript(current_clipboard[:50])}'...")
                         wrapped = f"{left_fence}{current_clipboard}{right_fence}"
-                        self.verbatim_insert_text(wrapped, request_id)
+                        self.verbatim_insert_text(
+                            wrapped, request_id,
+                            captured_target=CapturedTarget(
+                                control=focused_control,
+                                hwnd=_captured_hwnd_from_control(focused_control),
+                            ),
+                        )
                         return
 
                 # Priority 1: If captured text exists, insert wrapped text
@@ -1606,11 +2448,75 @@ class UIActionHandler:
                 # resolve the caller's Future before we finish positioning
                 # the cursor. wrap_or_insert owns the response for this path
                 # and emits below (wh-d43oi).
-                self.intelligent_insert_text(empty_delimiters, request_id=None)
+                # wh-review-pattern-fixes.16: defer_single_letter=False --
+                # a manually authored pattern can make the concatenated
+                # fences a single alphabetic letter, and the letter-buffer
+                # branch would insert nothing physically, return True, and
+                # let the left-arrow press below shift the caret before
+                # the deferred flush lands the letter.
+                delivered = self.intelligent_insert_text(
+                    empty_delimiters, request_id=None,
+                    defer_single_letter=False,
+                )
 
-                # Move cursor left to position between delimiters
+                # wh-review-pattern-fixes.11: only move the caret and
+                # claim a verified insert when the nested insertion
+                # actually delivered the delimiters. On a strategy
+                # failure, a handled exception, or a pre-send rejection,
+                # no text landed -- a left-arrow press would move the
+                # user's existing caret and the verified success would
+                # be false.
+                # wh-review-pattern-fixes.23: delivered is also False
+                # when a preceding letter-buffer flush failed (the
+                # delimiters are then never attempted), so this gate
+                # covers the flush outcome too.
+                if not delivered:
+                    logger.warning(
+                        "wrap_or_insert: empty delimiter insertion was "
+                        "not delivered (insertion or preceding "
+                        "letter-buffer flush failed); caret not moved."
+                    )
+                    self.response.send_error(
+                        request_id,
+                        "wrap_or_insert",
+                        "empty delimiter insertion not delivered",
+                    )
+                    return
+
+                # Move cursor left to position between delimiters.
+                # wh-review-pattern-fixes.37: the press must be
+                # acknowledged. press_key_action sends through
+                # fire-and-forget press_keys, discards the SendInput
+                # count, catches every exception, and returns None, so
+                # a dropped Left produced delimiters on screen with the
+                # caret AFTER the closing delimiter while this path
+                # still reported PATH_INSERT_VERIFIED. The next
+                # dictated word then landed outside the delimiters
+                # although the voice feedback said the command
+                # completed. press_key_verified reports the SendInput
+                # outcome (wh-review-pattern-fixes.32 (c)).
                 time.sleep(0.05)  # Small delay to ensure text is inserted
-                self.press_key_action("left", repeat=1)
+                left_result = self.press_key_verified("left", repeat=1)
+
+                if not (left_result and left_result.get("success")):
+                    # The delimiters ARE on screen; only the caret move
+                    # failed. Report that specific partial outcome. No
+                    # rollback: a backspace over text the caret may no
+                    # longer sit behind would destroy the user's own
+                    # content, and the caret position is exactly what
+                    # this branch just failed to establish.
+                    logger.error(
+                        "wrap_or_insert: empty delimiters were inserted "
+                        "but the caret move was not acknowledged; the "
+                        "caret is not between them."
+                    )
+                    self.response.send_error(
+                        request_id,
+                        "wrap_or_insert",
+                        "delimiters inserted but the caret was not "
+                        "positioned between them",
+                    )
+                    return
 
                 self.response.send_success(
                     request_id,
@@ -1629,6 +2535,65 @@ class UIActionHandler:
     # ========================================================================
     # PUBLIC API - Low-Level Input
     # ========================================================================
+
+    def select_phrase(self, phrase: str, request_id: Optional[str] = None):
+        """Select the first match of a spoken phrase in the focused control.
+
+        wh-spoken-phrase-select.2. The user speaks words, and this method
+        selects the first place those words appear in the document. The
+        search runs inside the target application through UI Automation,
+        so the document text never crosses a process boundary.
+
+        The match is exact apart from letter case. See
+        ui/uia_phrase_select.py for why a tolerant match is not possible
+        in Word, and for the measured cost of the search and the select.
+
+        Five of the six outcomes leave the screen unchanged. Each one
+        shows the user a Windows notification, which a screen reader
+        announces. ui/phrase_select_notice.py holds the wording and the
+        reason for that choice (wh-spoken-phrase-select.3).
+
+        Args:
+            phrase: The words to find.
+            request_id: Present so the dispatcher can bind the call. This
+                method is not in _HANDLES_OWN_RESPONSE, so the generic
+                dispatcher sends the response.
+
+        Returns:
+            One of the PHRASE_ constants in ui/uia_phrase_select.py.
+        """
+        try:
+            # Read only the focused control, not the whole context.
+            # capture_context() also reads the class name, the process
+            # id and the top level window, which this command discards,
+            # and it logs an ERROR when one of them raises. Every ERROR
+            # record shows the user a notification box, so a select that
+            # succeeds could still show the user an error.
+            # wh-spoken-phrase-select.7.1.
+            focused_control = read_focused_control()
+            outcome, _matched = select_phrase_in_control(
+                focused_control, phrase
+            )
+        except Exception as e:
+            # The phrase never appears in this line. The words a person
+            # speaks are theirs (wh-797.17).
+            logger.warning(
+                "select_phrase failed before the search: %s", type(e).__name__
+            )
+            outcome = PHRASE_FAILED
+        else:
+            logger.info("select_phrase outcome: %s", outcome)
+
+        # The report never changes the answer. A broken notifier must
+        # not turn a select that worked into a select that failed.
+        try:
+            notify_outcome(outcome, phrase, get_notifier_worker())
+        except Exception as e:
+            logger.warning(
+                "select_phrase could not show the outcome: %s",
+                type(e).__name__,
+            )
+        return outcome
 
     def raw_insert_text(self, text: str, request_id: Optional[str] = None):
         """Insert raw text at cursor by routing through the strategy router.
@@ -1719,6 +2684,17 @@ class UIActionHandler:
             # Review wh-kox5.3: invalidate the shadow buffer; see the
             # _execute_insert_with_ack branch for the full reasoning.
             self.buffer_manager.invalidate()
+        elif isinstance(strategy, RejectedInsertionStrategy):
+            # wh-paste-when-unverified.3.4: same rationale as the
+            # _execute_insert_with_ack branch. This caller also
+            # remembers the newly focused window before it routes, so a
+            # rejected insert leaves the remembered window naming a
+            # window nothing was written to while the previous window's
+            # credited characters are still on the counter; retracting
+            # there would delete text the program did not write. No
+            # buffer_manager.invalidate() -- a rejected insert wrote
+            # nothing, so there is nothing to invalidate.
+            self._used_simple_paste = True
 
         if not result.success:
             raise PasteFailedError(
@@ -1735,14 +2711,223 @@ class UIActionHandler:
         Args:
             text: Text to type via SendInput
         """
-        try:
-            type_string(text)
-        except Exception as e:
-            logger.error(f"Error in type_text: {e}", exc_info=True)
+        # Review wh-review-pattern-fixes.5: the typed characters change
+        # the target text and move the caret, and the keyboard listener
+        # ignores WheelHouse's own synthetic input while an internal
+        # action runs (input_proc._should_emit_keyboard_invalidation
+        # returns False), so the action itself must invalidate. Placed
+        # before the dispatch, matching hotkey_action, so a partial
+        # typing failure still leaves the buffer invalidated.
+        self.buffer_manager.invalidate()
 
-    def terminal_editor_cancelled(self):
-        """Handle editor cancellation from GUI Process."""
-        self.terminal_editor.force_cleanup()
+        # Decided inside the try, acted on after it: see press_key_action.
+        refusal: Optional[str] = None
+        try:
+            ok, sent, error = type_string_verified(text, caller_notifies=True)
+            if not ok:
+                refusal = TYPING_REFUSED_MESSAGE.format(
+                    sent=sent, total=len(text)
+                )
+                # The typed text is never logged here, only the counts and
+                # the primitive's own short reason.
+                logger.warning(
+                    "type_text: typing stopped after %d of %d characters (%s)",
+                    sent, len(text), error,
+                )
+        except Exception as e:
+            # WARNING, not ERROR: see press_key_action.
+            logger.warning(f"Error in type_text: {e}", exc_info=True)
+            # ``len`` raises for a text value the primitive could not read
+            # either -- ``text=1`` passes the ``if not text`` guard above
+            # and reaches this arm -- and a raise here would carry the
+            # exception out of the method
+            # (wh-keyboard-refusal-notice.1.2). Zero is the honest total
+            # when the value has no length: nothing was typed.
+            try:
+                total = len(text)
+            except TypeError:
+                total = 0
+            refusal = TYPING_REFUSED_MESSAGE.format(sent=0, total=total)
+        if refusal is not None:
+            self._say_the_keyboard_refused(refusal, source="type text")
+
+    def terminal_editor_cancelled(self, request_id: str = ""):
+        """Handle editor cancellation from GUI Process.
+
+        wh-overlay-slow-uia-stale-badges.14.17: routed through the
+        session-fenced cleanup so a cancellation delivered late from an
+        older session cannot reset the current one.
+        """
+        self.terminal_editor.cancelled_by_gui(request_id)
+
+    def _settle_overlay_walk(
+        self,
+        finder,
+        foreground,
+        *,
+        walk_deadline: Optional[float],
+        compare_snapshot_id: str,
+        trace_id: str,
+    ):
+        """Read the window until it settles, then compare it with the held list.
+
+        Returns ``(walk, held_summary)``. ``held_summary`` is the stored
+        summary of ``compare_snapshot_id`` when the settled read matches it --
+        the caller reads "unchanged" from that being non-None -- and ``None``
+        every other time, including every failure.
+
+        The read callable performs a full ``overlay_walk`` each time rather
+        than a bare tree walk, because the comparison has to be made against
+        the SAME processed list the badges are drawn from: the browser DOM
+        fold, the owned-popup fold, the taskbar walk and the contiguous
+        renumber all run inside ``overlay_walk``, and a raw walk would differ
+        from the held snapshot on every read.
+
+        crewcut: two limits are accepted here, both removable later.
+        (1) Every read this makes is bounded by the ONE dequeue-anchored
+        screen-read deadline this request was given -- ``[click]
+        screen_read_timeout_ms`` minus the 250 ms pre-walk margin, 9750 ms at
+        the shipped default -- because all reads share that single deadline
+        rather than each getting its own. On a slow accessibility provider a
+        read can still exceed the bound and produce no list, which ends the
+        settle early: the answer is then the last read that DID complete,
+        unconfirmed by a matching pair. Removing this means giving each read
+        its own budget, which needs a second configured number and a rule for
+        how many reads the settle may spend.
+        (2) Each read stores its own snapshot, so a settle leaves two or three
+        extra UNPINNED entries in the finder's store (capacity 4, TTL 30 s).
+        They cannot displace the held snapshot, which is pinned and so immune
+        to LRU eviction, and the last insert protects itself. Removing this
+        means splitting ``overlay_walk`` into a walk half and a store half,
+        which is about 300 lines of shipped fold and renumber logic that three
+        other paths share; not worth it for entries the store already reclaims.
+        """
+
+        class _SettleWalkFailed(Exception):
+            """A read could not produce a list; abort the detector."""
+
+            def __init__(self, walk):
+                super().__init__("settle read failed")
+                self.walk = walk
+
+        last: list = []
+
+        def _read():
+            result = finder.overlay_walk(foreground, deadline=walk_deadline)
+            if result.snapshot is None:
+                # execution_failed: no list at all. The detector only catches
+                # stale-window errors, so anything else propagates -- which is
+                # exactly the abort this needs.
+                raise _SettleWalkFailed(result)
+            last.append(result)
+            return result.snapshot.matches
+
+        listener = settle_detector.StructureEventListener(
+            foreground.foreground_window
+        )
+        available = False
+        try:
+            available = listener.start()
+        except Exception:  # noqa: BLE001 - the listener is best-effort
+            logger.warning(
+                "start_overlay_walk: settle listener failed to start; "
+                "degrading to plain two matching reads (trace_id=%s)",
+                trace_id, exc_info=True,
+            )
+        settled = None
+        try:
+            settled = settle_detector.wait_for_settled_window(
+                _read,
+                events_between=(
+                    listener.any_event_between if available else None
+                ),
+            )
+        except _SettleWalkFailed as failed:
+            if not last:
+                # Nothing completed, so there is no list to paint and nothing
+                # to compare. Hand the failed result back and let the
+                # handler's existing execution_failed branch answer.
+                return failed.walk, None
+            # A later read produced no list, but an earlier one did. Answer
+            # with that one rather than with nothing: it is a post-click read,
+            # so it is no worse than the single walk this path replaced, and
+            # the comparison below still runs -- when it matches the held
+            # snapshot the answer is the numbers already on screen, which is
+            # the safest outcome available.
+            logger.info(
+                "start_overlay_walk: a settle read failed (%s) after %d "
+                "completed reads; answering with the last completed read "
+                "(trace_id=%s)",
+                failed.walk.reason, len(last), trace_id,
+            )
+        finally:
+            # stop() unconditionally, not only when start() reported
+            # success: a start that registered some handlers and then raised
+            # leaves live COM registrations, and stop() is a no-op when there
+            # is nothing to release.
+            try:
+                listener.stop()
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "start_overlay_walk: settle listener failed to stop "
+                    "(trace_id=%s)", trace_id, exc_info=True,
+                )
+
+        walk = last[-1]
+        if settled is not None:
+            logger.info(
+                "start_overlay_walk: settled=%s after %d reads "
+                "(%d voided pairs, %.0f ms, trace_id=%s)",
+                settled.settled, settled.read_count, settled.voided_pairs,
+                settled.elapsed_ms, trace_id,
+            )
+        if not compare_snapshot_id or walk.snapshot is None:
+            return walk, None
+        # wh-overlay-slow-uia-stale-badges.2.2.2: ask for the held list AS THE
+        # WINDOW THIS READ RAN AGAINST. ``signature_of`` compares control type
+        # id, accessible name and bounding rectangle and carries no window
+        # identity, so two windows with the same layout compare as "unchanged"
+        # -- a dialog closed and reopened is the ordinary way there. Answering
+        # with the held id would then paint the old window's badges over the
+        # new one, and the machine's unchanged branch repaints WITHOUT
+        # re-pinning, so nothing would rebind the list to the window on screen.
+        # ``get_snapshot`` drops the entry and returns None on an identity
+        # mismatch, which falls into the held-is-gone path just below and
+        # answers with the fresh read; Logic then unpins, pins the new list and
+        # paints it. The two other production consumers, show_numbered_overlay
+        # and click_snapshot_item, already pass these four fields.
+        held = finder.get_snapshot(
+            compare_snapshot_id,
+            current_foreground_window=foreground.foreground_window,
+            current_foreground_pid=foreground.foreground_pid,
+            current_foreground_process_name=(
+                foreground.foreground_process_name
+            ),
+            current_foreground_window_creation_time=(
+                foreground.foreground_window_creation_time
+            ),
+        )
+        if held is None:
+            # The held snapshot expired (TTL) or was unpinned and evicted
+            # while the window settled. There is nothing to compare against,
+            # so the fresh read is the answer.
+            logger.info(
+                "start_overlay_walk: the held snapshot %s is gone; "
+                "answering with the fresh read (trace_id=%s)",
+                compare_snapshot_id, trace_id,
+            )
+            return walk, None
+        if settle_detector.signature_of(
+            held.matches
+        ) != settle_detector.signature_of(walk.snapshot.matches):
+            return walk, None
+        held_summary = finder.get_summary(compare_snapshot_id)
+        if held_summary is None:
+            # The lists match but the summary is gone, so the id cannot be
+            # answered with. Fall back to the fresh read rather than send an
+            # id with no list behind it.
+            return walk, None
+        return walk, held_summary
 
     def start_overlay_walk(
         self,
@@ -1752,6 +2937,8 @@ class UIActionHandler:
         trace_id: str = "",
         request_id: Optional[str] = None,
         command_dequeue_monotonic: Optional[float] = None,
+        settle: bool = False,
+        compare_snapshot_id: str = "",
         **kwargs,
     ) -> None:
         """Walk the focused window from scratch for the numbered overlay (wh-n29v.37).
@@ -1774,6 +2961,18 @@ class UIActionHandler:
              ``paint_generation`` + ``trace_id`` so Logic can drop a superseded
              walk's response by generation.
 
+        ``settle=True`` (wh-overlay-slow-uia-stale-badges.2) changes step 3
+        only: instead of one walk, the window is read through
+        ``ui.settle_detector.wait_for_settled_window`` until two consecutive
+        reads agree, and the settled read is then compared against
+        ``compare_snapshot_id`` -- the snapshot Logic pinned before the click.
+        When the two comparison lists are equal the response carries THAT id
+        and THAT summary, which is how Logic learns to restore the numbers it
+        already had; when they differ the fresh snapshot is the answer, exactly
+        as for a plain walk. Ids are never reused (``walk-<uuid4 hex>-<n>``
+        with a per-run salt and a monotonic counter), so the held id in a
+        response can only mean "unchanged".
+
         The handler is in ``_HANDLES_OWN_RESPONSE`` so the generic emitter does
         not clobber the walk outcome. It NEVER raises: any unexpected error is
         mapped to a ``status="error"`` / ``outcome="error"`` response so the
@@ -1788,6 +2987,23 @@ class UIActionHandler:
         )
 
         action_name = "start_overlay_walk"
+
+        # wh-overlay-slow-uia-stale-badges.2.2.1: the reply names the window
+        # this handler ACTUALLY READ, so Logic can refuse to paint a list over
+        # a window it does not describe. Filled in from the ONE
+        # ``ForegroundContext`` captured below -- the same context every settle
+        # read walks against -- so it is the read's window, not whatever is in
+        # front when the reply is parsed. It starts at the same per-field
+        # sentinels ``_capture_click_foreground`` degrades to, which is what a
+        # short-circuit emitted BEFORE the capture (automation unavailable,
+        # overlay disabled) sends; a sentinel identity matches no real
+        # foreground, so Logic fails closed on it.
+        read_identity: dict = {
+            "foreground_window": 0,
+            "foreground_pid": 0,
+            "foreground_process_name": "",
+            "foreground_window_creation_time": 0,
+        }
 
         def _emit(response: "StartOverlayWalkResponse") -> None:
             payload = response.to_dict()
@@ -1817,6 +3033,7 @@ class UIActionHandler:
                 trace_id=trace_id,
                 overlay_session_id=overlay_session_id,
                 paint_generation=paint_generation,
+                **read_identity,
             )
 
         try:
@@ -1858,18 +3075,27 @@ class UIActionHandler:
             # pre-handler reader stall into the budget so the walk gives up
             # before the Logic walk_in_flight timeout rather than after it.
             # The fallback (a direct call with no anchor, e.g. a unit test) uses
-            # this handler's entry instant. walk_deadline_ms comes from the
-            # validated _click_config (set as a side effect of the finder build);
-            # None when no walk bound is configured (defensive -- finder is
-            # non-None here). overlay_walk already accepts deadline= and threads
-            # it into walk_window unchanged.
+            # this handler's entry instant. The bound is the SCREEN READ's own
+            # one, ClickConfig.screen_read_walk_deadline_ms -- [click]
+            # screen_read_timeout_ms minus the pre-walk margin, 9750 ms at the
+            # shipped default -- NOT walk_deadline_ms, which bounds the by-name
+            # click walk and is still validated strictly below the click reply
+            # limit (wh-overlay-slow-uia-stale-badges.3). Reading it here is
+            # what lets a read that answers correctly after 2500 ms be used
+            # instead of discarded. It comes from the validated _click_config
+            # (set as a side effect of the finder build); None when no bound is
+            # configured (defensive -- finder is non-None here). overlay_walk
+            # already accepts deadline= and threads it into walk_window
+            # unchanged.
             dequeue_monotonic = (
                 command_dequeue_monotonic
                 if command_dequeue_monotonic is not None
                 else time.monotonic()
             )
             walk_deadline_ms = getattr(
-                getattr(self, "_click_config", None), "walk_deadline_ms", None
+                getattr(self, "_click_config", None),
+                "screen_read_walk_deadline_ms",
+                None,
             )
             walk_deadline: Optional[float] = (
                 dequeue_monotonic + (walk_deadline_ms / 1000.0)
@@ -1878,13 +3104,39 @@ class UIActionHandler:
             )
 
             foreground = _capture_click_foreground()
-            logger.info(
-                "start_overlay_walk: walking focused window in process=%s "
-                "(session=%s gen=%s trace_id=%s)",
-                foreground.foreground_process_name,
-                overlay_session_id, paint_generation, trace_id,
+            # Record the window every read below runs against, so the reply
+            # carries it (wh-overlay-slow-uia-stale-badges.2.2.1). This is the
+            # ONE capture the settle loop reuses for every read, so it names
+            # the window the answer describes even when the foreground moves
+            # while the window settles.
+            read_identity.update(
+                foreground_window=foreground.foreground_window,
+                foreground_pid=foreground.foreground_pid,
+                foreground_process_name=foreground.foreground_process_name,
+                foreground_window_creation_time=(
+                    foreground.foreground_window_creation_time
+                ),
             )
-            walk = finder.overlay_walk(foreground, deadline=walk_deadline)
+            logger.info(
+                "start_overlay_walk: %s focused window in process=%s "
+                "(session=%s gen=%s settle=%s trace_id=%s)",
+                "settling" if settle else "walking",
+                foreground.foreground_process_name,
+                overlay_session_id, paint_generation, settle, trace_id,
+            )
+            unchanged = False
+            held_summary = None
+            if settle:
+                walk, held_summary = self._settle_overlay_walk(
+                    finder,
+                    foreground,
+                    walk_deadline=walk_deadline,
+                    compare_snapshot_id=compare_snapshot_id,
+                    trace_id=trace_id,
+                )
+                unchanged = held_summary is not None
+            else:
+                walk = finder.overlay_walk(foreground, deadline=walk_deadline)
 
             if walk.outcome == "execution_failed":
                 logger.info(
@@ -1900,6 +3152,20 @@ class UIActionHandler:
             snapshot_id = (
                 walk.snapshot.snapshot_id if walk.snapshot is not None else None
             )
+            summary = walk.summary
+            if unchanged:
+                # Nothing changed since the click. Answer with the HELD
+                # snapshot and its OWN summary: a summary names the snapshot
+                # it was projected from, and StartOverlayWalkResponse REFUSES
+                # a response whose snapshot_summary.snapshot_id differs from
+                # its top-level snapshot_id (shared/start_overlay_walk.py:266)
+                # because Logic keys the retained summary by the top-level id.
+                # The fresh walk's summary names the fresh snapshot, so that
+                # pairing would be rejected at the process boundary and the
+                # whole response lost. _settle_overlay_walk only reports
+                # unchanged when it has the held summary in hand.
+                snapshot_id = compare_snapshot_id
+                summary = held_summary
             if walk.outcome == "no_targets":
                 logger.info(
                     "start_overlay_walk: no_targets (trace_id=%s)", trace_id,
@@ -1909,31 +3175,43 @@ class UIActionHandler:
                     outcome="no_targets",
                     reason=None,
                     snapshot_id=snapshot_id,
-                    snapshot_summary=walk.summary,
+                    snapshot_summary=summary,
                     trace_id=trace_id,
                     overlay_session_id=overlay_session_id,
                     paint_generation=paint_generation,
+                    **read_identity,
                 ))
                 return
 
             # outcome == "ok".
-            item_count = (
-                len(walk.summary.items) if walk.summary is not None else 0
-            )
+            item_count = len(summary.items) if summary is not None else 0
             logger.info(
-                "start_overlay_walk: ok with %d items (snapshot=%s trace_id=%s)",
-                item_count, snapshot_id, trace_id,
+                "start_overlay_walk: ok with %d items (snapshot=%s "
+                "unchanged=%s trace_id=%s)",
+                item_count, snapshot_id, unchanged, trace_id,
             )
             _emit(StartOverlayWalkResponse(
                 status="ok",
                 outcome="ok",
                 reason=None,
                 snapshot_id=snapshot_id,
-                snapshot_summary=walk.summary,
+                snapshot_summary=summary,
                 trace_id=trace_id,
                 overlay_session_id=overlay_session_id,
                 paint_generation=paint_generation,
+                **read_identity,
             ))
+        except _TRANSIENT_WALK_ERRORS as exc:
+            # Known transient class (rebuilding window, e.g. a theme switch):
+            # a feature failure on the normal execution_failed path, logged at
+            # WARNING so no error notification pops for a self-healing blip.
+            logger.warning(
+                "start_overlay_walk: transient UIA/COM walk error, likely a "
+                "rebuilding window; mapping to execution_failed "
+                "(trace_id=%s): %r",
+                trace_id, exc,
+            )
+            _emit(_failed("execution_failed", "transient_com_error"))
         except Exception as exc:  # noqa: BLE001 -- contract: never raise
             logger.error(
                 "start_overlay_walk: unexpected error (trace_id=%s): %s",
@@ -2286,16 +3564,22 @@ class UIActionHandler:
         request_id: Optional[str] = None,
         **kwargs,
     ) -> None:
-        """Slide the Input store's TTL for the still-visible pinned snapshot.
+        """Slide the Input store's TTL for the still-RETAINED pinned snapshot.
 
         The Input side of the Logic-side 15-second overlay keepalive
         (wh-overlay-snapshot-keepalive). Logic sends this every keepalive tick
-        for the snapshot the overlay is currently showing; the handler slides
-        that snapshot's TTL anchor via
+        for the snapshot it still holds pinned; the handler slides that
+        snapshot's TTL anchor via
         :meth:`ElementFinder.refresh_snapshot_ttl` so a numbered overlay left on
         screen past the TTL stays clickable. Without it the Logic resolver cache
         and the Input store expire independently and "click N" fails with
         ``snapshot_expired`` on a still-visible overlay.
+
+        The badges are not always on screen when this arrives. Logic also sends
+        it while its overlay is PAUSED or POST_CLICK_SETTLING, which clear the
+        badges but keep the pin -- for a repaint on resume, or for the
+        post-click comparison. See ``_overlay_keepalive_states`` in main.py
+        (wh-overlay-slow-uia-stale-badges.13.6).
 
         Logic does NOT block on the ack, but the handler emits exactly one
         ``PinSnapshotResponse`` (reused as the small Schema-A ack) so the
@@ -2675,6 +3959,9 @@ class UIActionHandler:
         item_id: str = "",
         request_id: Optional[str] = None,
         trace_id: str = "",
+        gesture: str = "",
+        overlay_session_id: Any = None,
+        paint_generation: Any = None,
         **kwargs,
     ) -> None:
         """Click a numbered-overlay item by item_id (wh-tab7j / wh-jfavj).
@@ -2683,7 +3970,10 @@ class UIActionHandler:
         the user clicks a numbered overlay badge, Logic resolves the display
         number to an ``item_id`` from its retained ``WalkSnapshotSummary`` and
         forwards this request carrying ``snapshot_id`` + ``item_id``
-        (+ ``trace_id`` + ``request_id``). The Input process owns the click:
+        (+ ``trace_id`` + ``request_id``, and since wh-click-gesture-param an
+        optional ``gesture`` for "right click N" / "double click N"; absent or
+        unrecognised means today's Invoke behaviour). The Input process owns
+        the click:
 
           1. Validate the request fields (both ``snapshot_id`` and ``item_id``
              must be non-empty strings) before any lookup.
@@ -2714,6 +4004,19 @@ class UIActionHandler:
         not fall through to its timeout path. ``snapshot_summary`` is always
         ``None`` here -- this handler clicks a pinned snapshot, it does not
         re-walk or repaint.
+
+        wh-overlay-slow-uia-stale-badges.8 part 4: the request MAY carry
+        ``overlay_session_id`` + ``paint_generation``, the pair of the visible
+        list the spoken number was resolved against. Between the field
+        validation and the snapshot lookup the handler refuses the click
+        (``stale_overlay_generation``) when that pair is not STRICTLY newer
+        than ``_last_executed_click_pair`` -- an earlier click already
+        executed against that list and changed the screen, so the number now
+        names the wrong control. Only an ok click records the watermark (a
+        refusal leaves the screen unchanged, so a retry must work). An absent
+        pair (pre-slice payload shape) or a malformed pair skips the check --
+        the primary guard is Logic's in-flight refusal; this one is
+        defence-in-depth, so it degrades OPEN like the pin watermark.
         """
         from services.wheelhouse.shared.click_element import (
             ClickElementResponse,
@@ -2773,6 +4076,51 @@ class UIActionHandler:
                     safe_trace,
                 )
                 _emit(_failed("invalid_request"))
+                return
+
+            # wh-overlay-slow-uia-stale-badges.8 part 4: one executed click
+            # per (overlay_session_id, paint_generation). Parse the optional
+            # pair; a malformed pair degrades OPEN (log, skip the check, and
+            # do NOT record it) because the primary guard lives on the Logic
+            # side and a type glitch must not refuse a click the user
+            # legitimately asked for. bool is excluded explicitly -- it is an
+            # int subclass, not a session id or generation.
+            resolved_pair: Optional[tuple[int, int]] = None
+            if (
+                isinstance(overlay_session_id, int)
+                and not isinstance(overlay_session_id, bool)
+                and isinstance(paint_generation, int)
+                and not isinstance(paint_generation, bool)
+            ):
+                resolved_pair = (overlay_session_id, paint_generation)
+            elif overlay_session_id is not None or paint_generation is not None:
+                logger.warning(
+                    "click_snapshot_item: malformed overlay pair "
+                    "(session=%r generation=%r); skipping the stale check "
+                    "(trace_id=%s)",
+                    overlay_session_id, paint_generation, safe_trace,
+                )
+            last = getattr(self, "_last_executed_click_pair", None)
+            if resolved_pair is not None and last is not None and (
+                resolved_pair[0] < last[0]
+                or (
+                    resolved_pair[0] == last[0]
+                    and resolved_pair[1] <= last[1]
+                )
+            ):
+                # The list this number came from was consumed by an earlier
+                # executed click (same pair) or belongs to an even older
+                # paint. Refuse WITHOUT touching the snapshot or executor:
+                # the screen has already changed under the badge.
+                logger.info(
+                    "click_snapshot_item: stale_overlay_generation -- "
+                    "resolved pair %s is not newer than the last executed "
+                    "click's pair %s (snapshot=%s item=%s trace_id=%s)",
+                    resolved_pair, last, snapshot_id, item_id, safe_trace,
+                )
+                _emit(_failed(
+                    "stale_overlay_generation", snapshot_id_out=snapshot_id,
+                ))
                 return
 
             finder = self._get_overlay_walk_finder()
@@ -2881,13 +4229,19 @@ class UIActionHandler:
 
             # The overlay-click path has no spoken query; build a minimal
             # ElementQuery from the match. It is consumed ONLY by the executor's
-            # coordinate-eligibility check (_coord_eligible).
+            # coordinate-eligibility check (_coord_eligible) and, since
+            # wh-click-gesture-param, by the gesture branch: "right click 5" /
+            # "double click 5" arrive as a gesture field on the request, and
+            # this is where that value becomes something the executor reads.
+            # An absent or unrecognised value degrades to the default Invoke
+            # gesture rather than guessing a physical click.
             query = ElementQuery(
                 name=match.name,
                 role=match.role,
                 ordinal=None,
                 spatial=None,
                 raw_utterance="",
+                gesture=_parse_gesture(gesture),
             )
             snap_fg = SnapshotForeground(
                 window=foreground.foreground_window,
@@ -2896,8 +4250,21 @@ class UIActionHandler:
                 window_creation_time=foreground.foreground_window_creation_time,
             )
             executor = self._get_click_executor()
-            click_result = executor.click(match, snap_fg, query)
+            # wh-review-pattern-fixes.8: a badge click can move focus, the
+            # caret, or the selection; invalidate before the dispatch (see
+            # the hotkey_action block comment for the full rationale).
+            self.buffer_manager.invalidate()
+            # badge_pick=True: a numbered-badge pick prefers the guarded
+            # coordinate click over DoDefaultAction when InvokePattern is
+            # structurally unavailable (wh-electron-dda-noop).
+            click_result = executor.click(match, snap_fg, query, badge_pick=True)
             if click_result.outcome == "ok":
+                if resolved_pair is not None:
+                    # wh-overlay-slow-uia-stale-badges.8 part 4: only an
+                    # EXECUTED click consumes its pair -- a refusal leaves
+                    # the screen unchanged, so a retry from the same list
+                    # must stay allowed.
+                    self._last_executed_click_pair = resolved_pair
                 logger.info(
                     "click_snapshot_item: clicked %r via %s "
                     "(item=%s snapshot=%s trace_id=%s)",
@@ -3115,6 +4482,11 @@ class UIActionHandler:
 
         executor = ClickExecutor(
             coordinate_click_fn=_win32_coordinate_click,
+            # Gesture coordinate click (wh-click-gesture-param): a right click
+            # or double click takes the guarded coordinate path with a
+            # different button or count. Without this injection the executor's
+            # raising placeholder refuses every non-default gesture.
+            gesture_click_fn=_win32_gesture_click,
             foreground_probe=_win32_foreground_probe,
             on_screen_fn=_win32_on_screen,
             enable_coordinate_click_on_com_error=(
@@ -3128,6 +4500,12 @@ class UIActionHandler:
             overlay_bounds_tolerance_physical_px=(
                 click_cfg.overlay_bounds_tolerance_physical_px
             ),
+            # Pre-click verification budget (wh-overlay-slow-uia-stale-badges.6).
+            # Thread the already-validated budget from ClickConfig so a slow
+            # application's COM reads refuse (verification_timeout) instead of
+            # blocking past the Logic awaiter and mislabeling the refusal as a
+            # transport timeout.
+            verification_budget_ms=click_cfg.verification_budget_ms,
             # Real Win32 popup-closed probe seams (wh-n29v.71). Without these
             # ClickExecutor._popup_still_open fails closed (returns False when
             # either probe is None) and EVERY popup-owned winner is refused
@@ -3137,6 +4515,14 @@ class UIActionHandler:
             # module-level callables, not bound to the IUIAutomation root.
             popup_visible_fn=uia_walker._default_is_window_visible,
             popup_owner_fn=uia_walker._default_owner_of,
+            # Shell-window class re-read (codex finding
+            # wh-overlay-taskbar-numbers.5.3): the shell probe additionally
+            # requires the walked HWND to STILL name a taskbar shell class at
+            # click time, so a handle recycled to an unrelated window after an
+            # explorer restart is refused (taskbar_closed) instead of invoked
+            # into. _default_class_name_of wraps GetClassName -- pure Win32,
+            # same module-level-callable rationale as the two seams above.
+            shell_class_fn=uia_walker._default_class_name_of,
             # Click-point hit-test (wh-explorer-navpane-click.1.1): the
             # coordinate fallback refuses before sending when the root window
             # under the click point is not the winner's own top-level window.
@@ -3403,6 +4789,10 @@ class UIActionHandler:
                 window_creation_time=foreground.foreground_window_creation_time,
             )
             executor = self._get_click_executor()
+            # wh-review-pattern-fixes.8: a by-name click can move focus, the
+            # caret, or the selection; invalidate before the dispatch (see
+            # the hotkey_action block comment for the full rationale).
+            self.buffer_manager.invalidate()
             click_result = executor.click(winner, snap_fg, query)
             if click_result.outcome == "ok":
                 logger.info(
@@ -3436,6 +4826,16 @@ class UIActionHandler:
                 snapshot_id=snapshot_id,
                 snapshot_summary=summary,
             ))
+        except _TRANSIENT_WALK_ERRORS as exc:
+            # Known transient class (rebuilding window, e.g. a theme switch):
+            # same response as the generic path, but WARNING-level so no error
+            # notification pops for a blip that resolves on the next attempt.
+            logger.warning(
+                "click_element: transient UIA/COM error, likely a rebuilding "
+                "window; mapping to execution_failed (trace_id=%s): %r",
+                trace_id, exc,
+            )
+            _emit(_failed("invoke_com_error"))
         except Exception as exc:  # noqa: BLE001 -- contract: never raise
             logger.error(
                 "click_element: unexpected error (trace_id=%s): %s",
@@ -3572,10 +4972,30 @@ class UIActionHandler:
             # into the toast button, which silently consumes the
             # keystroke. The cache stores target_hwnd=0 when the
             # rejection-time HWND lookup failed (stale COM, no
-            # top-level), and we skip the refocus call in that case
-            # so the win32 layer is not touched with a zero handle.
+            # top-level); such an entry is refused outright below
+            # (.1.11) -- it never reaches the refocus.
             target_hwnd = result.target_hwnd
             target_pid = result.target_process_id
+            # wh-ensure-focused-same-process-fallback.1.11: an entry
+            # with target_hwnd=0 carries no target identity at all --
+            # every guard below sits inside an ``if target_hwnd:``
+            # block, so such an entry used to skip the PID check, the
+            # root gates, AND the refocus, then paste into whatever
+            # window held foreground at click time (the original
+            # wh-override-paste-focus-drift toast-button failure,
+            # resurrected for exactly the entries whose target is
+            # least known). Refuse outright instead: the rejection-time
+            # HWND lookup failed, so no later probe can prove where
+            # this paste would land.
+            if not target_hwnd:
+                logger.info(
+                    "retry_dictation_by_token: cache entry has no "
+                    "target hwnd; emitting token_expired",
+                )
+                _emit(RetryDictationByTokenResponse.token_expired(
+                    reason="target_window_gone",
+                ))
+                return
             if target_hwnd and target_pid:
                 # wh-override-paste-focus-drift.1.2: detect HWND reuse
                 # before refocusing. Windows reassigns HWND values to
@@ -3610,6 +5030,105 @@ class UIActionHandler:
                         reason="target_window_gone",
                     ))
                     return
+            # wh-ensure-focused-same-process-fallback.1.7: the PID
+            # guard above cannot see a SAME-process handle recycle.
+            # Brave runs every window from one browser process, so a
+            # destroyed helper HWND reborn as a child of another Brave
+            # top-level window keeps the cached PID -- and
+            # ensure_focused's normalized strict compare then maps the
+            # recycled handle to that other window's root and credits
+            # it, pasting the cached dictation into a window the user
+            # never dictated into. (The pre-normalization raw equality
+            # refused this case by accident.) Compare the live
+            # GA_ROOT of the cached handle against the rejection-time
+            # snapshot; fail closed when it drifted or cannot be
+            # resolved.
+            # wh-ensure-focused-same-process-fallback.1.8: a nonzero
+            # HWND with target_root=0 (rejection-time normalization
+            # failed) refuses outright rather than skipping the
+            # comparison. The cache lives only in Input-process
+            # memory, so no persisted legacy entry needs a skip path,
+            # and skipping would recreate the .1.7 sequence for
+            # exactly the entries whose rejection-time identity is
+            # least known.
+            target_root = result.target_root
+            target_tag = result.target_tag
+            if target_hwnd:
+                if not target_root:
+                    logger.info(
+                        "retry_dictation_by_token: no rejection-time "
+                        "root snapshot for hwnd=%s; emitting "
+                        "token_expired",
+                        hex(target_hwnd),
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
+                live_root = normalize_hwnd_for_foreground_compare(
+                    target_hwnd,
+                )
+                if live_root != target_root:
+                    logger.info(
+                        "retry_dictation_by_token: target root drifted "
+                        "(hwnd=%s cached_root=%s live_root=%s); "
+                        "emitting token_expired",
+                        hex(target_hwnd), hex(target_root),
+                        hex(live_root) if live_root else live_root,
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
+                # wh-ensure-focused-same-process-fallback.1.12: every
+                # guard above compares numeric handle values, and a
+                # handle recycled as a NEW same-PID top-level window
+                # that is its own GA_ROOT aliases them all --
+                # normalize(hwnd) returns the handle itself (matching
+                # a snapshot taken the same way), the PID matches,
+                # and ensure_focused's strict compare then credits
+                # the impostor before any shape probe runs. The
+                # rejection-time SetProp marker lives on the window
+                # OBJECT and dies with it, so re-reading the property
+                # is the one probe a SAME-RUN recycle cannot alias:
+                # the new object reads 0, or a survivor marker from
+                # an earlier Input-process run that matches only on
+                # equal 43-bit salts (about 2**-43 per pair of runs,
+                # the accepted residual documented at _RUN_SALT in
+                # ui/hwnd_utils.py). A stored tag of 0 (SetProp failed
+                # at rejection time -- destroyed handle or a
+                # UIPI-protected elevated window) refuses outright,
+                # mirroring the .1.8 root-gate contract.
+                if not target_tag:
+                    logger.info(
+                        "retry_dictation_by_token: no rejection-time "
+                        "provenance tag for hwnd=%s; emitting "
+                        "token_expired",
+                        hex(target_hwnd),
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
+                live_tag = read_hwnd_provenance(target_hwnd)
+                if live_tag != target_tag:
+                    logger.info(
+                        "retry_dictation_by_token: provenance tag "
+                        "mismatch (hwnd=%s cached_tag=%d live_tag=%d); "
+                        "window object was recycled; emitting "
+                        "token_expired",
+                        hex(target_hwnd), target_tag, live_tag,
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
+            # wh-review-pattern-fixes.8: this direct ClipboardOnlyStrategy
+            # dispatch bypasses the router, and the strategy never touches
+            # the shadow buffer. Invalidate before the refocus + paste so a
+            # partial failure (focus moved, paste unverified) also leaves
+            # the buffer invalid (see the hotkey_action block comment).
+            self.buffer_manager.invalidate()
             if target_hwnd:
                 refocused = self.window_manager.ensure_focused(target_hwnd)
                 if not refocused:
@@ -3633,8 +5152,111 @@ class UIActionHandler:
                         reason="target_window_gone",
                     ))
                     return
+                # wh-ensure-focused-same-process-fallback.1.9: the
+                # pre-refocus root check above cannot cover the
+                # refocus interval -- Windows can recycle the handle
+                # as a child of a same-process sibling DURING
+                # ensure_focused, whose strict normalized compare
+                # then credits the sibling. Re-normalize after the
+                # successful refocus, immediately before
+                # capture_context, so the paste stands only while the
+                # handle still names the rejection-time root. The
+                # .1.8 gate guarantees target_root is nonzero here.
+                # No Win32 sequence makes this atomic with the
+                # capture and paste; this narrows the interval to a
+                # single probe.
+                post_root = normalize_hwnd_for_foreground_compare(
+                    target_hwnd,
+                )
+                if post_root != target_root:
+                    logger.info(
+                        "retry_dictation_by_token: target root drifted "
+                        "during refocus (hwnd=%s cached_root=%s "
+                        "post_root=%s); emitting token_expired",
+                        hex(target_hwnd), hex(target_root),
+                        hex(post_root) if post_root else post_root,
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
+                # wh-ensure-focused-same-process-fallback.1.12: the
+                # root re-check above still compares handle values,
+                # so a recycle into a same-PID own-root top-level
+                # window DURING ensure_focused passes it (the new
+                # window normalizes to the handle itself, equal to a
+                # snapshot taken the same way). Re-read the window
+                # property too: the recycled object never carried
+                # the marker and reads 0. The .1.12 pre-check
+                # guarantees target_tag is nonzero here.
+                post_tag = read_hwnd_provenance(target_hwnd)
+                if post_tag != target_tag:
+                    logger.info(
+                        "retry_dictation_by_token: provenance tag "
+                        "lost during refocus (hwnd=%s cached_tag=%d "
+                        "post_tag=%d); window object was recycled; "
+                        "emitting token_expired",
+                        hex(target_hwnd), target_tag, post_tag,
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
 
             context = capture_context()
+            if target_hwnd:
+                # wh-ensure-focused-same-process-fallback.1.16 (codex
+                # round 10): every probe above validates the CACHED
+                # handle, but ClipboardOnlyStrategy derives its paste
+                # target from THIS captured control
+                # (specific.py _hwnd_from_control), and capture_context
+                # is not a zero-duration gap -- it performs UIA focus
+                # resolution, psutil, and top-level-control work. A
+                # focus change inside that interval hands the strategy
+                # a different window and the cached text pastes there
+                # with every cached-target guard already passed. Bind
+                # the captured control back to the verified identity:
+                # its top-level must normalize to the cached root, and
+                # the provenance marker must still be on that
+                # top-level (the root comparison alone is a
+                # handle-value check, which an own-root recycle
+                # aliases). Any resolution failure refuses -- pasting
+                # without the proof delivers into whatever
+                # capture_context happened to return.
+                captured_top = top_level_hwnd_from_control(
+                    context.focused_control,
+                )
+                captured_root = (
+                    normalize_hwnd_for_foreground_compare(captured_top)
+                    if captured_top else None
+                )
+                if not captured_root or captured_root != target_root:
+                    logger.info(
+                        "retry_dictation_by_token: captured control "
+                        "resolves outside the verified target "
+                        "(cached_root=%s captured_root=%s); emitting "
+                        "token_expired",
+                        hex(target_root),
+                        hex(captured_root) if captured_root
+                        else captured_root,
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
+                final_tag = read_hwnd_provenance(captured_top)
+                if final_tag != target_tag:
+                    logger.info(
+                        "retry_dictation_by_token: provenance tag "
+                        "gone from captured top-level (cached_tag=%d "
+                        "final_tag=%d); window object was recycled "
+                        "during capture; emitting token_expired",
+                        target_tag, final_tag,
+                    )
+                    _emit(RetryDictationByTokenResponse.token_expired(
+                        reason="target_window_gone",
+                    ))
+                    return
             if context.focused_control:
                 self.window_manager.remember_target(context.focused_control)
 
@@ -3651,6 +5273,17 @@ class UIActionHandler:
             # same perfected output every time.
             self.clipboard_only_strategy.reset_preceding_mirror()
 
+            # wh-ensure-focused-same-process-fallback.1.18 (codex
+            # round 11): hand the verified cached identity down to the
+            # strategy. Every probe above finishes before the strategy
+            # re-resolves its paste target from the captured control,
+            # and the clipboard verify loop inside verified_paste runs
+            # before the Ctrl+V -- the marker must be re-read inside
+            # that final interval, which only verified_paste can do.
+            retry_identity = (
+                (target_hwnd, target_tag) if target_hwnd else None
+            )
+
             # The retry click usually fires after end_utterance has run, so
             # the utterance manager's clipboard restore will not cover us.
             # Mirror the non-utterance branch of intelligent_insert_text
@@ -3661,11 +5294,13 @@ class UIActionHandler:
             if self.utterance_manager.is_in_utterance():
                 insertion_result = self.clipboard_only_strategy.insert(
                     cached_text, context, request_id, None,
+                    retry_identity=retry_identity,
                 )
             else:
                 with clipboard_context(restore_delay=0.05):
                     insertion_result = self.clipboard_only_strategy.insert(
                         cached_text, context, request_id, None,
+                        retry_identity=retry_identity,
                     )
 
             # Forward dirty signal to the utterance manager (parallel to
@@ -3776,7 +5411,7 @@ class UIActionHandler:
             ))
 
     def press_key_action(self, key: str, repeat: int = 1, **kwargs):
-        """Press a key, invalidating buffer if necessary.
+        """Press a key. Every press invalidates the shadow buffer.
 
         Args:
             key: Key to press
@@ -3785,9 +5420,23 @@ class UIActionHandler:
         if 'request_id' in kwargs:
             logger.warning(f"Unexpected 'request_id' in press_key_action for key '{key}'")
 
-        if key.lower() in CACHE_INVALIDATING_KEYS:
-            self.buffer_manager.invalidate()
+        # Review wh-review-pattern-fixes.5: invalidate unconditionally,
+        # mirroring hotkey_action (wh-space-after-hotkey-linebreak). The
+        # target application decides what a pressed key does -- a letter,
+        # a digit, space, or punctuation types content and moves the
+        # caret, and the keyboard listener ignores WheelHouse's own
+        # synthetic input while an internal action runs. The old
+        # CACHE_INVALIDATING_KEYS allowlist missed every content-typing
+        # key ("press a", "press 5", "press space", "press ."), leaving
+        # the next dictated word to perfect against pre-press context.
+        # The cost of an unnecessary invalidation is one UIA re-sync on
+        # the next dictated word.
+        self.buffer_manager.invalidate()
 
+        # wh-keyboard-refusal-notice: decided inside the try, acted on after
+        # it, so a notice that itself fails cannot land the handler in the
+        # except branch and show a SECOND notice. Same shape as scroll_wheel.
+        refusal: Optional[str] = None
         try:
             if key.lower() == "enter" and self.terminal_editor.is_active:
                 self.terminal_editor.submit()
@@ -3795,18 +5444,90 @@ class UIActionHandler:
 
             # Capture Context for Flutter detection
             context = capture_context()
+            _stop_command_on_failed_focus_read(context, "press_key_action")
             is_flutter = context.is_flutter
             focused_control = context.focused_control
-            
+
             # Flutter apps filter SendInput for special keys, so use press_keys instead
             # SendKeys doesn't support special keys (only text input)
             if is_flutter:
                 logger.debug(f"[FLUTTER] press_key_action: key='{key}' - using press_keys (SendInput) for special key")
             
             for _ in range(repeat):
-                press_keys(key)
+                ok, accepted, expected = verified_press_keys(
+                    key, caller_notifies=True
+                )
+                if not ok:
+                    refusal = self._key_refusal_message(
+                        (key,), expected,
+                        PRESS_KEY_UNKNOWN_MESSAGE, PRESS_KEY_REFUSED_MESSAGE,
+                    )
+                    if accepted:
+                        # A short send can leave the key physically held
+                        # (down accepted, up dropped), so the notice
+                        # would report a failure while Windows
+                        # auto-repeats the key into the focused
+                        # application. Release it first, the way
+                        # press_key_verified below does (wh-eolas.2.5).
+                        # An unmapped key name reports (False, 0, 0) and
+                        # sent nothing, so it has nothing to release.
+                        _send_modifier_keyups((key,))
+                    logger.warning(
+                        "press_key_action: key=%r refused (sent %d/%d)",
+                        key, accepted, expected,
+                    )
+                    break
         except Exception as e:
-            logger.error(f"Error pressing key '{key}': {e}", exc_info=True)
+            # WARNING, not ERROR, for the reason scroll_wheel records: the
+            # notice below is the report, and an ERROR record would show a
+            # second box beside it through ErrorNotificationHandler.
+            logger.warning(f"Error pressing key '{key}': {e}", exc_info=True)
+            refusal = PRESS_KEY_REFUSED_MESSAGE.format(keys=key)
+        if refusal is not None:
+            self._say_the_keyboard_refused(refusal, source="press key")
+
+    def press_key_verified(self, key: str, repeat: int = 1, **kwargs) -> dict:
+        """Press a key with SendInput delivery verification.
+
+        wh-review-pattern-fixes.32 (c): ``press_key_action`` delivers
+        through ``press_keys``, which discards the SendInput count, and
+        callers reach it over the enqueue-only ``send_command`` channel
+        -- so Logic can never learn whether a state-changing press
+        landed. This variant sends through ``verified_press_keys`` and
+        returns ``{"success": bool}`` for the request/response channel
+        (input_proc puts the returned dict on the response queue, the
+        same special-case shape ``capture_selected_text`` uses).
+
+        Used by the AI transform's fallback-selection collapse, where a
+        silently dropped Right leaves a whole-field selection armed
+        while Logic believes cleanup completed.
+
+        Always sends via SendInput (no Flutter / terminal-editor
+        special cases: the callers press plain caret keys). Same
+        unconditional shadow-buffer invalidation as press_key_action.
+        """
+        self.buffer_manager.invalidate()
+        try:
+            for _ in range(repeat):
+                ok, accepted, expected = verified_press_keys(key)
+                if not ok:
+                    # A short send can leave the key physically held
+                    # (down accepted, up dropped) -- release it before
+                    # reporting (wh-eolas.2.5 shape).
+                    _send_modifier_keyups((key,))
+                    logger.error(
+                        "press_key_verified: short SendInput for "
+                        "key=%r (sent %d/%d); reporting failure.",
+                        key, accepted, expected,
+                    )
+                    return {"success": False}
+        except Exception as e:
+            logger.error(
+                f"Error in press_key_verified for key '{key}': {e}",
+                exc_info=True,
+            )
+            return {"success": False}
+        return {"success": True}
 
     def hotkey_action(self, keys: list, repeat: int = 1, **kwargs):
         """Execute a hotkey combination, optionally repeated.
@@ -3818,6 +5539,35 @@ class UIActionHandler:
         if 'request_id' in kwargs:
             logger.warning(f"Unexpected 'request_id' in hotkey_action for keys '{keys}'")
 
+        # wh-space-after-hotkey-linebreak: every hotkey invalidates the
+        # shadow buffer. A hotkey is a command, not dictation, and it can
+        # move the caret or rewrite the target text in ways WheelHouse
+        # cannot model from the key list alone (shift+enter, ctrl+v,
+        # ctrl+z, ctrl+a, ctrl+home). The remembered copy of the target
+        # text is therefore unusable after any hotkey.
+        #
+        # The keyboard listener cannot cover this gap. input_proc.py calls
+        # _should_emit_keyboard_invalidation with is_internal_action set
+        # for the whole duration of a dispatched action, and that function
+        # returns False for internal actions, which is exactly when these
+        # keys are sent. So the invalidation has to happen here.
+        #
+        # The reported failure: the 'new paragraph' pattern sends
+        # shift+enter twice through this method. The buffer stayed valid,
+        # VerifiedUnicodeStrategy skipped its re-sync, get_context()
+        # returned the two characters before the pre-hotkey caret, and
+        # TextPerfector added a space in front of the next dictated word.
+        # The user saw a line that started with a space.
+        #
+        # press_key_action now invalidates unconditionally for the same
+        # reason (wh-review-pattern-fixes.5): a modifier combination or
+        # the target application changes what an otherwise harmless key
+        # does. The cost of an unnecessary invalidation is one UIA
+        # re-sync on the next dictated word.
+        self.buffer_manager.invalidate()
+
+        # Decided inside the try, acted on after it: see press_key_action.
+        refusal: Optional[str] = None
         try:
             normalized_keys = [str(k).lower() for k in keys]
             if self.terminal_editor.is_active and normalized_keys == ["enter"]:
@@ -3826,9 +5576,10 @@ class UIActionHandler:
 
             # Capture Context for Flutter detection
             context = capture_context()
+            _stop_command_on_failed_focus_read(context, "hotkey_action")
             is_flutter = context.is_flutter
             focused_control = context.focused_control
-            
+
             if is_flutter and focused_control and focused_control.Exists(0, 0):
                 # Convert keys to SendKeys format (e.g., ['ctrl', 'c'] -> '{Ctrl}c')
                 sendkeys_str = self._convert_to_sendkeys_format(keys)
@@ -3838,10 +5589,263 @@ class UIActionHandler:
             else:
                 # Standard SendInput for non-Flutter apps
                 for _ in range(repeat):
-                    press_keys(*keys)
+                    ok, accepted, expected = verified_press_keys(
+                        *keys, caller_notifies=True
+                    )
+                    if not ok:
+                        refusal = self._key_refusal_message(
+                            tuple(keys), expected,
+                            HOTKEY_UNKNOWN_MESSAGE, HOTKEY_REFUSED_MESSAGE,
+                        )
+                        if accepted:
+                            # A short chord can leave a key physically
+                            # held (down accepted, up dropped), so a held
+                            # ctrl would run every later keystroke as a
+                            # shortcut. Release it first, the way
+                            # press_key_verified does (wh-eolas.2.5). An
+                            # unmapped key name reports (False, 0, 0) and
+                            # sent nothing, so it has nothing to release.
+                            _send_modifier_keyups(tuple(keys))
+                        logger.warning(
+                            "hotkey_action: keys=%r refused (sent %d/%d)",
+                            keys, accepted, expected,
+                        )
+                        break
         except Exception as e:
-            logger.error(f"Error executing hotkey '{keys}' (repeat={repeat}): {e}", exc_info=True)
+            # WARNING, not ERROR: see press_key_action.
+            logger.warning(
+                f"Error executing hotkey '{keys}' (repeat={repeat}): {e}",
+                exc_info=True,
+            )
+            # The join iterates keys a SECOND time, and the commonest way
+            # to reach this arm is a keys value the FIRST iteration could
+            # not read. input_proc validates only the container before
+            # method_to_call(**params), so nothing between Logic and here
+            # rejects a keys value that is not a list; no producer in this
+            # repository emits one today (grep for hotkey_action under
+            # services/wheelhouse excluding .venv and tests: every one
+            # builds a list of strings). A raise here would carry the
+            # exception out of the method and leave the user with the
+            # rate-limited generic [ERROR] box this bead removes
+            # (wh-keyboard-refusal-notice.1.2).
+            try:
+                chord = " + ".join(str(k) for k in keys)
+            except TypeError:
+                chord = str(keys)
+            refusal = HOTKEY_REFUSED_MESSAGE.format(chord=chord)
+        if refusal is not None:
+            self._say_the_keyboard_refused(refusal, source="hotkey")
     
+    def scroll_wheel(self, direction=None, clicks: int = 1, **kwargs):
+        """Turn the mouse wheel for a spoken scroll command.
+
+        Shaped like :meth:`hotkey_action`, NOT like the mouse-grid pointer
+        handlers, on three counts:
+
+        1. It is not in ``_HANDLES_OWN_RESPONSE`` and emits no
+           ``MouseActionResponse``. A scroll command is a fire-and-forget step
+           in a pattern's action list, and the generic dispatcher in
+           input_proc.py answers any waiting Logic request for it.
+        2. It is not gated by the voice-clicking config. That gate exists for
+           the grid's pointer actions, which move the physical pointer and
+           click with it. A wheel notch presses nothing and moves nothing, and
+           a user who turned voice clicking off still has to be able to read a
+           long page.
+        3. It never raises. Argument validation lives in the SendInput
+           primitive, which reports ``invalid_direction`` / ``invalid_clicks``
+           rather than raising, so a malformed IPC message is logged and
+           dropped instead of breaking the Input process command loop.
+
+        Args:
+            direction: ``"up"``, ``"down"``, ``"left"`` or ``"right"``.
+            clicks: whole wheel notches; the primitive caps the range.
+        """
+        # A wheel notch over a combo box, a spinner or a slider changes that
+        # control's VALUE rather than scrolling a view, so the remembered copy
+        # of the focused control's text cannot survive it. The keyboard
+        # listener never sees a wheel event, so the invalidation has to happen
+        # here -- the same reasoning the hotkey_action block comment records.
+        self.buffer_manager.invalidate()
+
+        # wh-voice-access-parity.2.3.3: one scroll at a time. A user who says
+        # "scroll down 3" while a continuous scroll is running asked for three
+        # notches, not for three notches added to a scroll that keeps going.
+        # This runs BEFORE the notches are sent, and its failure never costs
+        # them: the notches are what the user asked for.
+        self._stop_continuous_scroll("a discrete scroll command arrived")
+
+        # wh-wheel-refusal-notice: decided inside the try, acted on after it,
+        # so a notice that itself fails cannot land the handler in the except
+        # branch and show a SECOND notice.
+        refused = False
+        try:
+            succeeded, reason = self._mouse_scroll_seam(direction, clicks)
+            logger.info(
+                "scroll_wheel: direction=%r clicks=%r ok=%s reason=%s",
+                direction, clicks, succeeded, reason,
+            )
+            refused = (
+                not succeeded and reason not in _WHEEL_VALIDATION_REFUSALS
+            )
+        except Exception as exc:  # noqa: BLE001 -- never-raise handler
+            # WARNING, not ERROR: the notice below is the one the user should
+            # get, and an ERROR record would show a second box beside it
+            # through ErrorNotificationHandler (wh-wheel-refusal-notice).
+            logger.warning(
+                "scroll_wheel: unexpected error (direction=%r clicks=%r): %s",
+                direction, clicks, exc, exc_info=True,
+            )
+            refused = True
+        if refused:
+            self._say_the_wheel_would_not_turn()
+
+    def _say_the_wheel_would_not_turn(self) -> None:
+        """Tell the user a discrete scroll did nothing, and never raise.
+
+        wh-wheel-refusal-notice: before this the discrete spoken scroll had no
+        notice of its own, and the only thing the user saw was the generic
+        ``[ERROR]`` box ``ErrorNotificationHandler`` shows for every ERROR
+        record. The wheel primitive's refusal record is a WARNING now, so this
+        is the whole of what the user gets.
+
+        Reasons NOT listed in ``_WHEEL_VALIDATION_REFUSALS`` reach here,
+        including a reason name added later: a new refusal that shows nothing
+        at all is the worse failure of the two.
+        """
+        try:
+            send_notice(
+                NOTICE_TITLE, SCROLL_REFUSED_MESSAGE,
+                source="discrete scroll",
+            )
+        except Exception as exc:  # noqa: BLE001 -- a report must never raise
+            # WARNING, not ERROR, because an ERROR here pops its own
+            # notification -- the duplicate this bead exists to remove.
+            logger.warning(
+                "scroll_wheel: the refusal notice failed: %s",
+                type(exc).__name__,
+            )
+
+    def _key_refusal_message(
+        self, keys: tuple, expected: int, unknown: str, refused: str,
+    ) -> str:
+        """Word the notice for a refused key send (wh-keyboard-refusal-notice).
+
+        ``verified_press_keys`` reports an unrecognized key name as
+        ``(False, 0, 0)`` and a short send as ``(False, accepted, expected)``
+        with ``expected`` above zero, so ``expected == 0`` is what separates
+        the two causes. It never says WHICH name it did not know, so this
+        reads :data:`VK_CODE_MAP` and names them (boss ruling B, recorded on
+        wh-keyboard-refusal-notice).
+
+        Falls back to the short-send wording when no name is unrecognized.
+        A notice that named nothing would be worse than one that names the
+        chord.
+        """
+        chord = " + ".join(str(k) for k in keys)
+        if expected == 0:
+            unrecognized = [
+                str(k) for k in keys if str(k).lower() not in VK_CODE_MAP
+            ]
+            if unrecognized:
+                return unknown.format(
+                    chord=chord, keys=", ".join(unrecognized)
+                )
+        return refused.format(chord=chord, keys=chord)
+
+    def _say_the_keyboard_refused(self, message: str, *, source: str) -> None:
+        """Tell the user a keyboard action did nothing, and never raise.
+
+        The same notice path the wheel refusal fix uses
+        (:meth:`_say_the_wheel_would_not_turn`), for the same reason: the
+        generic ``[ERROR]`` box cannot be relied on to reach the user,
+        because ``ErrorNotificationHandler.emit`` drops a repeat of the same
+        (logger, level, message) inside ``rate_limit_seconds``, which
+        ``utils/logging_setup.py`` sets to 10 (wh-wheel-refusal-notice.1.7).
+        ``send_notice`` does not go through that handler at all, so two
+        identical failures inside ten seconds show two notices.
+        """
+        try:
+            send_notice(NOTICE_TITLE, message, source=source)
+        except Exception as exc:  # noqa: BLE001 -- a report must never raise
+            # WARNING, not ERROR, because an ERROR here pops its own
+            # notification -- the duplicate this bead exists to remove.
+            logger.warning(
+                "%s: the refusal notice failed: %s",
+                source, type(exc).__name__,
+            )
+
+    def _turn_the_wheel(self, direction, clicks):
+        """The wheel call the continuous scroller makes each tick.
+
+        It reads ``_mouse_scroll_seam`` at call time rather than closing over
+        it, so replacing the handler's seam reaches the running timer too.
+        """
+        return self._mouse_scroll_seam(direction, clicks)
+
+    def _stop_continuous_scroll(self, why: str) -> None:
+        """Stop the continuous scroll, if one is running, and never raise.
+
+        Every caller is a handler that has other work to finish, so a failure
+        here is logged and the caller carries on (wh-voice-access-parity.2.3.3).
+        """
+        try:
+            stopped = self._continuous_scroller.stop()
+            if stopped:
+                logger.info("continuous scroll stopped because %s", why)
+        except Exception as exc:  # noqa: BLE001 -- never-raise handler
+            logger.error(
+                "stopping the continuous scroll failed (%s): %s",
+                why, exc, exc_info=True,
+            )
+
+    def start_continuous_scroll(self, direction=None, **kwargs):
+        """Start a scroll that keeps going (wh-voice-access-parity.2.3.3).
+
+        Shaped like :meth:`scroll_wheel` on every count that handler documents:
+        it is not in ``_HANDLES_OWN_RESPONSE``, it is not gated by the
+        voice-clicking config, and it never raises.
+
+        It adds one rule of its own. It RETURNS IMMEDIATELY. The Input process
+        runs one command loop, and the stop word arrives through that same
+        loop, so a handler that scrolled in place would hold the loop for the
+        whole scroll and the scroll could never be stopped by voice. The
+        repeating timer therefore runs on its own thread
+        (ui/continuous_scroll.py) and this handler only starts it.
+
+        An unusable direction starts nothing. The scroller reports that as
+        False rather than raising, so a malformed message is logged and
+        dropped instead of breaking the command loop.
+
+        Args:
+            direction: ``"up"``, ``"down"``, ``"left"`` or ``"right"``.
+        """
+        # Same reason as the discrete handler: a wheel notch can change a
+        # control's value, so the remembered copy cannot survive it.
+        self.buffer_manager.invalidate()
+
+        try:
+            started = self._continuous_scroller.start(direction)
+            logger.info(
+                "start_continuous_scroll: direction=%r started=%s",
+                direction, started,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never-raise handler
+            logger.error(
+                "start_continuous_scroll: unexpected error (direction=%r): %s",
+                direction, exc, exc_info=True,
+            )
+
+    def stop_continuous_scroll(self, **kwargs):
+        """Stop the scroll that keeps going (wh-voice-access-parity.2.3.3).
+
+        Takes no direction: stopping is the same act whichever way the scroll
+        was going. Stopping when nothing is running is not an error and is not
+        reported as one -- a user who says the words twice must not be
+        refused, and input_proc.py calls this on a stop command it drops as
+        expired, where nothing may be running at all.
+        """
+        self._stop_continuous_scroll("the stop command arrived")
+
     def _convert_to_sendkeys_format(self, keys: list) -> str:
         """Convert press_keys format to SendKeys format.
         
@@ -3899,7 +5903,19 @@ class UIActionHandler:
             timeout: Display duration in seconds
         """
         try:
-            from plyer import notification
+            # wh-notice-length-guard: send_measured_notice measures both
+            # text fields against the fixed-size arrays plyer writes
+            # them into. It imports plyer itself, inside the call, so a
+            # missing plyer still reaches the handler below.
+            #
+            # The alias is load-bearing. This module already imports a
+            # different function named send_notice, from
+            # .continuous_scroll, whose signature is
+            # (title, message, *, source). Two functions of one name in
+            # one module is a trap: a later edit that moves this call
+            # out of this method would silently bind the other one, and
+            # app_name= and timeout= would raise TypeError there.
+            from utils.notice_text import send_notice as send_measured_notice
 
             # Validate parameters
             if not isinstance(title, str) or not isinstance(message, str) or not isinstance(timeout, int):
@@ -3910,12 +5926,20 @@ class UIActionHandler:
                 return
 
             try:
-                if hasattr(notification, 'notify') and callable(notification.notify):
-                    notification.notify(
-                        title=title,
-                        message=message,
-                        app_name='Wheelhouse',
-                        timeout=timeout
+                if not send_measured_notice(
+                    title,
+                    message,
+                    app_name='Wheelhouse',
+                    timeout=timeout,
+                ):
+                    # Before the guard, a missing plyer raised here and
+                    # the outer handler wrote "Failed to show
+                    # notification". The guard returns False instead of
+                    # raising, so without this branch the loss would be
+                    # recorded nowhere at this site.
+                    logger.warning(
+                        "Notification service unavailable; "
+                        "notification not shown. Title: %s", title,
                     )
             except Exception as e:
                 logger.error(f"Notification dispatch failed: {e}")
@@ -3925,7 +5949,61 @@ class UIActionHandler:
     # PUBLIC API - AI Clipboard Operations
     # ========================================================================
 
+    def _remember_capture_target(self) -> tuple[str, Optional[int]]:
+        """Record the control the next capture reads from, and issue a token.
+
+        wh-review-pattern-fixes.45: the AI correction flow crosses a
+        process boundary. The capture runs in the Input process, the
+        Logic process awaits the model, and the replacement comes back
+        as a separate request. A UIA control object cannot travel
+        between processes, so the control stays here, in a single slot,
+        under a token. Only two plain values go to the Logic process:
+        the token and the root-normalized top-level HWND, both of which
+        pickle. ``replace_selected_text`` requires both back and refuses
+        to send when either fails to match what this slot holds.
+
+        Returns the ``(token, hwnd)`` pair to report to the caller.
+        ``hwnd`` is None when the focused control could not be resolved
+        to a window; the replacement then has nothing to prove against
+        and refuses to send.
+        """
+        token = uuid.uuid4().hex
+        try:
+            control = capture_context().focused_control
+        except Exception as e:
+            logger.error(
+                "capture_selected_text: could not capture the target "
+                "context: %s; the replacement will have nothing to "
+                "prove against.", e,
+            )
+            control = None
+        hwnd = _captured_hwnd_from_control(control)
+        self._captured_selection_target = (
+            token, CapturedTarget(control=control, hwnd=hwnd),
+        )
+        return token, hwnd
+
     def capture_selected_text(self) -> dict:
+        """Capture the selection and report the target it came from.
+
+        wh-review-pattern-fixes.45: the capture records the control that
+        holds the selection before it touches the clipboard, then adds
+        two keys to every result: ``capture_token`` (the identifier the
+        Input process resolves back to that control) and ``target_hwnd``
+        (the root-normalized top-level window handle). The Logic process
+        hands both back to ``replace_selected_text``, which refuses to
+        paste when the foreground has drifted away from them.
+
+        Every other key comes from ``_capture_selected_text_body`` and
+        is documented there.
+        """
+        token, target_hwnd = self._remember_capture_target()
+        result = self._capture_selected_text_body()
+        result["capture_token"] = token
+        result["target_hwnd"] = target_hwnd
+        return result
+
+    def _capture_selected_text_body(self) -> dict:
         """Capture selected text via clipboard for AI text correction.
 
         Uses the sentinel clipboard pattern (proven in transform_selection):
@@ -3938,67 +6016,694 @@ class UIActionHandler:
         Clipboard is saved and restored via clipboard_context.
 
         Returns:
-            Dict with "text" key containing captured text (empty string if none).
+            Dict with five keys. "text" holds the captured text (empty
+            string if none). "flush_failed" is True when the pre-capture
+            letter-buffer flush failed; the clipboard and the selection
+            were then left untouched (wh-review-pattern-fixes.26).
+            "select_all_fallback" is True when the Ctrl+A no-selection
+            fallback fired; the whole-field selection it arms survives
+            the copy, and the caller owns its cleanup
+            (wh-review-pattern-fixes.28). "copy_failed" is True when a
+            Ctrl+C chord short-delivered; the selection state is then
+            UNKNOWN, not empty, and the caller must fail the operation
+            instead of treating the result as a no-selection capture
+            (wh-review-pattern-fixes.35). "capture_failed" is True on
+            EVERY exit where the capture did not complete -- including
+            the two above that already carry a specific flag
+            (wh-review-pattern-fixes.38). Four exits used to return
+            text='' with both specific flags False, which is
+            byte-identical to a genuine empty selection, so the Logic
+            side spoke the ordinary no-text message although the Input
+            process had failed before it could tell whether anything
+            was selected. A caller that wants specific wording checks
+            the specific flag first; "capture_failed" is the catch-all
+            no caller can forget. A genuine empty selection is the only
+            empty result with "capture_failed" False.
         """
         captured = ""
+        select_all_fallback = False
+        capture_failed = False
         try:
             with clipboard_context(restore_delay=0.05):
+                # wh-review-pattern-fixes.26 (sibling of the
+                # transform_selection / wrap_or_insert selection
+                # branches): a single letter deferred earlier in this
+                # utterance can still sit in _letter_buffer, and the
+                # AI transform runs at the utterance boundary BEFORE
+                # the deferred end_utterance flush. Flush BEFORE the
+                # sentinel write and any Ctrl+C / Ctrl+A, so the
+                # capture sees the letter on screen. Fail closed
+                # (finding .23 design): on a failed flush, touch
+                # neither the clipboard nor the selection and report
+                # the failure to the caller.
+                if self._letter_buffer:
+                    if not self._flush_letter_buffer():
+                        logger.warning(
+                            "capture_selected_text: letter-buffer flush "
+                            "failed; clipboard and selection not touched."
+                        )
+                        return {
+                            "text": "",
+                            "flush_failed": True,
+                            "select_all_fallback": False,
+                            "copy_failed": False,
+                            "capture_failed": True,
+                        }
+
                 sentinel = f"__SENTINEL__{time.time()}"
                 # wh-fz7j.4: route through _safe_copy for seq tracking.
                 # wh-fz7j.5: bail out if the sentinel write fails; otherwise
                 # _poll_clipboard would compare against a sentinel that was
                 # never copied and could return stale clipboard text.
                 if not self.clipboard._safe_copy(sentinel):
-                    return {"text": ""}
+                    # wh-review-pattern-fixes.38: no Ctrl+C was ever
+                    # sent, so whether the user has a selection is
+                    # unknown. Report the capture failure instead of an
+                    # empty-selection shape.
+                    logger.error(
+                        "capture_selected_text: sentinel clipboard "
+                        "write failed; selection state unknown."
+                    )
+                    return {
+                        "text": "",
+                        "flush_failed": False,
+                        "select_all_fallback": False,
+                        "copy_failed": False,
+                        "capture_failed": True,
+                    }
 
-                # Try copying current selection
-                press_keys('ctrl', 'c')
+                # Try copying current selection.
+                # wh-review-pattern-fixes.35: the copy must be
+                # verified. press_keys discards the SendInput count,
+                # and an undelivered Ctrl+C leaves the sentinel
+                # unchanged -- indistinguishable from a genuine empty
+                # selection. The false "no selection" would trigger
+                # the Ctrl+A fallback below, and the AI flow would
+                # capture and replace the ENTIRE field instead of the
+                # user's selection. Fail closed: release a
+                # possibly-held Ctrl (wh-eolas.2.5 shape) and report
+                # copy_failed without entering the fallback.
+                ok, accepted, expected = verified_press_keys('ctrl', 'c')
+                if not ok:
+                    _send_modifier_keyups(('ctrl',))
+                    logger.error(
+                        "capture_selected_text: Ctrl+C SendInput short "
+                        "delivery (sent %d/%d); selection state "
+                        "unknown, failing the capture closed.",
+                        accepted, expected,
+                    )
+                    return {
+                        "text": "",
+                        "flush_failed": False,
+                        "select_all_fallback": False,
+                        "copy_failed": True,
+                        "capture_failed": True,
+                    }
                 text = self._poll_clipboard(sentinel)
 
                 if text is None:
-                    # No selection detected -- select all and retry
-                    press_keys('ctrl', 'a')
+                    # No selection detected -- select all and retry.
+                    # wh-review-pattern-fixes.32 (d): the fallback flag
+                    # drives a later caret-moving collapse on the Logic
+                    # side, so it must reflect a Ctrl+A that actually
+                    # landed. press_keys discards the SendInput count;
+                    # an undelivered Ctrl+A would classify the user's
+                    # own selection as a fallback selection and the
+                    # collapse would move the user's caret. Send
+                    # verified, and only arm the flag on full delivery.
+                    ok, accepted, expected = verified_press_keys(
+                        'ctrl', 'a'
+                    )
+                    if not ok:
+                        # A short chord can leave Ctrl physically held
+                        # (down accepted, up dropped) -- release it
+                        # before reporting (wh-eolas.2.5 shape).
+                        _send_modifier_keyups(('ctrl',))
+                        logger.error(
+                            "capture_selected_text: Ctrl+A SendInput "
+                            "short delivery (sent %d/%d); not arming "
+                            "select_all_fallback.",
+                            accepted, expected,
+                        )
+                        return {
+                            "text": "",
+                            "flush_failed": False,
+                            "select_all_fallback": False,
+                            "copy_failed": False,
+                            # wh-review-pattern-fixes.38: the field was
+                            # never selected, so nothing could be
+                            # captured -- this is a failure, not an
+                            # empty selection.
+                            "capture_failed": True,
+                        }
+                    # wh-review-pattern-fixes.28: record that Ctrl+A
+                    # fired. From this point every exit -- including
+                    # the failed second sentinel write below -- must
+                    # report the armed whole-field selection.
+                    select_all_fallback = True
                     time.sleep(0.02)
                     if not self.clipboard._safe_copy(sentinel):
-                        return {"text": ""}
-                    press_keys('ctrl', 'c')
+                        # wh-review-pattern-fixes.38: the Ctrl+A landed
+                        # and the sentinel write did not, so the whole
+                        # field is selected and nothing was captured.
+                        # Report both: the caller owes the collapse AND
+                        # must not speak the no-text message.
+                        logger.error(
+                            "capture_selected_text: fallback sentinel "
+                            "clipboard write failed after a verified "
+                            "Ctrl+A; nothing captured."
+                        )
+                        return {
+                            "text": "",
+                            "flush_failed": False,
+                            "select_all_fallback": True,
+                            "copy_failed": False,
+                            "capture_failed": True,
+                        }
+                    # wh-review-pattern-fixes.35: the fallback copy is
+                    # verified too. It runs after a VERIFIED Ctrl+A, so
+                    # on a short delivery the armed whole-field
+                    # selection must still be reported alongside
+                    # copy_failed -- the caller owes the collapse.
+                    ok, accepted, expected = verified_press_keys(
+                        'ctrl', 'c'
+                    )
+                    if not ok:
+                        _send_modifier_keyups(('ctrl',))
+                        logger.error(
+                            "capture_selected_text: fallback Ctrl+C "
+                            "SendInput short delivery (sent %d/%d); "
+                            "failing the capture closed.",
+                            accepted, expected,
+                        )
+                        return {
+                            "text": "",
+                            "flush_failed": False,
+                            "select_all_fallback": True,
+                            "copy_failed": True,
+                            "capture_failed": True,
+                        }
                     text = self._poll_clipboard(sentinel)
 
                 captured = text or ""
         except Exception as e:
             logger.error(f"Error in capture_selected_text: {e}", exc_info=True)
+            # wh-review-pattern-fixes.38: the handler swallows the
+            # exception and falls through to the shared return below,
+            # which used to be byte-identical to a genuine empty
+            # selection. select_all_fallback keeps whatever the run
+            # established before the raise, so a Ctrl+A that already
+            # landed is still collapsed by the caller.
+            capture_failed = True
 
-        return {"text": captured}
+        return {
+            "text": captured,
+            "flush_failed": False,
+            "select_all_fallback": select_all_fallback,
+            "copy_failed": False,
+            "capture_failed": capture_failed,
+        }
 
-    def replace_selected_text(self, text: str) -> dict:
+    def _resolve_captured_selection_target(
+        self,
+        capture_token: Optional[str],
+        target_hwnd: Optional[int],
+    ) -> Optional[CapturedTarget]:
+        """Resolve the token the Logic process handed back to a control.
+
+        wh-review-pattern-fixes.45: returns the remembered
+        ``CapturedTarget`` only when all four conditions hold:
+
+        1. The caller supplied a token and an HWND.
+        2. This process still holds a captured target.
+        3. The stored token equals the supplied token.
+        4. The stored HWND equals the supplied HWND.
+
+        Condition 4 is what makes a WRONG identity fail, not only a
+        missing one. Returns None otherwise, and the caller must send
+        no keystroke. The slot is cleared on a successful resolve, so
+        one capture authorizes exactly one replacement.
+        """
+        if not capture_token or not target_hwnd:
+            logger.error(
+                "replace_selected_text: the caller supplied no captured "
+                "target (token=%r, hwnd=%r); refusing to paste.",
+                capture_token, target_hwnd,
+            )
+            return None
+        slot = self._captured_selection_target
+        if slot is None or slot[0] != capture_token:
+            logger.error(
+                "replace_selected_text: capture token %r does not match "
+                "the captured target this process holds; refusing to "
+                "paste.", capture_token,
+            )
+            return None
+        remembered = slot[1]
+        if remembered.hwnd != target_hwnd:
+            logger.error(
+                "replace_selected_text: the caller reported target "
+                "hwnd=%s but the capture recorded hwnd=%s; refusing to "
+                "paste.", target_hwnd, remembered.hwnd,
+            )
+            return None
+        self._captured_selection_target = None
+        return remembered
+
+    def replace_selected_text(
+        self,
+        text: str,
+        target_hwnd: Optional[int] = None,
+        capture_token: Optional[str] = None,
+    ) -> dict:
         """Replace current selection (or all text) with provided text.
 
-        Uses clipboard paste for reliability. Clipboard is saved and
-        restored via clipboard_context.
+        Uses clipboard paste for reliability.
+
+        wh-review-pattern-fixes.45: this method used to write the
+        clipboard and send Ctrl+V to whatever window held the
+        foreground. The AI correction flow captures the selection, waits
+        for a model that takes real time, and only then calls this
+        method, so the user can move to another window while the model
+        runs and have that window's selection replaced. ``target_hwnd``
+        and ``capture_token`` name the control the capture read from.
+        Both must match what ``capture_selected_text`` recorded, and the
+        captured target must still hold the foreground, before this
+        method writes the clipboard or sends a key. On any failure it
+        returns ``focus_drift`` True and sends nothing. It attempts no
+        repair: the user's original text is untouched, which is the
+        whole point of the refusal.
+
+        wh-review-pattern-fixes.33: does NOT wrap the paste in
+        ``clipboard_context``. The old fixed schedule (restore_delay=
+        0.05 plus a 0.05 s sleep) synchronously restored the user's old
+        clipboard ~100 ms after the key request, so a slow target that
+        processed the queued Ctrl+V after that point pasted the OLD
+        clipboard over the selection while this method reported
+        success -- the same race already fixed for raw_insert_text
+        (wh-fsov0 / wh-qoyk9). Restoration is instead delegated to the
+        utterance-level ownership-checked deferred path: the corrected-
+        text write is marked via ``mark_clipboard_dirty(write_seq=...)``
+        and ``end_utterance`` schedules the ``PendingRestore``. Outside
+        an active utterance the mark schedules nothing and the corrected
+        text stays on the clipboard -- the documented raw_insert_text
+        trade-off, and safer than racing the paste.
+
+        wh-review-pattern-fixes.32 (a): the Ctrl+V is sent through
+        ``verified_press_keys`` and success is reported only after
+        SendInput accepted the whole chord. press_keys discards the
+        count; an unverified success here made Logic set replaced=True
+        and speak "Done" while the captured text was still selected on
+        screen.
 
         Args:
             text: Replacement text to paste.
+            target_hwnd: The root-normalized top-level window handle
+                ``capture_selected_text`` reported for this capture.
+            capture_token: The token ``capture_selected_text`` issued for
+                this capture.
 
         Returns:
-            Dict with "success" key.
+            Dict with "success" and "focus_drift" keys. "success" is
+            True only after the captured target proved it holds the
+            foreground, the clipboard write succeeded, AND the Ctrl+V
+            chord was fully accepted. "focus_drift" is True only when
+            the captured target could not be resolved or no longer holds
+            the foreground; nothing was written and no key was sent, so
+            the user's text is exactly as they left it.
         """
+        # wh-review-pattern-fixes.45: prove the captured target BEFORE
+        # the clipboard write. A refusal must leave no trace: no
+        # clipboard change, no keystroke, no dirty mark.
+        captured = self._resolve_captured_selection_target(
+            capture_token, target_hwnd,
+        )
+        if captured is None:
+            return {"success": False, "focus_drift": True}
+        if not self.clipboard.prove_captured_target_is_foreground(
+            self.window_manager,
+            captured.hwnd,
+            captured.control,
+            caller="replace_selected_text",
+        ):
+            logger.error(
+                "replace_selected_text: the captured target (hwnd=%s) "
+                "no longer holds the foreground; refusing to paste the "
+                "replacement.", captured.hwnd,
+            )
+            return {"success": False, "focus_drift": True}
         try:
-            with clipboard_context(restore_delay=0.05):
-                # wh-fz7j.4: route through _safe_copy for seq tracking.
-                # wh-fz7j.5: bail out if the copy failed; otherwise Ctrl+V
-                # would paste the pre-existing clipboard contents.
-                if not self.clipboard._safe_copy(text):
-                    return {"success": False}
-                time.sleep(0.02)
-                press_keys('ctrl', 'v')
-                time.sleep(0.05)
+            # wh-fz7j.4: route through _safe_copy for seq tracking.
+            # wh-fz7j.5: bail out if the copy failed; otherwise Ctrl+V
+            # would paste the pre-existing clipboard contents.
+            if not self.clipboard._safe_copy(text):
+                return {"success": False, "focus_drift": False}
+            # Mark the write for the deferred-restore manager with the
+            # post-write seq so the ownership check has the WheelHouse
+            # baseline (same shape as raw_insert_text).
+            self.utterance_manager.mark_clipboard_dirty(
+                write_seq=self.clipboard.last_clipboard_write_seq
+            )
+            self.utterance_manager._last_paste_time = time.time()
+            time.sleep(0.02)
+            ok, accepted, expected = verified_press_keys('ctrl', 'v')
+            if not ok:
+                # A short chord can leave Ctrl physically held --
+                # release it before reporting (wh-eolas.2.5 shape).
+                _send_modifier_keyups(('ctrl',))
+                logger.error(
+                    "replace_selected_text: Ctrl+V SendInput short "
+                    "delivery (sent %d/%d); reporting failure.",
+                    accepted, expected,
+                )
+                return {"success": False, "focus_drift": False}
         except Exception as e:
             logger.error(f"Error in replace_selected_text: {e}", exc_info=True)
-            return {"success": False}
+            return {"success": False, "focus_drift": False}
         finally:
             self.buffer_manager.invalidate()
 
-        return {"success": True}
+        return {"success": True, "focus_drift": False}
+
+    # -----------------------------------------------------------------
+    # Mouse-grid pointer actions (wh-input-mouse-primitives).
+    #
+    # The Input process is the only place that touches the mouse. Logic's
+    # grid state machine owns every decision (which monitor, which cell,
+    # where the mark is) and sends one of these three commands with a
+    # resolved physical-pixel point; the Input process synthesises the
+    # input and reports back.
+    #
+    # All three are in ``_HANDLES_OWN_RESPONSE``, all three are
+    # never-raise, and all three emit exactly one ``MouseActionResponse``
+    # per request_id -- the same contract the click handlers keep, for the
+    # same reason (wh-lla5d: a dropped or doubled response leaves the
+    # Logic awaiter to time out or the demuxer to warn).
+    #
+    # None of them runs UI Automation verification or the occlusion
+    # hit-test the by-name click path uses: the user picked the point
+    # visually off a painted grid, so there is no invisible control to
+    # protect against (the design doc's "Verification difference").
+    # -----------------------------------------------------------------
+
+    def _get_validated_click_config(self):
+        """Return the validated ``[click]`` config, building it once.
+
+        ``ClickConfig.from_raw`` never raises and degrades to a disabled
+        config on a bad value. The grid lives behind the same master switch
+        as voice clicking (design doc, "Configuration"), so a disabled
+        ``[click]`` block disables the grid's pointer actions too. Logic
+        gates before sending; this defends the Input side against a stale or
+        racing request, exactly as ``_get_click_element_finder`` does for the
+        by-name path.
+
+        This deliberately does NOT build an ElementFinder or a COM
+        automation root -- a pointer action needs neither.
+        """
+        cfg = getattr(self, "_click_config", None)
+        if cfg is None:
+            from ui.click_config import ClickConfig
+
+            cfg = ClickConfig.from_raw(self.config.get("click", {}))
+            self._click_config = cfg
+        return cfg
+
+    def _emit_mouse_action_response(
+        self,
+        *,
+        action_name: str,
+        request_id: Optional[str],
+        trace_id: str,
+        succeeded: bool,
+        reason: Optional[str],
+    ) -> None:
+        """Put exactly one ``MouseActionResponse`` on the response queue.
+
+        A dead response queue is the ONE case that yields zero responses:
+        there is no second channel to deliver on, and the orphaned Logic
+        Future is already covered by Logic's own timeout.
+        """
+        from services.wheelhouse.shared.mouse_action import MouseActionResponse
+
+        payload = MouseActionResponse(
+            status="ok" if succeeded else "error",
+            outcome="ok" if succeeded else "execution_failed",
+            reason=None if succeeded else (reason or "unexpected_error"),
+            trace_id=trace_id if isinstance(trace_id, str) else "",
+        ).to_dict()
+        # Record the result BEFORE the enqueue attempt (wh-mouse-grid.1.24):
+        # when the reply reaches Logic after its timeout, the app demuxer
+        # discards it, so channel_probe's reply carries this record and Logic
+        # correlates it by trace_id to recover a release_failed warning. A
+        # failed enqueue is exactly the case where recovery matters, so the
+        # record must not depend on the put succeeding. This command loop is
+        # single-threaded, so the read in channel_probe cannot race this
+        # write.
+        self._last_mouse_action_result = {
+            "action": action_name,
+            "succeeded": bool(succeeded),
+            "reason": payload["reason"],
+            "trace_id": payload["trace_id"],
+        }
+        if request_id is not None:
+            payload["request_id"] = request_id
+        payload["action"] = action_name
+        try:
+            self.response_queue.put(payload)
+        except Exception as exc:  # noqa: BLE001 -- log and drop
+            logger.error(
+                "%s: failed to enqueue response (trace_id=%s): %s",
+                action_name, trace_id, exc,
+            )
+
+    def channel_probe(
+        self,
+        trace_id: str = "",
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Channel drain probe (wh-mouse-grid.1.18, extended by .1.24).
+
+        Logic sends this after a grid pointer request times out. Because this
+        command loop executes one command at a time in arrival order, ANY
+        reply proves every command queued before the probe has already
+        executed or been overwritten -- so the timed-out action can no longer
+        fire later.
+
+        The reply also carries ``last_mouse_action`` -- the recorded result
+        of the most recent pointer action (or ``None``) -- because the
+        timed-out action's own reply was discarded by the app demuxer after
+        Logic's timeout. Logic correlates the record by trace_id to recover
+        the release_failed stuck-button warning (wh-mouse-grid.1.24). The
+        in-order command loop guarantees the timed-out action's record was
+        written before this probe runs. In ``_HANDLES_OWN_RESPONSE`` so the
+        generic emitter does not clobber the record-bearing reply; touches
+        no input hardware.
+        """
+        payload: dict = {
+            "status": "ok",
+            "trace_id": trace_id if isinstance(trace_id, str) else "",
+            "last_mouse_action": getattr(
+                self, "_last_mouse_action_result", None
+            ),
+            "action": "channel_probe",
+        }
+        if request_id is not None:
+            payload["request_id"] = request_id
+        try:
+            self.response_queue.put(payload)
+        except Exception as exc:  # noqa: BLE001 -- log and drop
+            logger.error(
+                "channel_probe: failed to enqueue response (trace_id=%s): %s",
+                trace_id, exc,
+            )
+
+    def click_point(
+        self,
+        x=None,
+        y=None,
+        button: str = "left",
+        click_count: int = 1,
+        trace_id: str = "",
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Click at a physical-pixel screen point (mouse-grid gesture).
+
+        Args:
+            x, y: physical screen pixels. Negative values are normal on a
+                multi-monitor desktop whose secondary monitor sits left of or
+                above the primary.
+            button: ``"left"`` or ``"right"``.
+            click_count: 1 or 2 (a double click).
+            trace_id: Logic-generated correlation id, echoed in the response.
+
+        Emits one ``MouseActionResponse``. The argument validation lives in
+        the SendInput primitive, which reports ``invalid_point`` /
+        ``invalid_button`` / ``invalid_click_count`` rather than raising, so a
+        malformed IPC message produces a normal ``execution_failed`` response.
+        """
+        action_name = "click_point"
+        try:
+            if not self._get_validated_click_config().grid_enabled_effective:
+                logger.info(
+                    "click_point: voice clicking disabled by config; "
+                    "short-circuiting (trace_id=%s)", trace_id,
+                )
+                self._emit_mouse_action_response(
+                    action_name=action_name, request_id=request_id,
+                    trace_id=trace_id, succeeded=False,
+                    reason="disabled_by_config",
+                )
+                return
+
+            # wh-review-pattern-fixes.8: a grid click can move focus, the
+            # caret, or the selection; invalidate before the dispatch (see
+            # the hotkey_action block comment for the full rationale).
+            self.buffer_manager.invalidate()
+            succeeded, reason = self._mouse_click_seam(
+                x, y, button, click_count,
+            )
+            logger.info(
+                "click_point: point=(%r,%r) button=%s count=%r ok=%s "
+                "reason=%s (trace_id=%s)",
+                x, y, button, click_count, succeeded, reason, trace_id,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never-raise handler
+            logger.error(
+                "click_point: unexpected error (trace_id=%s): %s",
+                trace_id, exc, exc_info=True,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=False,
+                reason="unexpected_error",
+            )
+
+    def move_pointer(
+        self,
+        x=None,
+        y=None,
+        trace_id: str = "",
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Park the pointer at a physical-pixel point, pressing nothing.
+
+        The grid's "move here" gesture. Hover-revealed menus are common in
+        exactly the applications with poor accessibility trees that motivate
+        the grid, so parking the pointer is a first-class action rather than a
+        side effect of clicking.
+
+        Emits one ``MouseActionResponse``.
+        """
+        action_name = "move_pointer"
+        try:
+            if not self._get_validated_click_config().grid_enabled_effective:
+                logger.info(
+                    "move_pointer: voice clicking disabled by config; "
+                    "short-circuiting (trace_id=%s)", trace_id,
+                )
+                self._emit_mouse_action_response(
+                    action_name=action_name, request_id=request_id,
+                    trace_id=trace_id, succeeded=False,
+                    reason="disabled_by_config",
+                )
+                return
+
+            succeeded, reason = self._mouse_move_seam(x, y)
+            logger.info(
+                "move_pointer: point=(%r,%r) ok=%s reason=%s (trace_id=%s)",
+                x, y, succeeded, reason, trace_id,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never-raise handler
+            logger.error(
+                "move_pointer: unexpected error (trace_id=%s): %s",
+                trace_id, exc, exc_info=True,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=False,
+                reason="unexpected_error",
+            )
+
+    def perform_drag(
+        self,
+        start_x=None,
+        start_y=None,
+        end_x=None,
+        end_y=None,
+        duration_ms: int = 250,
+        trace_id: str = "",
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Drag from one physical-pixel point to another as ONE operation.
+
+        The whole gesture -- button down at the start, interpolated movement
+        across ``duration_ms``, button up at the end -- runs inside the
+        SendInput primitive, so no IPC boundary sits between the press and the
+        release and no message loss can strand the button pressed. The
+        primitive guarantees the release with a try/finally even when the
+        movement fails partway.
+
+        The movement is gradual because many applications ignore a drag whose
+        pointer teleports: they never see the intermediate movement that makes
+        them begin the drag operation.
+
+        Emits one ``MouseActionResponse``. The ``release_failed`` reason is
+        the one outcome meaning a mouse button may still be held; it reaches
+        Logic verbatim so the notice can say so.
+        """
+        action_name = "perform_drag"
+        try:
+            if not self._get_validated_click_config().grid_enabled_effective:
+                logger.info(
+                    "perform_drag: voice clicking disabled by config; "
+                    "short-circuiting (trace_id=%s)", trace_id,
+                )
+                self._emit_mouse_action_response(
+                    action_name=action_name, request_id=request_id,
+                    trace_id=trace_id, succeeded=False,
+                    reason="disabled_by_config",
+                )
+                return
+
+            # wh-review-pattern-fixes.8: a drag can move focus, the caret,
+            # or the selection; invalidate before the dispatch (see the
+            # hotkey_action block comment for the full rationale).
+            self.buffer_manager.invalidate()
+            succeeded, reason = self._mouse_drag_seam(
+                start_x, start_y, end_x, end_y, duration_ms,
+            )
+            logger.info(
+                "perform_drag: (%r,%r)->(%r,%r) duration_ms=%r ok=%s "
+                "reason=%s (trace_id=%s)",
+                start_x, start_y, end_x, end_y, duration_ms, succeeded,
+                reason, trace_id,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never-raise handler
+            logger.error(
+                "perform_drag: unexpected error (trace_id=%s): %s",
+                trace_id, exc, exc_info=True,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=False,
+                reason="unexpected_error",
+            )
 
     def _poll_clipboard(self, sentinel: str) -> str | None:
         """Poll clipboard until content differs from sentinel, or timeout.

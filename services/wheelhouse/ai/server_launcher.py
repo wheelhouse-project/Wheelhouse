@@ -655,7 +655,7 @@ class LocalAIServerLauncher:
     def build_command(self) -> list[str]:
         """The exact command line, so a test can assert it without spawning."""
         cfg = self._config
-        return [
+        command = [
             str(Path(cfg.binary_dir) / BINARY_NAME),
             "-m", cfg.model_path,
             "--host", "127.0.0.1",
@@ -667,6 +667,12 @@ class LocalAIServerLauncher:
             "--reasoning", "off",
             "--reasoning-budget", "0",
         ]
+        # Without an alias the server reports the model FILE PATH as the
+        # model id, which never matches [ai.server] model, and the AI Model
+        # menu shows the one model twice (wh-ai-model-alias).
+        if cfg.model_alias:
+            command += ["--alias", cfg.model_alias]
+        return command
 
     def start(self) -> bool:
         """Start the server and wait for it to report healthy.

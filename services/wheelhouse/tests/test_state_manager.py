@@ -11,6 +11,7 @@ Covers:
 """
 
 import asyncio
+import logging
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 
 import pytest
@@ -64,6 +65,111 @@ def sm_no_ws(mock_config, mock_event_bus, mock_gui_queue):
 # speech_enabled computed property
 # -----------------------------------------------------------------------
 
+class TestSettingsAcknowledgement:
+    @pytest.fixture(autouse=True)
+    def staged_config_double(self, mock_config):
+        mock_config.get_persisted.side_effect = mock_config.get
+        async def save(*, values=None):
+            saved = mock_config.save.return_value
+            if saved is True:
+                for key, value in (values or {}).items():
+                    mock_config.set(key, value)
+            return saved
+        mock_config.save.side_effect = save
+
+    @pytest.mark.asyncio
+    async def test_settings_ack_broadcast_hides_unsaved_memory(self, sm, mock_config, mock_gui_queue):
+        mock_config.set('FLOATING_BUTTON_SIZE', 50)
+        async def save(*, values=None):
+            sm.send_state_update()
+            message = mock_gui_queue.put_nowait.call_args.args[0]
+            assert message['FLOATING_BUTTON_SIZE'] == 50
+            return True
+        mock_config.save.side_effect = save
+        assert await sm.set_config_value('FLOATING_BUTTON_SIZE', 80, request_id='pending')
+
+    @pytest.mark.asyncio
+    async def test_settings_ack_reconcile_waits_for_inflight_write(self, sm, mock_config, mock_gui_queue):
+        mock_config.set('FLOATING_BUTTON_SIZE', 50)
+        started, release = asyncio.Event(), asyncio.Event()
+        async def save(*, values=None):
+            started.set()
+            await release.wait()
+            return False
+        mock_config.save.side_effect = save
+        writer = asyncio.create_task(sm.set_config_value('FLOATING_BUTTON_SIZE', 80, request_id='w'))
+        await started.wait()
+        reader = asyncio.create_task(sm.get_config_values(['FLOATING_BUTTON_SIZE'], 'r'))
+        await asyncio.sleep(0)
+        assert not reader.done()
+        release.set()
+        await asyncio.gather(writer, reader)
+        message = mock_gui_queue.put_nowait.call_args.args[0]
+        assert message == {'action': 'config_values_result', 'request_id': 'r',
+                           'values': {'FLOATING_BUTTON_SIZE': 50}}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('saved', [True, False])
+    async def test_settings_ack_carries_request_and_saved(self, sm, mock_config, mock_gui_queue, saved):
+        mock_config.set('FLOATING_BUTTON_SIZE', 50)
+        mock_config.save.return_value = saved
+        await sm.set_config_value('FLOATING_BUTTON_SIZE', 80, request_id='request-1')
+        messages = [c.args[0] for c in mock_gui_queue.put_nowait.call_args_list]
+        acks = [m for m in messages if m['action'] == 'config_write_result']
+        assert len(acks) == 1
+        ack = acks[0]
+        assert ack['request_id'] == 'request-1'
+        assert ack['saved'] is saved
+        assert ack['values'] == {'FLOATING_BUTTON_SIZE': 80 if saved else 50}
+        assert mock_config.get('FLOATING_BUTTON_SIZE') == (80 if saved else 50)
+
+    @pytest.mark.asyncio
+    async def test_settings_ack_handler_keeps_request_id(self, sm, mock_config, mock_gui_queue):
+        from main import LogicController
+        controller = MagicMock(spec=LogicController)
+        controller.state_manager = sm
+        tasks = []
+        controller.create_task_with_error_handling.side_effect = lambda coro, name: tasks.append(coro)
+        mock_config.save.return_value = True
+        command = {'action': 'set_config_value', 'key': 'FLOATING_BUTTON_SIZE',
+                   'value': 80, 'request_id': 'through-handler'}
+        LogicController._build_gui_handler_map(controller, command)[command['action']]()
+        await tasks[0]
+        assert any(c.args[0].get('request_id') == 'through-handler'
+                   for c in mock_gui_queue.put_nowait.call_args_list)
+
+
+@pytest.mark.parametrize("suppressed,expected", [
+    ("sonos", "Sonos"), ("audio", "System audio"), ("idle", "idle"),
+    ("manual", "disabled"), ("none", ""),
+])
+def test_ptt_pending_state_carries_actual_reason(sm, mock_gui_queue, suppressed, expected, monkeypatch):
+    monkeypatch.setattr(sm.loop, "create_task", lambda coroutine: coroutine.close())
+    sm.ptt_start(request_id="current-gui-hold")
+    if suppressed in ("sonos", "audio", "idle"):
+        setattr(sm, "_speech_suppressed_by_" + suppressed, True)
+    if suppressed == "audio":
+        sm.ptt_confirm_mute(False, sm._ptt_hold_id, "device unavailable")
+    if suppressed == "manual":
+        sm._speech_enabled = False
+    sm.send_state_update()
+    state = mock_gui_queue.put_nowait.call_args.args[0]
+    assert state["ptt_request_id"] == "current-gui-hold"
+    assert state["speech_enabled"] is (suppressed == "none")
+    assert expected in state["ptt_refusal_reason"]
+    if suppressed == "none":
+        assert state["ptt_refusal_reason"] == ""
+
+
+def test_ptt_pending_disabled_sonos_suppression_has_no_refusal(sm, mock_config, mock_gui_queue, monkeypatch):
+    monkeypatch.setattr(sm.loop, "create_task", lambda coroutine: coroutine.close())
+    mock_config.set("ENABLE_SONOS_SUPPRESSION", False)
+    sm._speech_suppressed_by_sonos = True
+    sm.ptt_start(request_id="hold")
+    state = mock_gui_queue.put_nowait.call_args.args[0]
+    assert state["speech_enabled"] is True
+    assert state["ptt_refusal_reason"] == ""
+
 class TestSpeechEnabledProperty:
     """Test the computed speech_enabled property with suppression combos."""
 
@@ -96,11 +202,11 @@ class TestSpeechEnabledProperty:
         sm._speech_suppressed_by_sonos = True
         assert sm.speech_enabled is False
 
-    def test_audio_suppression_respects_config_flag(self, sm):
-        """If ENABLE_AUDIO_SUPPRESSION is False, audio flag is ignored."""
+    def test_audio_suppression_follows_the_startup_decision(self, sm):
+        """With the startup decision off, the audio flag is ignored."""
         sm._speech_enabled = True
         sm._speech_suppressed_by_audio = True
-        sm.config_service._config["ENABLE_AUDIO_SUPPRESSION"] = False
+        sm.apply_audio_suppression_decision(False)
         assert sm.speech_enabled is True
 
     def test_sonos_suppression_respects_config_flag(self, sm):
@@ -291,12 +397,13 @@ class TestSendStateUpdate:
         expected_keys = {
             "action", "speech_enabled", "button_visible",
             "FLOATING_BUTTON_SIZE", "FLOATING_BUTTON_POS",
-            "SHOW_SPEECH_PULSE", "stt_mode", "stt_provider",
+            "SHOW_SPEECH_PULSE",
+            "settings_persisted", "stt_provider",
             "stt_providers_available", "stt_provider_display_names",
             "ai_provider", "ai_providers_available",
             "ai_provider_display_names",
             "interim_results_enabled", "debug_mode",
-            "speech_interaction_mode", "ptt_active",
+            "speech_interaction_mode", "ptt_active", "ptt_request_id", "ptt_refusal_reason",
         }
         assert expected_keys == set(state.keys())
 
@@ -415,11 +522,6 @@ class TestSTTRegistration:
         sm.unregister_stt_connection()
         assert sm.stt_websocket_connection is None
 
-    def test_set_stt_manager(self, sm):
-        mgr = Mock()
-        sm.set_stt_manager(mgr)
-        assert sm._stt_manager is mgr
-
     def test_set_remote_stt_launcher(self, sm):
         launcher = Mock()
         sm.set_remote_stt_launcher(launcher)
@@ -427,25 +529,144 @@ class TestSTTRegistration:
 
 
 # -----------------------------------------------------------------------
-# STT mode/provider helpers
+# STT provider helpers
 # -----------------------------------------------------------------------
 
 class TestSTTHelpers:
-
-    def test_get_stt_mode_default(self, sm):
-        assert sm._get_current_stt_mode() == "remote"
-
-    def test_get_stt_mode_from_config(self, sm, mock_config):
-        mock_config._config["stt"] = {"mode": "in_process"}
-        assert sm._get_current_stt_mode() == "in_process"
 
     def test_get_stt_provider_default(self, sm):
         # With no stt.last_provider in config, the remote default is the local
         # offline provider, not a cloud one (wh-stt-fallback-default-google).
         assert sm._get_current_stt_provider() == DEFAULT_STT_PROVIDER
 
+    def test_get_stt_provider_prefers_running_record(self, sm, mock_config):
+        # The launcher's actually-started provider outranks the config value:
+        # a malformed stt section can make the config unrepairable while a
+        # fallback engine runs (provider-removal review .1.6).
+        mock_config._config["stt"] = {"last_provider": "parakeet_tdt"}
+        sm.set_running_remote_stt_provider("google_stt")
+        assert sm._get_current_stt_provider() == "google_stt"
+
+    def test_get_stt_provider_reads_config_without_record(self, sm, mock_config):
+        mock_config._config["stt"] = {"last_provider": "google_stt"}
+        assert sm._get_current_stt_provider() == "google_stt"
+
+    def test_a_stopped_engine_selects_nothing(self, sm, mock_config):
+        # Clearing the record alone would not help: the config still names
+        # the provider the user chose, so the tray would put the check mark
+        # straight back on an engine that is not running
+        # (wh-remote-stt-robustness, Gap A).
+        mock_config._config["stt"] = {"last_provider": "google_stt"}
+        sm.set_running_remote_stt_provider("google_stt")
+
+        sm.set_remote_stt_stopped()
+
+        assert sm._get_current_stt_provider() is None
+
+    def test_a_stopped_engine_selects_nothing_without_a_record(self, sm, mock_config):
+        mock_config._config["stt"] = {"last_provider": "google_stt"}
+
+        sm.set_remote_stt_stopped()
+
+        assert sm._get_current_stt_provider() is None
+
+    def test_a_stop_naming_another_provider_is_ignored(self, sm, mock_config):
+        # A startup monitor left over from an earlier engine can report
+        # its failure after a replacement is already running; blanking the
+        # display for the running engine would be worse than the bug this
+        # state fixes.
+        mock_config._config["stt"] = {"last_provider": "google_stt"}
+        sm.set_running_remote_stt_provider("parakeet_tdt")
+
+        sm.set_remote_stt_stopped("google_stt")
+
+        assert sm._get_current_stt_provider() == "parakeet_tdt"
+
+    def test_a_stop_naming_the_running_provider_is_honoured(self, sm, mock_config):
+        mock_config._config["stt"] = {"last_provider": "google_stt"}
+        sm.set_running_remote_stt_provider("parakeet_tdt")
+
+        sm.set_remote_stt_stopped("parakeet_tdt")
+
+        assert sm._get_current_stt_provider() is None
+
+    def test_a_later_start_clears_the_stopped_state(self, sm, mock_config):
+        mock_config._config["stt"] = {"last_provider": "google_stt"}
+        sm.set_remote_stt_stopped()
+
+        sm.set_running_remote_stt_provider("parakeet_tdt")
+
+        assert sm._get_current_stt_provider() == "parakeet_tdt"
+        # The flag itself, because the reader cannot show it: a record is
+        # read before the flag, so a start that left the flag set would
+        # answer correctly here and wrongly the moment the record is
+        # cleared again. Only the attribute distinguishes the two.
+        assert sm._remote_stt_confirmed_stopped is False
+
+    def test_a_late_stop_cannot_blank_a_replacement_recorded_meanwhile(
+        self, sm, mock_config
+    ):
+        # The stop signal runs on the launcher's startup-monitor thread;
+        # the replacement is recorded on the event loop. The guard read
+        # and the two writes inside set_remote_stt_stopped are separate
+        # steps, so unless the two setters are serialised the loop can
+        # record the replacement in between and the stop then blanks an
+        # engine that is running, with nothing to correct it
+        # (round 1 finding wh-remote-stt-robustness.1.2).
+        #
+        # The property below is the seam that makes the interleaving
+        # deterministic: it parks the monitor thread between the guard
+        # and the first write. Serialised, the loop thread waits and the
+        # park times out; unserialised, the loop thread records the
+        # replacement and the stop wipes it.
+        import threading
+
+        mock_config._config["stt"] = {"last_provider": "google_stt"}
+
+        record = {"value": None}
+        monitor = {"thread": None}
+        reads = {"n": 0}
+        parked = threading.Event()
+        replaced = threading.Event()
+
+        def _get(self):
+            value = record["value"]
+            if threading.current_thread() is monitor["thread"]:
+                reads["n"] += 1
+                # The guard reads the record twice. Park after the second
+                # read, which is the only moment a lock that covered just
+                # the writes would leave unprotected.
+                if reads["n"] == 2 and not parked.is_set():
+                    parked.set()
+                    replaced.wait(timeout=0.5)
+            return value
+
+        def _set(self, value):
+            record["value"] = value
+
+        with patch.object(
+            StateManager,
+            "_running_remote_stt_provider",
+            property(_get, _set),
+            create=True,
+        ):
+            sm.set_running_remote_stt_provider("google_stt")
+
+            monitor["thread"] = threading.Thread(
+                target=sm.set_remote_stt_stopped, args=("google_stt",)
+            )
+            monitor["thread"].start()
+            assert parked.wait(timeout=2), "the stop never finished its guard"
+
+            sm.set_running_remote_stt_provider("parakeet_tdt")
+            replaced.set()
+            monitor["thread"].join(timeout=2)
+            assert not monitor["thread"].is_alive()
+
+            assert sm._get_current_stt_provider() == "parakeet_tdt"
+
     def test_get_available_providers_no_launcher(self, sm):
-        # Remote mode but no launcher - falls through to in-process check
+        # Remote mode but no launcher: nothing is discovered.
         result = sm._get_available_stt_providers()
         assert isinstance(result, list)
 
@@ -453,32 +674,26 @@ class TestSTTHelpers:
         result = sm._get_provider_display_names()
         assert isinstance(result, dict)
 
-    def test_get_zipformer_variant_no_launcher(self, sm):
-        assert sm._get_zipformer_variant() == "zipformer_cpu"
-
     def test_get_available_providers_with_launcher(self, sm):
         launcher = Mock()
         launcher.get_providers.return_value = [
             {"name": "google_stt", "display_name": "Google Cloud"},
-            {"name": "zipformer", "display_name": "Zipformer"},
+            {"name": "parakeet_tdt", "display_name": "Parakeet v3 (GPU)"},
         ]
         sm._remote_stt_launcher = launcher
         result = sm._get_available_stt_providers()
-        assert "google_stt" in result
-        assert "zipformer_cpu" in result
-        assert "zipformer_gpu" in result
+        assert result == ["google_stt", "parakeet_tdt"]
 
     def test_get_provider_display_names_with_launcher(self, sm):
         launcher = Mock()
         launcher.get_providers.return_value = [
             {"name": "google_stt", "display_name": "Google Cloud"},
-            {"name": "zipformer", "display_name": "Zipformer"},
+            {"name": "parakeet_tdt", "display_name": "Parakeet v3 (GPU)"},
         ]
         sm._remote_stt_launcher = launcher
         result = sm._get_provider_display_names()
         assert result["google_stt"] == "Google Cloud"
-        assert result["zipformer_cpu"] == "Zipformer CPU"
-        assert result["zipformer_gpu"] == "Zipformer GPU"
+        assert result["parakeet_tdt"] == "Parakeet v3 (GPU)"
 
 
 # -----------------------------------------------------------------------
@@ -905,6 +1120,15 @@ class TestPTTState:
         event = mock_event_bus.publish.call_args[0][0]
         assert event.__class__.__name__ == "PTTStartedEvent"
 
+    def test_ptt_start_stamps_the_event_with_the_hold_number(self, sm, mock_event_bus):
+        """SystemVolumePlugin echoes this number back on its mute report, and
+        that is how StateManager tells one hold's answer from another's
+        (wh-ptt-audio-override.1.1)."""
+        sm.ptt_start()
+        event = mock_event_bus.publish.call_args[0][0]
+        assert event.hold_id == sm._ptt_hold_id
+        assert event.hold_id > 0
+
     def test_ptt_start_sends_state_update(self, sm, mock_gui_queue):
         sm.ptt_start()
         mock_gui_queue.put_nowait.assert_called()
@@ -912,12 +1136,11 @@ class TestPTTState:
         assert state["action"] == "state_update"
         assert state["ptt_active"] is True
 
-    def test_ptt_stop_disables_speech(self, sm):
+    def test_ptt_stop_clears_the_active_flag(self, sm):
         sm._speech_enabled = True
-        sm._ptt_active = True
+        sm.ptt_start()
         sm.ptt_stop()
         assert sm._ptt_active is False
-        assert sm._speech_enabled is False
 
     def test_ptt_stop_publishes_event(self, sm, mock_event_bus):
         sm._ptt_active = True
@@ -933,10 +1156,21 @@ class TestPTTState:
         mock_event_bus.publish.assert_not_called()
 
     def test_ptt_stop_broadcasts_to_websocket(self, sm, mock_websocket_manager):
-        sm._ptt_active = True
+        """The release tells the engine the restored value, tagged "ptt".
+
+        This test is the only one that pins the reason keyword; the value
+        itself is covered by
+        test_an_ordinary_release_leaves_the_engine_on_when_speech_was_on.
+        It asserted False until wh-ptt-release-disables-speech.1.9: it set
+        _ptt_active directly, so ptt_start never ran, _speech_before_ptt
+        stayed unset, and ptt_stop restored the getattr default False. The
+        assertion matched that default rather than any contract, and it
+        would have passed under a full revert of 5719a1fa.
+        """
         sm._speech_enabled = True
+        sm.ptt_start()
         sm.ptt_stop()
-        mock_websocket_manager.set_transcription_status.assert_called_with(False, reason="ptt")
+        mock_websocket_manager.set_transcription_status.assert_called_with(True, reason="ptt")
 
     def test_ptt_stop_drag_cancel_restores_speech(self, sm):
         """Drag cancel restores speech to pre-PTT state."""
@@ -974,9 +1208,24 @@ class TestPTTState:
         sm.ptt_stop(reason="gesture_cancel")
         assert sm._speech_enabled is False
 
-    def test_ptt_stop_released_still_forces_speech_off(self, sm):
-        """An ordinary release is a decision, so it does turn speech off."""
+    def test_ptt_stop_released_restores_the_pre_hold_setting(self, sm):
+        """An ordinary release puts back what was there before the hold.
+
+        This test previously asserted the opposite, on the reading that an
+        ordinary release is itself a decision to turn speech off. David
+        reported the consequence on 2026-08-27: a hold taken while speech was
+        on but audio-suppressed ended with his own setting overwritten, and
+        listening never came back when the sound stopped
+        (wh-ptt-release-disables-speech).
+        """
         sm._speech_enabled = True
+        sm.ptt_start()
+        sm.ptt_stop(reason="released")
+        assert sm._speech_enabled is True
+
+    def test_ptt_stop_released_keeps_speech_off_in_push_to_talk_mode(self, sm):
+        """Speech is off between holds there, so the release ends off."""
+        sm._speech_enabled = False
         sm.ptt_start()
         sm.ptt_stop(reason="released")
         assert sm._speech_enabled is False
@@ -984,14 +1233,18 @@ class TestPTTState:
     def test_a_stop_after_the_safety_timeout_still_corrects_the_display(self, sm):
         """The interface asked to end a hold that already ended on its own.
 
-        The safety timeout ends a hold the user never released, and it turns
-        speech off. If the button is then hidden or the context menu opens,
-        the interface cancels the hold it still believes in and puts speech
-        back to what it was before -- showing the microphone as open while it
-        is shut. Nothing here can stop that guess being made, so the answer is
-        to send the real state back straight away and correct it.
+        The safety timeout ends a hold the user never released. If the button
+        is then hidden or the context menu opens, the interface cancels the
+        hold it still believes in and puts speech back to what it was before
+        -- showing the microphone as open while it is shut. Nothing here can
+        stop that guess being made, so the answer is to send the real state
+        back straight away and correct it.
+
+        Speech is off before the hold here, so the cutoff's restore leaves it
+        off and there is a wrong guess to correct (David, 2026-08-27: the
+        cutoff restores rather than forcing speech off).
         """
-        sm._speech_enabled = True
+        sm._speech_enabled = False
         sm.ptt_start()
         sm._ptt_safety_timeout()
         assert sm._speech_enabled is False
@@ -1063,11 +1316,16 @@ class TestPTTState:
         assert state["ptt_active"] is True
 
     def test_safety_timeout_stops_ptt(self, sm):
-        sm._ptt_active = True
+        """The cutoff ends the hold and puts the pre-hold setting back.
+
+        It forced speech off until David's ruling of 2026-08-27; a lost
+        release is not a decision to switch speech off.
+        """
         sm._speech_enabled = True
+        sm.ptt_start()
         sm._ptt_safety_timeout()
         assert sm._ptt_active is False
-        assert sm._speech_enabled is False
+        assert sm._speech_enabled is True
 
     def test_ptt_stop_clears_safety_handle(self, sm):
         sm._ptt_active = True
@@ -1134,21 +1392,52 @@ class TestTheSpeechEngineIsToldTheSameThingAsTheDisplay:
         assert sm.speech_enabled is False
         assert self._told(mock_websocket_manager) is False
 
-    def test_an_ordinary_release_still_turns_the_engine_off(
+    def test_an_ordinary_release_leaves_the_engine_on_when_speech_was_on(
         self, sm, mock_websocket_manager
     ):
-        """The user decided, so the engine goes off even though speech was on."""
+        """The release restores the setting, so the engine keeps listening.
+
+        This test previously asserted the opposite
+        (wh-ptt-release-disables-speech); see
+        TestPTTState.test_ptt_stop_released_restores_the_pre_hold_setting.
+        """
         sm._speech_enabled = True
         sm.ptt_start()
         sm.ptt_stop(reason="released")
-        assert self._told(mock_websocket_manager) is False
+        assert sm.speech_enabled is True
+        assert self._told(mock_websocket_manager) is True
 
-    def test_the_safety_cutoff_still_turns_the_engine_off(
+    def test_an_ordinary_release_leaves_the_engine_off_when_speech_was_off(
         self, sm, mock_websocket_manager
     ):
+        sm._speech_enabled = False
+        sm.ptt_start()
+        sm.ptt_stop(reason="released")
+        assert sm.speech_enabled is False
+        assert self._told(mock_websocket_manager) is False
+
+    def test_the_safety_cutoff_leaves_the_engine_on_when_speech_was_on(
+        self, sm, mock_websocket_manager
+    ):
+        """The cutoff restores like every other ending (David, 2026-08-27).
+
+        It turned the engine off until that ruling, because it forced the
+        setting off first. A lost release is not a decision to switch speech
+        off, so the display and the engine both get the restored value.
+        """
         sm._speech_enabled = True
         sm.ptt_start()
         sm.ptt_stop(reason="safety_timeout")
+        assert sm.speech_enabled is True
+        assert self._told(mock_websocket_manager) is True
+
+    def test_the_safety_cutoff_leaves_the_engine_off_when_speech_was_off(
+        self, sm, mock_websocket_manager
+    ):
+        sm._speech_enabled = False
+        sm.ptt_start()
+        sm.ptt_stop(reason="safety_timeout")
+        assert sm.speech_enabled is False
         assert self._told(mock_websocket_manager) is False
 
     def test_a_cancelled_hold_under_suppression_still_leaves_the_engine_off(
@@ -1196,17 +1485,21 @@ class TestTheSpeechEngineIsToldTheSameThingAsTheDisplay:
         """Starting a hold must not clear the audio-suppression setting.
 
         The audio monitor owns that setting and reports only when the answer
-        changes, so nothing puts it back. A hold shorter than one check leaves
-        it cleared for as long as the sound keeps playing, which switches off
-        audio suppression for good. Both channels say off instead, which is the
-        real answer while the sound is still audible.
+        changes, so nothing puts it back. A hold shorter than one check would
+        leave it cleared for as long as the sound keeps playing, which switches
+        off audio suppression for good.
+
+        The hold still has to hear the user, because it mutes the speakers.
+        It gets that from a separate override that every ending destroys, so
+        both channels say on while the setting itself stays exactly what the
+        monitor measured (wh-ptt-audio-override).
         """
         sm._speech_suppressed_by_audio = True
         sm.ptt_start()
         assert sm._speech_suppressed_by_audio is True
-        assert sm.speech_enabled is False
-        assert self._told(mock_websocket_manager) is False
-        assert self._shown(mock_gui_queue) is False
+        assert sm.speech_enabled is True
+        assert self._told(mock_websocket_manager) is True
+        assert self._shown(mock_gui_queue) is True
 
     def test_a_hold_that_begins_and_ends_between_two_checks_changes_nothing(
         self, sm
@@ -1276,3 +1569,72 @@ class TestTheSpeechEngineIsToldTheSameThingAsTheDisplay:
             told = self._told(mock_websocket_manager)
             shown = self._shown(mock_gui_queue)
             assert told is shown, f"{flag}: engine was told {told}, button showed {shown}"
+
+
+class TestTheDebugFlagMatchesTheRealLoggingLevel:
+    """The published debug_mode must match the level the process really runs at.
+
+    main.py applies the settings file's LOG_LEVEL in setup_logging (line 11635)
+    before it builds the StateManager (line 11661), and after every toggle it
+    keeps the flag in step with the same comparison these tests pin
+    (main.py:2242). A literal False in the constructor broke exactly one case:
+    a startup whose LOG_LEVEL is already DEBUG. Both menus draw the Debug
+    entry's checkmark from this flag, so the entry stood unchecked while
+    detailed logging was on, and the first click turned it off.
+    Finding wh-audio-suppression-floating-menu.1.1.
+    """
+
+    @pytest.fixture
+    def root_logger(self):
+        """Put the root logger back at whatever level the test found it."""
+        root = logging.getLogger()
+        original = root.level
+        yield root
+        root.setLevel(original)
+
+    @pytest.fixture
+    def build(self, mock_config, mock_event_bus, mock_gui_queue):
+        """Build StateManagers and close their event loops afterwards."""
+        loops = []
+
+        def make():
+            loop = asyncio.new_event_loop()
+            loop.create_task = Mock()  # prevent actual task creation
+            loops.append(loop)
+            return StateManager(
+                config_service=mock_config,
+                event_bus=mock_event_bus,
+                loop=loop,
+                state_to_gui_queue=mock_gui_queue,
+                websocket_manager=None,
+            )
+
+        yield make
+        for loop in loops:
+            loop.close()
+
+    def test_a_debug_startup_reports_debug_mode(self, root_logger, build):
+        root_logger.setLevel(logging.DEBUG)
+        assert build().debug_mode is True
+
+    def test_an_info_startup_does_not_report_debug_mode(self, root_logger, build):
+        root_logger.setLevel(logging.INFO)
+        assert build().debug_mode is False
+
+    def test_the_menus_receive_the_same_answer(
+        self, root_logger, build, mock_gui_queue
+    ):
+        """The menus read the flag from the state message, not from the object.
+
+        _create_menu draws the checkmark from the copy gui.py stored when it
+        consumed this message, so the message is what the user finally sees.
+        """
+        root_logger.setLevel(logging.DEBUG)
+        manager = build()
+        mock_gui_queue.put_nowait.reset_mock()
+        manager.send_state_update()
+        published = [
+            call.args[0] for call in mock_gui_queue.put_nowait.call_args_list
+        ]
+        assert published, "send_state_update put nothing on the GUI queue"
+        assert published[-1]["debug_mode"] is True

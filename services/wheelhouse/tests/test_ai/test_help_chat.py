@@ -200,6 +200,9 @@ class TestHandleHelpAskTruncationHint:
         assert controller._sent_response is not None
         assert "partial answer" in controller._sent_response
         assert "too small" in controller._sent_response.lower()
+        assert "'open voice access help'" in controller._sent_response
+        assert "x-ray" not in controller._sent_response
+        assert "wheelhouse help online" not in controller._sent_response
 
     @pytest.mark.asyncio
     async def test_untruncated_ok_result_has_no_hint(self):

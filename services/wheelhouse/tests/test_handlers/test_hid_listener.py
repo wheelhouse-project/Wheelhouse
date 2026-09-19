@@ -204,6 +204,141 @@ class TestBatching:
         hid_listener._accumulate_and_maybe_send(2)
         mock_loop.call_soon_threadsafe.assert_called_once()
 
+    def test_batched_event_carries_its_arrival_time(self, hid_listener):
+        """Each 50 ms batch is stamped with time.monotonic() when it is
+        queued, so the consumer can tell a queue wait from a pause in the
+        roll (wh-mouse-wheel-sensitivity.1.1)."""
+        hid_listener.last_batch_time = time.time() - 1.0
+        mock_loop = Mock()
+        hid_listener.loop = mock_loop
+        before = time.monotonic()
+
+        hid_listener._accumulate_and_maybe_send(2)
+
+        after = time.monotonic()
+        _callback, event = mock_loop.call_soon_threadsafe.call_args[0]
+        assert (event["type"], event["delta"]) == ("thumb_wheel", 2)
+        assert before <= event["at"] <= after
+
+
+# ===========================================================================
+# Tail flush (wh-mouse-wheel-sensitivity)
+# ===========================================================================
+
+class TestTailFlush:
+    """Ticks that arrive after the last send of a roll must not wait for the
+    next roll. The listener arms a timer for the rest of the 50 ms window and
+    flushes on the event loop thread."""
+
+    def test_within_window_arms_a_tail_flush(self, hid_listener):
+        hid_listener.last_batch_time = time.time()
+        mock_loop = Mock()
+        hid_listener.loop = mock_loop
+
+        hid_listener._accumulate_and_maybe_send(2)
+
+        mock_loop.call_soon_threadsafe.assert_called_once()
+        callback, delay = mock_loop.call_soon_threadsafe.call_args[0]
+        assert callback == hid_listener._arm_tail_flush
+        assert 0.0 <= delay <= hid_listener.batch_interval
+
+    def test_send_branch_does_not_arm_a_tail_flush(self, hid_listener):
+        """A batch that goes out at once leaves nothing to flush."""
+        hid_listener.last_batch_time = time.time() - 1.0
+        mock_loop = Mock()
+        hid_listener.loop = mock_loop
+
+        hid_listener._accumulate_and_maybe_send(2)
+
+        callbacks = [c[0][0] for c in mock_loop.call_soon_threadsafe.call_args_list]
+        assert hid_listener._arm_tail_flush not in callbacks
+
+    def test_flush_tail_sends_held_delta(self, hid_listener, hid_event_queue):
+        hid_listener.delta_accumulator = 4
+
+        hid_listener._flush_tail()
+
+        assert not hid_event_queue.empty(), "the held delta never reached the queue"
+        event = hid_event_queue.get_nowait()
+        assert (event["type"], event["delta"]) == ("thumb_wheel", 4)
+        assert hid_listener.delta_accumulator == 0
+
+    def test_tail_event_carries_its_arrival_time(self, hid_listener, hid_event_queue):
+        """The consumer measures the gesture gap from this stamp, not from
+        when it gets round to the batch (wh-mouse-wheel-sensitivity.1.1)."""
+        hid_listener.delta_accumulator = 4
+        before = time.monotonic()
+
+        hid_listener._flush_tail()
+
+        after = time.monotonic()
+        event = hid_event_queue.get_nowait()
+        assert before <= event["at"] <= after
+
+    def test_flush_tail_with_nothing_held_sends_nothing(self, hid_listener, hid_event_queue):
+        hid_listener.delta_accumulator = 0
+
+        hid_listener._flush_tail()
+
+        assert hid_event_queue.empty()
+
+    def test_flush_tail_starts_a_new_window(self, hid_listener, hid_event_queue):
+        """The tick after a flush accumulates instead of going out alone."""
+        hid_listener.last_batch_time = time.time() - 1.0
+        hid_listener.delta_accumulator = 2
+        hid_listener._flush_tail()
+        hid_event_queue.get_nowait()
+
+        hid_listener._accumulate_and_maybe_send(1)
+
+        assert hid_listener.delta_accumulator == 1
+        assert hid_event_queue.empty()
+
+    def test_arm_replaces_an_earlier_timer(self, hid_listener):
+        hid_listener._arm_tail_flush(5.0)
+        first = hid_listener._tail_flush_handle
+
+        hid_listener._arm_tail_flush(5.0)
+
+        assert first.cancelled()
+        assert hid_listener._tail_flush_handle is not first
+        hid_listener._tail_flush_handle.cancel()
+
+    def test_tail_reaches_queue_without_a_following_report(
+        self, hid_listener, hid_event_queue, event_loop_for_hid
+    ):
+        """End-to-end on a real loop: two ticks, then silence, then the batch."""
+        hid_listener.last_batch_time = time.time()
+
+        hid_listener._accumulate_and_maybe_send(2)
+        event_loop_for_hid.run_until_complete(asyncio.sleep(0.15))
+
+        assert not hid_event_queue.empty(), "the tail batch never reached the queue"
+        event = hid_event_queue.get_nowait()
+        assert (event["type"], event["delta"]) == ("thumb_wheel", 2)
+        assert hid_listener.delta_accumulator == 0
+
+    def test_closed_loop_does_not_raise(self, hid_listener):
+        """The HID thread can outlive the loop by a moment at shutdown."""
+        hid_listener.last_batch_time = time.time()
+        mock_loop = Mock()
+        mock_loop.call_soon_threadsafe.side_effect = RuntimeError("Event loop is closed")
+        hid_listener.loop = mock_loop
+
+        hid_listener._accumulate_and_maybe_send(1)
+
+        assert hid_listener.delta_accumulator == 1
+
+    def test_stop_cancels_an_armed_flush(self, hid_listener, event_loop_for_hid):
+        hid_listener._arm_tail_flush(5.0)
+        handle = hid_listener._tail_flush_handle
+
+        hid_listener.stop()
+        event_loop_for_hid.run_until_complete(asyncio.sleep(0))
+
+        assert handle.cancelled()
+        assert hid_listener._tail_flush_handle is None
+
 
 # ===========================================================================
 # _safe_enqueue_event

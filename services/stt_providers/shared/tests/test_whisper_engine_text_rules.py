@@ -192,3 +192,46 @@ class TestExtractTextAppliesRules:
         engine = WhisperStreamingEngine()
         segments = [make_mock_segment("Hello world.")]
         assert engine._extract_text(segments) == "hello world"
+
+
+@patch("shared_stt.whisper_engine.WhisperModel")
+class TestCapitalEvidenceInExtractText:
+    """wh-first-char-lowercase. _extract_text carries its own copy of the
+    first-character rule, so it gets the same condition and its own rows.
+    """
+
+    def test_a_capitalized_second_word_keeps_the_leading_capital(
+        self, mock_model_class
+    ):
+        engine = WhisperStreamingEngine()
+        segments = [make_mock_segment("Bill Smith.")]
+        assert engine._extract_text(segments) == "Bill Smith"
+
+    def test_an_internal_capital_keeps_the_leading_capital(
+        self, mock_model_class
+    ):
+        engine = WhisperStreamingEngine()
+        segments = [make_mock_segment("McDonald called.")]
+        assert engine._extract_text(segments) == "McDonald called"
+
+    def test_a_lowercase_second_word_still_lowercases_the_first(
+        self, mock_model_class
+    ):
+        engine = WhisperStreamingEngine()
+        segments = [make_mock_segment("Delete two.")]
+        assert engine._extract_text(segments) == "delete two"
+
+    def test_a_capitalized_pronoun_is_not_evidence(self, mock_model_class):
+        # wh-first-char-lowercase.1.1. Whisper capitalizes the pronoun on
+        # every utterance, so this site sees the shape most often.
+        engine = WhisperStreamingEngine()
+        segments = [make_mock_segment("So I'm going.")]
+        assert engine._extract_text(segments) == "so I'm going"
+
+    def test_a_spelled_out_acronym_cannot_be_seen(self, mock_model_class):
+        # wh-first-char-lowercase.1.2, the same known limit as the
+        # transcript_rules copy: this file carries its own identical
+        # spelled-out-letter rule, and it runs before the condition.
+        engine = WhisperStreamingEngine()
+        segments = [make_mock_segment("N-A-S-A launched it.")]
+        assert engine._extract_text(segments) == "nasa launched it"

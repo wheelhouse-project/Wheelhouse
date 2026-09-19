@@ -13,8 +13,10 @@ Lifecycle: after the GUI applies (or fails to apply, or clears) a
 validates inbound via ``safe_parse(OverlayStateChangedEvent.from_dict, ...)``
 (wh-uf54), applies the generation check, then drives its overlay state
 table. ``state`` is a closed set: ``"painted"`` (the overlay is up),
-``"failed"`` (the paint could not be applied), or ``"cleared"`` (the
-overlay was torn down).
+``"failed"`` (the paint could not be applied), ``"cleared"`` (the
+overlay was torn down on request), or ``"expired"`` (the GUI's badge
+lease ran out and the GUI tore the overlay down on its own,
+wh-overlay-slow-uia-stale-badges.9).
 
 ``monitor_ids`` carries the monitors the overlay actually painted on (empty
 tuple when none); ``snapshot_id`` echoes the painted snapshot when known, or
@@ -36,7 +38,7 @@ ACTION_NAME = "overlay_state_changed"
 
 # Closed-set membership for the state field. Mirrors the _ALLOWED_STATUS
 # pattern in show_numbered_overlay.py.
-_ALLOWED_STATE = frozenset({"painted", "failed", "cleared"})
+_ALLOWED_STATE = frozenset({"painted", "failed", "cleared", "expired"})
 
 
 class OverlayStateChangedEventSchemaError(ValueError):

@@ -50,7 +50,7 @@ import asyncio
 import logging
 
 import psutil
-from plyer import notification # Ensure plyer is installed if notifications are desired
+from utils.notice_text import send_notice  # the one route to plyer (wh-notice-length-guard)
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +94,11 @@ async def monitor_resources():
                     if cpu_usage > 95 or memory_usage > 95:
                         logger.warning(f"High resource usage detected: {log_message}")
                         try:
-                            if hasattr(notification, 'notify') and callable(notification.notify):
-                                notification.notify(
-                                    title="High Resource Usage",
-                                    message=f"CPU: {cpu_usage:.1f}%, Memory: {memory_usage:.1f}%",
-                                    timeout=5,
-                                )
-                            else:
+                            if not send_notice(
+                                "High Resource Usage",
+                                f"CPU: {cpu_usage:.1f}%, Memory: {memory_usage:.1f}%",
+                                timeout=5,
+                            ):
                                 logger.warning("Plyer notification.notify method not available or not callable.")
                         except Exception as notify_err:
                             logger.error(f"Error sending notification in monitor_resources: {notify_err}")

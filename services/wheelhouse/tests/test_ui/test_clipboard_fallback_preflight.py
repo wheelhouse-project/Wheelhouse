@@ -99,11 +99,31 @@ def _reject_predicate(reason="default_reject"):
     return p
 
 
+def _make_clipboard():
+    """A clipboard mock whose preparation steps report a clean delivery.
+
+    wh-review-pattern-fixes.36: the slow path aborts before any paste
+    when clear_selection returns False or gather_context reports
+    delivery_failed. A bare MagicMock returns a truthy MagicMock for
+    both, which would abort every slow-path test here for a reason none
+    of them is about. Pin the success shape; tests about the abort live
+    in test_clipboard_fallback_uia.py.
+    """
+    clipboard = MagicMock()
+    clipboard.clear_selection.return_value = True
+    clipboard.gather_context.return_value = {
+        'preceding_chars': '',
+        'has_selection': False,
+        'delivery_failed': False,
+    }
+    return clipboard
+
+
 def _make_strategy(predicate):
     return ClipboardFallbackStrategy(
         buffer_manager=MagicMock(),
         text_perfector=MagicMock(),
-        clipboard_ops=MagicMock(),
+        clipboard_ops=_make_clipboard(),
         window_manager=MagicMock(),
         text_target_predicate=predicate,
     )
@@ -220,7 +240,7 @@ class TestPreflightOptionalForBackCompat:
         strategy = ClipboardFallbackStrategy(
             buffer_manager=MagicMock(),
             text_perfector=MagicMock(),
-            clipboard_ops=MagicMock(),
+            clipboard_ops=_make_clipboard(),
             window_manager=MagicMock(),
         )
         ctx = _make_context()

@@ -1,7 +1,17 @@
 """Unit tests for TextPerfector - text formatting logic.
 
-These tests verify the pure logic functions for spacing, capitalization,
-and escape sequence handling. No UI dependencies.
+These tests verify the pure logic functions for spacing and
+capitalization. No UI dependencies.
+
+Escape-sequence decoding is not tested here any more. Commit d9662f52
+(wh-insert-text-backslash-escape) removed the decoding, because it split
+a Windows path at the backslash before a name starting with n, t or r.
+The six tests that asserted the old decoding were deleted with this
+note; they had been failing since that commit. The behaviour that
+replaced it -- a backslash reaches the target unchanged, and text
+starting with a backslash gets ordinary spacing and case treatment --
+is pinned by TestBackslashTextIsNotEscapeDecoded in
+services/wheelhouse/tests/test_text_perfector_line_separators.py.
 """
 import pytest
 from services.wheelhouse.ui.text_perfector import TextPerfector
@@ -91,40 +101,6 @@ class TestTextPerfector:
         """Already capitalized word should stay capitalized."""
         result = perfector.perfected_string("Bob", preceding_chars="")
         assert result == "Bob"
-
-    # ========================================================================
-    # ESCAPE SEQUENCE TESTS
-    # ========================================================================
-
-    def test_newline_escape(self, perfector):
-        """\\n should be converted to newline character."""
-        result = perfector.perfected_string("\\n", preceding_chars="")
-        assert result == "\n"
-
-    def test_tab_escape(self, perfector):
-        """\\t should be converted to tab character."""
-        result = perfector.perfected_string("\\t", preceding_chars="")
-        assert result == "\t"
-
-    def test_carriage_return_escape(self, perfector):
-        """\\r should be converted to carriage return."""
-        result = perfector.perfected_string("\\r", preceding_chars="")
-        assert result == "\r"
-
-    def test_backslash_escape(self, perfector):
-        """\\\\ should be converted to single backslash."""
-        result = perfector.perfected_string("\\\\", preceding_chars="")
-        assert result == "\\"
-
-    def test_mixed_escape_sequences(self, perfector):
-        """Multiple escape sequences should all be converted."""
-        result = perfector.perfected_string("line1\\nline2\\ttab", preceding_chars="")
-        assert result == "line1\nline2\ttab"
-
-    def test_escape_prevents_spacing(self, perfector):
-        """Escape sequences should prevent normal spacing rules."""
-        result = perfector.perfected_string("\\n", preceding_chars="text")
-        assert result == "\n"  # No space prefix
 
     # ========================================================================
     # INTEGRATION TESTS

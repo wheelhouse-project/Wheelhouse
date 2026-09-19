@@ -24,9 +24,27 @@ from utils import logging_setup
 from utils.trace_context import set_trace, current_trace_id, TraceIdFilter
 
 
+# setup_logging sets the level of the process-wide root logger
+# (utils/logging_setup.py:88), and shutdown_logging never puts it back.
+# StateManager reads that level when it is built (state_manager.py:235,
+# getEffectiveLevel() == logging.DEBUG) to decide debug_mode, so a DEBUG
+# level left behind here changes what a later test file observes. Save the
+# level before the call and restore it in _teardown
+# (wh-test-release-2026-09.2.3).
+_saved_root_level: int | None = None
+
+
 def _call_setup_logging(config):
     """Call setup_logging with file handler and notifier worker disabled."""
     from utils.logging_setup import setup_logging
+
+    global _saved_root_level
+    # .level, not getEffectiveLevel(), so a root logger left at NOTSET is
+    # restored to NOTSET rather than rewritten to WARNING. The "is None"
+    # test is correct when the saved level is 0, and it stops a second call
+    # inside one test from saving the DEBUG level set by the first.
+    if _saved_root_level is None:
+        _saved_root_level = logging.getLogger().level
 
     logging_setup.shutdown_logging()
 
@@ -42,7 +60,11 @@ def _call_setup_logging(config):
 
 
 def _teardown():
+    global _saved_root_level
     logging_setup.shutdown_logging()
+    if _saved_root_level is not None:
+        logging.getLogger().setLevel(_saved_root_level)
+        _saved_root_level = None
 
 
 class TestTraceIdInLogFormat:

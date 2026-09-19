@@ -91,11 +91,6 @@ def make_pipeline(retract_response=None):
         command_timeout_ms=1000,
         hotword="x-ray",
     )
-    processor.context_mirror = MagicMock()
-    processor.context_mirror.read_context.return_value = {
-        "app_name": "test.exe",
-        "window_title": "Test",
-    }
     return processor, app, queue
 
 

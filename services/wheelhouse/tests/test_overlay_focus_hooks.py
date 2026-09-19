@@ -455,6 +455,104 @@ def test_destroy_hook_active_flag_only_set_when_register_accepted():
     assert c._overlay_destroy_hook_active is True
 
 
+def _voice_reconciler_controller():
+    from main import LogicController
+
+    c = _make_controller()
+    for name in ("handle_overlay_command", "_reconcile_overlay_tracked_identity"):
+        setattr(c, name, getattr(LogicController, name).__get__(c))
+    c._grid_pointer_channel_quiescent.return_value = True
+    c._overlay_snapshot_window_identity = {}
+    c._overlay_focus_hooks.register_destroy_hook.return_value = True
+    c._overlay_window_pid_tid = lambda hwnd: {777: (10, 20), 888: (30, 40)}[hwnd]
+    return c
+
+
+def _paint_voice_session(c, hwnd):
+    from services.wheelhouse.click_overlay_state import (
+        OverlayEvent, OverlayEventKind, PaintAckState,
+    )
+
+    m = c.click_overlay_state
+    pair = dict(overlay_session_id=m.overlay_session_id,
+                paint_generation=m.paint_generation)
+    c._overlay_tracked_identity = ForegroundIdentity(
+        hwnd=hwnd, pid=10 if hwnd == 777 else 30,
+        process_name="app.exe", window_creation_time=1,
+    )
+    c._apply_overlay_event(OverlayEvent(
+        OverlayEventKind.BUILD_RESPONSE, snapshot_id=f"snap-{hwnd}", **pair,
+    ), source="test-build")
+    c._apply_overlay_event(OverlayEvent(
+        OverlayEventKind.PAINT_ACK, paint_state=PaintAckState.PAINTED, **pair,
+    ), source="test-paint")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["hide", "show"])
+async def test_voice_paused_command_releases_destroy_hook_for_next_window(command):
+    # Omitting command-path reconciliation leaves A's hook active and prevents
+    # registration for B. Exercise both accepted ways out of PAUSED.
+    from unittest.mock import call
+    from services.wheelhouse.click_overlay_state import (
+        OverlayEvent, OverlayEventKind, OverlayState,
+    )
+
+    c = _voice_reconciler_controller()
+    await c.handle_overlay_command("show", "first")
+    _paint_voice_session(c, 777)
+    c._apply_overlay_event(OverlayEvent(OverlayEventKind.MIC_PAUSE), source="pause-a")
+    assert c.click_overlay_state.state is OverlayState.PAUSED
+    assert c._overlay_destroy_hook_active is True
+    c._overlay_focus_hooks.register_destroy_hook.assert_called_once_with(pid=10, tid=20)
+
+    await c.handle_overlay_command(command, "leave-a")
+    assert c.click_overlay_state.state is (
+        OverlayState.CLOSED if command == "hide" else OverlayState.WALK_IN_FLIGHT
+    )
+    c._overlay_focus_hooks.unregister_destroy_hook.assert_called_once_with()
+    assert c._overlay_destroy_hook_active is False
+    # A late OS callback after the unregister request cannot disturb the walk.
+    state = c.click_overlay_state.state
+    c._on_overlay_focused_hwnd_destroyed(777)
+    assert c.click_overlay_state.state is state
+    if command == "hide":
+        assert c._overlay_tracked_identity is None
+        await c.handle_overlay_command("show", "second")
+    _paint_voice_session(c, 888)
+    c._apply_overlay_event(OverlayEvent(OverlayEventKind.MIC_PAUSE), source="pause-b")
+    assert c._overlay_destroy_hook_active is True
+    assert c._overlay_focus_hooks.register_destroy_hook.call_args_list == [
+        call(pid=10, tid=20), call(pid=30, tid=40),
+    ]
+    c._on_overlay_focused_hwnd_destroyed(888)
+    assert c.click_overlay_state.state is OverlayState.CLOSED
+    assert c._overlay_destroy_hook_active is False
+    assert c._overlay_focus_hooks.unregister_destroy_hook.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_closed", [False, True])
+async def test_voice_hide_resets_debounce_only_on_closed_edge(already_closed):
+    # An omitted reset coalesces the next session's first event; an
+    # unconditional reset defeats the idle-session debounce.
+    from unittest.mock import patch
+    from services.wheelhouse.click_overlay_state import OverlayState
+
+    c = _voice_reconciler_controller()
+    if not already_closed:
+        await c.handle_overlay_command("show", "first")
+        _paint_voice_session(c, 777)
+    debouncer = c._overlay_focus_debouncer
+    assert debouncer.should_fire(now_ms=5000.0) is True
+    with patch.object(debouncer, "reset", wraps=debouncer.reset) as reset:
+        await c.handle_overlay_command("hide", "hide")
+        assert reset.call_count == (0 if already_closed else 1)
+    assert c.click_overlay_state.state is OverlayState.CLOSED
+    await c.handle_overlay_command("show", "next")
+    assert debouncer.should_fire(now_ms=5100.0) is (not already_closed)
+
+
 def test_resume_identity_check_matches_and_mismatches(monkeypatch):
     c = _make_controller()
     c._overlay_tracked_identity = ForegroundIdentity(

@@ -156,20 +156,6 @@ stability_commit_threshold = 0.89
 
 
 # ------------------------------
-# [overflow_detection]
-# Automatic restart on PortAudio overflow events.
-# ------------------------------
-[overflow_detection]
-
-enabled = true
-overflow_threshold = 50
-window_seconds = 30.0
-restart_cooldown_seconds = 60.0
-max_restart_attempts = 3
-stable_reset_seconds = 300.0
-
-
-# ------------------------------
 # [debug]
 # Logging controls for diagnostics.
 # ------------------------------
@@ -186,6 +172,13 @@ log_frame_stats = true
 
 # log_overflow_diagnostics: Periodic logging of queue depths and operation timing for overflow diagnosis.
 log_overflow_diagnostics = false
+
+# log_load_diagnostics: the periodic [load-diag] window= line, and the
+# ten-second [load-diag] work_scope=wake_word line the wake-word detector
+# writes while it is listening. This provider builds no AudioProcessor, so
+# it writes no work_scope=silence line. Turn it on for a load test, off
+# afterwards. Same key as the Parakeet and distil providers.
+log_load_diagnostics = false
 
 
 # ------------------------------

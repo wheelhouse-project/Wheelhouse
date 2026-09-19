@@ -19,6 +19,10 @@ Adding a category here requires adding it to one of the three groups
 below, otherwise test_every_category_is_classified() fails.
 """
 
+import re
+import tomllib
+from pathlib import Path
+
 import pytest
 
 from vocabulary import build_vocabulary
@@ -55,6 +59,21 @@ VERBATIM_CATEGORIES = {
     "parameterized",
     "punctuation",
     "litmus",
+    # Voice Access parity command forms (wh-voice-access-parity.1.13), one
+    # category per source bead. These are spoken commands, so they follow the
+    # same convention as the other command categories above: the spoken text
+    # and the expected canonical are the same string, with no transformation
+    # between them. Measured at the time of writing: all 272 entries satisfy
+    # text == expected_transcription.
+    "va_punctuation_symbols",
+    "va_select_range",
+    "va_delete_cut_copy_range",
+    "va_format_range",
+    "va_navigation",
+    "va_command_aliases",
+    "va_window_app",
+    "va_search",
+    "va_literal_bypass",
 }
 
 LOOSE_MATCH_CATEGORIES = {
@@ -104,6 +123,33 @@ def test_verbatim_categories_have_identical_text_and_expected(vocabulary):
         )
 
 
+# "delete" is deliberately present twice: once as an ordinary single_word
+# entry and once as the litmus probe (review finding
+# wh-voice-access-parity.3.4 excluded it by design).
+DELIBERATE_DUPLICATES = {"delete"}
+
+
+def test_no_utterance_text_is_duplicated_across_categories(vocabulary):
+    """build_vocabulary's single-representation rule (the .1.6 comment).
+
+    A duplicated text is synthesized once per voice per category, so the
+    same audio is scored under two categories and double-counts the
+    per-category aggregates (review finding wh-voice-access-parity.3.4).
+    """
+    seen: dict[str, str] = {}
+    duplicates = []
+    for u in vocabulary:
+        if u.text in DELIBERATE_DUPLICATES:
+            continue
+        if u.text in seen:
+            duplicates.append(
+                f"{u.text!r} in both {seen[u.text]} and {u.category}"
+            )
+        else:
+            seen[u.text] = u.category
+    assert not duplicates, "; ".join(duplicates)
+
+
 def test_loose_match_categories_only_differ_cosmetically(vocabulary):
     for u in vocabulary:
         if u.category not in LOOSE_MATCH_CATEGORIES:
@@ -112,4 +158,83 @@ def test_loose_match_categories_only_differ_cosmetically(vocabulary):
             f"{u.category} entry text and expected differ in more than "
             f"sentence-start case or trailing punctuation: "
             f"text={u.text!r} expected={u.expected_transcription!r}"
+        )
+# ---------------------------------------------------------------------------
+# Finding wh-voice-access-parity.3.7 (Codex, round 2). The corpus said
+# "search Google for X" while the live command is "search on google for X".
+# Those rows therefore measured the catch-all '^search(?: for)? (.+)$',
+# which captures "Google for X" as the search term, instead of the provider
+# entry they were written to exercise. The two tests below keep the corpus
+# and patterns.toml synchronized in both directions, so the same drift
+# cannot return silently.
+#
+# "search Windows for X" is NOT affected and must keep its wording: the
+# live entry is '^search windows for (.+)$', with no "on".
+# ---------------------------------------------------------------------------
+
+_PATTERNS_TOML = (
+    Path(__file__).resolve().parents[4]
+    / "services" / "wheelhouse" / "speech" / "config" / "patterns.toml"
+)
+
+_SEARCH_ON_ENTRY = re.compile(r"^\^search on (\w+) for \(\.\+\)\$$")
+
+
+def _live_search_providers() -> set[str]:
+    """Provider names taken from the live '^search on X for (.+)$' entries."""
+    with _PATTERNS_TOML.open("rb") as handle:
+        blocks = tomllib.load(handle).get("pattern", [])
+    found = set()
+    for block in blocks:
+        match = _SEARCH_ON_ENTRY.match(block.get("pattern", ""))
+        if match is not None:
+            found.add(match.group(1).lower())
+    return found
+
+
+def _va_search_texts() -> list[str]:
+    return [
+        u.text.lower() for u in build_vocabulary() if u.category == "va_search"
+    ]
+
+
+class TestSearchProviderFormsMatchThePatternsFile:
+    def test_the_live_file_still_has_provider_entries(self):
+        """Guards the two tests below: an empty set makes them vacuous."""
+        providers = _live_search_providers()
+        assert {"google", "bing", "youtube"} <= providers, (
+            "patterns.toml no longer declares the three provider search "
+            f"entries; found {sorted(providers)!r}. Either the entries were "
+            "renamed or this test's pattern shape is stale."
+        )
+
+    def test_the_corpus_speaks_the_on_form_for_every_provider(self):
+        texts = _va_search_texts()
+        missing = [
+            provider
+            for provider in sorted(_live_search_providers())
+            if not any(
+                text.startswith(f"search on {provider} for ") for text in texts
+            )
+        ]
+        assert not missing, (
+            f"patterns.toml has a 'search on X for' entry for {missing!r} but "
+            "no va_search corpus utterance speaks that wording, so the "
+            "benchmark never exercises the entry"
+        )
+
+    def test_the_corpus_never_speaks_the_on_less_provider_form(self):
+        texts = _va_search_texts()
+        offenders = sorted(
+            {
+                text
+                for provider in _live_search_providers()
+                for text in texts
+                if text.startswith(f"search {provider} for ")
+            }
+        )
+        assert not offenders, (
+            "these va_search utterances drop the 'on' that the live entry "
+            "requires, so they fall into the catch-all "
+            f"'^search(?: for)? (.+)$' instead: {offenders!r}"
         )

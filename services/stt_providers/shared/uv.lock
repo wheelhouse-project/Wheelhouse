@@ -907,6 +907,7 @@ dependencies = [
     { name = "pysilero-vad", marker = "sys_platform == 'win32'" },
     { name = "sounddevice", marker = "sys_platform == 'win32'" },
     { name = "websockets", marker = "sys_platform == 'win32'" },
+    { name = "winsdk", marker = "sys_platform == 'win32'" },
 ]
 
 [package.dev-dependencies]
@@ -930,6 +931,7 @@ requires-dist = [
     { name = "pysilero-vad", specifier = ">=3.0,<3.3" },
     { name = "sounddevice", specifier = ">=0.5" },
     { name = "websockets", specifier = ">=13.0,<16" },
+    { name = "winsdk", marker = "sys_platform == 'win32'", specifier = "==1.0.0b10" },
 ]
 
 [package.metadata.requires-dev]
@@ -944,6 +946,17 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.0.0,<8" },
     { name = "sherpa-onnx", specifier = ">=1.13.3,<1.14" },
     { name = "sherpa-onnx-core", specifier = ">=1.13.3,<1.14" },
+]
+
+[[package]]
+name = "winsdk"
+version = "1.0.0b10"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/01/005772332e79947013aa33c7cb20431e3efd6ac46eb54aed3472c14afe50/winsdk-1.0.0b10.tar.gz", hash = "sha256:8f39ea759626797449371f857c9085b84bb9f3b6d493dc6525e2cedcb3d15ea2", size = 7061492 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/67/3eeaf41b0e7a4e1e627e1940fbf2f8e2c936161d0652dd9e462d70b79913/winsdk-1.0.0b10-cp312-cp312-win32.whl", hash = "sha256:775a55a71e05ec2aa262c1fd67d80f270d4186bbdbbee2f43c9c412cf76f0761", size = 9393830 },
+    { url = "https://files.pythonhosted.org/packages/0c/87/a5ffbb9613fcd3917183707ac16c88e82d22a1faf933bb9a3e04fff2f289/winsdk-1.0.0b10-cp312-cp312-win_amd64.whl", hash = "sha256:8231ce5f16e1fc88bb7dda0adf35633b5b26101eae3b0799083ca2177f03e4e5", size = 12015329 },
+    { url = "https://files.pythonhosted.org/packages/39/9c/64365f88dead53c38dfb07e992c13fc66698ad7221be56e17e641448cca7/winsdk-1.0.0b10-cp312-cp312-win_arm64.whl", hash = "sha256:f4ab469ada19b34ccfc69a148090f98b40a1da1da797b50b9cbba0c090c365a5", size = 11596120 },
 ]
 
 [[package]]

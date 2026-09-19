@@ -9,6 +9,7 @@ The one test that genuinely needs a real UI Automation tree is marked skip.
 """
 
 import gc
+import sys
 
 import pytest
 
@@ -324,6 +325,143 @@ def test_build_matches_keeps_offscreen_and_zero_area_when_not_opted_in():
 
     assert [m.name for m in matches] == ["On", "Off", "Zero"]
     assert [m.display_number for m in matches] == [1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Walk-time mark: a row outside the menu that precedes it
+# (wh-vscode-menu-badge-misplaced). Chromium scrolls a menu taller than the
+# screen by moving the popup, and then reports the last rows below their real
+# position -- outside the menu's own rectangle. The mark lets the overlay keep
+# today's badge placement for such a row instead of placing a badge at a
+# plausible-looking spot computed from a wrong rectangle.
+# ---------------------------------------------------------------------------
+
+def _menu(left=100, top=100, right=1100, bottom=900):
+    return FakeCachedElement(
+        name="", control_type=uia_walker.UIA_MENU,
+        localized_control_type="menu", rect=FakeRect(left, top, right, bottom),
+        invoke_supported=False,
+    )
+
+
+def _menu_row(name, left, top, right, bottom):
+    return FakeCachedElement(
+        name=name, control_type=UIA_MENUITEM,
+        localized_control_type="menu item",
+        rect=FakeRect(left, top, right, bottom),
+    )
+
+
+def test_build_matches_marks_row_outside_preceding_menu():
+    """The measured VS Code shape: the Exit row reported below the bottom of
+    the Menu element that precedes it in the pre-order array."""
+    array = FakeElementArray([
+        _menu(),
+        _menu_row("Exit", 110, 850, 1090, 937),  # bottom 937 > menu bottom 900
+    ])
+
+    matches, _ = uia_walker._build_matches_from_array(
+        array, query_has_role=False, monitor_id=0, mark_bounds_outside_menu=True,
+    )
+
+    exit_match = [m for m in matches if m.name == "Exit"][0]
+    assert exit_match.bounds_outside_menu is True
+
+
+def test_build_matches_row_inside_preceding_menu_not_marked():
+    array = FakeElementArray([
+        _menu(),
+        _menu_row("Save", 110, 800, 1090, 880),
+    ])
+
+    matches, _ = uia_walker._build_matches_from_array(
+        array, query_has_role=False, monitor_id=0, mark_bounds_outside_menu=True,
+    )
+
+    assert [m.bounds_outside_menu for m in matches if m.name == "Save"] == [False]
+
+
+def test_build_matches_row_with_no_preceding_menu_not_marked():
+    """A control that no Menu element precedes has nothing to be checked
+    against, so it is never marked -- even when a Menu follows it."""
+    array = FakeElementArray([
+        _menu_row("Tab", 5000, 5000, 5100, 5040),
+        _menu(),
+    ])
+
+    matches, _ = uia_walker._build_matches_from_array(
+        array, query_has_role=False, monitor_id=0, mark_bounds_outside_menu=True,
+    )
+
+    assert [m.bounds_outside_menu for m in matches if m.name == "Tab"] == [False]
+
+
+def test_build_matches_uses_nearest_preceding_menu():
+    """With two Menu elements (a menu and its submenu), a row is checked
+    against the NEAREST preceding one only."""
+    array = FakeElementArray([
+        _menu(100, 100, 1100, 900),
+        _menu(1100, 300, 1900, 700),                    # submenu to the right
+        _menu_row("Recent", 1110, 310, 1890, 390),      # inside the submenu
+        _menu_row("Stale", 110, 110, 1090, 190),        # inside the first menu
+    ])
+
+    matches, _ = uia_walker._build_matches_from_array(
+        array, query_has_role=False, monitor_id=0, mark_bounds_outside_menu=True,
+    )
+
+    marks = {m.name: m.bounds_outside_menu for m in matches if m.name}
+    assert marks == {"Recent": False, "Stale": True}
+
+
+def test_build_matches_menu_dropped_by_offscreen_filter_still_counts():
+    """The Menu element is recorded from the element array before any filter
+    runs, so a Menu the overlay's off-screen filter drops still bounds the
+    rows after it."""
+    menu = _menu()
+    menu.CachedIsOffscreen = True
+    array = FakeElementArray([menu, _menu_row("Exit", 110, 850, 1090, 937)])
+
+    matches, _ = uia_walker._build_matches_from_array(
+        array, query_has_role=False, monitor_id=0,
+        skip_offscreen_or_zero_area=True, mark_bounds_outside_menu=True,
+    )
+
+    assert [m.bounds_outside_menu for m in matches] == [True]
+
+
+def test_build_matches_does_not_mark_by_default():
+    """Marking is opt-in: the default (every native walk) leaves every match
+    unmarked, whatever the geometry."""
+    array = FakeElementArray([
+        _menu(),
+        _menu_row("Exit", 110, 850, 1090, 937),
+    ])
+
+    matches, _ = uia_walker._build_matches_from_array(
+        array, query_has_role=False, monitor_id=0,
+    )
+
+    assert [m.bounds_outside_menu for m in matches] == [False, False]
+
+
+def test_walk_window_marks_only_for_a_browser_walk():
+    """walk_window marks rows only when the caller supplies the browser
+    correction hook -- ElementFinder supplies it exactly for a Chromium-family
+    process. The same tree walked without the hook (a native walk) is never
+    marked."""
+    elements = [_menu(), _menu_row("Exit", 110, 850, 1090, 937)]
+
+    def _walk(hook):
+        array = FakeElementArray(elements)
+        result = walk_window(
+            FakeTopLevel(array), automation=FakeAutomation(array),
+            query_has_role=False, browser_correction_hook=hook,
+        )
+        return {m.name: m.bounds_outside_menu for m in result.matches}
+
+    assert _walk(lambda matches: matches)["Exit"] is True
+    assert _walk(None)["Exit"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1424,6 +1562,239 @@ def test_dda_via_pattern_unresolvable_interface_class_is_unavailable(monkeypatch
 
 
 # ---------------------------------------------------------------------------
+# Expand / Collapse default action (wh-treeitem-dda-wrong-action)
+#
+# Explorer's navigation-pane tree items expose an MSAA default action of
+# "Expand" or "Collapse". Firing it toggles the node, while a mouse click
+# navigates, so the press must NOT fire: do_default_action_via_legacy_pattern
+# raises DefaultActionIsExpandCollapse BEFORE DoDefaultAction() and the
+# executor diverts to its guarded coordinate click. The verb set holds the
+# strings Windows itself uses (read from oleaccrc.dll and UIAutomationCore.dll
+# through _load_string_resource, the test seam) plus an English floor, so a
+# localized Windows is detected and a load failure never raises.
+# ---------------------------------------------------------------------------
+
+# The four resource strings the loader asks Windows for, as a German system
+# would answer them.
+GERMAN_EXPAND_COLLAPSE_RESOURCES = {
+    ("oleaccrc.dll", 305): "Erweitern",
+    ("oleaccrc.dll", 306): "Reduzieren",
+    ("UIAutomationCore.dll", 204): "Erweitern",
+    ("UIAutomationCore.dll", 205): "Reduzieren",
+}
+
+
+@pytest.fixture
+def fresh_expand_collapse_verbs():
+    """Drop the memoized verb set around a test that injects the loader."""
+    uia_walker._expand_collapse_verbs.cache_clear()
+    yield
+    uia_walker._expand_collapse_verbs.cache_clear()
+
+
+@pytest.mark.parametrize("default_action", ["Expand", "Collapse", "COLLAPSE"])
+def test_dda_via_pattern_expand_collapse_raises_without_pressing(default_action):
+    """An Expand or Collapse default action must signal the executor to divert,
+    and nothing may be sent: DoDefaultAction() is never called. The English
+    words are always in the verb set (the floor), whatever the system language.
+    """
+    pattern = FakeLegacyActionPattern(default_action=default_action)
+    element = FakeInvokableElement(current=FakeRawPattern(pattern))
+
+    with pytest.raises(uia_walker.DefaultActionIsExpandCollapse) as excinfo:
+        uia_walker.do_default_action_via_legacy_pattern(element)
+
+    assert pattern.do_default_action_calls == 0
+    assert excinfo.value.default_action == default_action
+
+
+@pytest.mark.parametrize(
+    "default_action",
+    [
+        pytest.param("Press", id="press"),
+        pytest.param("Open", id="open"),
+        pytest.param("Double Click", id="double-click"),
+        pytest.param("Click", id="click"),
+        pytest.param("Expand all", id="expand-all"),
+    ],
+)
+def test_dda_via_pattern_genuine_default_action_still_presses(default_action):
+    """A default action that is not exactly Expand or Collapse still fires
+    DoDefaultAction() once, unchanged ("Expand all" is a different verb)."""
+    pattern = FakeLegacyActionPattern(default_action=default_action)
+    element = FakeInvokableElement(current=FakeRawPattern(pattern))
+
+    uia_walker.do_default_action_via_legacy_pattern(element)
+
+    assert pattern.do_default_action_calls == 1
+
+
+def test_expand_collapse_verbs_include_localized_names(
+    monkeypatch, fresh_expand_collapse_verbs
+):
+    """The verb set holds the casefolded strings Windows returns for the four
+    resource IDs, plus the English floor."""
+    requested = []
+
+    def german_loader(dll_name, string_id):
+        requested.append((dll_name, string_id))
+        return GERMAN_EXPAND_COLLAPSE_RESOURCES.get((dll_name, string_id))
+
+    monkeypatch.setattr(uia_walker, "_load_string_resource", german_loader)
+
+    verbs = uia_walker._expand_collapse_verbs()
+
+    assert verbs == frozenset({"erweitern", "reduzieren", "expand", "collapse"})
+    assert sorted(requested) == sorted(GERMAN_EXPAND_COLLAPSE_RESOURCES)
+
+
+@pytest.mark.parametrize("default_action", ["Erweitern", "Reduzieren", "erweitern"])
+def test_dda_via_pattern_localized_expand_collapse_raises_without_pressing(
+    monkeypatch, fresh_expand_collapse_verbs, default_action
+):
+    """On a German Windows the default action reads "Erweitern" / "Reduzieren".
+    Detection must use the names Windows loaded, not an English compare."""
+    monkeypatch.setattr(
+        uia_walker,
+        "_load_string_resource",
+        lambda dll_name, string_id: GERMAN_EXPAND_COLLAPSE_RESOURCES.get(
+            (dll_name, string_id)
+        ),
+    )
+    pattern = FakeLegacyActionPattern(default_action=default_action)
+    element = FakeInvokableElement(current=FakeRawPattern(pattern))
+
+    with pytest.raises(uia_walker.DefaultActionIsExpandCollapse):
+        uia_walker.do_default_action_via_legacy_pattern(element)
+
+    assert pattern.do_default_action_calls == 0
+
+
+def test_expand_collapse_verbs_english_floor_when_nothing_loads(
+    monkeypatch, fresh_expand_collapse_verbs
+):
+    """When no resource string loads, the set is exactly the English floor,
+    and an English Expand default action is still diverted."""
+    monkeypatch.setattr(
+        uia_walker, "_load_string_resource", lambda _dll_name, _string_id: None
+    )
+
+    assert uia_walker._expand_collapse_verbs() == frozenset({"expand", "collapse"})
+
+    pattern = FakeLegacyActionPattern(default_action="Expand")
+    element = FakeInvokableElement(current=FakeRawPattern(pattern))
+    with pytest.raises(uia_walker.DefaultActionIsExpandCollapse):
+        uia_walker.do_default_action_via_legacy_pattern(element)
+    assert pattern.do_default_action_calls == 0
+
+
+class _FakeResourceApi:
+    """Stands in for the kernel32 / user32 functions _load_string_resource
+    calls, so each failure mode of LoadLibraryExW / LoadStringW can be forced.
+    """
+
+    def __init__(self, *, module_handle=0x1002, load_string=None):
+        self._module_handle = module_handle
+        self._load_string = load_string
+        self.freed = []
+
+    def LoadLibraryExW(self, _name, _file, _flags):
+        return self._module_handle
+
+    def LoadStringW(self, handle, string_id, buffer, size):
+        return self._load_string(handle, string_id, buffer, size)
+
+    def FreeLibrary(self, handle):
+        self.freed.append(handle)
+        return 1
+
+
+def _raise_os_error(*_args):
+    raise OSError("LoadStringW failed")
+
+
+@pytest.mark.parametrize(
+    "api_factory",
+    [
+        # The DLL is missing: LoadLibraryExW returns NULL (None from ctypes).
+        lambda: _FakeResourceApi(module_handle=None),
+        # The resource ID is missing: LoadStringW returns 0 characters.
+        lambda: _FakeResourceApi(load_string=lambda *_a: 0),
+        # LoadStringW raises.
+        lambda: _FakeResourceApi(load_string=_raise_os_error),
+    ],
+    ids=["dll_missing", "resource_missing", "load_string_raises"],
+)
+def test_load_string_resource_failure_returns_none_and_never_raises(
+    monkeypatch, api_factory
+):
+    api = api_factory()
+    monkeypatch.setattr(uia_walker, "_resource_string_api", lambda: api)
+
+    assert uia_walker._load_string_resource("oleaccrc.dll", 305) is None
+
+
+def test_load_string_resource_missing_dll_never_reads_a_string(monkeypatch):
+    """A NULL module handle must not reach LoadStringW: with a NULL handle
+    LoadStringW reads the string table of the running executable instead."""
+    reads = []
+
+    def recording_load_string(handle, string_id, _buffer, _size):
+        reads.append((handle, string_id))
+        return 0
+
+    api = _FakeResourceApi(module_handle=None, load_string=recording_load_string)
+    monkeypatch.setattr(uia_walker, "_resource_string_api", lambda: api)
+
+    assert uia_walker._load_string_resource("oleaccrc.dll", 305) is None
+    assert reads == []
+    assert api.freed == []
+
+
+def test_load_string_resource_frees_the_module_after_a_missing_resource(
+    monkeypatch,
+):
+    api = _FakeResourceApi(load_string=lambda *_a: 0)
+    monkeypatch.setattr(uia_walker, "_resource_string_api", lambda: api)
+
+    uia_walker._load_string_resource("oleaccrc.dll", 305)
+
+    assert api.freed == [0x1002]
+
+
+def test_expand_collapse_verbs_fall_back_to_floor_when_api_unavailable(
+    monkeypatch, fresh_expand_collapse_verbs, caplog
+):
+    """The ctypes surface itself cannot be built (no kernel32 / user32): the
+    verb set is the English floor, nothing raises, and the failure is logged."""
+
+    def unavailable():
+        raise OSError("user32 unavailable")
+
+    monkeypatch.setattr(uia_walker, "_resource_string_api", unavailable)
+
+    with caplog.at_level("WARNING", logger="ui.uia_walker"):
+        verbs = uia_walker._expand_collapse_verbs()
+
+    assert verbs == frozenset({"expand", "collapse"})
+    assert "oleaccrc.dll" in caplog.text
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("win"), reason="needs the Windows resource DLLs"
+)
+def test_load_string_resource_reads_real_windows_strings():
+    """The real ctypes path (64-bit handle types, LoadStringW into a buffer)
+    returns text for a present resource and None for a missing DLL."""
+    assert uia_walker._load_string_resource("oleaccrc.dll", 305)
+    assert uia_walker._load_string_resource("UIAutomationCore.dll", 205)
+    assert (
+        uia_walker._load_string_resource("wheelhouse-no-such-module.dll", 305)
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
 # Transient stale-window retry on the PRIMARY focused-window walk
 # (wh-overlay-walk-com-retry).
 #
@@ -1619,6 +1990,21 @@ def test_walk_window_retry_respects_deadline():
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _clear_uia_module_cache():
+    """Drop the ``_uia_module`` memo around every test in this module.
+
+    ``_uia_module`` is memoized (wh-lru-cache-hot-paths), so a test that
+    monkeypatches the comtypes import surface would otherwise be handed the
+    module a PREVIOUS test cached, and would pass or fail by test order.
+    Clearing on the way out also stops a fake module escaping into the rest
+    of the suite.
+    """
+    uia_walker._uia_module.cache_clear()
+    yield
+    uia_walker._uia_module.cache_clear()
+
+
 def test_uia_module_generates_gen_module_when_missing(monkeypatch):
     """A fresh venv (CI, or an end user's first install) has never generated
     ``comtypes.gen.UIAutomationClient``. ``_uia_module`` must trigger the
@@ -1658,3 +2044,101 @@ def test_uia_module_generates_gen_module_when_missing(monkeypatch):
 
     assert uia_walker._uia_module() is fake_gen_mod
     assert calls == ["UIAutomationCore.dll"]
+
+
+# ---------------------------------------------------------------------------
+# _uia_module memoization (wh-lru-cache-hot-paths).
+# ---------------------------------------------------------------------------
+
+
+def test_uia_module_resolves_the_gen_module_only_once(monkeypatch):
+    """``_uia_module`` must resolve the generated module once per process.
+
+    Every walked element pays for this lookup: ``element_match_from_cached``
+    calls ``_cached_invoke_supported``, which calls ``_uia_const``, which
+    calls ``_uia_module``; an element with no UIA Name pays a second time
+    through ``_cached_legacy_name``. A window with several hundred controls
+    therefore re-ran the ``from comtypes.gen import UIAutomationClient``
+    import machinery several hundred times per walk, and the overlay
+    re-walks on every focus change.
+
+    The fake package below counts attribute lookups for
+    ``UIAutomationClient``. The exact count for one uncached resolution is
+    an implementation detail of the import machinery (``_handle_fromlist``
+    probes the attribute before the bytecode reads it), so the assertion is
+    that the SECOND call adds nothing, not that the first call costs
+    exactly one.
+    """
+    import sys
+    import types
+
+    fake_client = types.ModuleType("comtypes.gen.UIAutomationClient")
+    lookups = []
+
+    class _CountingGenPackage(types.ModuleType):
+        # No __path__: the import machinery only probes for submodules on a
+        # package that has one, so leaving it off keeps the lookup count
+        # down to the plain attribute reads this test counts.
+        def __getattr__(self, name):
+            if name == "UIAutomationClient":
+                lookups.append(name)
+                return fake_client
+            raise AttributeError(name)
+
+    monkeypatch.setitem(
+        sys.modules, "comtypes.gen", _CountingGenPackage("comtypes.gen"))
+    monkeypatch.delitem(
+        sys.modules, "comtypes.gen.UIAutomationClient", raising=False)
+
+    assert uia_walker._uia_module() is fake_client
+    after_first = len(lookups)
+    assert after_first > 0, "the first call must actually resolve the module"
+
+    assert uia_walker._uia_module() is fake_client
+    assert len(lookups) == after_first, (
+        "the second call re-ran the import machinery; _uia_module is not "
+        "memoized and every walked element still pays for the lookup"
+    )
+
+
+def test_uia_module_failure_is_not_memoized(monkeypatch):
+    """A failed resolution must NOT be remembered.
+
+    This is why the memo sits on ``_uia_module`` rather than on
+    ``_uia_const``. ``_uia_module`` RAISES when comtypes cannot generate
+    the type library, and ``lru_cache`` does not store exceptions, so a
+    transient generation failure is retried on the next call.
+    ``_uia_const`` swallows the same failure and returns its numeric
+    default -- memoizing THAT would pin the fallback value for the rest of
+    the process lifetime, and every later call would keep reporting the
+    default even after generation started working.
+    """
+    import sys
+    import types
+
+    import comtypes.client
+    import comtypes.gen
+
+    fake_client = types.ModuleType("comtypes.gen.UIAutomationClient")
+    attempts = []
+
+    def flaky_get_module(name):
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise OSError("type library generation failed")
+        sys.modules["comtypes.gen.UIAutomationClient"] = fake_client
+        setattr(comtypes.gen, "UIAutomationClient", fake_client)
+        return fake_client
+
+    monkeypatch.delitem(
+        sys.modules, "comtypes.gen.UIAutomationClient", raising=False)
+    monkeypatch.delattr(comtypes.gen, "UIAutomationClient", raising=False)
+    monkeypatch.setattr(comtypes.gen, "__path__", [])
+    monkeypatch.setattr(comtypes.client, "GetModule", flaky_get_module)
+
+    with pytest.raises(OSError):
+        uia_walker._uia_module()
+
+    # The retry must reach comtypes again rather than replay the failure.
+    assert uia_walker._uia_module() is fake_client
+    assert attempts == ["UIAutomationCore.dll", "UIAutomationCore.dll"]

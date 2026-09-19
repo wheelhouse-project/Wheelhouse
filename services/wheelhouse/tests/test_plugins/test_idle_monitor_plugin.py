@@ -142,13 +142,31 @@ class TestIdleMonitorInitialize:
         config = Mock()
         config.get = lambda key, default=None: {
             "plugins.idle_monitor.idle_timeout_minutes": 5,
-            "plugins.idle_monitor.polling_interval_seconds": 2,
+            "plugins.idle_monitor.polling_interval_seconds": 1,
         }.get(key, default)
 
         with caplog.at_level(logging.WARNING):
             await plugin.initialize(config, mock_event_bus)
 
         assert any("aggressive" in r.message.lower() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_initialize_does_not_warn_at_shipped_default_polling(self, plugin, mock_config, mock_event_bus, caplog):
+        """config.toml and the help document ship polling_interval_seconds = 4.
+
+        The shipped default must not log the 'aggressive' warning on every
+        startup (wh-idle-poll-warning-threshold).
+        """
+        config = Mock()
+        config.get = lambda key, default=None: {
+            "plugins.idle_monitor.idle_timeout_minutes": 5,
+            "plugins.idle_monitor.polling_interval_seconds": 4,
+        }.get(key, default)
+
+        with caplog.at_level(logging.WARNING):
+            await plugin.initialize(config, mock_event_bus)
+
+        assert not any("aggressive" in r.message.lower() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_initialize_stores_event_bus_reference(self, plugin, mock_config, mock_event_bus):

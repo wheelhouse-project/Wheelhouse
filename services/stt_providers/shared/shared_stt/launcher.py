@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from shared_stt.startup_refusal import REFUSAL_EXIT_CODE
+
 logger = logging.getLogger(__name__)
 
 # Global for signal handler
@@ -68,7 +70,7 @@ def get_pid_file_path(app_name: str) -> str:
     """Get the PID file path for the given app name.
 
     Args:
-        app_name: Application name (e.g., "GoogleSTT", "Zipformer")
+        app_name: Application name (e.g., "GoogleSTT", "Parakeet")
 
     Returns:
         Full path to the PID file
@@ -82,7 +84,7 @@ def get_restart_flag_path(app_name: str) -> str:
     """Get the restart flag file path for the given app name.
 
     Args:
-        app_name: Application name (e.g., "GoogleSTT", "Zipformer")
+        app_name: Application name (e.g., "GoogleSTT", "Parakeet")
 
     Returns:
         Full path to the restart flag file
@@ -102,9 +104,25 @@ def should_restart(
 
     Decision logic:
     1. Restart flag exists -> restart (intentional restart request)
-    2. Exit code 0 -> do NOT restart (clean shutdown via shutdown command)
-    3. Short uptime + non-zero exit -> restart (crash)
-    4. Long uptime + non-zero exit -> do not restart (normal exit)
+    2. REFUSAL_EXIT_CODE -> do NOT restart (the provider refused to start)
+    3. Exit code 0 -> do NOT restart (clean shutdown via shutdown command)
+    4. Short uptime + non-zero exit -> restart (crash)
+    5. Long uptime + non-zero exit -> do not restart (normal exit)
+
+    Why the refusal is its own case, ahead of the uptime test. A
+    provider that refuses to start has already told WheelHouse why, over
+    its own connection, and the condition it refused for -- winsdk
+    missing, a device that will not open -- does not change because the
+    process is started again. Before this, a refusal reached inside
+    crash_threshold_s (the ordinary case on a machine whose model is
+    already in the file cache) was read as a crash and restarted up to
+    max_crashes times, each attempt sending another notice against a
+    launch WheelHouse had already recorded as stopped
+    (wh-capture-winrt-required.1.5).
+
+    The restart flag still outranks it, unchanged: that flag is a
+    deliberate request from the running system, and it already outranked
+    exit code 0 for the same reason.
 
     Args:
         exit_code: The process exit code
@@ -117,6 +135,15 @@ def should_restart(
     """
     if restart_flag_exists:
         return True
+    elif exit_code == REFUSAL_EXIT_CODE:
+        # The launcher log is where a person looks when a provider does
+        # not appear. Without this line the log shows a child that
+        # exited and a supervisor that quit, and nothing saying the
+        # provider itself declined to run.
+        logger.error(
+            f"The provider refused to start (exit code {REFUSAL_EXIT_CODE}) "
+            "and will not be restarted")
+        return False
     elif exit_code == 0:
         # Clean shutdown - exit code 0 means "do not restart"
         return False

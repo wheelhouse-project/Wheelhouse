@@ -48,6 +48,7 @@ VALID_RAW: dict[str, Any] = {
     "snapshot_ttl_seconds": 30,
     "response_timeout_ms": 3000,
     "walk_deadline_ms": 2500,
+    "screen_read_timeout_ms": 10000,
     "min_substring_query_length": 4,
     "min_substring_overlap_ratio": 0.6,
     "enable_coordinate_click_on_com_error": False,
@@ -80,6 +81,7 @@ def test_valid_raw_round_trips_every_key():
     assert cfg.snapshot_ttl_seconds == 30
     assert cfg.response_timeout_ms == 3000
     assert cfg.walk_deadline_ms == 2500
+    assert cfg.screen_read_timeout_ms == 10000
     assert cfg.min_substring_query_length == 4
     assert cfg.min_substring_overlap_ratio == 0.6
     assert cfg.enable_coordinate_click_on_com_error is False
@@ -158,10 +160,87 @@ def test_response_timeout_below_100_disables():
     )
 
 
+def test_response_timeout_above_10000_disables():
+    # wh-click-response-timeout-unbounded: response_timeout_ms was the only
+    # millisecond key in this table with no ceiling, and it is the one most
+    # often multiplied to derive another timer. 10000 is now the inclusive
+    # ceiling, the same bound verification_budget_ms uses; above it the
+    # standard MAIN-track disable applies.
+    _assert_disabled(
+        ClickConfig.from_raw(raw(response_timeout_ms=10001)),
+        "response_timeout_ms",
+    )
+
+
+def test_response_timeout_arbitrary_precision_int_disables():
+    # ConfigService reads the file with tomllib, which parses
+    # arbitrary-precision integers rather than enforcing TOML's 64-bit range,
+    # so 10 followed by 308 zeroes used to reach a live ENABLED ClickConfig
+    # with all 309 digits preserved. A derived timer that doubled it then
+    # raised OverflowError when converted to a float
+    # (wh-overlay-slow-uia-stale-badges.21.10). The ceiling rejects it here,
+    # at the validator, instead of at each derived site.
+    _assert_disabled(
+        ClickConfig.from_raw(raw(response_timeout_ms=10**308)),
+        "response_timeout_ms",
+    )
+
+
 def test_min_substring_query_length_below_one_disables():
     _assert_disabled(
         ClickConfig.from_raw(raw(min_substring_query_length=0)),
         "min_substring_query_length",
+    )
+
+
+# ---------------------------------------------------------------------------
+# verification_budget_ms (wh-overlay-slow-uia-stale-badges.6): the pre-click
+# verification wall-clock budget. MAIN validation track (a bad value disables
+# clicking, same as response_timeout_ms); int >= 100; default 2000.
+# ---------------------------------------------------------------------------
+
+
+def test_verification_budget_missing_key_defaults_to_2000():
+    cfg = ClickConfig.from_raw(raw())
+    assert cfg.enabled is True
+    assert cfg.verification_budget_ms == 2000
+
+
+def test_verification_budget_valid_value_round_trips():
+    cfg = ClickConfig.from_raw(raw(verification_budget_ms=500))
+    assert cfg.enabled is True
+    assert cfg.verification_budget_ms == 500
+
+
+def test_verification_budget_below_100_disables():
+    _assert_disabled(
+        ClickConfig.from_raw(raw(verification_budget_ms=99)),
+        "verification_budget_ms",
+    )
+
+
+def test_verification_budget_bool_disables():
+    _assert_disabled(
+        ClickConfig.from_raw(raw(verification_budget_ms=True)),
+        "verification_budget_ms",
+    )
+
+
+def test_verification_budget_ceiling_10000_accepted():
+    # wh-overlay-slow-uia-stale-badges.20.5: 10000 is the inclusive ceiling.
+    cfg = ClickConfig.from_raw(raw(verification_budget_ms=10000))
+    assert cfg.enabled is True
+    assert cfg.verification_budget_ms == 10000
+
+
+def test_verification_budget_above_10000_disables():
+    # wh-overlay-slow-uia-stale-badges.20.5: above 10000 a slow-verification
+    # refusal can arrive after app.py's late-response grace window, which
+    # silently defeats the late-answer correction; the standard MAIN-track
+    # disable applies.
+    _assert_disabled(
+        ClickConfig.from_raw(raw(verification_budget_ms=10001)),
+        "verification_budget_ms",
     )
 
 
@@ -308,6 +387,102 @@ def test_missing_walk_deadline_keeps_default_when_response_timeout_above_it():
 
 
 # ---------------------------------------------------------------------------
+# screen_read_timeout_ms (wh-overlay-slow-uia-stale-badges.3): the screen
+# read's OWN Logic-side limit, an int in [100, 60000], default 10000. It is
+# deliberately NOT checked against response_timeout_ms in either direction --
+# a read of the whole window and a reply to one click are different
+# operations with different costs, and the old coupling threw away correct
+# reads that finished after 2500 ms. walk_deadline_ms keeps its own meaning
+# and its own cross-key rule for the by-name click walk.
+# ---------------------------------------------------------------------------
+
+def test_screen_read_timeout_default_when_missing():
+    base = copy.deepcopy(VALID_RAW)
+    del base["screen_read_timeout_ms"]
+    cfg = ClickConfig.from_raw(base)
+    assert cfg.enabled is True
+    assert cfg.invalid_key is None
+    assert cfg.screen_read_timeout_ms == 10000
+
+
+def test_screen_read_timeout_above_the_reply_limit_is_accepted():
+    """Acceptance criterion 2: the read limit may exceed the click reply limit.
+
+    8000 against a 3000 ms response_timeout_ms is the shape the parent bug
+    measured (a 7031 ms read that returned the CORRECT new content). Under
+    the old coupling any value at or above response_timeout_ms disabled the
+    whole [click] block.
+    """
+    cfg = ClickConfig.from_raw(
+        raw(response_timeout_ms=3000, screen_read_timeout_ms=8000)
+    )
+    assert cfg.enabled is True
+    assert cfg.invalid_key is None
+    assert cfg.screen_read_timeout_ms == 8000
+    assert cfg.screen_read_timeout_ms > cfg.response_timeout_ms
+
+
+def test_screen_read_timeout_below_floor_disables():
+    _assert_disabled(
+        ClickConfig.from_raw(raw(screen_read_timeout_ms=99)),
+        "screen_read_timeout_ms",
+    )
+
+
+def test_screen_read_timeout_above_ceiling_disables():
+    _assert_disabled(
+        ClickConfig.from_raw(raw(screen_read_timeout_ms=60001)),
+        "screen_read_timeout_ms",
+    )
+
+
+def test_screen_read_timeout_at_ceiling_accepted():
+    cfg = ClickConfig.from_raw(raw(screen_read_timeout_ms=60000))
+    assert cfg.enabled is True
+    assert cfg.invalid_key is None
+    assert cfg.screen_read_timeout_ms == 60000
+
+
+def test_screen_read_timeout_bool_disables():
+    _assert_disabled(
+        ClickConfig.from_raw(raw(screen_read_timeout_ms=True)),
+        "screen_read_timeout_ms",
+    )
+
+
+def test_screen_read_walk_deadline_subtracts_the_pre_walk_margin():
+    """The Input-side read bound is the key minus the 250 ms pre-walk margin.
+
+    Same margin the click pair uses, for the same reason: the Logic awaiter
+    starts at IPC send, the Input walk deadline at command dequeue.
+    """
+    cfg = ClickConfig.from_raw(raw(screen_read_timeout_ms=8000))
+    assert cfg.screen_read_walk_deadline_ms == 7750
+
+
+def test_screen_read_walk_deadline_floors_at_100():
+    cfg = ClickConfig.from_raw(raw(screen_read_timeout_ms=100))
+    assert cfg.enabled is True
+    assert cfg.screen_read_timeout_ms == 100
+    assert cfg.screen_read_walk_deadline_ms == 100
+
+
+def test_walk_deadline_validation_is_unchanged_by_the_new_key():
+    """The new read key does not relax walk_deadline_ms's own cross-key rule.
+
+    walk_deadline_ms still bounds the by-name click walk and still has to sit
+    strictly below response_timeout_ms with the margin, whatever the read
+    limit says.
+    """
+    _assert_disabled(
+        ClickConfig.from_raw(
+            raw(walk_deadline_ms=3001, screen_read_timeout_ms=8000)
+        ),
+        "walk_deadline_ms",
+    )
+
+
+# ---------------------------------------------------------------------------
 # (b2) Numeric AT-boundary -> ACCEPTED (closed bounds, wh-9f3t.32.1).
 #
 # The numeric validators use closed bounds (>=, <=). The below-boundary
@@ -420,6 +595,15 @@ def test_response_timeout_at_100_accepted():
         "response_timeout_ms",
         100,
     )
+
+
+def test_response_timeout_ceiling_10000_accepted():
+    # wh-click-response-timeout-unbounded: 10000 is the inclusive ceiling.
+    # VALID_RAW's walk_deadline_ms of 2500 stays strictly below it, so the
+    # cross-key walk bound does not interfere with this boundary.
+    cfg = ClickConfig.from_raw(raw(response_timeout_ms=10000))
+    assert cfg.enabled is True
+    assert cfg.response_timeout_ms == 10000
 
 
 # ---------------------------------------------------------------------------
@@ -713,8 +897,8 @@ def test_disabled_sentinel_is_a_click_config():
 # overlay_invalid_key == ()). Missing overlay key -> its default; defaults alone
 # never populate overlay_invalid_key. Ranges (design-v4 Configuration):
 #   overlay_enabled                     bool   default True
-#   overlay_badge_font_pt               int    [6, 96]      default 16
-#   overlay_badge_shadow                bool   default True
+#   overlay_badge_font_pt               int    [6, 96]      default 8
+#   overlay_badge_shadow                bool   default False
 #   overlay_auto_open_on_ambiguous      bool   default True
 #   overlay_focus_debounce_ms           int    [0, 5000]    default 250
 #   overlay_bounds_tolerance_physical_px int    [0, 200]     default 8
@@ -724,8 +908,8 @@ def test_disabled_sentinel_is_a_click_config():
 
 OVERLAY_DEFAULTS: dict[str, Any] = {
     "overlay_enabled": True,
-    "overlay_badge_font_pt": 16,
-    "overlay_badge_shadow": True,
+    "overlay_badge_font_pt": 8,
+    "overlay_badge_shadow": False,
     "overlay_auto_open_on_ambiguous": True,
     "overlay_focus_debounce_ms": 250,
     "overlay_bounds_tolerance_physical_px": 8,
@@ -733,6 +917,7 @@ OVERLAY_DEFAULTS: dict[str, Any] = {
     "overlay_browser_refresh_seconds": 10,
     "overlay_badge_corner": "top_right",
     "overlay_badge_trailing_space": True,
+    "overlay_badge_theme": "auto",
 }
 
 
@@ -751,8 +936,8 @@ def test_overlay_keys_round_trip_at_defaults():
     assert cfg.enabled is True
     assert cfg.invalid_key is None
     assert cfg.overlay_enabled is True
-    assert cfg.overlay_badge_font_pt == 16
-    assert cfg.overlay_badge_shadow is True
+    assert cfg.overlay_badge_font_pt == 8
+    assert cfg.overlay_badge_shadow is False
     assert cfg.overlay_auto_open_on_ambiguous is True
     assert cfg.overlay_focus_debounce_ms == 250
     assert cfg.overlay_bounds_tolerance_physical_px == 8
@@ -760,6 +945,7 @@ def test_overlay_keys_round_trip_at_defaults():
     assert cfg.overlay_browser_refresh_seconds == 10
     assert cfg.overlay_badge_corner == "top_right"
     assert cfg.overlay_badge_trailing_space is True
+    assert cfg.overlay_badge_theme == "auto"
     assert cfg.overlay_invalid_key == ()
     assert cfg.overlay_enabled_effective is True
 
@@ -770,14 +956,15 @@ def test_overlay_keys_default_when_absent():
     cfg = ClickConfig.from_raw(raw())
     assert cfg.enabled is True
     assert cfg.overlay_enabled is True
-    assert cfg.overlay_badge_font_pt == 16
-    assert cfg.overlay_badge_shadow is True
+    assert cfg.overlay_badge_font_pt == 8
+    assert cfg.overlay_badge_shadow is False
     assert cfg.overlay_auto_open_on_ambiguous is True
     assert cfg.overlay_focus_debounce_ms == 250
     assert cfg.overlay_bounds_tolerance_physical_px == 8
     assert cfg.snapshot_store_capacity == 4
     assert cfg.overlay_browser_refresh_seconds == 10
     assert cfg.overlay_badge_trailing_space is True
+    assert cfg.overlay_badge_theme == "auto"
     assert cfg.overlay_invalid_key == ()
     assert cfg.overlay_enabled_effective is True
 
@@ -915,6 +1102,40 @@ def test_overlay_badge_trailing_space_non_bool_disables_overlay_only():
     _assert_overlay_disabled(cfg, "overlay_badge_trailing_space")
     # A bad value keeps the field at its default, not the rejected value.
     assert cfg.overlay_badge_trailing_space is True
+
+
+# -- overlay_badge_theme str in {auto,light,dark} -----------------------------
+# The bubble badge's own color scheme (wh-overlay-bubble-badges): "light" is a
+# white bubble with a black digit, "dark" a near-black bubble with a white
+# digit. "auto" (default) picks per paint from the Windows app theme -- system
+# dark theme -> light bubble, system light theme -> dark bubble (contrast
+# against typical screen content). Values name the BUBBLE color, not the
+# system theme. Spec: docs/plans/2026-08-04-overlay-bubble-badges-design-v1.md.
+
+def test_overlay_badge_theme_default_is_auto():
+    cfg = ClickConfig.from_raw(raw())
+    assert cfg.overlay_enabled_effective is True
+    assert cfg.overlay_badge_theme == "auto"
+
+
+def test_overlay_badge_theme_each_valid_value_accepted():
+    for theme in ("auto", "light", "dark"):
+        cfg = ClickConfig.from_raw(raw(overlay_badge_theme=theme))
+        assert cfg.overlay_enabled_effective is True, theme
+        assert cfg.overlay_badge_theme == theme
+
+
+def test_overlay_badge_theme_unknown_string_disables_overlay_only():
+    cfg = ClickConfig.from_raw(raw(overlay_badge_theme="blue"))
+    _assert_overlay_disabled(cfg, "overlay_badge_theme")
+    # A bad value keeps the field at its default, not the rejected string.
+    assert cfg.overlay_badge_theme == "auto"
+
+
+def test_overlay_badge_theme_non_string_disables_overlay_only():
+    cfg = ClickConfig.from_raw(raw(overlay_badge_theme=True))
+    _assert_overlay_disabled(cfg, "overlay_badge_theme")
+    assert cfg.overlay_badge_theme == "auto"
 
 
 # -- overlay_focus_debounce_ms int [0, 5000]; 0 IS valid (no-debounce) -------
@@ -1085,6 +1306,35 @@ def test_overlay_browser_refresh_seconds_bool_disables_overlay_only():
         ClickConfig.from_raw(raw(overlay_browser_refresh_seconds=True)),
         "overlay_browser_refresh_seconds",
     )
+
+
+# -- overlay_settle_after_click bool, default False ---------------------------
+# wh-overlay-slow-uia-stale-badges.1: the feature flag for the whole
+# settle-after-click behaviour. It must default to False. Child .1 clears the
+# badges after a click; child .2 brings them back. With only child .1 shipped,
+# an ON default would leave the user with no numbers after every click.
+
+
+def test_overlay_settle_after_click_defaults_to_false():
+    assert ClickConfig.from_raw(raw()).overlay_settle_after_click is False
+    assert ClickConfig.from_raw({}).overlay_settle_after_click is False
+
+
+def test_overlay_settle_after_click_true_round_trips():
+    cfg = ClickConfig.from_raw(raw(overlay_settle_after_click=True))
+    assert cfg.overlay_enabled_effective is True
+    assert cfg.overlay_settle_after_click is True
+
+
+def test_overlay_settle_after_click_non_bool_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(overlay_settle_after_click=1)),
+        "overlay_settle_after_click",
+    )
+
+
+def test_overlay_settle_after_click_off_on_the_disabled_path():
+    assert DISABLED_CLICK_CONFIG.overlay_settle_after_click is False
 
 
 # -- snapshot_store_capacity int [1, 64] -------------------------------------
@@ -1387,3 +1637,251 @@ def test_bad_overlay_enabled_and_another_bad_key_both_collected():
     assert "overlay_enabled" in cfg.overlay_invalid_key
     assert "snapshot_store_capacity" in cfg.overlay_invalid_key
     assert len(cfg.overlay_invalid_key) == 2
+
+
+# ---------------------------------------------------------------------------
+# (k) Mouse-grid keys (wh-grid-state-machine).
+#
+# The mouse grid ("show grid") adds two [click] keys. They
+# validate on the OVERLAY track, not the Phase 1 track. The grid spec asks for
+# "never raises; degrades to safe defaults", which is what the overlay track
+# does and what the Phase 1 track does NOT (a bad Phase 1 value disables the
+# whole feature). Putting them there is also coherent on the merits: the grid
+# and the numbered overlay are mutually exclusive views of one visual-selection
+# layer, so a bad grid value taking both down is not over-reach. A bad value
+# keeps the field at its default, records the key in overlay_invalid_key, and
+# leaves by-name click fully operative.
+#   grid_min_cell_px   int [1, 500]    default 24
+#   drag_duration_ms   int [0, 5000]   default 250 (0 = no interpolation)
+# ---------------------------------------------------------------------------
+
+def test_grid_keys_round_trip_at_defaults():
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=24, drag_duration_ms=250))
+    assert cfg.enabled is True
+    assert cfg.invalid_key is None
+    assert cfg.grid_min_cell_px == 24
+    assert cfg.drag_duration_ms == 250
+    assert cfg.overlay_invalid_key == ()
+    assert cfg.overlay_enabled_effective is True
+
+
+def test_grid_keys_default_when_absent():
+    # An absent key is config-author omission, not a malformed value: it takes
+    # its default and never populates overlay_invalid_key.
+    cfg = ClickConfig.from_raw(raw())
+    assert cfg.grid_min_cell_px == 24
+    assert cfg.drag_duration_ms == 250
+    assert cfg.overlay_invalid_key == ()
+
+
+def test_grid_keys_accept_operator_values():
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=40, drag_duration_ms=600))
+    assert cfg.grid_min_cell_px == 40
+    assert cfg.drag_duration_ms == 600
+    assert cfg.overlay_enabled_effective is True
+
+
+# -- grid_min_cell_px int [1, 500] -------------------------------------------
+
+def test_grid_min_cell_px_at_lower_bound_accepted():
+    # 1 is the floor, not 0: refinement into a zero-pixel cell is meaningless,
+    # and grid_overlay_state.can_refine clamps the effective floor up to three
+    # pixels anyway (a shorter side cannot split into three non-empty cells).
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=1))
+    assert cfg.overlay_enabled_effective is True
+    assert cfg.grid_min_cell_px == 1
+
+
+def test_grid_min_cell_px_at_upper_bound_accepted():
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=500))
+    assert cfg.overlay_enabled_effective is True
+    assert cfg.grid_min_cell_px == 500
+
+
+def test_grid_min_cell_px_zero_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(grid_min_cell_px=0)), "grid_min_cell_px"
+    )
+
+
+def test_grid_min_cell_px_negative_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(grid_min_cell_px=-1)), "grid_min_cell_px"
+    )
+
+
+def test_grid_min_cell_px_above_upper_bound_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(grid_min_cell_px=501)), "grid_min_cell_px"
+    )
+
+
+def test_grid_min_cell_px_bool_disables_overlay_only():
+    # bool is a subclass of int; True must not read as 1.
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(grid_min_cell_px=True)), "grid_min_cell_px"
+    )
+
+
+def test_grid_min_cell_px_string_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(grid_min_cell_px="24")), "grid_min_cell_px"
+    )
+
+
+def test_grid_min_cell_px_float_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(grid_min_cell_px=24.0)), "grid_min_cell_px"
+    )
+
+
+def test_bad_grid_min_cell_px_keeps_the_default_value():
+    # The field keeps its default so the grid geometry stays sane even while
+    # the operator's typo is being surfaced.
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=0))
+    assert cfg.grid_min_cell_px == 24
+
+
+# -- drag_duration_ms int [0, 5000]; 0 IS valid (no interpolation) -----------
+
+def test_drag_duration_ms_zero_accepted():
+    # 0 means "no interpolated movement" -- a single move then release. Most
+    # applications ignore such a drag, which is why the default is 250, but it
+    # is a legitimate operator choice and must not be flagged or clamped.
+    cfg = ClickConfig.from_raw(raw(drag_duration_ms=0))
+    assert cfg.overlay_enabled_effective is True
+    assert cfg.drag_duration_ms == 0
+
+
+def test_drag_duration_ms_at_upper_bound_accepted():
+    cfg = ClickConfig.from_raw(raw(drag_duration_ms=5000))
+    assert cfg.overlay_enabled_effective is True
+    assert cfg.drag_duration_ms == 5000
+
+
+def test_drag_duration_ms_negative_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(drag_duration_ms=-1)), "drag_duration_ms"
+    )
+
+
+def test_drag_duration_ms_above_upper_bound_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(drag_duration_ms=5001)), "drag_duration_ms"
+    )
+
+
+def test_drag_duration_ms_bool_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(drag_duration_ms=False)), "drag_duration_ms"
+    )
+
+
+def test_drag_duration_ms_float_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(drag_duration_ms=250.0)), "drag_duration_ms"
+    )
+
+
+def test_bad_drag_duration_ms_keeps_the_default_value():
+    cfg = ClickConfig.from_raw(raw(drag_duration_ms=-1))
+    assert cfg.drag_duration_ms == 250
+
+
+# -- interaction with the other tracks ---------------------------------------
+
+def test_both_grid_keys_bad_are_both_collected():
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=0, drag_duration_ms=-1))
+    assert cfg.enabled is True
+    assert "grid_min_cell_px" in cfg.overlay_invalid_key
+    assert "drag_duration_ms" in cfg.overlay_invalid_key
+    assert len(cfg.overlay_invalid_key) == 2
+
+
+def test_bad_grid_key_does_not_disable_by_name_click():
+    # The grid sits behind the [click] master switch, but a bad grid VALUE must
+    # not take by-name clicking down with it.
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=-5))
+    assert cfg.enabled is True
+    assert cfg.invalid_key is None
+    assert cfg.min_confidence == 0.4  # Phase 1 keys still validated normally
+
+
+def test_phase_one_failure_still_yields_grid_defaults():
+    # The disabled path must carry the grid fields at their defaults, not at
+    # some unset value: the whole feature is off, so nothing reads them, but
+    # the dataclass must still be fully populated.
+    cfg = ClickConfig.from_raw(raw(min_confidence=2.0))
+    assert cfg.enabled is False
+    assert cfg.grid_min_cell_px == 24
+    assert cfg.drag_duration_ms == 250
+
+
+def test_disabled_sentinel_carries_the_grid_defaults():
+    assert DISABLED_CLICK_CONFIG.grid_min_cell_px == 24
+    assert DISABLED_CLICK_CONFIG.drag_duration_ms == 250
+
+
+# ---------------------------------------------------------------------------
+# (l) grid_enabled_effective (wh-mouse-grid.1.21).
+#
+# The grid's on/off gate was documented as the [click] master switch, but a
+# bad grid key (grid_min_cell_px / drag_duration_ms) lands on the OVERLAY
+# validation track, so `enabled` alone misses it: [click] grid_min_cell_px=0
+# yielded enabled=True and the grid still opened with the silently-restored
+# default. grid_enabled_effective is the derived gate the grid entry points
+# must consult: the master switch AND no GRID key failed validation. It
+# deliberately ignores overlay_enabled (a valid numbered-overlay opt-out must
+# not take the grid down) and ignores overlay-only bad keys (a bad
+# snapshot_store_capacity says nothing about the grid).
+# ---------------------------------------------------------------------------
+
+def test_grid_enabled_effective_true_on_a_valid_config():
+    cfg = ClickConfig.from_raw(raw())
+    assert cfg.grid_enabled_effective is True
+
+
+def test_invalid_grid_min_cell_px_disables_the_grid():
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=0))
+    assert cfg.enabled is True
+    assert cfg.grid_enabled_effective is False
+
+
+def test_invalid_drag_duration_ms_disables_the_grid():
+    cfg = ClickConfig.from_raw(raw(drag_duration_ms=-1))
+    assert cfg.enabled is True
+    assert cfg.grid_enabled_effective is False
+
+
+def test_overlay_opt_out_keeps_the_grid_enabled():
+    # overlay_enabled=false is a valid numbered-overlay opt-out, not a fault;
+    # the grid stays controlled by the master switch alone.
+    cfg = ClickConfig.from_raw(raw(overlay_enabled=False))
+    assert cfg.overlay_enabled_effective is False
+    assert cfg.grid_enabled_effective is True
+
+
+def test_bad_overlay_only_key_keeps_the_grid_enabled():
+    # A bad overlay-only key disables the numbered overlay but says nothing
+    # about the grid.
+    cfg = ClickConfig.from_raw(raw(snapshot_store_capacity=0))
+    assert cfg.overlay_enabled_effective is False
+    assert cfg.grid_enabled_effective is True
+
+
+def test_master_disable_takes_the_grid_down():
+    cfg = ClickConfig.from_raw(raw(enabled=False))
+    assert cfg.grid_enabled_effective is False
+
+
+def test_phase_one_failure_takes_the_grid_down():
+    # A bad Phase 1 key disables the whole feature, grid included.
+    cfg = ClickConfig.from_raw(raw(min_confidence=2.0))
+    assert cfg.enabled is False
+    assert cfg.grid_enabled_effective is False
+
+
+def test_both_grid_keys_bad_still_a_single_disabled_grid():
+    cfg = ClickConfig.from_raw(raw(grid_min_cell_px=0, drag_duration_ms=-1))
+    assert cfg.grid_enabled_effective is False
+    assert cfg.overlay_enabled_effective is False

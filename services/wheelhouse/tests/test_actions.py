@@ -21,7 +21,7 @@ import pytest
 from unittest.mock import Mock, MagicMock, AsyncMock, patch
 from datetime import datetime
 
-from speech.actions import words_to_int, ActionFunctions, _normalize_key, SPOKEN_KEY_MAP
+from speech.actions import words_to_int, ActionFailed, ActionFunctions, _normalize_key, SPOKEN_KEY_MAP
 
 
 # ============================================================================
@@ -53,6 +53,23 @@ class TestWordsToInt:
     def test_ten(self):
         assert words_to_int("ten") == 10
 
+    def test_a_word_count_above_ten(self):
+        # The reported defect (wh-number-words-one-parser): the table
+        # this function used to carry stopped at ten, so "backspace
+        # fifteen" pressed backspace once and dictated the word.
+        assert words_to_int("fifteen") == 15
+
+    def test_a_two_word_count(self):
+        assert words_to_int("twenty three") == 23
+
+    def test_a_hyphenated_count(self):
+        assert words_to_int("twenty-three") == 23
+
+    def test_a_hundreds_count(self):
+        # Not capped here: press and hotkey clamp a repeat at 50, and
+        # scroll clamps at MAX_SCROLL_CLICKS, each after this call.
+        assert words_to_int("one hundred twenty three") == 123
+
     def test_none_returns_default_one(self):
         assert words_to_int(None) == 1
 
@@ -73,6 +90,36 @@ class TestWordsToInt:
 
     def test_multi_digit(self):
         assert words_to_int("42") == 42
+
+    def test_a_digit_string_at_the_conversion_limit_still_converts(self):
+        # The boundary below the refusal, so a fix for the case above
+        # cannot pass by refusing every long number
+        # (wh-voice-access-parity.2.3.2.6).
+        digits = "1" * sys.get_int_max_str_digits()
+        assert words_to_int(digits) == int(digits)
+
+    def test_a_digit_string_too_long_to_convert_returns_none(self):
+        # Python 3.12 refuses int() on a digit string longer than
+        # sys.get_int_max_str_digits() (4300 by default) and raises
+        # ValueError. This function's contract is None for anything it
+        # cannot convert, so the exception must not escape: every caller
+        # reads None, and none of them catch ValueError
+        # (wh-voice-access-parity.2.3.2.6).
+        #
+        # Catch the exception and assert on it rather than letting it
+        # propagate. A test that RAISES under a mutation proves nothing,
+        # because the mutation gate cannot tell that crash from a real
+        # catch (wh-voice-access-parity.2.3.2.4).
+        raised = None
+        result = None
+        try:
+            result = words_to_int("1" * (sys.get_int_max_str_digits() + 1))
+        except ValueError as exc:
+            raised = exc
+        assert raised is None, (
+            f"words_to_int raised instead of reporting the count unreadable: {raised}"
+        )
+        assert result is None
 
 
 # ============================================================================
@@ -224,12 +271,53 @@ class TestPressKeys:
         assert "{" in result["params"]["keys"]
 
     def test_two_word_tuple_alias(self, action_funcs):
-        # "left parenthesis" -> ("shift", "9") -> hotkey("shift", "9")
-        # hotkey treats "9" as repeat count (valid digit), so keys=["shift"], repeat=9
+        # "left parenthesis" -> ("shift", "9"). Both keys must reach the
+        # payload: press_keys has already validated "9" as a key name, so
+        # the digit must not be taken as a repeat count
+        # (wh-arrow-key-names-missing.1.2).
         result = action_funcs.press_keys("left parenthesis")
         assert result is not None
-        assert "shift" in result["params"]["keys"]
-        assert result["params"]["repeat"] == 9
+        assert result["params"]["keys"] == ["shift", "9"]
+        assert result["params"]["repeat"] == 1
+
+    def test_every_open_parenthesis_alias_presses_shift_nine_once(
+        self, action_funcs
+    ):
+        # All four aliases map to the same ("shift", "9") tuple, so all
+        # four reached the repeat-count heuristic the same way.
+        for alias in (
+            "left parenthesis",
+            "left paren",
+            "open parenthesis",
+            "open paren",
+        ):
+            result = action_funcs.press_keys(alias)
+            assert result["params"]["keys"] == ["shift", "9"], alias
+            assert result["params"]["repeat"] == 1, alias
+
+    def test_close_parenthesis_alias_still_presses_shift_zero_once(
+        self, action_funcs
+    ):
+        # ")" ends in "0", which words_to_int reports as 0 rather than a
+        # positive count, so it already survived. Guard it against a fix
+        # that changes the zero case.
+        result = action_funcs.press_keys("right parenthesis")
+        assert result["params"]["keys"] == ["shift", "0"]
+        assert result["params"]["repeat"] == 1
+
+    def test_bare_digit_is_a_key_not_a_repeat_count(self, action_funcs):
+        # "press 1": every digit is a key name in VK_CODE_MAP, so the
+        # digit must be pressed once. Taking it as a repeat count left an
+        # empty key list, pressed nothing, and still reported success.
+        result = action_funcs.press_keys("1")
+        assert result["params"]["keys"] == ["1"]
+        assert result["params"]["repeat"] == 1
+
+    def test_chord_ending_in_a_digit_keeps_the_digit(self, action_funcs):
+        # "press control 2" must press ctrl+2 once, not ctrl alone twice.
+        result = action_funcs.press_keys("control 2")
+        assert result["params"]["keys"] == ["ctrl", "2"]
+        assert result["params"]["repeat"] == 1
 
     def test_modifier_sorting(self, action_funcs):
         result = action_funcs.press_keys("delete ctrl alt")
@@ -241,13 +329,17 @@ class TestPressKeys:
         assert ctrl_idx < delete_idx
         assert alt_idx < delete_idx
 
-    def test_unrecognized_key_returns_none(self, action_funcs):
-        result = action_funcs.press_keys("xyzzy zorp")
-        assert result is None
+    def test_unrecognized_key_raises_action_failed(self, action_funcs):
+        # wh-arrow-key-names-missing: press_keys used to return None here.
+        # The rule engine could not tell that from a successful None
+        # return, reported the rule as executed, and the spoken words were
+        # lost. It now raises, and the engine dictates the words instead.
+        with pytest.raises(ActionFailed):
+            action_funcs.press_keys("xyzzy zorp")
 
-    def test_empty_string_returns_none(self, action_funcs):
-        result = action_funcs.press_keys("")
-        assert result is None
+    def test_empty_string_raises_action_failed(self, action_funcs):
+        with pytest.raises(ActionFailed):
+            action_funcs.press_keys("")
 
     def test_spoken_punctuation(self, action_funcs):
         result = action_funcs.press_keys("slash")
@@ -728,15 +820,18 @@ class TestClickElementAction:
 # click grammar routing (wh-vjwdl) -- routing against the real patterns
 # ============================================================================
 
-class TestClickPatternHotwordGating:
-    """Click grammar routing against the real patterns.toml.
+class TestSelectPhrasePatternHotwordGating:
+    """Select grammar routing against the real patterns.toml.
 
-    History: wh-vjwdl originally made the click pattern hotword-required.
-    Commit bc91e701 (2026-07-05) reversed that by user decision: click,
-    apply numbers, and dismiss numbers fire WITHOUT the hotword now. The
-    accepted trade-off is that command-mode text beginning with 'click'
-    routes to a UI click attempt. These tests lock the current contract;
-    click-to-talk must still win over the greedy click pattern.
+    wh-spoken-phrase-select.6.2. Two properties keep the capture entry
+    ^select (.+)$ safe, and neither one had a test.
+
+    The first is the hotword. Without it every dictated sentence that
+    opens with "select" would become a command. The second is the
+    position in the file: the catalog walks patterns.toml in order and
+    the first match wins, so the capture must follow the four fixed
+    forms. These tests mirror TestClickPatternHotwordGating above,
+    which pins the same two properties for the click capture.
     """
 
     @pytest.fixture
@@ -749,19 +844,105 @@ class TestClickPatternHotwordGating:
         assert catalog.pattern_count > 0  # sanity: real file loaded
         return PatternMatcher(catalog)
 
-    def test_click_without_hotword_matches_click_element(self, matcher):
-        # bc91e701: the click pattern is no longer hotword-gated, so a
-        # command-mode buffer starting with 'click' matches click_element
-        # even when the hotword is inactive.
+    def test_select_phrase_without_hotword_is_refused(self, matcher):
+        # "select the ones you want" is ordinary dictated text.
+        result = matcher.match_complete(
+            "select the ones you want",
+            pattern_type="command",
+            hotword_active=False,
+            first_word="select",
+        )
+        if result is not None and result.matched:
+            funcs = [a.get("function") for a in (result.actions or [])]
+            assert "select_phrase" not in funcs, (
+                "the select capture must not match without the hotword"
+            )
+
+    def test_select_phrase_with_hotword_matches(self, matcher):
+        result = matcher.match_complete(
+            "select brown fox",
+            pattern_type="command",
+            hotword_active=True,
+            first_word="select",
+        )
+        assert result is not None and result.matched
+        funcs = [a.get("function") for a in (result.actions or [])]
+        assert "select_phrase" in funcs
+
+    def test_select_all_wins_over_the_capture_with_the_hotword(self, matcher):
+        # Both entries are eligible while the hotword is active, so only
+        # the file order keeps "select all" on the fixed form. This test
+        # fails if anybody moves the capture entry earlier.
+        result = matcher.match_complete(
+            "select all",
+            pattern_type="command",
+            hotword_active=True,
+            first_word="select",
+        )
+        assert result is not None and result.matched
+        funcs = [a.get("function") for a in (result.actions or [])]
+        assert "select_phrase" not in funcs, (
+            "select all reached the phrase capture instead of the fixed form"
+        )
+
+    @pytest.mark.parametrize("spoken", ["select word", "select line", "select paragraph"])
+    def test_the_other_fixed_forms_win_too(self, matcher, spoken):
+        result = matcher.match_complete(
+            spoken,
+            pattern_type="command",
+            hotword_active=True,
+            first_word="select",
+        )
+        assert result is not None and result.matched
+        funcs = [a.get("function") for a in (result.actions or [])]
+        assert "select_phrase" not in funcs, (
+            f"{spoken!r} reached the phrase capture instead of the fixed form"
+        )
+
+
+class TestClickPatternHotwordGating:
+    """Click grammar routing against the real patterns.toml.
+
+    History, in order. wh-vjwdl originally made the click pattern
+    hotword-required. Commit bc91e701 (2026-07-05) reversed that by user
+    decision, so click, show numbers and hide numbers all fired without
+    the hotword. On 2026-08-17 David required the hotword again for the
+    click command alone (wh-voice-access-parity.1.6.1.1), after DeepSeek
+    showed that the Voice Access word "tap" joined the same greedy
+    trigger and read "tap water is safe to drink" as a request to click a
+    control named "water is safe to drink". "show numbers" and "hide
+    numbers" keep the July decision and stay hotword-free.
+
+    These tests lock the current contract; click-to-talk must still win
+    over the greedy click pattern.
+    """
+
+    @pytest.fixture
+    def matcher(self):
+        from speech.pattern_catalog import PatternCatalog
+        from speech.pattern_matcher import PatternMatcher
+
+        patterns_path = Path(__file__).parent.parent / "speech" / "config" / "patterns.toml"
+        catalog = PatternCatalog(str(patterns_path))
+        assert catalog.pattern_count > 0  # sanity: real file loaded
+        return PatternMatcher(catalog)
+
+    def test_click_without_hotword_is_refused(self, matcher):
+        # 2026-08-17: the click pattern is hotword-gated again, so a
+        # command-mode buffer starting with 'click' no longer reaches
+        # click_element while the hotword is inactive. "click here to
+        # continue" is ordinary dictated text.
         result = matcher.match_complete(
             "click here to continue",
             pattern_type="command",
             hotword_active=False,
             first_word="click",
         )
-        assert result is not None and result.matched
-        funcs = [a.get("function") for a in (result.actions or [])]
-        assert "click_element" in funcs
+        if result is not None and result.matched:
+            funcs = [a.get("function") for a in (result.actions or [])]
+            assert "click_element" not in funcs, (
+                "the click command must not match without the hotword"
+            )
 
     def test_click_with_hotword_matches_click_element(self, matcher):
         # Hotword active: the click pattern matches and routes to click_element.
@@ -788,3 +969,47 @@ class TestClickPatternHotwordGating:
         funcs = [a.get("function") for a in (result.actions or [])]
         assert "set_speech_interaction_mode" in funcs
         assert "click_element" not in funcs
+
+
+# ============================================================================
+# SELECT PHRASE
+# ============================================================================
+
+class TestSelectPhraseAction:
+    """The select_phrase action packages a spoken phrase for the Input process.
+
+    wh-spoken-phrase-select.1. The handler in the Input process finds the
+    first match of the phrase inside the focused text control and selects
+    it. The action itself does no searching; it only builds the payload.
+    An empty capture returns None, which is how click_element declines and
+    lets the words fall through to dictation.
+    """
+
+    def test_registered(self, action_funcs):
+        assert "select_phrase" in action_funcs.get_functions()
+
+    def test_payload_shape(self, action_funcs):
+        result = action_funcs.select_phrase("brown fox")
+        assert result == {
+            "action": "select_phrase",
+            "params": {"phrase": "brown fox"},
+        }
+
+    def test_keeps_every_word_of_a_long_phrase(self, action_funcs):
+        phrase = "the quick brown fox jumps over the lazy dog"
+        result = action_funcs.select_phrase(phrase)
+        assert result["params"]["phrase"] == phrase
+
+    def test_keeps_punctuation_inside_the_phrase(self, action_funcs):
+        result = action_funcs.select_phrase("hello, world")
+        assert result["params"]["phrase"] == "hello, world"
+
+    def test_removes_surrounding_whitespace(self, action_funcs):
+        result = action_funcs.select_phrase("  brown fox  ")
+        assert result["params"]["phrase"] == "brown fox"
+
+    def test_empty_capture_returns_none(self, action_funcs):
+        assert action_funcs.select_phrase("   ") is None
+
+    def test_none_capture_returns_none(self, action_funcs):
+        assert action_funcs.select_phrase(None) is None

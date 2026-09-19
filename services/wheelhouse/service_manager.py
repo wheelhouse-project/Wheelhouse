@@ -39,11 +39,15 @@ Typical Usage:
 """
 import asyncio
 import logging
+import threading
 from typing import Optional, Any, Dict, TYPE_CHECKING
 
 from services.wheelhouse.event_bus import EventBus
 from services.wheelhouse.handlers.mouse_handler import MouseHandler
-from services.wheelhouse.config_service import ConfigService
+from services.wheelhouse.config_service import (
+    ConfigService,
+    DEFAULT_STT_PROVIDER,
+)
 from services.wheelhouse.utils.screen import get_screen_size
 from services.wheelhouse.integrations.bravia_control import BraviaControl
 from services.wheelhouse.handlers.software_dimmer import SoftwareDimmer
@@ -52,6 +56,10 @@ from services.wheelhouse.speech.speech_handler import SpeechHandler
 from services.wheelhouse.plugins.registry import PluginRegistry
 from services.wheelhouse.coordinators.brightness_coordinator import BrightnessCoordinator
 from services.wheelhouse.stt.remote_stt_launcher import RemoteSTTLauncher
+from stt.provider_env_check import (
+    check_provider_environments,
+    notify_provider_environment_mismatches,
+)
 from services.wheelhouse.ai.service import AIService
 from services.wheelhouse.ai.runtime_config import RuntimeConfig
 from services.wheelhouse.ai.server_launcher import (
@@ -102,7 +110,6 @@ class ServiceManager:
         self.audio_monitor: Optional[AudioMonitor] = None
         self.mouse_handler: Optional[MouseHandler] = None
         self.speech_handler: Optional[SpeechHandler] = None
-        self.stt_manager: Optional[Any] = None  # STTManager for in-process STT
         
         # Coordinators
         self.brightness_coordinator: Optional[BrightnessCoordinator] = None
@@ -112,6 +119,7 @@ class ServiceManager:
 
         # Remote STT provider launcher (for remote mode)
         self.remote_stt_launcher: Optional[RemoteSTTLauncher] = None
+        self._provider_environments_checked = False
 
         # AI Service (text correction, help Q&A)
         self.ai_service: Optional[AIService] = None
@@ -141,18 +149,17 @@ class ServiceManager:
             self.config_service.get("BRAVIA_IP", ""), 
             self.config_service.get("BRAVIA_PSK", "")
         )
-        # Create software dimmer based on config (gamma_dimmer | software_dimmer | flux)
-        dimmer_type = self.config_service.get("brightness_coordinator.software_dimmer", "flux")
-        if dimmer_type == "gamma_dimmer":
+        # Create software dimmer based on config (gamma_dimmer | software_dimmer | overlay).
+        # Any other value, and a missing key, builds GammaDimmer. BrightnessCoordinator
+        # logs the one WARNING for an unrecognised value and records gamma_dimmer.
+        dimmer_type = self.config_service.get("brightness_coordinator.software_dimmer", "gamma_dimmer")
+        if dimmer_type in ("software_dimmer", "overlay"):
+            self.software_dimmer = SoftwareDimmer(self.loop)
+            log.info("Using SoftwareDimmer (overlay window)")
+        else:
             from services.wheelhouse.handlers.gamma_dimmer import GammaDimmer
             self.software_dimmer = GammaDimmer(self.loop)
             log.info("Using GammaDimmer (native gamma ramp)")
-        elif dimmer_type in ("software_dimmer", "overlay"):
-            self.software_dimmer = SoftwareDimmer(self.loop)
-            log.info("Using SoftwareDimmer (overlay window)")
-        else:  # flux or other
-            self.software_dimmer = None
-            log.info(f"Using {dimmer_type} (external control via hotkeys)")
         self.audio_monitor = AudioMonitor(self.loop, self.config_service, self.event_bus)
         
         # Initialize brightness coordinator (before MouseHandler, after EventBus and SoftwareDimmer)
@@ -170,37 +177,16 @@ class ServiceManager:
         log.info("Initializing plugin system...")
         self.plugin_registry = PluginRegistry(self.config_service, self.event_bus)
         
-        # Initialize STT based on mode
-        stt_mode = self.config_service.get("stt.mode", "remote")
-        if stt_mode == "in_process":
-            try:
-                from stt.stt_manager import STTManager
+        # Initialize STT. Remote is the only mode
+        # (wh-in-process-capture-removal); the settings key is read once at
+        # startup in main, for the WARNING an old in_process file needs.
+        log.info("Using remote STT mode (WebSocket to external STT server)")
+        self.remote_stt_launcher = self._build_remote_stt_launcher()
+        providers = self.remote_stt_launcher.discover_providers()
+        log.info(f"Discovered {len(providers)} remote STT providers: {[p['name'] for p in providers]}")
+        # Wire launcher to state_manager for provider discovery in GUI
+        self.state_manager.set_remote_stt_launcher(self.remote_stt_launcher)
 
-                # Read VAD configuration (enabled by default for in-process STT)
-                vad_enabled = self.config_service.get("stt.vad.enabled", True)
-                vad_threshold = self.config_service.get("stt.vad.threshold", 0.5)
-                vad_lead_in_chunks = self.config_service.get("stt.vad.lead_in_chunks", 3)
-
-                self.stt_manager = STTManager(
-                    vad_enabled=vad_enabled,
-                    vad_threshold=vad_threshold,
-                    vad_lead_in_chunks=vad_lead_in_chunks,
-                )
-                self._stt_provider_type = self.config_service.get("stt.provider", "google")
-                self._stt_provider_kwargs = self._build_stt_provider_kwargs(self._stt_provider_type)
-                log.info(f"In-process STT enabled, provider: {self._stt_provider_type}, VAD: {vad_enabled}")
-                self.state_manager.set_stt_manager(self.stt_manager)
-            except ImportError as e:
-                log.warning(f"Could not initialize STTManager: {e}")
-        else:
-            # Remote mode - initialize RemoteSTTLauncher for provider discovery/management
-            log.info("Using remote STT mode (WebSocket to external STT server)")
-            self.remote_stt_launcher = self._build_remote_stt_launcher()
-            providers = self.remote_stt_launcher.discover_providers()
-            log.info(f"Discovered {len(providers)} remote STT providers: {[p['name'] for p in providers]}")
-            # Wire launcher to state_manager for provider discovery in GUI
-            self.state_manager.set_remote_stt_launcher(self.remote_stt_launcher)
-        
         # Initialize AI Service if enabled
         if self.config_service.get("ai.enabled", False):
             self.ai_service = AIService(
@@ -261,6 +247,7 @@ class ServiceManager:
         runtime = RuntimeConfig.from_raw(
             self.config_service.get("ai.runtime"),
             self.config_service.get("ai.server.base_url", ""),
+            model_alias=self.config_service.get("ai.server.model", ""),
         )
         if not runtime.enabled:
             return None
@@ -389,54 +376,6 @@ class ServiceManager:
         except Exception as e:
             log.error(f"Error starting AIService: {e}", exc_info=True)
 
-    def _build_stt_provider_kwargs(self, provider_type: str) -> dict:
-        """Build provider-specific kwargs from config.
-
-        Args:
-            provider_type: The STT provider type (google, azure).
-
-        Returns:
-            Dictionary of kwargs for the provider constructor.
-        """
-        if provider_type == "google":
-            return {
-                "language": self.config_service.get("stt.google.language", "en-US"),
-                "boost_words": self.config_service.get("stt.google.boost_words", []),
-            }
-        elif provider_type == "azure":
-            return {
-                "subscription_key": self.config_service.get("stt.azure.subscription_key", ""),
-                "region": self.config_service.get("stt.azure.region", "eastus"),
-            }
-        return {}
-
-    async def start_stt_manager(self, transcript_handler) -> None:
-        """Start the in-process STTManager with transcript routing.
-        
-        :flow: In-Process STT
-        :step: 1
-        :description: Starts STTManager with configured provider and wires transcript handler
-        :data_in: transcript_handler callback, provider config from config.toml
-        :data_out: Running STTManager with audio capture and transcription
-        :notes: Called from main.py after services initialize. Registers transcript 
-                callback to route TranscriptEvents to speech processing pipeline.
-        
-        Args:
-            transcript_handler: Async callback for TranscriptEvent objects.
-        """
-        if not self.stt_manager:
-            return
-        
-        # Register transcript handler
-        self.stt_manager.on_transcript(transcript_handler)
-        
-        # Start with configured provider
-        await self.stt_manager.start(
-            self._stt_provider_type,
-            **self._stt_provider_kwargs,
-        )
-        log.info(f"STTManager started with {self._stt_provider_type}")
-
     def start_remote_stt(self) -> bool:
         """Start the remote STT provider based on last_provider config.
 
@@ -455,26 +394,96 @@ class ServiceManager:
         last_provider = self.config_service.get("stt.last_provider", None)
         providers = self.remote_stt_launcher.discover_providers()
 
+        if not self._provider_environments_checked:
+            self._provider_environments_checked = True
+
+            def report_provider_environments():
+                try:
+                    notices = check_provider_environments(providers)
+                    notify_provider_environment_mismatches(notices)
+                except Exception:
+                    log.warning("Provider environment check failed", exc_info=True)
+
+            # main.py calls this method from the Logic event loop thread with
+            # no await, and a cold check waits seconds on uv. Waiting here
+            # stalls the websocket server the providers connect to and every
+            # task already scheduled on that loop, and no launch decision
+            # reads the notices (wh-codex-merge-audit.5.1.1).
+            threading.Thread(target=report_provider_environments,
+                             name="ProviderEnvironmentNotice", daemon=True).start()
+
         if not providers:
             log.warning("No remote STT providers discovered")
+            # As terminal as the all-starts-failed return below: nothing
+            # is running, so the tray must not name an engine. Only that
+            # one said so, and the reader kept answering with the
+            # configured provider (wh-remote-stt-robustness.2.1).
+            self.state_manager.set_remote_stt_stopped()
+            self.state_manager.send_state_update()
             return False
 
         # Try to start last selected provider
         if last_provider:
             if self.remote_stt_launcher.start_provider(last_provider):
+                self.state_manager.set_running_remote_stt_provider(last_provider)
                 log.info(f"Started remote STT provider: {last_provider}")
                 return True
             else:
                 log.warning(f"Failed to start last provider '{last_provider}', falling back to first available")
 
-        # Fall back to first available provider
-        first_provider = providers[0]["name"]
-        if self.remote_stt_launcher.start_provider(first_provider):
-            log.info(f"Started remote STT provider (fallback): {first_provider}")
+        # Fall back to the default provider when it is discovered (discovery
+        # is unsorted filesystem iteration, so providers[0] can be an engine
+        # that needs credentials this machine does not have), unless the
+        # default is the provider that just failed; otherwise first available.
+        provider_names = [p["name"] for p in providers]
+        if DEFAULT_STT_PROVIDER in provider_names and DEFAULT_STT_PROVIDER != last_provider:
+            fallback_provider = DEFAULT_STT_PROVIDER
+        else:
+            fallback_provider = provider_names[0]
+        if self.remote_stt_launcher.start_provider(fallback_provider):
+            # The runtime record keeps the GUI truthful even when the config
+            # repair below fails: _get_current_stt_provider prefers it over
+            # the (possibly unrepaired) stored value.
+            self.state_manager.set_running_remote_stt_provider(fallback_provider)
+            # Repair the stored choice so the next launch does not retry a
+            # provider that no longer exists (e.g. a removed engine left in
+            # stt.last_provider). set() only changes memory; the scheduled
+            # save() writes it to disk. Best-effort: a user config can hold
+            # a valid TOML scalar such as stt = "legacy", which get() reads
+            # through but set() raises TypeError on, and the engine is
+            # already running -- never let the repair kill the startup path.
+            try:
+                self.config_service.set("stt.last_provider", fallback_provider)
+                self.loop.create_task(
+                    self._save_repaired_last_provider(fallback_provider)
+                )
+            except Exception as e:
+                log.warning(
+                    f"Could not record fallback STT provider {fallback_provider}: {e}"
+                )
+            # The GUI received its initial state before this runs; mark the
+            # running engine now instead of after the next periodic update.
+            # Outside the try so a failed config repair still updates the GUI.
+            self.state_manager.send_state_update()
+            log.info(f"Started remote STT provider (fallback): {fallback_provider}")
             return True
 
         log.error("Failed to start any remote STT provider")
+        # No engine is running, so the tray must not show one as selected
+        # (wh-remote-stt-robustness).
+        self.state_manager.set_remote_stt_stopped()
+        self.state_manager.send_state_update()
         return False
+
+    async def _save_repaired_last_provider(self, provider: str) -> None:
+        """Persist the fallback provider chosen by start_remote_stt."""
+        if not await self.config_service.save():
+            # The engine is running; only the record of it failed, so the
+            # next start will retry the stale provider again.
+            log.error(
+                f"Fell back to STT provider {provider}, but the repaired "
+                "choice was NOT saved and will not survive a restart"
+            )
 
     async def shutdown_services(self):
         """:flow: Application Lifecycle
@@ -502,14 +511,6 @@ class ServiceManager:
                 await self.plugin_registry.stop_all()
             except Exception as e:
                 log.error(f"Error stopping plugins: {e}", exc_info=True)
-        
-        # Stop STTManager
-        if self.stt_manager:
-            try:
-                await self.stt_manager.stop()
-                log.info("STTManager stopped")
-            except Exception as e:
-                log.error(f"Error stopping STTManager: {e}", exc_info=True)
         
         # Stop brightness coordinator
         if self.brightness_coordinator:

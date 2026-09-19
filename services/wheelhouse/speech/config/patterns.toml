@@ -25,6 +25,15 @@
 #   gates exist only on the command paths, so the flag on an unanchored
 #   replacement is ignored with a startup warning
 #   (wh-int8-punctuation-mishears.1.4).
+#   Also used by every command that is one ordinary English word with
+#   nothing after it (save, desktop, maximize, minimize, browser,
+#   notepad, replace, search, boost, simplify, shorten, pirate,
+#   patterns). David decided on 2026-08-20 that those must behave the
+#   way Windows Voice Access behaves: say the word as the whole
+#   utterance and it fires, with no hotword in front. They carried
+#   requires_hotword before that; the flag replaces it, because the
+#   router matches a PREFIX of an utterance, so a bare ^save$ would
+#   otherwise fire on "save the document for me".
 # - actions: Array of {function, params, awaits_done?} action steps
 #
 # ORDERING RULES:
@@ -59,6 +68,22 @@ actions = [
     { function = "insert_text", params = ["g1"] }
 ]
 
+# -----------------------------------------------------------------------
+# BLOCK 1 -- "type X" and "dictate X". A NEW entry, not a replacement.
+# PLACEMENT: immediately AFTER the shipped literal-bypass block at
+# patterns.toml line 65, so it is the SECOND [[pattern]] entry in the file.
+# The shipped block must keep first position, and this block must sit above
+# everything else so no earlier pattern can claim "type" or "dictate".
+# It is ^-anchored on purpose -- see the REJECTED FIRST VERSION note above.
+# -----------------------------------------------------------------------
+[[pattern]]
+pattern = '''^(?:type|dictate) (.+)$'''
+doc_id = "type-dictate-bypass"
+actions = [
+    { function = "insert_text", params = ["g1"] }
+]
+
+
 # =============================================================================
 # COMMANDS - Trailing-position (wh-2vz)
 # =============================================================================
@@ -85,6 +110,7 @@ actions = [
 [[pattern]]
 pattern = '''^zoom in$'''
 doc_id = "zoom-in"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "+"] }
 ]
@@ -92,6 +118,7 @@ actions = [
 [[pattern]]
 pattern = '''^zoom out$'''
 doc_id = "zoom-out"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "-"] }
 ]
@@ -99,7 +126,7 @@ actions = [
 [[pattern]]
 pattern = '''^save$'''
 doc_id = "save"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "s"] }
 ]
@@ -107,6 +134,7 @@ actions = [
 [[pattern]]
 pattern = '''^create tab$'''
 doc_id = "create-tab"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "n"] }
 ]
@@ -114,6 +142,7 @@ actions = [
 [[pattern]]
 pattern = '''^create window$'''
 doc_id = "create-window"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["shift", "ctrl", "n"] }
 ]
@@ -126,26 +155,59 @@ actions = [
     { function = "hk", params = ["alt", "f4"] }
 ]
 
+# "close tab" -- ORDERING HAZARD #2: this entry must sit above the
+# end-of-file close-app capture '''^(?:close|exit|quit)\s+(.+)$'''. That
+# capture claimed "close tab" as an application name, and because
+# command_engine._execute_rule sends every step without inspecting the
+# activate response, the alt+f4 fired against whatever window had focus:
+# the user asked to close one tab and lost the whole window (review
+# finding wh-voice-access-parity.3.3, David ruling 1 of 2026-08-24).
+#
+# NO whole_utterance_only, and here is the check behind that. Two
+# case-insensitive greps of this file: one for the string "close tab"
+# anywhere, which found nothing, and one over every "pattern = " line
+# containing "close", which found only close-window, the five punct-close-*
+# replacements, and the close-app capture. No entry has a literal body
+# starting with "close tab", chained forms included, so this entry cannot
+# sever a longer one. Re-run both greps before adding any "close tab ..."
+# wording.
+#
+# requires_hotword mirrors close-window directly above. Without the gate
+# the dictated words "close tab" would send Ctrl+W in the middle of
+# ordinary typing.
 [[pattern]]
-pattern = '''^desktop$'''
-doc_id = "show-desktop"
+pattern = '''^close tab$'''
+doc_id = "close-tab"
 requires_hotword = true
+actions = [
+    { function = "hk", params = ["ctrl", "w"] }
+]
+
+# The optional verb/noun halves on the next three entries exist because
+# the end-of-file per-app captures (show-app, minimize-app, maximize-app)
+# otherwise claim the natural phrasings as app names under the hotword:
+# "show desktop" became activate("desktop") and the utterance was
+# consumed (review finding wh-voice-access-parity.3.3).
+[[pattern]]
+pattern = '''^(?:show (?:the )?)?desktop$'''
+doc_id = "show-desktop"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["win", "d"] }
 ]
 
 [[pattern]]
-pattern = '''^maximize$'''
+pattern = '''^maximize(?: (?:the )?window)?$'''
 doc_id = "maximize-window"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["win", "up"] }
 ]
 
 [[pattern]]
-pattern = '''^minimize$'''
+pattern = '''^minimize(?: (?:the )?window)?$'''
 doc_id = "minimize-window"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["win", "down"] }
 ]
@@ -153,8 +215,183 @@ actions = [
 [[pattern]]
 pattern = '''^Windows? settings$'''
 doc_id = "windows-settings"
+whole_utterance_only = true
 actions = [
     { function = "run", params = ["explorer.exe ms-settings:"] }
+]
+
+# --- Voice Access window management, bulk and fixed-phrase forms
+# (wh-voice-access-parity.1.7). Placed in this section so they sit ABOVE
+# the per-app capture blocks (now at the end of COMMANDS - Cursor
+# Navigation): minimize-all-windows must precede minimize-app, and the
+# show-* fixed phrases must precede show-app, or the per-app "(.+)"
+# captures would claim their tails as app names. The Voice Access
+# "go home" wording is deliberately absent: it already means
+# press-Home through the cursor-navigate parser, and replacing that
+# with show-desktop is an open question for the project owner
+# (wh-voice-access-parity.1.7, boss placement note 2026-08-24). ---
+# -----------------------------------------------------------------------
+# Window management -- bulk and fixed-phrase forms (no capture group,
+# no hotword requirement; see the requires_hotword note above).
+# -----------------------------------------------------------------------
+
+# "restore window" -- see the crewcut comment above: Win+Down is the
+# closest single key, and it is context-sensitive (restore-if-maximized,
+# minimize-if-already-restored).
+[[pattern]]
+pattern = '''^restore window$'''
+doc_id = "restore-window"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "down"] }
+]
+
+# "show task switcher" -- see the TASK-SWITCHER KEY note above: Win+Tab
+# (Task View), not Alt+Tab. ORDERING HAZARD #2: must sit above show-app.
+[[pattern]]
+pattern = '''^show task switcher$'''
+doc_id = "show-task-switcher"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "tab"] }
+]
+
+# "list all windows" -- same Win+Tab Task View action as show-task-switcher
+# and show-all-windows; see the TASK-SWITCHER KEY note above.
+[[pattern]]
+pattern = '''^list all windows$'''
+doc_id = "list-all-windows"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "tab"] }
+]
+
+# "show all windows" -- same Win+Tab Task View action. ORDERING HAZARD #2:
+# must sit above show-app (^show\s+(.+)$ would otherwise capture g1="all
+# windows").
+[[pattern]]
+pattern = '''^show all windows$'''
+doc_id = "show-all-windows"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "tab"] }
+]
+
+# "minimize all windows" -- see the MINIMIZE-ALL KEY note above: Win+M
+# specifically (documented verbatim as "Minimize all windows"), not Win+D.
+# ORDERING HAZARD #2: must sit above minimize-app (^minimize\s+(.+)$ would
+# otherwise capture g1="all windows").
+# "windows" is optional ("minimize all" was captured by minimize-app as
+# an app named "all" -- wh-voice-access-parity.3.3), which makes the
+# short form a PREFIX of the long one, so whole_utterance_only is
+# required: without it the router fires win+m at the word "all" and
+# dictates "windows".
+[[pattern]]
+pattern = '''^minimize all(?: windows)?$'''
+doc_id = "minimize-all-windows"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "m"] }
+]
+
+# -----------------------------------------------------------------------
+# Snap window -- four separate patterns, one per direction. hk takes
+# literal key names and cannot map a captured direction word to a key
+# (bead MECHANISM). See the SNAP KEY COMBINATIONS note above for the
+# Win+Left/Right (documented shell keys) vs Win+Alt+Up/Down (documented
+# top/bottom-half combination) sourcing.
+# -----------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''^snap window to the left$'''
+doc_id = "snap-window-left"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "left"] }
+]
+
+[[pattern]]
+pattern = '''^snap window to the right$'''
+doc_id = "snap-window-right"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "right"] }
+]
+
+[[pattern]]
+pattern = '''^snap window to the top$'''
+doc_id = "snap-window-top"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "alt", "up"] }
+]
+
+[[pattern]]
+pattern = '''^snap window to the bottom$'''
+doc_id = "snap-window-bottom"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "alt", "down"] }
+]
+
+# -----------------------------------------------------------------------
+# Touch/on-screen keyboard. Load bearing for help text: say "on-screen
+# keyboard", never "touch keyboard". The Windows touch keyboard has no
+# stable launch command, and win+ctrl+o toggles the ON-SCREEN keyboard,
+# which is a different Windows feature -- help text generated from this
+# block must not promise the touch keyboard. That rationale used to be a
+# pointer to a "KEYBOARD APPROXIMATION comment above", which does not
+# exist in this file: the splice copied the section comments out of
+# patterns-staging/wh-voice-access-parity.1.7.toml but not its header
+# notes, so the pointer never resolved here. It is inlined above instead;
+# the fragment header still holds the long form.
+# win+ctrl+o is a toggle, so a "show" or a "hide" phrase
+# promises a direction the keystroke cannot deliver -- "hide keyboard"
+# opened the keyboard whenever it was already closed. David removed those
+# four phrases on 2026-08-27 (wh-keyboard-toggle-only). The four retired
+# doc_ids were show-touch-keyboard, show-keyboard, hide-touch-keyboard and
+# hide-keyboard; they still appear in
+# patterns-staging/wh-voice-access-parity.1.7.toml, which is the record of
+# what was spliced and is deliberately not edited.
+#
+# The command is the single word "keyboard". David's wording, same day:
+# "the word 'keyboard' is the toggle command for the keyboard". The block
+# below briefly read '^toggle keyboard$' and '^toggle touch keyboard$';
+# both are gone, so the older wording reaches no command at all rather
+# than a wrong one.
+#
+# The old ORDERING HAZARD #2 said show-touch-keyboard and show-keyboard
+# must both sit above show-app. It does not carry over: show-app is
+# '^show\s+(.+)$' and the surviving phrase does not begin with "show".
+# None of the 18 capture-all patterns in this file begins with "keyboard"
+# -- checked against every '(.+)' capture in the file on 2026-08-27, and
+# the bare word first-matched nothing before this block was added -- so
+# the block has no ordering constraint against any other block, in either
+# direction.
+#
+# Deliberately has no requires_hotword. The four retired phrases were
+# hotword-free too, but they were two words and a two-word show/hide
+# instruction almost never collides with dictation. The bare word does:
+# "keyboard" is a common dictated noun, and whole_utterance_only does not
+# gate on the hotword -- it only delays execution to the end of the
+# utterance -- so dictating the word on its own toggles the on-screen
+# keyboard. win+ctrl+o is a blind toggle, so an accidental trigger does
+# not correct itself. David was shown that consequence and ruled on
+# 2026-08-27 to keep the command hotword-free anyway
+# (wh-keyboard-toggle-only.1.3), because he chose the bare word as the
+# command and requiring the hotword would undo that. Do not add
+# requires_hotword back without asking; the hotword-free behavior is the
+# design. test_live_keyboard_toggle_is_deliberately_hotword_free in
+# tests/test_va_window_app.py pins the flag so an edit cannot flip it
+# silently.
+# -----------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''^keyboard$'''
+doc_id = "keyboard-toggle"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["win", "ctrl", "o"] }
 ]
 
 # =============================================================================
@@ -175,7 +412,7 @@ actions = [
 [[pattern]]
 pattern = '''^browser$'''
 doc_id = "activate-browser"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "activate", params = ["default_browser"] }
 ]
@@ -183,7 +420,7 @@ actions = [
 [[pattern]]
 pattern = '''^notepad$'''
 doc_id = "activate-notepad"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "activate", params = ["notepad.exe"] }
 ]
@@ -197,6 +434,7 @@ actions = [
 [[pattern]]
 pattern = '''^item (\d+)$'''
 doc_id = "item-number"
+whole_utterance_only = true
 actions = [
     { function = "number_point", params = ["g1"] }
 ]
@@ -205,15 +443,30 @@ actions = [
 [[pattern]]
 pattern = '''^delete word$'''
 doc_id = "delete-word"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "left"], awaits_done = true },
     { function = "hk", params = ["shift", "ctrl", "right"], awaits_done = true },
     { function = "hk", params = ["del"], awaits_done = true }
 ]
 
+# Voice Access wording. Selects everything, then deletes it. "delete" is an
+# ordinary English word, so this entry is whole_utterance_only and stays
+# dictatable in a sentence. Without the flag "delete all the files" wiped the
+# focused document at the second word (DeepSeek round 1 on commit bc5b588e).
+[[pattern]]
+pattern = '''^delete all$'''
+doc_id = "delete-all"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "a"], awaits_done = true },
+    { function = "press", params = ["del"], awaits_done = true }
+]
+
 [[pattern]]
 pattern = '''^delete\s*(\d+)?$'''
 doc_id = "delete"
+whole_utterance_only = true
 actions = [
     { function = "press", params = ["del", "g1"] }
 ]
@@ -225,9 +478,169 @@ actions = [
     { function = "press", params = ["backspace", "g1"] }
 ]
 
+# --- Voice Access delete-over-a-range forms (wh-voice-access-parity.1.3).
+# No ordering hazard: every block is ^...$-anchored on wordings nothing
+# else matches (verified by first-match walk, 2026-08-24). ---
+# --- delete over a range -----------------------------------------------
+
+[[pattern]]
+pattern = '''^delete next\s+(\d+)?\s*characters?$'''
+doc_id = "delete-next-character"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete next\s+(\d+)?\s*words?$'''
+doc_id = "delete-next-word"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete next\s+(\d+)?\s*lines?$'''
+doc_id = "delete-next-line"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete next\s+(\d+)?\s*paragraphs?$'''
+doc_id = "delete-next-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete previous\s+(\d+)?\s*characters?$'''
+doc_id = "delete-previous-character"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete previous\s+(\d+)?\s*words?$'''
+doc_id = "delete-previous-word"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete previous\s+(\d+)?\s*lines?$'''
+doc_id = "delete-previous-line"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete previous\s+(\d+)?\s*paragraphs?$'''
+doc_id = "delete-previous-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete last\s+(\d+)?\s*characters?$'''
+doc_id = "delete-last-character"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete last\s+(\d+)?\s*words?$'''
+doc_id = "delete-last-word"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete last\s+(\d+)?\s*lines?$'''
+doc_id = "delete-last-line"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^delete last\s+(\d+)?\s*paragraphs?$'''
+doc_id = "delete-last-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+# --- delete word/line/paragraph (single current unit) + this-aliases ----
+# "delete word" (bare) already exists at patterns.toml:214-221 (doc_id
+# "delete-word"). Not re-authored. Only the "this word" alias is new, and it
+# reuses the existing entry's exact action steps.
+
+[[pattern]]
+pattern = '''^delete this word$'''
+doc_id = "delete-this-word"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "left"], awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "right"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+# No existing entry for "delete line" or "delete this line" (verified above).
+# One block covers both, following the ^select (?:this )?line$ style at
+# patterns.toml:450. Home first: this is a "line form" under mechanism rule 2.
+[[pattern]]
+pattern = '''^delete (?:this )?line$'''
+doc_id = "delete-line"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "end"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
+# No existing entry for "delete paragraph" or "delete this paragraph"
+# (verified above). One block covers both, following the
+# ^select (?:this )?paragraph$ style at patterns.toml:458 (its 3-step
+# boundary-snap-then-extend shape), plus the final delete.
+[[pattern]]
+pattern = '''^delete (?:this )?paragraph$'''
+doc_id = "delete-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "down"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "up"], awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "down"], awaits_done = true },
+    { function = "hk", params = ["del"], awaits_done = true }
+]
+
 [[pattern]]
 pattern = '''^(tab|indent)\s+(\d+)$'''
 doc_id = "tab-indent"
+whole_utterance_only = true
 actions = [
     { function = "press", params = ["tab", "g2"] }
 ]
@@ -235,6 +648,7 @@ actions = [
 [[pattern]]
 pattern = '''^(shift tab|outdent)$'''
 doc_id = "shift-tab-outdent"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["shift", "tab"] }
 ]
@@ -251,7 +665,11 @@ actions = [
 
 # Insert raw text at cursor without intelligent insertion.
 # No prefix space, no capitalization, no TextPerfector, no letter buffering.
-# Requires hotword for safety (avoids accidental insertion during dictation).
+# Deliberately has no requires_hotword. Commit cd33da60 removed the hotword
+# requirement because it blocked dictation use. The command is not disruptive
+# -- it only puts the text that follows the word "insert" at the cursor -- and
+# it is useful, so it stays available without the hotword. Do not add
+# requires_hotword back without asking; the hotword-free behavior is the design.
 # Examples: "insert hello world", "insert @example.com", "insert TODO:"
 #
 # wh-qoyk9: this pattern intentionally has no awaits_done. Logic emits
@@ -275,11 +693,47 @@ actions = [
 # the trailing entry was added; a leading + trailing pair would
 # silently pre-empt the trailing intercept in single-word utterances.
 
+# "dismiss" is the Voice Access word for the Escape key
+# (wh-voice-access-parity.1.6). Widened rather than added as a second row:
+# the catalog indexes a command by its LEADING PLAIN ALTERNATION, so both
+# words reach this entry, and one row cannot fall out of order against
+# itself. whole_utterance_only stays -- it is what keeps "dismiss the
+# meeting invite" dictating instead of pressing Escape and typing the rest.
+# It does not collide with "dismiss numbers" or "dismiss grid": those are
+# anchored two-word patterns, and this one is anchored at both ends.
 [[pattern]]
-pattern = '''^escape$'''
+pattern = '''^(?:escape|dismiss)$'''
 doc_id = "escape"
+whole_utterance_only = true
 actions = [
     { function = "press", params = ["esc"] }
+]
+
+# -----------------------------------------------------------------------
+# BLOCK 2 -- bare "enter". New entry, no placement constraint. See the
+# BARE ENTER / BARE TAB note above for the whole_utterance_only reasoning
+# and the SUBMIT CAUTION note for why this does not endanger the trailing
+# submit-enter entry.
+# -----------------------------------------------------------------------
+[[pattern]]
+pattern = '''^enter$'''
+doc_id = "enter"
+whole_utterance_only = true
+actions = [
+    { function = "press", params = ["enter"] }
+]
+
+# -----------------------------------------------------------------------
+# BLOCK 3 -- bare "tab". Same reasoning as BLOCK 2. Does not collide with
+# the existing tab-indent entry (patterns.toml line 251) -- see the BARE
+# TAB vs the existing "tab-indent" entry note above.
+# -----------------------------------------------------------------------
+[[pattern]]
+pattern = '''^tab$'''
+doc_id = "tab"
+whole_utterance_only = true
+actions = [
+    { function = "press", params = ["tab"] }
 ]
 
 [[pattern]]
@@ -302,8 +756,9 @@ actions = [
 # =============================================================================
 
 [[pattern]]
-pattern = '''^undo\s*(\d+)?$'''
+pattern = '''^undo(?: that)?\s*(\d+)?$'''
 doc_id = "undo"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "z", "g1"] }
 ]
@@ -311,6 +766,7 @@ actions = [
 [[pattern]]
 pattern = '''^undue\s*(\d+)?$'''
 doc_id = "undo-alias-undue"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "z", "g1"] }
 ]
@@ -318,13 +774,15 @@ actions = [
 [[pattern]]
 pattern = '''^undu\s*(\d+)?$'''
 doc_id = "undo-alias-undu"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "z", "g1"] }
 ]
 
 [[pattern]]
-pattern = '''^redo\s*(\d+)?$'''
+pattern = '''^redo(?: that)?\s*(\d+)?$'''
 doc_id = "redo"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "y", "g1"] }
 ] 
@@ -332,8 +790,112 @@ actions = [
 [[pattern]]
 pattern = '''^redu\s*(\d+)?$'''
 doc_id = "redo-alias-redu"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "y", "g1"] }
+]
+
+
+# =============================================================================
+# COMMANDS - Scrolling
+# =============================================================================
+# wh-voice-access-parity.2.3, part one: discrete mouse wheel scrolling. Each
+# entry sends whole wheel notches at the pointer's current position; nothing
+# here moves or presses the mouse.
+#
+# All four are whole_utterance_only because "scroll" is an ordinary English
+# word. Without the flag the router would execute the command the moment the
+# direction word arrived, so "scroll down to the bottom of the page" would
+# scroll and then drop the rest of the sentence.
+#
+# Placement: "scroll" is not the first word of any other command in this file,
+# and no other entry matches these phrases, so first-match order does not
+# constrain where the section sits. It is placed with the other navigation-like
+# commands rather than with the clicking commands, because scrolling presses
+# nothing.
+#
+# wh-voice-access-parity.2.3.3, part two: continuous scrolling. The five
+# entries after the discrete four start a scroll that keeps going and stop it
+# again. The repeating timer lives in the Input process
+# (ui/continuous_scroll.py), so the start command returns at once and the
+# single Input command loop stays free for the stop word.
+#
+# The stop word is "stop scrolling" and NOT a bare "stop". A bare "stop"
+# entry would consume the dictated word "stop" in every utterance forever,
+# which changes dictation for every user. A bare "stop" is a later addition
+# if daily use asks for it, and it would need Logic-side gating that only
+# accepts it while a scroll is actually running.
+
+[[pattern]]
+pattern = '''^scroll up\s*(\d+)?$'''
+doc_id = "scroll-up"
+whole_utterance_only = true
+actions = [
+    { function = "scroll", params = ["up", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^scroll down\s*(\d+)?$'''
+doc_id = "scroll-down"
+whole_utterance_only = true
+actions = [
+    { function = "scroll", params = ["down", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^scroll left\s*(\d+)?$'''
+doc_id = "scroll-left"
+whole_utterance_only = true
+actions = [
+    { function = "scroll", params = ["left", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^scroll right\s*(\d+)?$'''
+doc_id = "scroll-right"
+whole_utterance_only = true
+actions = [
+    { function = "scroll", params = ["right", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^start scrolling up$'''
+doc_id = "scroll-start-up"
+whole_utterance_only = true
+actions = [
+    { function = "start_continuous_scroll", params = ["up"] }
+]
+
+[[pattern]]
+pattern = '''^start scrolling down$'''
+doc_id = "scroll-start-down"
+whole_utterance_only = true
+actions = [
+    { function = "start_continuous_scroll", params = ["down"] }
+]
+
+[[pattern]]
+pattern = '''^start scrolling left$'''
+doc_id = "scroll-start-left"
+whole_utterance_only = true
+actions = [
+    { function = "start_continuous_scroll", params = ["left"] }
+]
+
+[[pattern]]
+pattern = '''^start scrolling right$'''
+doc_id = "scroll-start-right"
+whole_utterance_only = true
+actions = [
+    { function = "start_continuous_scroll", params = ["right"] }
+]
+
+[[pattern]]
+pattern = '''^stop scrolling$'''
+doc_id = "scroll-stop"
+whole_utterance_only = true
+actions = [
+    { function = "stop_continuous_scroll", params = [] }
 ]
 
 
@@ -344,6 +906,7 @@ actions = [
 [[pattern]]
 pattern = '''^copy all$'''
 doc_id = "copy-all"
+whole_utterance_only = true
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
     { function = "hk", params = ["ctrl", "a"], awaits_done = true },
@@ -354,6 +917,7 @@ actions = [
 pattern = '''^copy line$'''
 doc_id = "copy-line"
 requires_hotword = false
+whole_utterance_only = true
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
     { function = "hk", params = ["home"], awaits_done = true },
@@ -365,30 +929,286 @@ actions = [
 [[pattern]]
 pattern = '''^copy screen$'''
 doc_id = "copy-screen"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["win", "shift", "s"] }
 ]
 
 [[pattern]]
-pattern = '''^copy$'''
+pattern = '''^copy(?: that)?$'''
 doc_id = "copy"
+whole_utterance_only = true
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
     { function = "hk", params = ["ctrl", "c"], awaits_done = true }
 ]
 
 [[pattern]]
-pattern = '''^cut$'''
+pattern = '''^cut(?: that)?$'''
 doc_id = "cut"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
     { function = "hk", params = ["ctrl", "x"], awaits_done = true }
 ]
 
+# --- Voice Access cut/copy-over-a-range forms (wh-voice-access-parity.1.3).
+# Every block starts with skip_clipboard_restore or the clipboard is
+# discarded when the utterance ends (fragment MECHANISM RULE 1). ---
+# --- cut over a range -----------------------------------------------
+
 [[pattern]]
-pattern = '''^paste$'''
+pattern = '''^cut next\s+(\d+)?\s*characters?$'''
+doc_id = "cut-next-character"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut next\s+(\d+)?\s*words?$'''
+doc_id = "cut-next-word"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut next\s+(\d+)?\s*lines?$'''
+doc_id = "cut-next-line"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut next\s+(\d+)?\s*paragraphs?$'''
+doc_id = "cut-next-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut previous\s+(\d+)?\s*characters?$'''
+doc_id = "cut-previous-character"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut previous\s+(\d+)?\s*words?$'''
+doc_id = "cut-previous-word"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut previous\s+(\d+)?\s*lines?$'''
+doc_id = "cut-previous-line"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut previous\s+(\d+)?\s*paragraphs?$'''
+doc_id = "cut-previous-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut last\s+(\d+)?\s*characters?$'''
+doc_id = "cut-last-character"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut last\s+(\d+)?\s*words?$'''
+doc_id = "cut-last-word"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut last\s+(\d+)?\s*lines?$'''
+doc_id = "cut-last-line"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^cut last\s+(\d+)?\s*paragraphs?$'''
+doc_id = "cut-last-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "x"], awaits_done = true }
+]
+
+# --- copy over a range -----------------------------------------------
+
+[[pattern]]
+pattern = '''^copy next\s+(\d+)?\s*characters?$'''
+doc_id = "copy-next-character"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy next\s+(\d+)?\s*words?$'''
+doc_id = "copy-next-word"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy next\s+(\d+)?\s*lines?$'''
+doc_id = "copy-next-line"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy next\s+(\d+)?\s*paragraphs?$'''
+doc_id = "copy-next-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy previous\s+(\d+)?\s*characters?$'''
+doc_id = "copy-previous-character"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy previous\s+(\d+)?\s*words?$'''
+doc_id = "copy-previous-word"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy previous\s+(\d+)?\s*lines?$'''
+doc_id = "copy-previous-line"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy previous\s+(\d+)?\s*paragraphs?$'''
+doc_id = "copy-previous-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy last\s+(\d+)?\s*characters?$'''
+doc_id = "copy-last-character"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy last\s+(\d+)?\s*words?$'''
+doc_id = "copy-last-word"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy last\s+(\d+)?\s*lines?$'''
+doc_id = "copy-last-line"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["home"], awaits_done = true },
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^copy last\s+(\d+)?\s*paragraphs?$'''
+doc_id = "copy-last-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "skip_clipboard_restore", awaits_done = true },
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "c"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^paste(?: that| here)?$'''
 doc_id = "paste"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "v"], awaits_done = true }
 ]
@@ -409,38 +1229,493 @@ actions = [
 [[pattern]]
 pattern = '''^select all$'''
 doc_id = "select-all"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "a"], awaits_done = true }
 ]
 
 [[pattern]]
-pattern = '''^select word$'''
+pattern = '''^select (?:this )?word$'''
 doc_id = "select-word"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "left"], awaits_done = true },
     { function = "hk", params = ["shift", "ctrl", "right"], awaits_done = true }
 ]
 
 [[pattern]]
-pattern = '''^select line$'''
+pattern = '''^select (?:this )?line$'''
 doc_id = "select-line"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["home"], awaits_done = true },
     { function = "hk", params = ["shift", "end"], awaits_done = true }
 ]
 
 [[pattern]]
-pattern = '''^select paragraph$'''
+pattern = '''^select (?:this )?paragraph$'''
 doc_id = "select-paragraph"
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "down"], awaits_done = true },
     { function = "hk", params = ["ctrl", "up"], awaits_done = true },
     { function = "hk", params = ["shift", "ctrl", "down"], awaits_done = true }
 ]
 
+# --- Voice Access select-by-range forms (wh-voice-access-parity.1.2).
+# ORDER MATTERS: every block below must stay ABOVE select-phrase, whose
+# ^select (.+)$ capture otherwise swallows every range form (fragment
+# ORDERING HAZARD, verified by first-match walk 2026-08-24). ---
+# select next <n> characters -- forward, one character at a time.
+[[pattern]]
+pattern = '''^select next\s+(\d+)?\s*characters?$'''
+doc_id = "select-next-characters"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"] }
+]
+
+# select previous/last <n> characters -- backward, one character at a time.
+# "last" is a Voice Access synonym for "previous" (see DIRECTION MERGE
+# above), not a third direction, so it shares this doc_id and action.
+[[pattern]]
+pattern = '''^select (?:previous|last)\s+(\d+)?\s*characters?$'''
+doc_id = "select-previous-characters"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"] }
+]
+
+# select next <n> words -- forward, by word boundary (shift+ctrl+right is
+# the same combination the existing select-word entry uses to extend to a
+# word boundary).
+[[pattern]]
+pattern = '''^select next\s+(\d+)?\s*words?$'''
+doc_id = "select-next-words"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"] }
+]
+
+# select previous/last <n> words -- backward, by word boundary.
+[[pattern]]
+pattern = '''^select (?:previous|last)\s+(\d+)?\s*words?$'''
+doc_id = "select-previous-words"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"] }
+]
+
+# select next <n> lines -- forward, one screen line at a time (shift+down,
+# per the bead's own MECHANISM example).
+[[pattern]]
+pattern = '''^select next\s+(\d+)?\s*lines?$'''
+doc_id = "select-next-lines"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "down", "g1"] }
+]
+
+# select previous/last <n> lines -- backward, one screen line at a time.
+[[pattern]]
+pattern = '''^select (?:previous|last)\s+(\d+)?\s*lines?$'''
+doc_id = "select-previous-lines"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "up", "g1"] }
+]
+
+# select next <n> paragraphs -- forward, by paragraph jump (shift+ctrl+down,
+# the same combination the existing select-paragraph entry's third step
+# uses to extend across a paragraph boundary).
+[[pattern]]
+pattern = '''^select next\s+(\d+)?\s*paragraphs?$'''
+doc_id = "select-next-paragraphs"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"] }
+]
+
+# select previous/last <n> paragraphs -- backward, by paragraph jump.
+[[pattern]]
+pattern = '''^select (?:previous|last)\s+(\d+)?\s*paragraphs?$'''
+doc_id = "select-previous-paragraphs"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"] }
+]
+
+# unselect that -- collapse the selection with a single arrow-key press.
+# See the KNOWN APPROXIMATION note above: this moves the caret to the
+# selection's right edge, unlike Voice Access.
+[[pattern]]
+pattern = '''^unselect that$'''
+doc_id = "unselect-that"
+whole_utterance_only = true
+actions = [
+    { function = "press", params = ["right"] }
+]
+
+# clear selection -- same approximation and same single key as unselect
+# that, kept as a separate entry/doc_id because it is a separate Voice
+# Access wording, not an alias of unselect-that.
+[[pattern]]
+pattern = '''^clear selection$'''
+doc_id = "clear-selection"
+whole_utterance_only = true
+actions = [
+    { function = "press", params = ["right"] }
+]
+
+# Select a spoken phrase (wh-spoken-phrase-select). The Input process
+# searches the focused text control for the words and selects the first
+# match. The match is exact apart from letter case.
+#
+# ORDER MATTERS. This entry must stay AFTER the four fixed select forms
+# above. The catalog walks the file in order and the first match wins, so
+# an earlier position here would swallow "select all", "select word",
+# "select line", and "select paragraph".
+#
+# requires_hotword follows the click-element decision of 2026-07-05
+# (commit bc91e701). A bare capture after a common English word turns
+# every dictated sentence that opens with "select" into a command. The
+# same argument settled it for "click <name>", so the same answer applies
+# here. Remove this line if daily use shows the hotword costs more than
+# the false commands it prevents.
+[[pattern]]
+pattern = '''^select (.+)$'''
+doc_id = "select-phrase"
+requires_hotword = true
+actions = [
+    { function = "select_phrase", params = ["g1"] }
+]
+
 # =============================================================================
 # COMMANDS - Cursor Navigation
 # =============================================================================
+
+# --- Voice Access line and document navigation (wh-voice-access-parity.1.5).
+# ORDER MATTERS: all blocks below must stay ABOVE cursor-navigate, whose
+# unanchored ^go (.+) otherwise swallows every go-... wording here.
+#
+# EVERY entry in this fixed nav family carries whole_utterance_only = true
+# (review finding wh-voice-access-parity.3.1, same defect class as the
+# delete-all precedent). The router executes a complete pattern
+# MID-utterance, so without the flag "go to end of line" pressed End at
+# the word "end" and typed "of line", and the chain "go to end then grab
+# left" was severed the same way. With the flag, these entries fire only
+# when the utterance provably ends; a longer buffer falls through to
+# cursor-navigate, whose parser resolves chains and rejects ordinary
+# sentences into dictation, exactly the pre-branch behavior. Keep the
+# flag on any entry added to this family.
+# -----------------------------------------------------------------------
+# Vertical movement by line and paragraph. "up"/"down" are not directions
+# the navigation parser understands (it only knows left/right), so these
+# are unreachable today under any verb -- both "go" and "move" fall through
+# to dictation. Up = arrow/landmark toward the start of the buffer, down =
+# toward the end, matching the existing paragraph mapping in
+# speech/navigation/executor.py (_RELATIVE_KEYS: left/paragraph -> ctrl+up,
+# right/paragraph -> ctrl+down).
+# -----------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''^(?:go|move) up(?: (\d+))? lines?$'''
+doc_id = "nav-up-lines"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["up", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) down(?: (\d+))? lines?$'''
+doc_id = "nav-down-lines"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["down", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) up(?: (\d+))? paragraphs?$'''
+doc_id = "nav-up-paragraphs"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "up", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) down(?: (\d+))? paragraphs?$'''
+doc_id = "nav-down-paragraphs"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "down", "g1"] }
+]
+
+# -----------------------------------------------------------------------
+# Horizontal movement by character and word. "go left/right N
+# characters/words" already resolves correctly today through cursor-navigate
+# (NavigationParser understands left/right + character/word). "move left/
+# right N characters/words" does not -- NavigationParser only accepts the
+# verbs "go" and "grab", so "move ..." never reaches it and falls through to
+# dictation. These blocks cover both verbs identically so they keep working
+# the same way once placed above cursor-navigate.
+# -----------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''^(?:go|move) left(?: (\d+))? characters?$'''
+doc_id = "nav-left-characters"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["left", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) right(?: (\d+))? characters?$'''
+doc_id = "nav-right-characters"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["right", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) left(?: (\d+))? words?$'''
+doc_id = "nav-left-words"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "left", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) right(?: (\d+))? words?$'''
+doc_id = "nav-right-words"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "right", "g1"] }
+]
+
+# -----------------------------------------------------------------------
+# Bare landmarks: "go to top/bottom/end". NavigationParser already parses
+# these three today (they are in _SIMPLE_LANDMARKS) and executor.py maps
+# them to ctrl+home / ctrl+end / end respectively, so these three already
+# move the cursor correctly through cursor-navigate. They are still written
+# here as plain hk patterns, matching this bead's MECHANISM for every SCOPE
+# form and keeping the whole Voice Access navigation family on one
+# consistent authoring path rather than splitting it between the parser and
+# plain patterns.
+# -----------------------------------------------------------------------
+
+# The optional article on the bare trio, the "go to home" entry, and the
+# start-of / top-of / bottom-of forms below exist because switch-to-app
+# (hotword-gated, further down) captures any "go to <tail>" wording this
+# fixed set misses: "go to the top" activated an app literally named
+# "the top" (review finding wh-voice-access-parity.3.2).
+
+# "go to home" -- the pre-existing parser behavior for the "home"
+# landmark (speech/navigation/executor.py maps "home" -> the Home key;
+# wh-ed4 strips the optional "to"). DISTINCT from the Voice Access
+# "go home" command (win+d, David's ruling 2026-08-24, staged fragment
+# wh-voice-access-parity.1.7-go-home.toml): only the bare two-word
+# "go home" takes the Voice Access meaning; "go to home" keeps moving
+# the text cursor.
+[[pattern]]
+pattern = '''^go to home$'''
+doc_id = "nav-go-home"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["home"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?top$'''
+doc_id = "nav-go-top"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "home"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?bottom$'''
+doc_id = "nav-go-bottom"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "end"] }
+]
+
+# "top/bottom of the document" -- same targets as beginning/end of the
+# document under the more casual noun (wh-voice-access-parity.3.2).
+[[pattern]]
+pattern = '''^go to (?:the )?top of (?:the )?document$'''
+doc_id = "nav-go-top-of-document"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "home"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?bottom of (?:the )?document$'''
+doc_id = "nav-go-bottom-of-document"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "end"] }
+]
+
+# -----------------------------------------------------------------------
+# "go to the beginning/end of the document/line/word/paragraph". None of
+# these resolve correctly today: NavigationParser's compound-landmark path
+# only accepts an exact 3-token "prefix of unit" shape (no articles), only
+# recognizes "word" and "paragraph" as compound units (never "document" or
+# "line"), so the natural phrasing with articles -- "go to the beginning of
+# the document" -- matches the cursor-navigate pattern but fails to parse
+# and silently does nothing. "the" is optional in both places so "go to
+# beginning of the word" and "go to the beginning of word" also match.
+# -----------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?document$'''
+doc_id = "nav-go-beginning-of-document"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "home"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?end of (?:the )?document$'''
+doc_id = "nav-go-end-of-document"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "end"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?line$'''
+doc_id = "nav-go-beginning-of-line"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["home"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?end of (?:the )?line$'''
+doc_id = "nav-go-end-of-line"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["end"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?word$'''
+doc_id = "nav-go-beginning-of-word"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "left"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?end of (?:the )?word$'''
+doc_id = "nav-go-end-of-word"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "right"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?paragraph$'''
+doc_id = "nav-go-beginning-of-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "up"] }
+]
+
+[[pattern]]
+pattern = '''^go to (?:the )?end of (?:the )?paragraph$'''
+doc_id = "nav-go-end-of-paragraph"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["ctrl", "down"] }
+]
+
+# Bare "go to end" (end of line, the pre-existing Wheelhouse landmark;
+# the official Voice Access command list has no bare "go to end" form).
+# Placed BELOW the qualified go-to blocks by boss decision 2026-08-24.
+# An earlier version of this comment claimed both-ends anchoring alone
+# made the order defensive; that was wrong (wh-voice-access-parity.3.1):
+# the router executes complete patterns mid-utterance, so before the
+# whole_utterance_only flag this bare form fired at word three of every
+# "go to end of ..." phrase. The flag plus this order is what keeps the
+# qualified wordings reachable.
+[[pattern]]
+pattern = '''^go to (?:the )?end$'''
+doc_id = "nav-go-end"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["end"] }
+]
+
+# -----------------------------------------------------------------------
+# "move to the beginning/end of the selection". Collapses the current
+# selection without extending it: an unshifted left-arrow press collapses
+# to the selection's start, an unshifted right-arrow press collapses to its
+# end (standard Windows text-control behavior). Neither NavigationParser nor
+# the existing cursor-navigate entry has any concept of "selection" as a
+# landmark, and the verb is "move" (not "go" or "grab"), so this never
+# reaches the parser today and falls through to dictation.
+# -----------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''^move to (?:the )?beginning of (?:the )?selection$'''
+doc_id = "nav-move-beginning-of-selection"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["left"] }
+]
+
+[[pattern]]
+pattern = '''^move to (?:the )?end of (?:the )?selection$'''
+doc_id = "nav-move-end-of-selection"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["right"] }
+]
+
+# --- Voice Access per-app window commands (wh-voice-access-parity.1.7).
+# Placement is load bearing in BOTH directions. ONLY switch-to-app lives
+# here: it must sit BELOW every specific "go to <landmark>" block above
+# (its go-to half would otherwise capture "top"/"bottom"/"end" as app
+# names) and ABOVE cursor-navigate, whose unanchored ^go (.+) would
+# otherwise swallow the "go to <app>" wording. The fragment's other four
+# per-app captures (show-app, close-app, minimize-app, maximize-app) have
+# no "go" wording and no reason to sit this early; the first placement
+# put all five here and show-app swallowed "show grid"/"show numbers"
+# (grid section) while close-app swallowed the "close parentheses"/
+# "close bracket"/"close brace"/"close quotes"/"close single quote"
+# punctuation replacements, all of which sit later in this file. Those
+# four broad captures now live at the very END of the file -- see the
+# per-app tail section there (corrective move 2026-08-24). ---
+# -----------------------------------------------------------------------
+# requires_hotword = true on every per-app block (see the requires_hotword
+# note above -- matches the activate-app shape model).
+# -----------------------------------------------------------------------
+
+# "switch to X" / "go to X" -- one doc_id, two accepted wordings for the
+# same activate action (support.microsoft.com Voice Access command list,
+# fetched 2026-08-24, groups them as alternate phrasings of one command;
+# same DIRECTION-MERGE-style reasoning as wh-voice-access-parity.1.2's
+# previous/last merge). ORDERING HAZARD #1 still applies to this block's
+# go-to half: every fixed "go to <landmark>" entry must precede it.
+# ORDERING HAZARD #2 NO LONGER NAMES go-to-desktop. David eliminated that
+# entry on 2026-08-24 (wh-voice-access-parity.3.3) because "go home" is
+# now the one show-desktop command. The accepted consequence is that
+# "go to desktop" reaches this capture and asks for a window named
+# "desktop"; the guard is TestGoToDesktopIsEliminated in
+# services/wheelhouse/tests/test_va_navigation_router.py. The staged
+# "go home" block (wh-voice-access-parity.1.7) must be placed ABOVE this
+# capture when it is spliced.
+[[pattern]]
+pattern = '''^(?:switch to|go to)\s+(.+)$'''
+doc_id = "switch-to-app"
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["g1"] }
+]
 
 # Composable cursor movement: "go right two words", "go home", etc.
 # Chaining: "go home then grab to end" (multiple commands in one utterance)
@@ -467,7 +1742,7 @@ actions = [
 [[pattern]]
 pattern = '''^replace$'''
 doc_id = "replace"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "h"] }
 ]
@@ -475,11 +1750,61 @@ actions = [
 [[pattern]]
 pattern = '''^search$'''
 doc_id = "search-selection"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "c"], awaits_done = true },
     { function = "capture_clipboard", params = [], awaits_done = true  },
     { function = "gs", params = ["capture_clipboard"] }
+]
+
+# --- Voice Access web/Windows search forms (wh-voice-access-parity.1.8).
+# INTERNAL ORDER MATTERS: the four specific engine/Windows blocks must
+# stay contiguous and ABOVE the search-web catch-all (fragment INTERNAL
+# ORDERING note). The bare word 'search' still resolves to the earlier
+# search-selection entry, which requires nothing after the word. ---
+[[pattern]]
+pattern = '''^search windows for (.+)$'''
+doc_id = "search-web-windows"
+requires_hotword = true
+actions = [
+    { function = "hk", params = ["win", "s"], awaits_done = true },
+    { function = "type_text", params = ["g1"] }
+]
+
+[[pattern]]
+pattern = '''^search on google for (.+)$'''
+doc_id = "search-web-google"
+requires_hotword = true
+actions = [
+    { function = "gs", params = ["g1"] }
+]
+
+[[pattern]]
+pattern = '''^search on bing for (.+)$'''
+doc_id = "search-web-bing"
+requires_hotword = true
+actions = [
+    { function = "open_url", params = ["https://www.bing.com/search?q=g1"] }
+]
+
+[[pattern]]
+pattern = '''^search on youtube for (.+)$'''
+doc_id = "search-web-youtube"
+requires_hotword = true
+actions = [
+    { function = "open_url", params = ["https://www.youtube.com/results?search_query=g1"] }
+]
+
+# ORDER MATTERS. This entry must stay AFTER the four specific forms above
+# (see the INTERNAL ORDERING note in the fragment header) -- it is the
+# catch-all default (no named engine, no "windows"), which reuses the
+# existing gs action the same way search-web-google does.
+[[pattern]]
+pattern = '''^search(?: for)? (.+)$'''
+doc_id = "search-web"
+requires_hotword = true
+actions = [
+    { function = "gs", params = ["g1"] }
 ]
 
 # =============================================================================
@@ -487,27 +1812,535 @@ actions = [
 # =============================================================================
 
 [[pattern]]
-pattern = '''^bold text$'''
+pattern = '''^bold (?:text|that)$'''
 doc_id = "bold"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "b"] }
 ]
 
 [[pattern]]
-pattern = '''^italics$'''
+pattern = '''^(?:italics|italicize that)$'''
 doc_id = "italics"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "i"] }
 ]
 
 [[pattern]]
-pattern = '''^underline$'''
+pattern = '''^underline(?: that)?$'''
 doc_id = "underline"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "u"] }
+]
+
+# --- Voice Access format-over-a-range forms (wh-voice-access-parity.1.4).
+# 48 blocks: 6 verbs x 4 units x 2 merged directions. No ordering hazard
+# against the short bold/italics/underline/case entries: those are all
+# $-anchored with fixed short tails (verified by first-match walk). ---
+# =============================================================================
+# BOLD -- ctrl+b
+# =============================================================================
+
+[[pattern]]
+pattern = '''^bold next (\d+)?\s*words?$'''
+doc_id = "bold-next-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^bold (?:previous|last) (\d+)?\s*words?$'''
+doc_id = "bold-prev-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^bold next (\d+)?\s*lines?$'''
+doc_id = "bold-next-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^bold (?:previous|last) (\d+)?\s*lines?$'''
+doc_id = "bold-prev-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^bold next (\d+)?\s*paragraphs?$'''
+doc_id = "bold-next-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^bold (?:previous|last) (\d+)?\s*paragraphs?$'''
+doc_id = "bold-prev-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^bold next (\d+)?\s*characters?$'''
+doc_id = "bold-next-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+[[pattern]]
+pattern = '''^bold (?:previous|last) (\d+)?\s*characters?$'''
+doc_id = "bold-prev-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "b"] }
+]
+
+# =============================================================================
+# ITALICIZE -- ctrl+i
+# =============================================================================
+
+[[pattern]]
+pattern = '''^italicize next (\d+)?\s*words?$'''
+doc_id = "italicize-next-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^italicize (?:previous|last) (\d+)?\s*words?$'''
+doc_id = "italicize-prev-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^italicize next (\d+)?\s*lines?$'''
+doc_id = "italicize-next-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^italicize (?:previous|last) (\d+)?\s*lines?$'''
+doc_id = "italicize-prev-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^italicize next (\d+)?\s*paragraphs?$'''
+doc_id = "italicize-next-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^italicize (?:previous|last) (\d+)?\s*paragraphs?$'''
+doc_id = "italicize-prev-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^italicize next (\d+)?\s*characters?$'''
+doc_id = "italicize-next-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+[[pattern]]
+pattern = '''^italicize (?:previous|last) (\d+)?\s*characters?$'''
+doc_id = "italicize-prev-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "i"] }
+]
+
+# =============================================================================
+# UNDERLINE -- ctrl+u
+# =============================================================================
+
+[[pattern]]
+pattern = '''^underline next (\d+)?\s*words?$'''
+doc_id = "underline-next-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+[[pattern]]
+pattern = '''^underline (?:previous|last) (\d+)?\s*words?$'''
+doc_id = "underline-prev-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+[[pattern]]
+pattern = '''^underline next (\d+)?\s*lines?$'''
+doc_id = "underline-next-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+[[pattern]]
+pattern = '''^underline (?:previous|last) (\d+)?\s*lines?$'''
+doc_id = "underline-prev-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+[[pattern]]
+pattern = '''^underline next (\d+)?\s*paragraphs?$'''
+doc_id = "underline-next-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+[[pattern]]
+pattern = '''^underline (?:previous|last) (\d+)?\s*paragraphs?$'''
+doc_id = "underline-prev-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+[[pattern]]
+pattern = '''^underline next (\d+)?\s*characters?$'''
+doc_id = "underline-next-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+[[pattern]]
+pattern = '''^underline (?:previous|last) (\d+)?\s*characters?$'''
+doc_id = "underline-prev-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "hk", params = ["ctrl", "u"] }
+]
+
+# =============================================================================
+# UPPERCASE -- transform_selection
+# =============================================================================
+
+[[pattern]]
+pattern = '''^upper ?case next (\d+)?\s*words?$'''
+doc_id = "uppercase-next-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^upper ?case (?:previous|last) (\d+)?\s*words?$'''
+doc_id = "uppercase-prev-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^upper ?case next (\d+)?\s*lines?$'''
+doc_id = "uppercase-next-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^upper ?case (?:previous|last) (\d+)?\s*lines?$'''
+doc_id = "uppercase-prev-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^upper ?case next (\d+)?\s*paragraphs?$'''
+doc_id = "uppercase-next-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^upper ?case (?:previous|last) (\d+)?\s*paragraphs?$'''
+doc_id = "uppercase-prev-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^upper ?case next (\d+)?\s*characters?$'''
+doc_id = "uppercase-next-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^upper ?case (?:previous|last) (\d+)?\s*characters?$'''
+doc_id = "uppercase-prev-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+# =============================================================================
+# LOWERCASE -- transform_selection
+# =============================================================================
+
+[[pattern]]
+pattern = '''^lower ?case next (\d+)?\s*words?$'''
+doc_id = "lowercase-next-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case (?:previous|last) (\d+)?\s*words?$'''
+doc_id = "lowercase-prev-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case next (\d+)?\s*lines?$'''
+doc_id = "lowercase-next-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case (?:previous|last) (\d+)?\s*lines?$'''
+doc_id = "lowercase-prev-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case next (\d+)?\s*paragraphs?$'''
+doc_id = "lowercase-next-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case (?:previous|last) (\d+)?\s*paragraphs?$'''
+doc_id = "lowercase-prev-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case next (\d+)?\s*characters?$'''
+doc_id = "lowercase-next-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^lower ?case (?:previous|last) (\d+)?\s*characters?$'''
+doc_id = "lowercase-prev-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+# =============================================================================
+# CAPITALIZE -- transform_selection
+# =============================================================================
+
+[[pattern]]
+pattern = '''^capitalize next (\d+)?\s*words?$'''
+doc_id = "capitalize-next-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "right", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize (?:previous|last) (\d+)?\s*words?$'''
+doc_id = "capitalize-prev-words"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "left", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize next (\d+)?\s*lines?$'''
+doc_id = "capitalize-next-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "down", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize (?:previous|last) (\d+)?\s*lines?$'''
+doc_id = "capitalize-prev-lines"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "up", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize next (\d+)?\s*paragraphs?$'''
+doc_id = "capitalize-next-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "down", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize (?:previous|last) (\d+)?\s*paragraphs?$'''
+doc_id = "capitalize-prev-paragraphs"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "ctrl", "up", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize next (\d+)?\s*characters?$'''
+doc_id = "capitalize-next-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "right", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^capitalize (?:previous|last) (\d+)?\s*characters?$'''
+doc_id = "capitalize-prev-characters"
+requires_hotword = false
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["shift", "left", "g1"], awaits_done = true },
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
 ]
 
 # =============================================================================
@@ -517,22 +2350,55 @@ actions = [
 # the "Wrapping Operations (Ambiguous Patterns)" section below for clarity.
 
 [[pattern]]
-pattern = '''^upper ?case$'''
+pattern = '''^upper ?case(?: that)?$'''
 doc_id = "uppercase"
+whole_utterance_only = true
+actions = [
+    { function = "transform_selection", params = ["uppercase"], awaits_done = true }
+]
+
+# Voice Access wording. "all" is an ordinary English word, so this
+# entry is whole_utterance_only and stays dictatable in a sentence.
+[[pattern]]
+pattern = '''^all caps that$'''
+doc_id = "uppercase-all-caps-that"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["uppercase"], awaits_done = true }
 ]
 
 [[pattern]]
-pattern = '''^lower ?case$'''
+pattern = '''^lower ?case(?: that)?$'''
 doc_id = "lowercase"
+whole_utterance_only = true
+actions = [
+    { function = "transform_selection", params = ["lowercase"], awaits_done = true }
+]
+
+# Voice Access wording. "no" is an ordinary English word, so this
+# entry is whole_utterance_only and stays dictatable in a sentence.
+[[pattern]]
+pattern = '''^no caps that$'''
+doc_id = "lowercase-no-caps-that"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["lowercase"], awaits_done = true }
 ]
 
 [[pattern]]
-pattern = '''^capitalize$'''
+pattern = '''^capitalize(?: that)?$'''
 doc_id = "capitalize"
+whole_utterance_only = true
+actions = [
+    { function = "transform_selection", params = ["capitalize"], awaits_done = true }
+]
+
+# Voice Access wording. "cap" is an ordinary English word, so this
+# entry is whole_utterance_only and stays dictatable in a sentence.
+[[pattern]]
+pattern = '''^cap that$'''
+doc_id = "capitalize-that"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["capitalize"], awaits_done = true }
 ]
@@ -540,6 +2406,7 @@ actions = [
 [[pattern]]
 pattern = '''^title case$'''
 doc_id = "title-case"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["title_case"], awaits_done = true }
 ]
@@ -547,6 +2414,7 @@ actions = [
 [[pattern]]
 pattern = '''^snake case$'''
 doc_id = "snake-case"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["snake_case"], awaits_done = true }
 ]
@@ -554,6 +2422,7 @@ actions = [
 [[pattern]]
 pattern = '''^camel case$'''
 doc_id = "camel-case"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["camel_case"], awaits_done = true }
 ]
@@ -561,6 +2430,7 @@ actions = [
 [[pattern]]
 pattern = '''^pascal case$'''
 doc_id = "pascal-case"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["pascal_case"], awaits_done = true }
 ]
@@ -568,6 +2438,7 @@ actions = [
 [[pattern]]
 pattern = '''^kebab case$'''
 doc_id = "kebab-case"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["kebab_case"], awaits_done = true }
 ]
@@ -575,6 +2446,7 @@ actions = [
 [[pattern]]
 pattern = '''^compress$'''
 doc_id = "compress"
+whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["compress"], awaits_done = true }
 ]
@@ -584,7 +2456,7 @@ actions = [
 [[pattern]]
 pattern = '''^boost$'''
 doc_id = "boost"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "skip_clipboard_restore", awaits_done = true },
     { function = "hk", params = ["ctrl", "c"], awaits_done = true },
@@ -614,7 +2486,7 @@ actions = [
 [[pattern]]
 pattern = '''^simplify$'''
 doc_id = "rewrite-simplify"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "rewrite_text_ai", params = ["Rewrite this text in plain language. Use shorter sentences and simpler words. Keep every fact. Return only the rewritten text."] }
 ]
@@ -622,7 +2494,7 @@ actions = [
 [[pattern]]
 pattern = '''^shorten$'''
 doc_id = "rewrite-shorten"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "rewrite_text_ai", params = ["Rewrite this text more briefly. Cut repetition and padding. Keep every fact. Return only the rewritten text."] }
 ]
@@ -641,7 +2513,7 @@ actions = [
 [[pattern]]
 pattern = '''^pirate$'''
 doc_id = "rewrite-pirate"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "rewrite_text_ai", params = ["Rewrite this text the way a pirate would say it. Keep every fact. Return only the rewritten text."] }
 ]
@@ -683,9 +2555,9 @@ actions = [
 
 # Online help -- opens the configured help URL in a browser. No local model.
 [[pattern]]
-pattern = '''^help$'''
+pattern = '''^(?:help|open voice access help)$'''
 doc_id = "help-online"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "wheelhouse_help_online" }
 ]
@@ -697,9 +2569,24 @@ actions = [
 [[pattern]]
 pattern = '''^(?:patterns?|pattern manager)$'''
 doc_id = "pattern-manager"
-requires_hotword = true
+whole_utterance_only = true
 actions = [
     { function = "open_pattern_manager" }
+]
+
+# =============================================================================
+# COMMANDS - Voice Teaching (wh-7ou.7)
+# =============================================================================
+
+# Opens the "Teach WheelHouse your voice" window (guided calibration of the
+# single-word rescue thresholds; Distil-Whisper provider only -- other
+# providers get the wrong-provider notice from the Logic process).
+[[pattern]]
+pattern = '''^(?:learn|calibrate) my voice$'''
+doc_id = "learn-my-voice"
+whole_utterance_only = true
+actions = [
+    { function = "open_calibration" }
 ]
 
 # =============================================================================
@@ -709,6 +2596,7 @@ actions = [
 [[pattern]]
 pattern = '''^push to talk mode$'''
 doc_id = "push-to-talk-mode"
+whole_utterance_only = true
 actions = [
     { function = "set_speech_interaction_mode", params = ["push_to_talk"] }
 ]
@@ -716,44 +2604,327 @@ actions = [
 [[pattern]]
 pattern = '''^click to talk mode$'''
 doc_id = "click-to-talk-mode"
+whole_utterance_only = true
 actions = [
     { function = "set_speech_interaction_mode", params = ["toggle"] }
 ]
 
-# Voice element clicking (wh-vjwdl). Hotword-required: "click" is a common
-# dictation word, so without requires_hotword a dictated "click here..." would
-# be parsed as a click command. MUST stay AFTER the exact "click to talk mode"
-# entry above so first-match-wins lets that specific command win.
+# Voice element clicking (wh-vjwdl). Hotword-required: "click" and "tap" are
+# common dictation words, and the capture group is greedy, so every utterance
+# that starts with either word would otherwise be parsed as a click command.
+# MUST stay AFTER the exact "click to talk mode" entry above so
+# first-match-wins lets that specific command win.
 # The forward-to-Input execution lands in slice wh-tab7j; this slice only
 # parses g1 into an ElementQuery.
+#
+# The comment above claimed the hotword requirement from the day the entry
+# was written, but the entry never set the flag. DeepSeek found it while
+# reviewing the Voice Access word "tap", which made the gap reach a second
+# common word: "tap water is safe to drink" asked for a control named
+# "water is safe to drink". David chose the hotword on 2026-08-17
+# (wh-voice-access-parity.1.6.1.1). The cost is that "click the file menu"
+# now needs the hotword spoken first.
 [[pattern]]
-pattern = '''^click\s+(.+)$'''
+pattern = '''^(?:click|tap)\s+(.+)$'''
 doc_id = "click-element"
+requires_hotword = true
 actions = [
     { function = "click_element", params = ["g1"], awaits_done = true }
 ]
 
 # Numbered-overlay toggle (wh-n29v.17; renamed and hotword dropped in
 # bc91e701). Hotword-free, matching the "click <name>" style. Anchored
-# "^apply numbers$" / "^dismiss numbers$" so they do not start with "click"
+# "^show numbers$" / "^hide numbers$" so they do not start with "click"
 # and never collide with the broad click pattern above.
 # The action delegates to LogicController.handle_overlay_command, which
 # applies SHOW_NUMBERS / HIDE_NUMBERS to the overlay state machine and hands
 # the returned effects to the integration stub seam (wh-h9a8v2).
+#
+# The words are "show" and "hide", and only those. David decided on
+# 2026-08-17 that Wheelhouse uses the Voice Access wording here, so the
+# older "apply numbers" and "dismiss numbers" wordings came back on
+# 2026-08-20 as aliases, at David's direction, so a person who learned them
+# keeps them (wh-dismiss-alias-restore). "apply" pairs with "show" and
+# "dismiss" pairs with "hide", which is the pairing they always had. The
+# doc_ids stay "show-numbers" and "hide-numbers": action_catalog.py,
+# knowledge/wheelhouse_help.md and the published reference all name those.
 [[pattern]]
-pattern = '''^apply numbers$'''
-doc_id = "apply-numbers"
+pattern = '''^(?:show|apply) numbers$'''
+doc_id = "show-numbers"
 requires_hotword = false
+whole_utterance_only = true
 actions = [
     { function = "show_overlay_command", awaits_done = true }
 ]
 
 [[pattern]]
-pattern = '''^dismiss numbers$'''
-doc_id = "dismiss-numbers"
+pattern = '''^(?:hide|dismiss) numbers$'''
+doc_id = "hide-numbers"
 requires_hotword = false
+whole_utterance_only = true
 actions = [
     { function = "hide_overlay_command", awaits_done = true }
+]
+
+# Gesture clicks + mouse grid (wh-grid-speech-routing). All hotword-free,
+# matching the "click <name>" / "show numbers" style.
+#
+# ORDERING NOTES:
+# - "right/double click <target>" starts with right/double, never "click",
+#   so it cannot collide with "^click to talk mode$" or "^click\s+(.+)$".
+# - The bare grid words below use whole_utterance_only so "click", "mark",
+#   "drag", "move here" and the bare numbers stay ordinary dictation inside
+#   longer utterances (precedent: the mishear punctuation aliases). With the
+#   grid CLOSED the actions dictate the captured g1 verbatim, so single-word
+#   utterances keep typing normally too.
+# - First-word extraction constraint: the catalog indexes command patterns
+#   by literal first words, and its extractor only reads a LEADING plain
+#   alternation. That is why these use "(right|double)" (not "(?:...)"
+#   nested inside the outer capture) and why the digit numbers are an
+#   explicit "(1|2|...|9)" alternation.
+
+# "right click recycle bin" / "double click 5" -- full gesture command with
+# a target, routed through ClickCommandParser.parse_command so the gesture
+# rides the ElementQuery into forward_click_element (by-name, overlay
+# number, or grid number alike).
+[[pattern]]
+pattern = '''^((right|double)[\s-]+click\s+.+)$'''
+doc_id = "click-element-gesture"
+actions = [
+    { function = "click_element_command", params = ["g1"], awaits_done = true }
+]
+
+# Explicit grid commands: always consumed, grid open or closed. The words
+# are "show" and "hide", matching the numbered overlay above and the Voice
+# Access wording (David's decision, 2026-08-17). The older "apply grid" and
+# "dismiss grid" wordings came back on 2026-08-20 as aliases, matching the
+# numbered overlay above, and the doc_ids stay "show-grid" and "hide-grid"
+# (wh-dismiss-alias-restore).
+[[pattern]]
+pattern = '''^(?:show|apply) grid$'''
+doc_id = "show-grid"
+whole_utterance_only = true
+actions = [
+    { function = "grid_show_command", awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^(?:hide|dismiss) grid$'''
+doc_id = "hide-grid"
+whole_utterance_only = true
+actions = [
+    { function = "grid_dismiss_command", awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^grid next screen$'''
+doc_id = "grid-next-screen"
+whole_utterance_only = true
+actions = [
+    { function = "grid_next_screen_command", awaits_done = true }
+]
+
+# Grid-open-only words. Each captures g1 (with any trailing STT
+# punctuation) for the dictation fallback when the grid is closed.
+[[pattern]]
+pattern = '''^((right|double)[\s-]+click[.!?]?)$'''
+doc_id = "grid-gesture-click"
+whole_utterance_only = true
+actions = [
+    { function = "grid_click_command", params = ["g1"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^((click|tap)[.!?]?)$'''
+doc_id = "grid-click"
+whole_utterance_only = true
+actions = [
+    { function = "grid_click_command", params = ["g1"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^(mark[.!?]?)$'''
+doc_id = "grid-mark"
+whole_utterance_only = true
+actions = [
+    { function = "grid_action_command", params = ["mark", "g1"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^(drag[.!?]?)$'''
+doc_id = "grid-drag"
+whole_utterance_only = true
+actions = [
+    { function = "grid_action_command", params = ["drag", "g1"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^(move here[.!?]?)$'''
+doc_id = "grid-move-here"
+whole_utterance_only = true
+actions = [
+    { function = "grid_action_command", params = ["move_here", "g1"], awaits_done = true }
+]
+
+# Bare grid numbers 1-9 (word or digit, optional leading "number"). A number
+# the grid consumes NEVER falls through to dictation. With the grid closed
+# grid_number_command offers the number to the numbered overlay
+# (wh-overlay-count-homophones.1.1): with badges showing it clicks badge N,
+# and only with neither showing does the g1 text dictate verbatim, so
+# "number five" still types as words when nothing is on screen.
+#
+# The two word-form patterns also list "too", "to" and "for"
+# (wh-overlay-count-homophones, David's decision 2026-09-03): the speech
+# engine returns those words for the spoken "two" and "four", so without
+# them a spoken grid number matched no grid pattern at all. "too" precedes
+# "to" only for readability; the regex engine backtracks either way. The
+# digit pattern below needs nothing, because a digit is never a homophone.
+# The accepted cost is David's: with the grid OPEN a bare "to", "too" or
+# "for" refines a cell, and with badges showing it clicks badge 2 or 4,
+# instead of typing. With neither on screen it still types.
+[[pattern]]
+pattern = '''^((number|numbers)\s+(one|two|three|four|five|six|seven|eight|nine|too|to|for|1|2|3|4|5|6|7|8|9)[.!?]?)$'''
+doc_id = "grid-number-prefixed"
+whole_utterance_only = true
+actions = [
+    { function = "grid_number_command", params = ["g1", "g3"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^((one|two|three|four|five|six|seven|eight|nine|too|to|for)[.!?]?)$'''
+doc_id = "grid-number-word"
+whole_utterance_only = true
+actions = [
+    { function = "grid_number_command", params = ["g1", "g2"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^((1|2|3|4|5|6|7|8|9)[.!?]?)$'''
+doc_id = "grid-number-digit"
+whole_utterance_only = true
+actions = [
+    { function = "grid_number_command", params = ["g1", "g2"], awaits_done = true }
+]
+
+# =============================================================================
+# REPLACEMENTS - Voice Access Single-Mark Punctuation
+# =============================================================================
+# ORDERING, LOAD BEARING: these entries must stay ABOVE the wrapping section
+# that follows them. The wrapping triggers match the bare words "parentheses",
+# "quotes" and "single quote" anywhere in an utterance, so a wrapping entry
+# placed first would swallow every name below.
+# =============================================================================
+
+[[pattern]]
+pattern = '''\bleft parentheses\b'''
+doc_id = "punct-left-parentheses"
+actions = [
+    { function = "text", params = ["("] }
+]
+
+[[pattern]]
+pattern = '''\bopen parentheses\b'''
+doc_id = "punct-open-parentheses"
+actions = [
+    { function = "text", params = ["("] }
+]
+
+[[pattern]]
+pattern = '''\bright parentheses\b'''
+doc_id = "punct-right-parentheses"
+actions = [
+    { function = "text", params = [")"] }
+]
+
+[[pattern]]
+pattern = '''\bclose parentheses\b'''
+doc_id = "punct-close-parentheses"
+actions = [
+    { function = "text", params = [")"] }
+]
+
+[[pattern]]
+pattern = '''\bopen bracket\b'''
+doc_id = "punct-open-bracket"
+actions = [
+    { function = "text", params = ["["] }
+]
+
+[[pattern]]
+pattern = '''\bclose bracket\b'''
+doc_id = "punct-close-bracket"
+actions = [
+    { function = "text", params = ["]"] }
+]
+
+[[pattern]]
+pattern = '''\bleft brace\b'''
+doc_id = "punct-left-brace"
+actions = [
+    { function = "text", params = ["{"] }
+]
+
+[[pattern]]
+pattern = '''\bopen brace\b'''
+doc_id = "punct-open-brace"
+actions = [
+    { function = "text", params = ["{"] }
+]
+
+[[pattern]]
+pattern = '''\bright brace\b'''
+doc_id = "punct-right-brace"
+actions = [
+    { function = "text", params = ["}"] }
+]
+
+[[pattern]]
+pattern = '''\bclose brace\b'''
+doc_id = "punct-close-brace"
+actions = [
+    { function = "text", params = ["}"] }
+]
+
+[[pattern]]
+pattern = '''\bopen quotes\b'''
+doc_id = "punct-open-quotes"
+actions = [
+    { function = "text", params = ['"'] }
+]
+
+[[pattern]]
+pattern = '''\bclose quotes\b'''
+doc_id = "punct-close-quotes"
+actions = [
+    { function = "text", params = ['"'] }
+]
+
+[[pattern]]
+pattern = '''\bbegin single quote\b'''
+doc_id = "punct-begin-single-quote"
+actions = [
+    { function = "text", params = ["'"] }
+]
+
+[[pattern]]
+pattern = '''\bopen single quote\b'''
+doc_id = "punct-open-single-quote"
+actions = [
+    { function = "text", params = ["'"] }
+]
+
+[[pattern]]
+pattern = '''\bend single quote\b'''
+doc_id = "punct-end-single-quote"
+actions = [
+    { function = "text", params = ["'"] }
+]
+
+[[pattern]]
+pattern = '''\bclose single quote\b'''
+doc_id = "punct-close-single-quote"
+actions = [
+    { function = "text", params = ["'"] }
 ]
 
 # =============================================================================
@@ -876,9 +3047,178 @@ doc_id = "filter-hey-google"
 actions = [
     { function = "text", params = [""] }
 ]
+
+# =============================================================================
+# REPLACEMENTS - Non-Speech Sounds
+# =============================================================================
+# Hums and hesitation noises that the shipped Parakeet engine transcribes as
+# literal words. The empty text param consumes the match and types nothing.
+#
+# Boundaries are (?<![\w-]) / (?![\w-]) rather than \b because \b treats a
+# hyphen as a boundary: \buh\b would match the "uh" inside "uh-huh" and type
+# the leftover "-huh". Excluding a hyphen on both sides means only a whole
+# token in the list is consumed.
+#
+# "mm" alone is NOT in the list: it is the written abbreviation for
+# millimeter, and the engine emits it for the unit as well as for the hum.
+#
+# The list holds six sounds, which is the most the pattern explainer can
+# render as spoken words (_MAX_VARIANTS). A seventh sound makes the
+# explainer quote this raw expression at the user instead, and the pinned
+# allowlist in tests/test_pattern_explainer.py fails. Raise that limit
+# before you add another sound here.
+[[pattern]]
+pattern = '''(?<![\w-])(?:mm-hmm|mm-mm|mhm|hmm|uh|um)(?![\w-])'''
+doc_id = "filter-filler-sounds"
+actions = [
+    { function = "text", params = [""] }
+]
+
 # =============================================================================
 # REPLACEMENTS - Punctuation Basic
 # =============================================================================
+
+# Voice Access punctuation and symbol names. This group stays before the
+# existing generic "slash" entry so "forward slash" is not partially matched.
+[[pattern]]
+pattern = '''\bfull stop\b'''
+doc_id = "punct-full-stop"
+actions = [
+    { function = "text", params = ["."] }
+]
+
+[[pattern]]
+pattern = '''\bdot dot dot\b'''
+doc_id = "punct-dot-dot-dot"
+actions = [
+    { function = "text", params = ["..."] }
+]
+
+[[pattern]]
+pattern = '''\bforward slash\b'''
+doc_id = "punct-forward-slash"
+actions = [
+    { function = "text", params = ["/"] }
+]
+
+[[pattern]]
+pattern = '''\bpipe character\b'''
+doc_id = "punct-pipe-character"
+actions = [
+    { function = "text", params = ["|"] }
+]
+
+[[pattern]]
+pattern = '''\bparagraph ?sign\b'''
+doc_id = "punct-paragraph-sign"
+actions = [
+    { function = "text", params = ["¶"] }
+]
+
+[[pattern]]
+pattern = '''\bparagraph mark\b'''
+doc_id = "punct-paragraph-mark"
+actions = [
+    { function = "text", params = ["¶"] }
+]
+
+[[pattern]]
+pattern = '''\bsection ?sign\b'''
+doc_id = "punct-section-sign"
+actions = [
+    { function = "text", params = ["§"] }
+]
+
+[[pattern]]
+pattern = '''\bcopyright ?sign\b'''
+doc_id = "punct-copyright-sign"
+actions = [
+    { function = "text", params = ["©"] }
+]
+
+[[pattern]]
+pattern = '''\bregistered ?sign\b'''
+doc_id = "punct-registered-sign"
+actions = [
+    { function = "text", params = ["®"] }
+]
+
+[[pattern]]
+pattern = '''\bdegree symbol\b'''
+doc_id = "punct-degree-symbol"
+actions = [
+    { function = "text", params = ["°"] }
+]
+
+[[pattern]]
+pattern = '''\bnumber ?sign\b'''
+doc_id = "punct-number-sign"
+actions = [
+    { function = "text", params = ["#"] }
+]
+
+[[pattern]]
+pattern = '''\bpound ?sign\b'''
+doc_id = "punct-pound-sign"
+actions = [
+    { function = "text", params = ["#"] }
+]
+
+[[pattern]]
+pattern = '''\bminus ?sign\b'''
+doc_id = "punct-minus-sign"
+actions = [
+    { function = "text", params = ["-"] }
+]
+
+[[pattern]]
+pattern = '''\bmultiplication ?sign\b'''
+doc_id = "punct-multiplication-sign"
+actions = [
+    { function = "text", params = ["×"] }
+]
+
+[[pattern]]
+pattern = '''\bdivision ?sign\b'''
+doc_id = "punct-division-sign"
+actions = [
+    { function = "text", params = ["÷"] }
+]
+
+[[pattern]]
+pattern = '''\bless ?than ?sign\b'''
+doc_id = "punct-less-than-sign"
+actions = [
+    { function = "text", params = ["<"] }
+]
+
+[[pattern]]
+pattern = '''\bgreater ?than ?sign\b'''
+doc_id = "punct-greater-than-sign"
+actions = [
+    { function = "text", params = [">"] }
+]
+
+[[pattern]]
+pattern = '''\bpound ?sterling ?sign\b'''
+doc_id = "punct-pound-sterling-sign"
+actions = [
+    { function = "text", params = ["£"] }
+]
+
+[[pattern]]
+pattern = '''\beuro ?sign\b'''
+doc_id = "punct-euro-sign"
+actions = [
+    { function = "text", params = ["€"] }
+]
+
+[[pattern]]
+pattern = '''\byen ?sign\b'''
+doc_id = "punct-yen-sign"
+actions = [
+    { function = "text", params = ["¥"] }
+]
 
 [[pattern]]
 pattern = '''\bperiod\b'''
@@ -985,8 +3325,17 @@ actions = [
     { function = "text", params = ["^"] }
 ]
 
+# "ampersand" is the spoken name for "&", and it is the only alias here.
+# This entry used to read \b(?:ampersand|and sign(?:ed)?)\b. The words
+# "and sign" and "and signed" were removed on David's answer to
+# QUESTIONS-2026-09-05 item 94, after the repaired first-word index made
+# them reachable and measurement showed the cost: this entry is a
+# replacement, so it matches anywhere in an utterance, and "he read and
+# signed the form" typed "he read & the form" while "please come and
+# sign" typed "please come &". Saying "and sign" now types the words, by
+# design. wh-and-sign-index-defect.1.1 holds the measurements.
 [[pattern]]
-pattern = '''\b(?:ampersand|and sign(?:ed)?)\b'''
+pattern = '''\bampersand\b'''
 doc_id = "punct-ampersand"
 actions = [
     { function = "text", params = ["&"] }
@@ -1111,4 +3460,76 @@ doc_id = "mishear-comma-come"
 whole_utterance_only = true
 actions = [
     { function = "text", params = [","] }
+]
+
+# =============================================================================
+# COMMANDS - Voice Access per-app window captures (wh-voice-access-parity.1.7)
+# =============================================================================
+# The four broad per-app captures. Placed at the very END of the file on
+# purpose (corrective move 2026-08-24): each captures everything after its
+# trigger word as an app name, so any fixed phrase later in the file that
+# starts with the same word would be unreachable. The first placement put
+# them above cursor-navigate with their sibling switch-to-app, and
+# show-app swallowed "show grid" / "show numbers" (grid section) while
+# close-app swallowed the "close parentheses" / "close bracket" /
+# "close brace" / "close quotes" / "close single quote" punctuation
+# replacements. Last position is the defensive general rule, not just a
+# fix for those seven: a broad capture belongs below every fixed phrase
+# it could shadow, the same reason cursor-navigate sits below the
+# go-to landmark blocks. switch-to-app alone cannot move here -- its
+# "go to X" wording must stay ABOVE cursor-navigate's ^go (.+) -- and it
+# has no fixed-phrase collisions below its position, so it keeps the
+# original spot. requires_hotword = true on all four (free-text capture,
+# activate-app shape model).
+
+# "show X" -- kept as its own doc_id rather than merged into switch-to-app.
+# Microsoft's own command list groups "show X" with "open X"/"start X"
+# ("Open a new app"), not with "switch to X"/"go to X" ("Switch to an
+# existing app") -- a different real action (launch vs. focus). The
+# fragment's MECHANISM (bead DESCRIPTION) puts "show X" in the per-app
+# group using plain activate like the others, which brings an existing
+# window to the front rather than launching a new instance. Recorded as a
+# fact about the real feature this approximates, not a defect.
+[[pattern]]
+pattern = '''^show\s+(.+)$'''
+doc_id = "show-app"
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["g1"] }
+]
+
+# "close X" / "exit X" / "quit X" -- one doc_id, three synonyms of the same
+# close action (support.microsoft.com Voice Access command list, fetched
+# 2026-08-24, groups all three as alternate phrasings of "Close an open
+# app"). The bare phrase "close window" stays owned by the existing
+# close-window doc_id in Window Management, far above this block.
+[[pattern]]
+pattern = '''^(?:close|exit|quit)\s+(.+)$'''
+doc_id = "close-app"
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["g1"], awaits_done = true },
+    { function = "hk", params = ["alt", "f4"], awaits_done = true }
+]
+
+# "minimize X" -- minimize-all-windows (Window Management) precedes this
+# block, so "minimize all windows" keeps its own entry.
+[[pattern]]
+pattern = '''^minimize\s+(.+)$'''
+doc_id = "minimize-app"
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["g1"], awaits_done = true },
+    { function = "hk", params = ["win", "down"], awaits_done = true }
+]
+
+# "maximize X" -- no bulk "maximize all windows" form exists in the bead's
+# SCOPE, so this block has no ordering hazard equivalent to minimize-app's.
+[[pattern]]
+pattern = '''^maximize\s+(.+)$'''
+doc_id = "maximize-app"
+requires_hotword = true
+actions = [
+    { function = "activate", params = ["g1"], awaits_done = true },
+    { function = "hk", params = ["win", "up"], awaits_done = true }
 ]

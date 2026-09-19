@@ -267,6 +267,7 @@ class TestIpcMilestones:
         app.ui_ready_event = MagicMock()
         app.response_queue = MagicMock()
         app.response_futures = {}
+        app._request_trace_meta = {}
         app.response_timeout_s = 5.0
         app._outbound_q = asyncio.Queue()
         app.demuxer_task = None
@@ -276,12 +277,18 @@ class TestIpcMilestones:
 
     @pytest.mark.asyncio
     async def test_send_command_produces_ipc_sent(self, app, caplog):
-        """IPC_SENT logged when send_command enqueues a payload."""
+        """IPC_SENT logged when the sender delivers a send_command payload.
+
+        wh-overlay-slow-uia-stale-badges.14.11: IPC_SENT records delivery
+        (frame written and signaled), not enqueue acceptance.
+        """
         from utils.trace_context import set_trace
         set_trace("T-000020")
+        app.command_ready_event.is_set.return_value = False
 
         with caplog.at_level(logging.INFO):
             await app.send_command({"action": "press", "params": {"key": "enter"}})
+            await app._send_one(app._outbound_q.get_nowait())
 
         records = _pipeline_records(caplog.records)
         milestones = _milestone_names(records)
@@ -291,11 +298,16 @@ class TestIpcMilestones:
 
     @pytest.mark.asyncio
     async def test_send_request_produces_ipc_sent(self, app, caplog):
-        """IPC_SENT logged when send_request enqueues a payload."""
+        """IPC_SENT logged when the sender delivers a send_request payload.
+
+        wh-overlay-slow-uia-stale-badges.14.11: IPC_SENT records delivery
+        (frame written and signaled), not enqueue acceptance.
+        """
         from utils.trace_context import set_trace
         import unittest.mock
 
         set_trace("T-000021")
+        app.command_ready_event.is_set.return_value = False
 
         async def instant_timeout(coro, timeout):
             raise asyncio.TimeoutError()
@@ -304,6 +316,7 @@ class TestIpcMilestones:
             with unittest.mock.patch("asyncio.wait_for", side_effect=instant_timeout):
                 with pytest.raises(asyncio.TimeoutError):
                     await app.send_request("intelligent_insert_text", params={"insertion_string": "hi"})
+            await app._send_one(app._outbound_q.get_nowait())
 
         records = _pipeline_records(caplog.records)
         milestones = _milestone_names(records)
@@ -496,6 +509,7 @@ class TestMilestoneContent:
         app.ui_ready_event = MagicMock()
         app.response_queue = MagicMock()
         app.response_futures = {}
+        app._request_trace_meta = {}
         app.response_timeout_s = 5.0
         app._outbound_q = asyncio.Queue()
         app.demuxer_task = None
@@ -503,9 +517,11 @@ class TestMilestoneContent:
         app._ws_manager = None
 
         set_trace("T-000043")
+        app.command_ready_event.is_set.return_value = False
 
         with caplog.at_level(logging.INFO):
             await app.send_command({"action": "press", "params": {"key": "a"}})
+            await app._send_one(app._outbound_q.get_nowait())
 
         records = _pipeline_records(caplog.records)
         ipc = [r for r in records if r.getMessage().startswith("IPC_SENT")]

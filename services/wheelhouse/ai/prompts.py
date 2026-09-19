@@ -4,7 +4,7 @@ TEXT_CORRECTION_SYSTEM: System prompt for "fix this" text correction.
 HELP_SYSTEM_TEMPLATE: System prompt template for help Q&A (requires
     .format(knowledge_base=...) substitution).
 REWRITE_LAYOUT_RULE / REWRITE_SOURCE_RULE / build_rewrite_system /
-    wrap_selection: the rewriting commands ("x-ray simplify" and friends).
+    wrap_selection: the rewriting commands ("simplify" and friends).
     Only the style instruction comes from the voice pattern; the other two
     parts are fixed and were measured, not guessed. See the docstrings below
     and scripts/benchmarks/local-ai/ before editing a word of them.

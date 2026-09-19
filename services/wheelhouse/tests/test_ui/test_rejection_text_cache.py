@@ -259,8 +259,10 @@ def test_put_with_target_hwnd_resolves_to_same_hwnd():
 
 
 def test_put_without_target_hwnd_defaults_to_zero():
-    """Legacy callers that omit target_hwnd get a default of 0, which the
-    retry handler treats as 'no refocus needed'.
+    """Callers that omit target_hwnd get a default of 0. The retry
+    handler refuses such an entry outright with token_expired
+    (wh-ensure-focused-same-process-fallback.1.11) -- the default is a
+    data-shape default only, never replay permission.
     """
 
     clock = _FakeClock()
@@ -346,6 +348,130 @@ def test_resolve_expired_carries_zero_target_process_id():
     result = cache.resolve("tok-1")
     assert result.status is CacheStatus.EXPIRED
     assert result.target_process_id == 0
+
+
+# ---------------------------------------------------------------------------
+# Target root carry (wh-ensure-focused-same-process-fallback.1.7)
+# ---------------------------------------------------------------------------
+
+
+def test_put_with_target_root_resolves_to_same_root():
+    """The cache stores the rejection-time GA_ROOT snapshot of the target
+    HWND so the retry handler can detect same-PID handle recycling: a
+    destroyed helper HWND reborn as a CHILD of another window in the
+    same browser process normalizes to that other window's root, which
+    the PID guard alone cannot see.
+    """
+
+    clock = _FakeClock()
+    cache = RejectionTextCache(ttl_seconds=60.0, time_source=clock)
+    cache.put(
+        "tok-1", "hello world",
+        target_hwnd=0x12345, target_process_id=4242, target_root=0x12345,
+    )
+    result = cache.resolve("tok-1")
+    assert result.status is CacheStatus.HIT
+    assert result.target_hwnd == 0x12345
+    assert result.target_process_id == 4242
+    assert result.target_root == 0x12345
+
+
+def test_put_without_target_root_defaults_to_zero():
+    """Callers that omit target_root get a default of 0. The retry
+    handler returns token_expired for an entry whose root snapshot is
+    0 (the .1.8/.1.11 fail-closed contract) -- the default is a
+    data-shape default only, never replay permission.
+    """
+
+    clock = _FakeClock()
+    cache = RejectionTextCache(ttl_seconds=60.0, time_source=clock)
+    cache.put("tok-1", "hello", target_hwnd=0x12345, target_process_id=4242)
+    result = cache.resolve("tok-1")
+    assert result.status is CacheStatus.HIT
+    assert result.target_root == 0
+
+
+def test_resolve_miss_carries_zero_target_root():
+    cache = RejectionTextCache()
+    result = cache.resolve("never-stored")
+    assert result.status is CacheStatus.MISS
+    assert result.target_root == 0
+
+
+def test_resolve_expired_carries_zero_target_root():
+    clock = _FakeClock()
+    cache = RejectionTextCache(ttl_seconds=60.0, time_source=clock)
+    cache.put(
+        "tok-1", "hello",
+        target_hwnd=0xABCD, target_process_id=9999, target_root=0xABCD,
+    )
+    clock.advance(61.0)
+    result = cache.resolve("tok-1")
+    assert result.status is CacheStatus.EXPIRED
+    assert result.target_root == 0
+
+
+# ---------------------------------------------------------------------------
+# target_tag (wh-ensure-focused-same-process-fallback.1.12)
+# ---------------------------------------------------------------------------
+
+
+def test_put_with_target_tag_resolves_to_same_tag():
+    """The cache stores the rejection-time window-property provenance
+    marker so the retry handler can detect a numeric handle recycled as
+    a NEW top-level window that is its own GA_ROOT -- a shape every
+    handle-value comparison (normalize, PID, root snapshot) aliases.
+    The marker lives on the window OBJECT via SetProp, so a recycled
+    handle reads 0, or a survivor marker from an earlier
+    Input-process run that matches only on equal 43-bit salts (about
+    2**-43 per pair of runs -- the accepted residual at _RUN_SALT).
+    """
+
+    clock = _FakeClock()
+    cache = RejectionTextCache(ttl_seconds=60.0, time_source=clock)
+    cache.put(
+        "tok-1", "hello world",
+        target_hwnd=0x12345, target_process_id=4242,
+        target_root=0x12345, target_tag=7,
+    )
+    result = cache.resolve("tok-1")
+    assert result.status is CacheStatus.HIT
+    assert result.target_tag == 7
+
+
+def test_put_without_target_tag_defaults_to_zero():
+    """Legacy callers that omit target_tag get a default of 0, which the
+    retry handler refuses for entries carrying a nonzero HWND (same
+    refuse-outright contract as the .1.8 root gate).
+    """
+
+    clock = _FakeClock()
+    cache = RejectionTextCache(ttl_seconds=60.0, time_source=clock)
+    cache.put("tok-1", "hello", target_hwnd=0x12345, target_process_id=4242)
+    result = cache.resolve("tok-1")
+    assert result.status is CacheStatus.HIT
+    assert result.target_tag == 0
+
+
+def test_resolve_miss_carries_zero_target_tag():
+    cache = RejectionTextCache()
+    result = cache.resolve("never-stored")
+    assert result.status is CacheStatus.MISS
+    assert result.target_tag == 0
+
+
+def test_resolve_expired_carries_zero_target_tag():
+    clock = _FakeClock()
+    cache = RejectionTextCache(ttl_seconds=60.0, time_source=clock)
+    cache.put(
+        "tok-1", "hello",
+        target_hwnd=0xABCD, target_process_id=9999,
+        target_root=0xABCD, target_tag=3,
+    )
+    clock.advance(61.0)
+    result = cache.resolve("tok-1")
+    assert result.status is CacheStatus.EXPIRED
+    assert result.target_tag == 0
 
 
 # ---------------------------------------------------------------------------

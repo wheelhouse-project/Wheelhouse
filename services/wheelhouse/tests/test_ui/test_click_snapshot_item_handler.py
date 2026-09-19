@@ -29,13 +29,18 @@ harness) injecting fake finder / snapshot / executor, so they stay headless
 from __future__ import annotations
 
 from typing import Any, Optional, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from services.wheelhouse.shared.click_element import ClickElementResponse
 from tests.test_element_finder import _store_walk, make_multi_finder
-from ui.element_types import ElementMatch, ElementQuery, WalkSnapshot
+from ui.element_types import (
+    ClickGesture,
+    ElementMatch,
+    ElementQuery,
+    WalkSnapshot,
+)
 from ui.ui_action_handler import UIActionHandler
 
 _MOD = "ui.ui_action_handler"
@@ -80,14 +85,16 @@ class _FakeClickResult:
 
 
 class _FakeExecutor:
-    """Captures the click() args and returns a preset ClickResult."""
+    """Captures the click() args (and kwargs) and returns a preset ClickResult."""
 
     def __init__(self, result: _FakeClickResult) -> None:
         self._result = result
         self.calls: list[tuple[Any, Any, Any]] = []
+        self.call_kwargs: list[dict[str, Any]] = []
 
-    def click(self, winner: Any, snapshot_foreground: Any, query: Any):
+    def click(self, winner: Any, snapshot_foreground: Any, query: Any, **kwargs: Any):
         self.calls.append((winner, snapshot_foreground, query))
+        self.call_kwargs.append(kwargs)
         return self._result
 
 
@@ -153,9 +160,11 @@ class _Stub:
 
     click_snapshot_item touches only ``self.response_queue``,
     ``self._get_overlay_walk_finder()``, ``self._get_click_executor()``, the
-    module-level ``_capture_click_foreground``, and ``self._click_automation_root``
-    (read on the finder-None branch). We provide overridable hooks for each so
-    the handler can be driven without constructing the win32-heavy handler.
+    module-level ``_capture_click_foreground``, ``self._click_automation_root``
+    (read on the finder-None branch), and ``self.buffer_manager`` (the
+    wh-review-pattern-fixes.8 pre-dispatch shadow-buffer invalidation). We
+    provide overridable hooks for each so the handler can be driven without
+    constructing the win32-heavy handler.
     """
 
     def __init__(
@@ -169,6 +178,7 @@ class _Stub:
         self._finder = finder
         self._executor = executor
         self._click_automation_root = automation_root
+        self.buffer_manager = MagicMock()
 
     def _get_overlay_walk_finder(self):
         return self._finder
@@ -226,6 +236,73 @@ def test_happy_path_clicks_and_emits_ok():
     # get_snapshot was driven with the captured foreground identity.
     assert finder.get_snapshot_calls[0]["snapshot_id"] == "s1"
     assert finder.get_snapshot_calls[0]["current_foreground_window"] == 1000
+
+
+def test_handler_marks_the_click_as_a_badge_pick():
+    # wh-electron-dda-noop: the badge path tells the executor this is a badge
+    # pick (badge_pick=True), which reorders coordinate-vs-DoDefaultAction
+    # when InvokePattern is structurally unavailable. Without the flag the
+    # executor cannot distinguish a badge pick from a by-name click.
+    match = _match("uia-3", name="Cancel")
+    finder = _FakeFinder(_snapshot([match]))
+    executor = _FakeExecutor(
+        _FakeClickResult("ok", None, "Cancel", clicked_via="coordinate")
+    )
+    stub = _Stub(finder=finder, executor=executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="trace-badge")
+
+    assert len(executor.call_kwargs) == 1
+    assert executor.call_kwargs[0].get("badge_pick") is True
+
+
+# ---------------------------------------------------------------------------
+# Gesture parameter (wh-click-gesture-param)
+# ---------------------------------------------------------------------------
+
+
+def test_badge_click_defaults_to_the_invoke_gesture():
+    match = _match("uia-3")
+    executor = _FakeExecutor(_FakeClickResult("ok", None, "Cancel"))
+    stub = _Stub(finder=_FakeFinder(_snapshot([match])), executor=executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t")
+
+    assert executor.calls[0][2].gesture is ClickGesture.INVOKE
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ("right_click", ClickGesture.RIGHT_CLICK),
+    ("double_click", ClickGesture.DOUBLE_CLICK),
+    ("invoke", ClickGesture.INVOKE),
+])
+def test_badge_click_carries_the_requested_gesture(payload, expected):
+    # "right click 5" / "double click 5" reach the badge path as a gesture
+    # field on the request; the handler stamps it on the ElementQuery it
+    # builds, which is what the executor reads.
+    match = _match("uia-3")
+    executor = _FakeExecutor(_FakeClickResult("ok", None, "Cancel"))
+    stub = _Stub(finder=_FakeFinder(_snapshot([match])), executor=executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t", gesture=payload)
+
+    assert executor.calls[0][2].gesture is expected
+
+
+def test_unrecognised_gesture_degrades_to_invoke():
+    # A malformed / future gesture value must never guess a physical click;
+    # it degrades to today's Invoke behaviour.
+    match = _match("uia-3")
+    executor = _FakeExecutor(_FakeClickResult("ok", None, "Cancel"))
+    stub = _Stub(finder=_FakeFinder(_snapshot([match])), executor=executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t", gesture="triple_click")
+
+    assert executor.calls[0][2].gesture is ClickGesture.INVOKE
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +634,182 @@ def test_click_snapshot_item_in_handles_own_response_allowlist():
     from input_proc import _HANDLES_OWN_RESPONSE
 
     assert "click_snapshot_item" in _HANDLES_OWN_RESPONSE
+
+
+# ---------------------------------------------------------------------------
+# One executed click per (overlay_session_id, paint_generation)
+# (wh-overlay-slow-uia-stale-badges.8 part 4).
+#
+# The request now carries the pair of the VISIBLE list the number was
+# resolved against. Input runs commands strictly in order, so the guard it
+# can enforce is: after a click from pair P EXECUTES, a later click carrying
+# a pair that is not NEWER than P is refused (stale_overlay_generation)
+# instead of executed -- that list was consumed by the click that changed
+# the screen. Mirrors the pin_snapshot single-pair watermark
+# (wh-n29v.42.1): overlay_session_id is monotonic and the overlay machine
+# is single, so one bounded pair suffices. A request without the pair
+# (legacy shape) skips the check.
+# ---------------------------------------------------------------------------
+
+
+def _fresh_click_stub() -> _Stub:
+    match = _match("uia-3", name="Cancel")
+    finder = _FakeFinder(_snapshot([match]))
+    executor = _FakeExecutor(
+        _FakeClickResult("ok", None, "Cancel", clicked_via="invoke")
+    )
+    return _Stub(finder=finder, executor=executor)
+
+
+def test_second_click_from_same_generation_refused():
+    """Two clicks from the SAME pair, in order (as Input receives them): the
+    first executes, the second is refused without touching the executor."""
+
+    stub = _fresh_click_stub()
+    executor = cast(_FakeExecutor, stub._executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-first", overlay_session_id=5, paint_generation=2)
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-second", overlay_session_id=5, paint_generation=2)
+
+    assert len(stub.response_queue.items) == 2
+    first = ClickElementResponse.from_dict(stub.response_queue.items[0])
+    second = ClickElementResponse.from_dict(stub.response_queue.items[1])
+    assert first.outcome == "ok"
+    assert second.status == "error"
+    assert second.outcome == "execution_failed"
+    assert second.reason == "stale_overlay_generation"
+    assert second.snapshot_id == "s1"
+    # The refused click never reached the executor.
+    assert len(executor.calls) == 1
+
+
+def test_click_from_older_generation_refused():
+    """A click carrying a STRICTLY older generation within the same session
+    is refused too (a delayed dispatch from a superseded list)."""
+
+    stub = _fresh_click_stub()
+    executor = cast(_FakeExecutor, stub._executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-new", overlay_session_id=5, paint_generation=3)
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-old", overlay_session_id=5, paint_generation=2)
+
+    second = ClickElementResponse.from_dict(stub.response_queue.items[1])
+    assert second.reason == "stale_overlay_generation"
+    assert len(executor.calls) == 1
+
+
+def test_click_from_older_session_refused():
+    stub = _fresh_click_stub()
+    executor = cast(_FakeExecutor, stub._executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-s2", overlay_session_id=6, paint_generation=0)
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-s1", overlay_session_id=5, paint_generation=9)
+
+    second = ClickElementResponse.from_dict(stub.response_queue.items[1])
+    assert second.reason == "stale_overlay_generation"
+    assert len(executor.calls) == 1
+
+
+def test_click_from_newer_generation_allowed():
+    """The list was rebuilt after the first click; a click resolved against
+    the NEW list (newer generation, same session) executes normally."""
+
+    stub = _fresh_click_stub()
+    executor = cast(_FakeExecutor, stub._executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-g2", overlay_session_id=5, paint_generation=2)
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-g3", overlay_session_id=5, paint_generation=3)
+
+    second = ClickElementResponse.from_dict(stub.response_queue.items[1])
+    assert second.outcome == "ok"
+    assert len(executor.calls) == 2
+
+
+def test_click_from_newer_session_allowed():
+    stub = _fresh_click_stub()
+    executor = cast(_FakeExecutor, stub._executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-s5", overlay_session_id=5, paint_generation=7)
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-s6", overlay_session_id=6, paint_generation=0)
+
+    second = ClickElementResponse.from_dict(stub.response_queue.items[1])
+    assert second.outcome == "ok"
+    assert len(executor.calls) == 2
+
+
+def test_click_without_pair_skips_the_stale_check():
+    """A request without the pair (the pre-slice payload shape) executes as
+    before, even after a paired click recorded the watermark."""
+
+    stub = _fresh_click_stub()
+    executor = cast(_FakeExecutor, stub._executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-paired", overlay_session_id=5, paint_generation=2)
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-legacy")
+
+    second = ClickElementResponse.from_dict(stub.response_queue.items[1])
+    assert second.outcome == "ok"
+    assert len(executor.calls) == 2
+
+
+def test_failed_click_does_not_consume_the_generation():
+    """Only an EXECUTED (ok) click consumes its pair: after a refusal the
+    screen did not change, so a retry against the same list must work."""
+
+    match = _match("uia-3", name="Cancel")
+    finder = _FakeFinder(_snapshot([match]))
+    executor = _FakeExecutor(
+        _FakeClickResult("execution_failed", "invoke_com_error", "Cancel")
+    )
+    stub = _Stub(finder=finder, executor=executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-fail", overlay_session_id=5, paint_generation=2)
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-retry", overlay_session_id=5, paint_generation=2)
+
+    second = ClickElementResponse.from_dict(stub.response_queue.items[1])
+    # The retry was ATTEMPTED (not refused as stale) and reports the
+    # executor's own failure again.
+    assert second.reason == "invoke_com_error"
+    assert len(executor.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "bad_session,bad_generation",
+    [
+        (True, 2),          # bool is an int subclass, not a real session id
+        ("5", 2),           # wrong type
+        (5, None),          # half-missing pair
+    ],
+)
+def test_malformed_pair_fields_skip_the_check(bad_session, bad_generation):
+    """A malformed pair degrades OPEN (skip the check, log), matching the
+    absent-pair legacy path: the primary guard lives on the Logic side, and
+    a type glitch must not refuse a click the user legitimately asked for.
+    The malformed pair is also NOT recorded, so it cannot poison the
+    watermark comparison for later valid pairs."""
+
+    stub = _fresh_click_stub()
+    executor = cast(_FakeExecutor, stub._executor)
+
+    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
+          trace_id="t-bad", overlay_session_id=bad_session,
+          paint_generation=bad_generation)
+
+    resp = _one_response(stub)
+    assert resp.outcome == "ok"
+    assert len(executor.calls) == 1
+    assert getattr(stub, "_last_executed_click_pair", None) is None

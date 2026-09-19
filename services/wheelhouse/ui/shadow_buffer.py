@@ -110,6 +110,22 @@ class ShadowBufferManager:
                 if not sel_ranges:
                     return False
                 sel_range = sel_ranges[0]
+
+                # wh-pzt: an empty tiptap editor (the Claude Code desktop
+                # prompt) reports its placeholder ("Type / for commands")
+                # as document text, with the caret after it. The caret's
+                # enclosing element carries the class "is-editor-empty"
+                # only in that state, so read the editor as empty with the
+                # caret at the line start. "is-empty" alone also marks an
+                # empty paragraph inside a non-empty editor; that text is
+                # real, so it keeps the normal read.
+                if self._is_editor_empty(sel_range):
+                    with self._lock:
+                        self._buffer = ""
+                        self._cursor_pos = 0
+                        self._selection_len = 0
+                    return True
+
                 sel_text = sel_range.GetText(-1)
                 sel_len = len(sel_text)
 
@@ -142,6 +158,20 @@ class ShadowBufferManager:
             logger.error(f"Shadow Buffer synchronization failed: {e}", exc_info=True)
             self.invalidate()
             return False
+
+    @staticmethod
+    def _is_editor_empty(sel_range) -> bool:
+        """True when the caret sits in an empty tiptap editor (wh-pzt).
+
+        Any failure to read the enclosing element returns False, which
+        keeps the normal text read.
+        """
+        try:
+            enclosing = sel_range.GetEnclosingControl()
+            class_name = getattr(enclosing, "ClassName", "") if enclosing else ""
+        except (_ctypes.COMError, AttributeError, ValueError, TypeError):
+            return False
+        return isinstance(class_name, str) and "is-editor-empty" in class_name.split()
 
     def _get_cursor_pos_fast(self, focused_control, doc_range) -> int | None:
         """Get cursor position via TextPattern2.GetCaretRange() (raw comtypes).

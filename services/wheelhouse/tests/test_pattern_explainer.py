@@ -16,24 +16,91 @@ Guarantees enforced here:
    regexes proves the fallback fires instead of a guess.
 3. Full shipped coverage: every pattern in speech/config/patterns.toml
    produces an explanation, and the set of triggers that hit the
-   raw-expression fallback is pinned to an explicit allowlist (currently
-   empty -- the translator handles every shipped construct).
+   raw-expression fallback is pinned to an explicit allowlist. That
+   allowlist is not empty: FALLBACK_ALLOWLIST below holds the generated
+   _va_range_fallbacks() entries, and every one
+   carries its reason at the point it is defined.
 4. Dependency-freeness: the module imports in a bare subprocess with all
    non-stdlib imports blocked except speech.action_catalog (same style as
    test_action_catalog.py), because the GUI process imports it.
 """
+import re
 import subprocess
 import sys
 import tomllib
+import pytest
 from pathlib import Path
 
-from speech.pattern_explainer import explain_pattern
+from speech.pattern_explainer import (
+    _UnsupportedConstruct,
+    _parse_trigger,
+    explain_pattern,
+)
 
 _TESTS_DIR = Path(__file__).parent
 _SERVICE_DIR = _TESTS_DIR.parent
 _PATTERNS_TOML = _SERVICE_DIR / "speech" / "config" / "patterns.toml"
 
 HOTWORD = "x-ray"
+
+
+class TestGridTriggers:
+    @pytest.mark.parametrize("raw, expected", [
+        (r"^((right|double)[\s-]+click\s+.+)$", "Say 'right click' (or 'double click') followed by any words."),
+        (r"^((right|double)[\s-]+click[.!?]?)$", "Say 'right click' (or 'double click')."),
+        (r"^((click|tap)[.!?]?)$", "Say 'click' (or 'tap')."),
+        (r"^(mark[.!?]?)$", "Say 'mark'."),
+        (r"^(drag[.!?]?)$", "Say 'drag'."),
+        (r"^(move here[.!?]?)$", "Say 'move here'."),
+        (r"^((1|2|3|4|5|6|7|8|9)[.!?]?)$", "Say a digit from 1 to 9."),
+        (r"^((one|two|three|four|five|six|seven|eight|nine|too|to|for)[.!?]?)$", "Say a number from one to nine (also accepts 'too', 'to', 'for')."),
+        (r"^((number|numbers)\s+(one|two|three|four|five|six|seven|eight|nine|too|to|for|1|2|3|4|5|6|7|8|9)[.!?]?)$", "Say 'number' (or 'numbers') followed by a number from one to nine, in words or digits (also accepts 'too', 'to', 'for')."),
+    ])
+    def test_exact_grid_trigger(self, raw, expected):
+        assert explain_pattern(_pattern_dict(raw, []), HOTWORD).splitlines()[0] == expected
+
+    @pytest.mark.parametrize("raw", [
+        r"^click[.!?]? now$", r"^click[.!?]+$", r"^click[.!?]$",
+        r"^right[\s-]*click$", r"^right[\s_]+click$",
+        r"^((one|two|four|five|six|seven|eight|nine))$",
+        r"^((one|two|three|four|five|six|seven|eight|nine|ten))$",
+        r"^((1|2|3|4|5|6|7|8|9))? extra$",
+        r"^((1|2|3|4|5|6|7|8|9)) times$",
+        r"^number(1|2|3|4|5|6|7|8|9)$",
+        r"^(1|2|3|4|5|6|7|8|9)(1|2|3|4|5|6|7|8|9)$",
+        r"^((right|double)[\s-]+click\s+.+) again$",
+        r"^(a|b|c|d|e|f|g)$",
+    ])
+    def test_unsupported_stays_honest(self, raw):
+        assert FALLBACK_MARKER in explain_pattern(_pattern_dict(raw, []), HOTWORD)
+
+    @pytest.mark.parametrize("missing", list("123456789"))
+    def test_each_missing_digit_prevents_complete_range_claim(self, missing):
+        raw = "^((" + "|".join(d for d in "123456789" if d != missing) + ")[.!?]?)$"
+        assert FALLBACK_MARKER in explain_pattern(_pattern_dict(raw, []), HOTWORD)
+
+    def test_range_wording_preserves_actual_accepted_forms(self):
+        for pat in _shipped_patterns():
+            if pat.get("doc_id") not in {
+                "grid-number-word", "grid-number-digit", "grid-number-prefixed"
+            }:
+                continue
+            raw = pat["pattern"]
+            prefix = "number " if pat["doc_id"] == "grid-number-prefixed" else ""
+            candidates = "one two three four five six seven eight nine too to for 1 2 3 4 5 6 7 8 9".split()
+            text = explain_pattern(_pattern_dict(raw, []), HOTWORD)
+            for token in candidates:
+                expected = (
+                    pat["doc_id"] == "grid-number-prefixed"
+                    or (token.isdigit() == (pat["doc_id"] == "grid-number-digit"))
+                )
+                for punctuation in ("", ".", "!", "?"):
+                    assert bool(re.fullmatch(raw, prefix + token + punctuation)) == expected
+            assert len(text) < 230
+
+    def test_large_literal_cross_product_remains_bounded(self):
+        raw = "^" + "(one|two|three|four|five|six)" * 20 + "$"
+        assert FALLBACK_MARKER in explain_pattern(_pattern_dict(raw, []), HOTWORD)
 
 # The trigger-side fallback wording. Present exactly when the translator
 # refused to translate and quoted the raw expression instead.
@@ -223,6 +290,23 @@ class TestReplacement:
             "Wheelhouse discards it (types nothing)."
         )
 
+    def test_hyphen_aware_boundaries_translate_like_word_boundaries(self):
+        # Shipped filter-filler-sounds pattern. It brackets its alternation
+        # with (?<![\w-]) / (?![\w-]) instead of \b so a listed sound is not
+        # matched inside a longer hyphenated token ("uh" inside "uh-huh").
+        # Both assertions are zero-width and contribute no spoken content, so
+        # the explanation must read exactly as the \b form would -- not fall
+        # back to quoting the raw expression at the user.
+        pattern = _pattern_dict(
+            r"(?<![\w-])(?:mm-hmm|mm-mm|mhm|hmm|uh)(?![\w-])",
+            [{"function": "text", "params": [""]}],
+        )
+        assert explain_pattern(pattern, HOTWORD) == (
+            "When you say 'mm-hmm' (or 'mm-mm', 'mhm', 'hmm', 'uh') "
+            "anywhere while dictating, Wheelhouse discards it "
+            "(types nothing)."
+        )
+
     def test_non_text_replacement_lists_steps_after_colon(self):
         # Shipped \bnew ?line\b pattern: optional-space variants expand.
         pattern = _pattern_dict(
@@ -385,6 +469,16 @@ class TestRawExpressionFallback:
             # subsystem promises never to produce (wh-local-ai-runtime.2.27).
             r"^pick ([A-z]+)$",      # the full cross-case range
             r"^pick ([Z-a]+)$",      # a narrow range entirely inside the gap
+            # Lookarounds stay unsupported in general. Only the two exact
+            # hyphen-aware boundary tokens the shipped filler-sound pattern
+            # uses are allowed through (they are \b with the hyphen removed
+            # from the word set); anything else about a lookaround -- a
+            # different character set, a literal, a lookahead that asserts
+            # content -- must still fall back rather than be guessed at.
+            r"^(?=zoom)zoom$",       # positive lookahead asserting a literal
+            r"^(?<!a)b$",            # lookbehind on a different character
+            r"^(?<![\w])b$",         # boundary-like, but not the exact token
+            r"^b(?![\s-])$",         # lookahead over a different class
         ]
         for raw in exotic:
             pattern = _pattern_dict(
@@ -400,6 +494,75 @@ class TestRawExpressionFallback:
 # ---------------------------------------------------------------------------
 # 3. Degradation (spec section 14: never crash)
 # ---------------------------------------------------------------------------
+
+
+class TestOptionalArticleCollapse:
+    """The optional definite article does not multiply the variant count.
+
+    wh-explainer-allowlist-landmarks. Each of the four landmark navigation
+    patterns holds three groups -- (?:the )?, (?:beginning|start) and
+    (?:the )? -- so the cross-product was 2 x 2 x 2 = 8, over _MAX_VARIANTS,
+    and the Pattern Manager quoted a raw regular expression at the user for
+    four ordinary navigation commands.
+
+    David ruled on 2026-08-25 that the article collapses rather than the
+    limit rising: raising _MAX_VARIANTS to 8 would print eight
+    near-identical phrases per command, half of them unnatural English such
+    as "go to start of word".
+    """
+
+    def test_a_landmark_pattern_with_two_articles_now_translates(self):
+        variants, suffixes = _parse_trigger(
+            r"^go to (?:the )?(?:beginning|start) of (?:the )?word$"
+        )
+        assert variants == [
+            "go to the beginning of the word",
+            "go to the start of the word",
+        ]
+        assert suffixes == []
+
+    def test_the_article_free_form_is_no_longer_shown(self):
+        """The accepted trade-off, pinned so a change to it is deliberate.
+
+        The user no longer reads that "go to end" also works. Both forms
+        still MATCH; only the display changes.
+        """
+        variants, _ = _parse_trigger(r"^go to (?:the )?end$")
+        assert variants == ["go to the end"]
+
+    def test_an_article_nested_in_another_group_also_collapses(self):
+        """The collapse fires inside a branch parse, not only at top level.
+
+        wh-explainer-allowlist-landmarks.1.1. _parse_trigger recurses into
+        each alternation branch with _branch=True, so an optional article
+        sitting INSIDE another group collapses during that recursion. Three
+        shipped patterns reach this path and all three lost a displayed
+        form in this change: "^maximize(?: (?:the )?window)?$" and its
+        identically shaped minimize twin dropped "maximize window" /
+        "minimize window", and "^(?:show (?:the )?)?desktop$" dropped
+        "show desktop".
+
+        Without this test, confining the collapse to top-level parses is
+        invisible: all 43 tests in this module stay green while those three
+        patterns silently regain the dropped forms. Measured, not assumed.
+        """
+        variants, _ = _parse_trigger(r"^maximize(?: (?:the )?window)?$")
+        assert variants == ["maximize the window", "maximize"]
+
+        variants, _ = _parse_trigger(r"^(?:show (?:the )?)?desktop$")
+        assert variants == ["show the desktop", "desktop"]
+
+    def test_an_optional_demonstrative_still_shows_both_forms(self):
+        """Only the article collapses. "this " is a demonstrative.
+
+        Measured over speech/config/patterns.toml: "the " is the only
+        article appearing as an optional group body, in 30 places, and
+        there is no optional "a " or "an ". The optional "this " appears in
+        5 places and keeps both spoken forms, because collapsing it would
+        drop a form the user genuinely says.
+        """
+        variants, _ = _parse_trigger(r"^select (?:this )?word$")
+        assert variants == ["select this word", "select word"]
 
 
 class TestDegradation:
@@ -440,15 +603,54 @@ class TestDegradation:
 # 4. All-shipped-patterns coverage
 # ---------------------------------------------------------------------------
 
-# Spec section 10 demands the raw-fallback exceptions be enumerated. Every
-# trigger expression currently shipped in speech/config/patterns.toml is
+# Spec section 10 demands the raw-fallback exceptions be enumerated. Almost
+# every trigger expression shipped in speech/config/patterns.toml is
 # translatable by the explainer (anchors, \b, literal words, optional
 # letters/spaces, literal alternation groups incl. one nested optional
-# group, (.+)/(.*), (\d+)/(\d+)?, \s+/\s*, bare trailing .*), so the
-# allowlist is EMPTY. If a future shipped pattern genuinely needs an exotic
-# construct, add its exact expression here with a comment saying why it
-# cannot be translated.
-FALLBACK_ALLOWLIST: set = set()
+# group, (.+)/(.*), (\d+)/(\d+)?, \s+/\s*, bare trailing .*). If a future
+# shipped pattern genuinely needs an exotic construct, add its exact
+# expression here with a comment saying why it cannot be translated.
+#
+def _va_range_fallbacks() -> set:
+    r"""The wh-voice-access-parity range captures (spliced 2026-08-24).
+
+    100 triggers, four regular families: .1.5 go/move navigation, .1.4
+    format-over-a-range, .1.3 delete/cut/copy-over-a-range, and .1.2
+    select-by-range. Every one falls back for the same recorded reason as
+    the remaining unsupported forms: an optional numeric capture ((\d+)? or
+    (?: (\d+))?) that the translator cannot render as a friendly phrase
+    yet -- the same number-range summarization gap tracked as
+    wh-pattern-explainer-grid. Generated instead of hand-listed so the
+    family shapes stay readable and a wording change fails this test
+    loudly instead of drowning in a 100-line literal diff.
+    """
+    out = set()
+    units = ["characters?", "lines?", "paragraphs?", "words?"]
+    nav_pairs = [
+        ("up", ["lines?", "paragraphs?"]),
+        ("down", ["lines?", "paragraphs?"]),
+        ("left", ["characters?", "words?"]),
+        ("right", ["characters?", "words?"]),
+    ]
+    for direction, nav_units in nav_pairs:
+        for unit in nav_units:
+            out.add(rf"^(?:go|move) {direction}(?: (\d+))? {unit}$")
+    for verb in ["bold", "italicize", "underline", "capitalize",
+                 "lower ?case", "upper ?case"]:
+        for unit in units:
+            out.add(rf"^{verb} next (\d+)?\s*{unit}$")
+            out.add(rf"^{verb} (?:previous|last) (\d+)?\s*{unit}$")
+    for verb in ["delete", "cut", "copy"]:
+        for direction in ["next", "previous", "last"]:
+            for unit in units:
+                out.add(rf"^{verb} {direction}\s+(\d+)?\s*{unit}$")
+    for unit in units:
+        out.add(rf"^select next\s+(\d+)?\s*{unit}$")
+        out.add(rf"^select (?:previous|last)\s+(\d+)?\s*{unit}$")
+    return out
+
+
+FALLBACK_ALLOWLIST: set = _va_range_fallbacks()
 
 
 def _shipped_patterns():
@@ -494,6 +696,71 @@ class TestShippedPatternCoverage:
             f"FALLBACK_ALLOWLIST. Unexpected: {sorted(fallbacks - FALLBACK_ALLOWLIST)}; "
             f"no longer falling back: {sorted(FALLBACK_ALLOWLIST - fallbacks)}"
         )
+
+
+class TestShownPhrasesMatchTheirOwnPattern:
+    """Every phrase the Pattern Manager prints must match its own pattern.
+
+    This is the property the explainer owes the user: a person who says
+    exactly the words on the screen has to get the command. Nothing checked
+    it before wh-explainer-branch-space-loss, and 49 phrases across 27 of
+    the shipped patterns failed it -- the screen said 'go to theend' for a
+    pattern that only matches 'go to the end'.
+
+    Two kinds of pattern are skipped, and each skip is counted so a change
+    that quietly stops translating cannot hide here:
+
+    - A pattern the translator refuses. It shows the raw expression, so
+      there is no spoken phrase to check. TestShippedPatternCoverage pins
+      that set separately.
+    - A pattern with a suffix clause, from (.+), (\\d+) and friends. Its
+      phrase is only the start of what the user says, so a whole-string
+      match is the wrong check.
+    """
+
+    def _translated(self):
+        """Yield (doc_id, raw, variants) for every pattern that translates."""
+        for pat in _shipped_patterns():
+            raw = pat.get("pattern", "")
+            try:
+                variants, suffixes = _parse_trigger(raw)
+            except _UnsupportedConstruct:
+                continue
+            if suffixes:
+                continue
+            yield pat.get("doc_id", "<no doc_id>"), raw, variants
+
+    def test_every_shown_phrase_matches_the_pattern_it_belongs_to(self):
+        broken = []
+        for doc_id, raw, variants in self._translated():
+            expr = re.compile(raw, re.IGNORECASE)
+            for variant in variants:
+                if expr.fullmatch(variant) is None:
+                    broken.append(f"{doc_id}: {variant!r} does not match {raw!r}")
+        assert broken == [], (
+            "The Pattern Manager shows spoken phrases that do not match "
+            "their own pattern, so a user who says them gets nothing:\n  "
+            + "\n  ".join(broken)
+        )
+
+    def test_the_check_covers_most_of_the_shipped_patterns(self):
+        """Guard the guard: a translator that refused everything would make
+        the test above pass over an empty set."""
+        checked = list(self._translated())
+        shipped = _shipped_patterns()
+        assert len(checked) >= len(shipped) // 2, (
+            f"only {len(checked)} of {len(shipped)} shipped patterns reached "
+            "the phrase check; the translator or the skip rules changed"
+        )
+
+    def test_no_shown_phrase_has_stray_whitespace(self):
+        """The whole-pattern cleanup must survive the branch fix."""
+        bad = []
+        for doc_id, _raw, variants in self._translated():
+            for variant in variants:
+                if variant != variant.strip() or "  " in variant:
+                    bad.append(f"{doc_id}: {variant!r}")
+        assert bad == [], "phrases with stray whitespace: " + ", ".join(bad)
 
 
 # ---------------------------------------------------------------------------

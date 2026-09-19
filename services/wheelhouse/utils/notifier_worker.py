@@ -156,15 +156,17 @@ class NotifierWorker:
 
     def _deliver(self, payload: NotifierPayload) -> None:
         try:
-            from plyer import notification
+            # wh-notice-length-guard: send_notice measures both fields
+            # first, and returns False when there is no backend -- which
+            # is what keeps the delivered count honest.
+            from utils.notice_text import send_notice
 
-            if hasattr(notification, "notify") and callable(notification.notify):
-                notification.notify(
-                    title=payload.title,
-                    message=payload.message,
-                    app_name="Wheelhouse",
-                    timeout=10,
-                )
+            if send_notice(
+                payload.title,
+                payload.message,
+                app_name="Wheelhouse",
+                timeout=10,
+            ):
                 self._delivered += 1
         except Exception as exc:
             _safe_stderr_write(

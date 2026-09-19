@@ -66,12 +66,27 @@ from version_info import get_startup_banner
 import collections
 
 # Import from shared libraries
-from shared_audio.diagnostics import run_mic_check, LoopStallTracker
-from shared_audio.capture import get_audio_provider, get_available_providers, AudioConfig
+from shared_audio.diagnostics import (
+    run_mic_check, LoopStallTracker, UtteranceLoadMetrics,
+    IterationSegments, CaptureLoadReporter, STALL_PREFIX)
+# get_available_providers is deliberately absent from this list. It was
+# on the dev side of this merge, and wh-capture-winrt-required A2 deleted
+# it: the factory has one path, so there is nothing to enumerate, and
+# shared/tests/test_audio_capture_factory.py asserts the name is gone.
+from shared_audio.capture import (
+    get_audio_provider,
+    AudioConfig,
+    CAPTURE_BACKEND_NAME,
+)
 from shared_audio.silero_vad import SileroVAD
 from shared_audio.agc import SmartAGC, AGCConfig
 from shared_audio.thread_priority import elevate_current_thread
 from shared_stt.ws_forwarder import WSForwarder, WebSocketLogHandler
+from shared_stt.startup_refusal import (
+    REFUSAL_EXIT_CODE,
+    send_startup_failed_notice,
+    wait_for_notice_connection,
+)
 
 from usage_metrics import UsageMetrics
 
@@ -214,6 +229,238 @@ def restart_completion_notification(error):
     if error is None:
         return ("STT Service", "Service restart completed. Ready.", "ready")
     return startup_notification(error)
+
+
+def capture_failure_notification(detail):
+    """The (title, message, kind) triple for a microphone that never
+    became ready. Same title and same kind as the credentials failure,
+    because WheelHouse routes on those and the two are the same event to
+    the user: the provider started and will not transcribe
+    (wh-provider-ready-handshake criterion 2)."""
+    return (
+        "Google STT",
+        "Failed to start - transcription will not work: " + detail,
+        "startup_failed",
+    )
+
+
+def capture_handshake(startup_error, mic):
+    """Ask capture whether the microphone actually opened.
+
+    Split out of startup_notification_after_capture for
+    wh-provider-ready-handshake.1.2, which serializes the shutdown read
+    with the send under a lock. This wait must stay OUTSIDE that lock.
+    main()'s finally records the shutdown before it calls mic.stop(),
+    and mic.stop() is what releases this wait, so a lock held across the
+    wait would block the finally on its first statement while the call
+    that would release the wait is one the finally has not reached: a
+    deadlock that hangs shutdown.
+
+    The credentials failure keeps precedence and capture is not even
+    asked in that case, which is why the answer is None rather than
+    False: a provider with no client will not transcribe whatever the
+    microphone does, and waiting out the handshake would only delay a
+    notice that will not mention the microphone.
+
+    wait_ready() is the capture provider's own answer, defined at
+    shared_audio/capture/base.py. It is called with no argument so the
+    15 second default stays in one place: a number here could disagree
+    with the provider's own (criterion 5).
+    """
+    if startup_error is not None:
+        return None
+    ready = mic.wait_ready()
+    return ready
+
+
+def startup_notification_after_capture(startup_error, ready, mic,
+                                       shutting_down):
+    """The startup notification triple, given capture's own answer.
+
+    wh-provider-ready-handshake criterion 1. The preflight result alone
+    says nothing about the microphone, so a device that never opened
+    used to produce "Transcription service ready" while every spoken
+    word was discarded.
+
+    ready is the answer capture_handshake already collected, and is None
+    when the credentials branch meant capture was never asked. It is a
+    required positional argument: a default would let a future call site
+    make the decision without the handshake in silence.
+
+    The credentials failure keeps precedence: a missing keyfile is a
+    real failure whether or not the server is stopping, and only the
+    capture-side answer is suppressed.
+
+    Returns None, and the caller sends nothing, when shutting_down is
+    set by the time the handshake has answered. mic.stop() clears
+    _capture_alive and joins the capture thread
+    (shared_audio/capture/winrt_capture.py:260-298), that thread sets
+    _setup_done on every exit path (:620), and wait_ready() then returns
+    False with setup_error still None (:356) -- the same answer a dead
+    microphone gives. main()'s finally block stops the microphone before
+    it stops the forwarder, so the notice would still reach the user.
+
+    The event is read AFTER the wait, not before it, because the wait is
+    the window the stop lands in: a check taken before it answers a
+    question about a moment that has already passed when the answer
+    arrives. This function holds no lock of its own; the caller runs it
+    and the send under one, so nothing can set the event between this
+    read and that send (wh-provider-ready-handshake.1.2).
+    """
+    if startup_error is not None:
+        return startup_notification(startup_error)
+    if shutting_down.is_set():
+        return None
+    if ready:
+        return startup_notification(None)
+    detail = (
+        getattr(mic, "setup_error", None)
+        or "audio capture did not become ready in time"
+    )
+    # Google writes no "Audio capture started" success line, so there is
+    # nothing to move for criterion 3; this is the half of it that
+    # applies, and it is what an operator reads in wheelhouse.log to
+    # tell a dead microphone from a quiet one.
+    logger.error(f"[startup] Audio capture is not ready: {detail}")
+    return capture_failure_notification(detail)
+
+
+def begin_shutdown(shutting_down, notification_lock):
+    """Record the shutdown, under the lock the announcement thread holds
+    across its own read of that record and its send.
+
+    wh-provider-ready-handshake.1.2. The read and the send used to be
+    two steps, and a stop landing between them still reached the user:
+    WSForwarder.stop() gives already-queued frames a bounded 2.0 second
+    chance to deliver before it stops its loop
+    (shared_stt/ws_forwarder.py:912-953), so the notice the read exists
+    to suppress was delivered, not discarded.
+
+    A function rather than two lines inline in main()'s finally, so a
+    test can request the stop through the same path the shutdown takes.
+    A bare shutting_down.set() takes no lock and would pin nothing.
+
+    This waits only for as long as the announcement thread holds the
+    lock, and that thread does no waiting under it: the handshake wait
+    happens before the lock is taken, and send_notification hands the
+    frame to the forwarder's loop with run_coroutine_threadsafe without
+    waiting on the future (ws_forwarder.py:848-874).
+    """
+    with notification_lock:
+        shutting_down.set()
+
+
+def send_startup_notification(forwarder, startup_error, mic, shutting_down,
+                              notification_lock, capture_failed):
+    """Tell WheelHouse how the start went, once capture has answered.
+
+    A module-level function rather than the closure this used to be, so
+    the behaviour can be pinned by a test without running main().
+
+    Nothing is sent when startup_notification_after_capture returns
+    None, which is its answer for a shutdown that landed inside the
+    handshake; that function's docstring carries the mechanism.
+
+    capture_failed is the only route from this thread back to main()'s
+    loop (wh-capture-winrt-required A9). It is set when the microphone
+    never opened, and main() reads it in its loop condition and in its
+    return statement. It is required and positional for the same reason
+    as ready and notification_lock: a default would let a future call
+    site drop the whole mechanism in silence, and the provider would go
+    back to running deaf. parakeet and distil need no event -- their
+    announcement is a method and writes self.running directly -- but
+    main() keeps its run state in a LOCAL that no other thread can
+    assign to, so the answer has to travel as an object.
+
+    A credentials failure does NOT set it. That failure has its own
+    recovery: the restart handler reloads the config, rebuilds the
+    client, and sends a fresh completion notice
+    (wh-google-creds-file-picker.1.12). Capture is not even asked in
+    that case, which is why capture_handshake answers None rather than
+    False, and `not ready` alone would read that None as a failure.
+
+    notification_lock is held across the decision and the send, and
+    begin_shutdown holds the same lock around the event's set, so no
+    stop can land between the read of that event and the moment the
+    notice is decided and handed to the forwarder's loop
+    (wh-provider-ready-handshake.1.2). That hand-off is the boundary,
+    not queue acceptance: send_notification schedules the queue put
+    with asyncio.run_coroutine_threadsafe and never waits on the future
+    (ws_forwarder.py:848-874), so the lock does not order that put at
+    all: the forwarder's loop can run it before or after this lock is
+    released (wh-provider-ready-handshake.1.3, .1.4). It is a required
+    positional argument for the same reason as ready: a default would
+    let a future call site skip the serialization in silence. The handshake wait
+    happens before the lock is taken -- capture_handshake's docstring
+    says why a lock held across it deadlocks the shutdown.
+
+    The 3.0 second sleep that stood where the handshake now stands is
+    gone and nothing replaces it. It was described as waiting for the
+    WebSocket to connect. WSForwarder.start() creates its loop and queue
+    synchronously on the calling thread (shared_stt/ws_forwarder.py:163-
+    164) before starting its background thread, and send_notification
+    returns early only when those are None (:859-860). The queue is
+    unbounded, and the disconnect clear runs only after a connection
+    that had already succeeded is lost -- both call sites (:474, :496)
+    sit inside "if was_connected". A notice queued before the first
+    connection is delivered when that connection opens.
+    """
+    ready = capture_handshake(startup_error, mic)
+    with notification_lock:
+        triple = startup_notification_after_capture(
+            startup_error, ready, mic, shutting_down)
+        if triple is None:
+            logger.info(
+                "[startup] Server is stopping - no startup notification "
+                "will be sent")
+            return
+        title, message, kind = triple
+        logger.info(
+            f"[startup] Sending startup notification to Wheelhouse: "
+            f"{message}")
+        # capture_backend names the path this run actually took, and
+        # only on the ready notice (wh-capture-winrt-required A4). The
+        # other two outcomes this function sends -- a credentials
+        # failure, which never asked capture at all, and a capture
+        # failure, which is a provider with no microphone -- have
+        # nothing true to say about which path was taken.
+        forwarder.send_notification(
+            title, message, kind=kind,
+            capture_backend=CAPTURE_BACKEND_NAME if kind == "ready" else "")
+        # AFTER the send, never before (wh-capture-winrt-required A9).
+        # The notice is the only thing that tells the user why, and an
+        # event set first would be read by main()'s loop condition while
+        # this thread was still deciding, so the shutdown could reach
+        # forwarder.stop() before the notice was handed over.
+        #
+        # startup_error is None is what keeps this to a CAPTURE failure:
+        # ready is None on the credentials branch, and `not ready` alone
+        # would read that None as a microphone that never opened.
+        if startup_error is None and not ready:
+            logger.error(
+                "[startup] Audio capture never became ready - stopping "
+                "the service")
+            # The send above only QUEUED that notice
+            # (wh-capture-winrt-required.1.4). WSForwarder.stop() drains
+            # the queue only when a connection is already live; with no
+            # connection it sets its stop event at once and the sender
+            # loop never reads the queue again. Setting the event here
+            # takes main()'s loop into its finally, which stops the
+            # forwarder, so a capture failure that landed before the
+            # first handshake finished discarded the one message the
+            # user could act on -- even when WheelHouse accepted the
+            # connection a moment later.
+            #
+            # The same bounded wait the constructor refusal uses, not a
+            # second copy of it. Under notification_lock, which
+            # begin_shutdown() takes in that finally before
+            # forwarder.stop() runs, so the teardown cannot begin while
+            # the notice is still waiting. It waits on the forwarder's
+            # own thread, which nothing in the shutdown has to reach
+            # first, so holding the lock across it cannot deadlock.
+            wait_for_notice_connection(forwarder, forwarder.uri)
+            capture_failed.set()
+    logger.info("[startup] Startup notification sent")
 
 
 def report_streamer_start_failure(forwarder, exc, already_notified):
@@ -376,9 +623,10 @@ def capture_lost_audio(consecutive_none_reads, drops_now, drops_last_seen):
     (wh-google-creds-file-picker.1.27): a run of consecutive None
     reads (capture stopped; see _CAPTURE_GAP_NONE_READS), and an
     advance of the backend's queue-overflow drop counter (frames were
-    discarded on queue.Full -- both the sounddevice and WinRT backends
-    count these in the 'drops' field of the AudioProvider adapter's
-    get_stats(); see read_drop_count). Either
+    discarded on queue.Full -- the WinRT backend counts these in the
+    'drops' field of the AudioProvider adapter's get_stats(), and the
+    sounddevice backend did too until it was deleted
+    (wh-portaudio-capture-removal); see read_drop_count). Either
     means the frame in hand may be the tail of a command begun during
     the gap, so the caller must apply audio_discontinuity before
     processing it.
@@ -389,14 +637,71 @@ def capture_lost_audio(consecutive_none_reads, drops_now, drops_last_seen):
     )
 
 
+def sample_consumer_iteration(mic, stall_tracker, utterance_load,
+                              segments=None, reporter=None):
+    """Close one loop iteration: sample it, and say if it stalled.
+
+    wh-stt-load-metrics.4. Two things report the queue: the stall
+    tracker's periodic [stall] line and the per-utterance [load-diag]
+    line. Reading mic.get_queue_size() twice would give them two
+    different depths for one iteration -- and the two would disagree
+    most under exactly the load these lines exist to measure, since
+    that is when the queue moves fastest between the reads.
+
+    Returns the lines to log, in order: the stall message, and after
+    it the segment breakdown of the iteration that stall was measured
+    across (wh-stt-load-metrics.4 G3, which asks for the CALL the loop
+    waits on, not only the fact that it waited). Empty when nothing
+    stalled, which is almost every iteration.
+
+    The order is what makes the breakdown true: this runs at the TOP
+    of an iteration, so the segment accumulators still hold the
+    PREVIOUS iteration's work -- the one the tracker just measured a
+    gap across. Reading them before segments.start() is the whole
+    point; starting first would report an iteration that has not
+    happened yet.
+
+    Both collaborators are optional so the stall tracker, which has
+    watched this loop since wh-stt-audio-consumer-behind-realtime,
+    depends on neither.
+
+    reporter is the shared CaptureLoadReporter, present only while
+    [debug] log_load_diagnostics is on. It reads the queue itself and
+    records the same tracker, so when it is here the depth comes from
+    it rather than from a second read of the queue -- the one-reading
+    rule above, kept across the two ways in. It returns a list that may
+    hold the stall message beside an outage notice and the periodic
+    window summary, so the breakdown is placed by matching the stall
+    prefix rather than by position.
+    """
+    if reporter is not None:
+        raw_lines = reporter.record_iteration()
+        depth = reporter.last_queue_depth
+    else:
+        depth = mic.get_queue_size()
+        stall_msg = stall_tracker.record(depth)
+        raw_lines = [stall_msg] if stall_msg else []
+    if utterance_load is not None:
+        utterance_load.sample(depth)
+    lines = []
+    for line in raw_lines:
+        lines.append(line)
+        if segments is not None and line.startswith(STALL_PREFIX):
+            lines.append(segments.report())
+    if segments is not None:
+        segments.start()
+    return lines
+
+
 def read_drop_count(mic):
     """Read the backend's queue-overflow drop counter.
 
     mic is the AudioProvider adapter from get_audio_provider(), whose
     public statistics method is get_stats() -- get_stats_snapshot()
-    exists only on the private stream inside the sounddevice adapter,
-    and calling it on the adapter crashes the provider at startup on
-    every backend (wh-google-creds-file-picker.1.28). A provider whose
+    existed only on the private stream inside the sounddevice adapter,
+    which is deleted (wh-portaudio-capture-removal), and calling it on
+    the adapter crashed the provider at startup on every backend
+    (wh-google-creds-file-picker.1.28). A provider whose
     stats lack the 'drops' field degrades to no-drop-detection rather
     than killing the audio loop.
     """
@@ -508,7 +813,8 @@ class StabilityProcessor:
 class UtteranceManager:
     """Manages utterance state transitions and finalization triggers."""
     
-    def __init__(self, config, stability_processor, forwarder=None, usage_metrics=None):
+    def __init__(self, config, stability_processor, forwarder=None,
+                 usage_metrics=None, load_metrics=None):
         self.state = UtteranceState.IDLE
         self.current_utterance_id = 0
         self.last_speech_ts = None
@@ -520,6 +826,22 @@ class UtteranceManager:
         
         # Usage metrics tracking
         self.usage_metrics = usage_metrics
+
+        # wh-stt-load-metrics.4: the per-utterance load line, or None
+        # on a server built before it. Optional and last so every
+        # existing construction of this class reads unchanged.
+        self.load_metrics = load_metrics
+        # wh-stt-load-metrics.4.1.1: which thread may touch the load
+        # metrics. Four of the five finalization triggers run on the
+        # consumer loop; the EOS fallback runs on a threading.Timer.
+        # Neither UtteranceLoadMetrics nor LoopStallTracker's utterance
+        # window locks, so a finish() from the timer thread can read
+        # and zero counters the loop is writing that instant, and the
+        # stall it drops appears on no line at all. This class is built
+        # by the loop before the loop starts, so the identity recorded
+        # here is the loop's.
+        self._load_metrics_thread = threading.get_ident()
+        self._pending_load_lines = deque()
         self.last_billed_seconds = 0  # From Google's total_billed_time
         self.last_final_text = ""  # Track text for metrics
         self.utterance_start_time = None  # Track when utterance started for duration fallback
@@ -563,6 +885,24 @@ class UtteranceManager:
         # Reset final-driven management flag for new utterance
         self.utterance_has_final = False
         self.utterance_start_time = time.time()  # Track start for billing fallback
+
+        # wh-stt-load-metrics.4.1.1: a line the timer thread queued has
+        # still to read the window start() is about to zero, and the
+        # next utterance can begin in the same iteration the EOS
+        # fallback finalized in. Draining here, not only at the top of
+        # the loop, is what makes the order certain.
+        self.emit_pending_load_lines()
+
+        # wh-stt-load-metrics.4: open this utterance's load window.
+        # Guarded because this is a diagnostic on the consumer loop's
+        # own thread: it may cost its own numbers, never the utterance.
+        if self.load_metrics:
+            try:
+                self.load_metrics.start()
+            except Exception as e:
+                logger.warning(f'[load-diag] window not opened for '
+                               f'UTT-{self.current_utterance_id}: '
+                               f'{type(e).__name__}: {e}')
 
         # Cancel any pending EOS fallback timer
         if self.eos_fallback_timer:
@@ -823,6 +1163,30 @@ class UtteranceManager:
                 )
                 logger.info(f"[ws] UTT-{self.current_utterance_id}: sent empty fallback final ({reason})")
         
+        # wh-stt-load-metrics.4: what this utterance cost. Queued only
+        # for an utterance that really just ended: the stale
+        # finalization branch at the top returns before here, and
+        # forwarder.send_final above can raise out of the WebSocket,
+        # which leaves the utterance ACTIVE and reaches no line.
+        # wh-stt-load-metrics.4.1.1: queued rather than written,
+        # because the EOS fallback timer runs this method on its own
+        # thread and the metrics have one owner thread.
+        # wh-stt-load-metrics.4.1.3: queued immediately before the
+        # transition below, because that transition and the
+        # stream_should_close flag beside it are what let the consumer
+        # loop close this utterance and open the next one. After them
+        # the timer thread can be descheduled at any point, or wait
+        # inside the synchronous usage CSV write; the reopen then
+        # increments current_utterance_id, drains this queue and zeroes
+        # the load window, so a request queued later names the wrong
+        # utterance and reads the wrong window. The id goes into a
+        # local for the same reason: a reopen must not be able to
+        # relabel a request already queued.
+        if self.load_metrics:
+            finalized_utterance_id = self.current_utterance_id
+            self._pending_load_lines.append(
+                (finalized_utterance_id, reason))
+
         # Transition state and mark utterance as closed
         self.state = UtteranceState.FINALIZED
         self.closed_utterances.add(self.current_utterance_id)
@@ -857,8 +1221,56 @@ class UtteranceManager:
             self.last_billed_seconds = 0
             self.last_final_text = ""
             self.utterance_start_time = None
-            
+
+        # wh-stt-load-metrics.4.1.1: on the loop's own thread the line
+        # is written here and now, which keeps the other four
+        # finalization triggers writing it exactly where they did. The
+        # EOS fallback timer's thread leaves it for the loop's next
+        # drain, so that thread never touches the metrics.
+        if threading.get_ident() == self._load_metrics_thread:
+            self.emit_pending_load_lines()
+
         return None
+
+    def emit_pending_load_lines(self):
+        """Write the load lines finalizations have queued.
+
+        wh-stt-load-metrics.4.1.1. Called only from the consumer loop's
+        thread -- the top of each iteration, and start_new_utterance
+        before it zeroes the window -- so UtteranceLoadMetrics and the
+        stall tracker's utterance window keep a single owner thread and
+        need no lock. A lock would have to be held across finish() by
+        whichever thread got there first, and under the CPU load this
+        feature exists to measure that is the audio loop waiting on a
+        descheduled timer thread.
+
+        Reading the counters one iteration after an EOS finalization
+        adds that iteration's samples to the utterance's tail, which is
+        where they belong: the speech ended, and the loop kept
+        measuring the same queue.
+
+        crewcut: a line still queued when the loop exits is lost. The
+        loop breaks on a finalization made on its own thread, which
+        this method has already written by then, so only an EOS
+        fallback landing in the same instant can be dropped. Draining
+        once more after the loop would close it, at the cost of a call
+        site inside the restart and shutdown chain that this bead's G4
+        holds still.
+        """
+        # deque.append and deque.popleft are each atomic, and this is the
+        # only method that pops, so the emptiness test cannot lose a race
+        # with the timer thread's append: the worst it can do is leave a
+        # line that has just arrived for the next drain. Entries exist
+        # only when load_metrics does -- _finalize_utterance appends
+        # inside that same guard.
+        while self._pending_load_lines and self.load_metrics:
+            utterance_id, reason = self._pending_load_lines.popleft()
+            try:
+                logger.info(self.load_metrics.finish(utterance_id, reason))
+            except Exception as e:
+                logger.warning(f'[load-diag] no line for '
+                               f'UTT-{utterance_id}: '
+                               f'{type(e).__name__}: {e}')
 
 
 def handle_set_log_level(level: str):
@@ -889,9 +1301,10 @@ def main(argv=None):
     responses to the *StabilityProcessor* for overlay mode transmission. Implements **hybrid
     final/EOS utterance management** that prefers Google final results but arms a 500 ms EOS
     fallback to guarantee clean shutdown when finals never arrive. Integrates silence finalization
-    and automatic restart handling for PortAudio overflow events, emitting WebSocket notifications
-    for the WheelHouse GUI when restarts occur.
-    :data_in: Raw audio frames from `MicrophoneStream`, Google streaming responses (partials, finals,
+    and logs audio input overflow reported by the capture backend, naming the place that backend
+    loses frames. No restart follows an overflow and no notification is sent for one: the callback
+    below writes the line and returns (wh-stt-overflow-config-and-wording, criterion 4).
+    :data_in: Raw audio frames from `WinRTAudioCapture`, Google streaming responses (partials, finals,
     EOS events, stability scores), overflow telemetry.
     :data_out: Stable/final messages via `WSForwarder`, and optional restart/health notifications.
     """
@@ -910,8 +1323,19 @@ def main(argv=None):
     forwarder = None
     
     def on_overflow_detected():
-        """Log overflow events without triggering restart."""
-        logger.info("[overflow] WARNING: PortAudio buffer overflow detected (audio frames may be dropped)")
+        """Log overflow events without triggering restart.
+
+        The phrase comes from the backend rather than from this line. It
+        used to say PortAudio whichever backend was running, and WinRT --
+        the shipped default -- has no PortAudio in its capture path at
+        all; it drops a chunk when the queue it hands to the forwarder is
+        full. `mic` is assigned further down in this same function, before
+        capture starts, so it is bound by the time this callback can run.
+        """
+        logger.info(
+            f"[overflow] audio input overflow at {mic.OVERFLOW_SOURCE}; "
+            f"frames may be dropped"
+        )
 
     def handle_add_hint(hint: str):
         """Handle add_hint command from WheelHouse via WebSocket.
@@ -963,8 +1387,10 @@ def main(argv=None):
     def handle_restart_service():
         """Handle restart_service command from WheelHouse via WebSocket.
         
-        This callback is invoked when the user clicks "Restart Transcription Service"
-        in the WheelHouse GUI menu. It triggers a graceful restart of the STT process.
+        This callback is invoked when WheelHouse sends the restart_service command.
+        The "Restart Transcription Service" menu item that once sent a full restart
+        was removed on 2026-09-04 (wh-remove-restart-credentials-items). It triggers a
+        graceful restart of the STT process.
         """
         restart_requested_event.set()
         logger.info("[restart] Restart requested via WebSocket command")
@@ -973,35 +1399,6 @@ def main(argv=None):
                 "STT Service",
                 "Restarting transcription service..."
             )
-
-    def handle_hard_restart_service():
-        """Handle hard_restart_service command from WheelHouse via WebSocket.
-        
-        This triggers a FULL process restart by creating a restart flag file
-        and exiting cleanly. The launcher.py supervisor detects the flag and
-        restarts the process, allowing all config changes (including device) to apply.
-        """
-        nonlocal stop
-        logger.info("[restart] Hard restart requested - creating flag file and exiting")
-        if forwarder:
-            forwarder.send_notification(
-                "STT Service",
-                "Full restart in progress..."
-            )
-        
-        # Create restart flag file for launcher to detect
-        from shared_stt.launcher import get_restart_flag_path
-        flag_path = get_restart_flag_path("google_stt")
-        
-        try:
-            with open(flag_path, "w") as f:
-                f.write("restart")
-            logger.info(f"[restart] Created restart flag: {flag_path}")
-        except IOError as e:
-            logger.info(f"[restart] Failed to create restart flag: {e}")
-        
-        # Signal main loop to exit
-        stop = True
 
     def handle_shutdown():
         """Handle shutdown command from WheelHouse via WebSocket.
@@ -1040,6 +1437,8 @@ def main(argv=None):
             keyword=getattr(cfg, 'wake_word_keyword', 'computer'),
             model_dir=getattr(cfg, 'wake_word_model_dir', 'data/wake_words'),
             sensitivity=getattr(cfg, 'wake_word_sensitivity', 0.5),
+            diagnostic_logger=logger,
+            log_load_diagnostics=cfg.debug.log_load_diagnostics,
         )
         logger.info(f"[wake_word] Detector initialized: keyword='{cfg.wake_word_keyword}', "
              f"mode='{wake_word_mode}', loaded={wake_word_detector.is_loaded}")
@@ -1052,9 +1451,10 @@ def main(argv=None):
         - reason="idle": transcription disabled due to idle timeout -> start listening
         - reason="audio"/"sonos": transcription disabled for other reasons
 
-        The wake_word_mode determines which reasons trigger listening:
-        - "idle_recovery": only activates on reason="idle"
-        - "push_to_talk": activates on reason in ("idle", "audio", "sonos")
+        The wake_word_mode decides which reasons arm the detector, and the
+        rule itself lives in one shared function so all three providers
+        apply the same one (shared_stt.wake_word_detector.
+        WAKE_WORD_ARMED_REASONS).
         """
         nonlocal wake_word_listening
         if reason is None:
@@ -1062,11 +1462,12 @@ def main(argv=None):
             return
         if not wake_word_detector or not wake_word_detector.is_loaded:
             return
-        should_activate = False
-        if wake_word_mode == "idle_recovery":
-            should_activate = (reason == "idle")
-        elif wake_word_mode == "push_to_talk":
-            should_activate = (reason in ("idle", "audio", "sonos"))
+        # Imported here, the way the detector itself is above: the module
+        # pulls in openwakeword, and a run with the wake word switched off
+        # must not pay for it. Past the is_loaded check the module is
+        # already imported, so this costs a sys.modules lookup.
+        from shared_stt.wake_word_detector import should_listen_for_wake_word
+        should_activate = should_listen_for_wake_word(wake_word_mode, reason)
         if should_activate:
             wake_word_detector.reset()
             wake_word_listening = True
@@ -1074,7 +1475,8 @@ def main(argv=None):
         else:
             wake_word_listening = False
 
-    # Initialize audio capture using factory (auto-selects WinRT or sounddevice)
+    # Initialize audio capture. The factory returns the WinRT capture or
+    # raises; there is no other backend to select (wh-capture-winrt-required).
     audio_config = AudioConfig(
         rate=cfg.rate,
         channels=1,
@@ -1082,12 +1484,62 @@ def main(argv=None):
         device_index=cfg.device_index
     )
     
-    available_backends = get_available_providers()
-    logger.info(f"[audio] Available backends: {available_backends}")
-    
     # Overflow detection: log warnings but do NOT restart the mic.
     # Restarting the mic causes a 2s+ blackout that often makes things worse.
-    mic = get_audio_provider(config=audio_config, overflow_callback=on_overflow_detected)
+    try:
+        mic = get_audio_provider(config=audio_config, overflow_callback=on_overflow_detected)
+    except RuntimeError as exc:
+        # The factory refuses when winsdk is missing and there is no second
+        # capture path to fall back to (wh-capture-winrt-required). Starting
+        # anyway would leave a provider that looks healthy and transcribes
+        # silence, so the only answer is to say why and quit.
+        #
+        # The notice goes out over a forwarder that lives only for it: the
+        # forwarder this function builds does not exist yet at this point
+        # (it is constructed about seventy lines below, after the dozen
+        # callbacks it takes), and moving that construction up to serve an
+        # exit path would reorder the whole startup.
+        #
+        # str(exc) rather than a second copy of the wording: the message is
+        # user-visible and belongs to the factory that owns the rule.
+        #
+        # A --list-devices run gets the refusal on stderr and NO notice.
+        # WheelHouse never launched that run, so a notice from it is
+        # addressed to nobody -- and it cannot be ignored either, because
+        # the notice names the provider, so WheelHouse would read it
+        # against whatever launch of google_stt happens to be live and
+        # would end a session the person never touched. The flag is
+        # handled about twenty lines below, past the capture both paths
+        # need, so the branch has to be made here.
+        #
+        # cfg.forward_ws is the second run that gets stderr and no notice.
+        # Every notice this provider sent before this change rode the
+        # forwarder built under "if cfg.forward_ws:" below, so all of them
+        # inherited that gate without saying so. This one does not ride it
+        # -- send_startup_failed_notice opens a forwarder of its own -- so
+        # the gate has to be read here or a run with forwarding turned off
+        # still reaches out to WheelHouse and can end a live session
+        # (wh-capture-winrt-required.1.1).
+        if args.list_devices or not cfg.forward_ws:
+            print(str(exc), file=sys.stderr)
+            return 1
+        send_startup_failed_notice(
+            "Google STT",
+            str(exc),
+            cfg.ws_host,
+            cfg.ws_port,
+            provider_name="google_stt",
+            emits_eos=True,
+        )
+        # REFUSAL_EXIT_CODE, not 1: a normal WheelHouse launch runs
+        # launcher.py, whose supervisor restarts any nonzero exit
+        # reached inside its fifteen-second crash window, and this
+        # refusal is reached in well under a second
+        # (wh-capture-winrt-required.1.5). The --list-devices and
+        # forwarding-off branch above keeps 1: no supervisor watches a
+        # run a person started by hand, and 1 is what a console user
+        # expects from a command that printed an error.
+        return REFUSAL_EXIT_CODE
     logger.info("[overflow] Overflow logging enabled (auto-restart disabled)")
     
     if args.list_devices:
@@ -1164,7 +1616,6 @@ def main(argv=None):
                 transcription_enabled_event=transcription_enabled_event,
                 add_hint_callback=handle_add_hint,
                 restart_callback=handle_restart_service,
-                hard_restart_callback=handle_hard_restart_service,
                 on_disconnect_callback=handle_wheelhouse_disconnect,
                 on_reconnect_callback=handle_wheelhouse_reconnect,
                 shutdown_callback=handle_shutdown,
@@ -1175,10 +1626,28 @@ def main(argv=None):
                 provider_name="google_stt",
                 emits_eos=True,
             )
+            # Declared in the capabilities frame on every connect
+            # (wh-audio-suppression-control C3). Set before start(), which
+            # is what spawns the thread that sends the frame. An attribute
+            # rather than a constructor argument because the parakeet and
+            # distil servers build their forwarder before their detector
+            # exists; this provider builds the detector first and assigns
+            # the same way for one shape across the three.
+            forwarder.wake_word_available = bool(
+                wake_word_detector and wake_word_detector.is_loaded
+            )
             forwarder.start()
             # Enable log forwarding to WheelHouse via the standard Python logging
-            # pipeline (wh-6wp). The handler queues records through WSForwarder,
-            # so logs emitted before the WebSocket connects are buffered, not lost.
+            # pipeline (wh-6wp). A record written while WheelHouse is unreachable
+            # is DROPPED, not buffered: WebSocketLogHandler counts it per logger
+            # and reports the total on the first record sent after the connection
+            # returns (wh-forwarded-log-time-order criterion 4). The
+            # "[ws] forwarding to ..." line below MAY be one of those counted
+            # records, and which way it goes is not fixed: forwarder.start()
+            # only spawns the sender thread, so whether that thread has
+            # connected by the time the line is written depends on the
+            # scheduler. Before the gate moved down, the plain handler had no
+            # reachability test at all and the line was queued either way.
             ws_log_handler = WebSocketLogHandler(forwarder, source="Google STT")
             ws_log_handler.setLevel(logging.INFO)
             logger.addHandler(ws_log_handler)
@@ -1210,10 +1679,65 @@ def main(argv=None):
     if startup_error is not None:
         logger.error(f"[startup] Credentials preflight failed: {startup_error}")
 
+    # wh-stt-load-metrics.4 G3: which call the loop was waiting on when
+    # it stalled. Always on -- a stall that only happens under load is
+    # not one anybody can reproduce with a debug flag turned on
+    # afterwards, and the cost is five clock reads an iteration. Built
+    # above the stall tracker because the tracker's busy figure is this
+    # timer's running work total.
+    segments = IterationSegments()
+
+    # Always-on consumer stall detection: when this loop goes unscheduled
+    # for seconds (whole-machine CPU saturation) the capture queue fills
+    # and frames drop with no other direct log signature
+    # (wh-stt-audio-consumer-behind-realtime). Built here, above the
+    # utterance manager, because the per-utterance load line reads this
+    # tracker's utterance window (wh-stt-load-metrics.4).
+    #
+    # wh-stt-load-metrics.4 G1a: with [debug] log_load_diagnostics on,
+    # the same CaptureLoadReporter the Parakeet loop runs. Its periodic
+    # "[load-diag] window=" line is what the load-test tool waits for
+    # before it starts a run, so without it a Google run could not be
+    # measured by that tool at all. It brings its own stall tracker,
+    # and the loop uses that one rather than building a second: two
+    # trackers would apply one threshold twice and report the same
+    # stall in two places with different numbers.
+    #
+    # busy_seconds is the loop's own measured work, so the [stall]
+    # figure is the gap MINUS that work rather than plain wall time.
+    # It must be the sum of the timed spans, not the iteration's wall
+    # time less the capture wait: wall time carries the unaccounted
+    # figure, unaccounted IS the descheduling, and subtracting it would
+    # quiet the [stall] line exactly when the machine is worst.
+    #
+    # timeout=0.0 on capture_ready so the loop never waits on it; a
+    # capture still opening answers False, which is the right answer
+    # for a window with no frames yet (wh-stt-load-metrics.1.13).
+    load_reporter = (
+        CaptureLoadReporter(
+            capture_stats=mic.get_stats,
+            busy_seconds=lambda: segments.work_seconds,
+            capture_ready=lambda: mic.wait_ready(timeout=0.0),
+        )
+        if cfg.debug.log_load_diagnostics else None
+    )
+    stall_tracker = (
+        load_reporter.stall_tracker if load_reporter else LoopStallTracker())
+
+    # wh-stt-load-metrics.4: what one utterance cost. mic.get_stats is
+    # the AudioProvider adapter's public statistics method -- the same
+    # one read_drop_count uses, and not get_stats_snapshot, which
+    # existed only on the private stream inside the sounddevice adapter
+    # before that adapter was deleted (wh-portaudio-capture-removal).
+    utterance_load = UtteranceLoadMetrics(
+        capture_stats=mic.get_stats, stall_tracker=stall_tracker)
+
     # Initialize stability-based processing and usage metrics
     usage_metrics = UsageMetrics()
     stability_processor = StabilityProcessor(cfg, forwarder)
-    utterance_mgr = UtteranceManager(cfg, stability_processor, forwarder, usage_metrics)
+    utterance_mgr = UtteranceManager(cfg, stability_processor, forwarder,
+                                     usage_metrics,
+                                     load_metrics=utterance_load)
 
     # Initialize Smart AGC (uses config from config_loader)
     agc_config = AGCConfig(
@@ -1234,12 +1758,6 @@ def main(argv=None):
     last_overflow_diag_log = time.time()
     vad_times_ms = []
     agc_times_ms = []
-
-    # Always-on consumer stall detection: when this loop goes unscheduled for
-    # seconds (whole-machine CPU saturation) the capture queue fills and
-    # frames drop with no other direct log signature
-    # (wh-stt-audio-consumer-behind-realtime).
-    stall_tracker = LoopStallTracker()
 
     if cfg.agc.enabled:
         logger.info(f"[agc] Smart AGC enabled: target_rms={cfg.agc.target_speech_rms}, max_gain={cfg.agc.max_gain}")
@@ -1314,32 +1832,80 @@ def main(argv=None):
     # Display startup banner with version info
     logger.info(f"[startup] {get_startup_banner('Google STT Server')} - Ready")
 
-    # Send "ready" notification to WheelHouse after WebSocket connects
+    # Send the startup notification to WheelHouse.
     # Note: WheelHouse sends "Loading..." notification when starting provider,
-    # so we only need to send the "ready" notification here
+    # so we only need to send the outcome here.
+    # "ready" only when the startup credentials preflight passed
+    # (wh-google-creds-file-picker.1.4) AND capture answered the
+    # readiness handshake (wh-provider-ready-handshake criterion 1); the
+    # kind lets WheelHouse route a failure instead of suppressing it
+    # (wh-google-creds-file-picker.1.5).
+    # The wait keeps its own thread, so a slow microphone open delays
+    # only the notice and the frame loop below starts at once
+    # (criterion 5). mic.start() ran above, which is what makes
+    # wait_ready() a question capture can answer.
+    # An intentional shutdown that lands inside that wait releases
+    # wait_ready() as False, which is the same answer a dead microphone
+    # gives, and mic.stop() runs before forwarder.stop() in the finally
+    # below -- so without this event the user reads a startup failure
+    # for a stop they asked for.
+    shutting_down = threading.Event()
+    # Serializes that event's set with the announcement thread's read of
+    # it and the send that follows, so a stop cannot land between the
+    # two (wh-provider-ready-handshake.1.2). Created whether or not
+    # there is a forwarder, because the finally records the shutdown
+    # through it either way.
+    notification_lock = threading.Lock()
+    # The announcement thread's only route back to the loop below
+    # (wh-capture-winrt-required A9). `stop` is a local of this
+    # function, so a daemon thread cannot assign to it; parakeet and
+    # distil write self.running instead, which is the same answer
+    # through an object they both already have.
+    #
+    # Without this the loop kept turning on a capture that will never
+    # produce a chunk: the notice went out, the process stayed up, and
+    # the provider ran deaf for as long as the machine did.
+    capture_failed = threading.Event()
     if forwarder:
-        def send_ready_notification():
-            time.sleep(3.0)  # Wait for WebSocket to connect and service to be ready
-
-            # "ready" only when the startup credentials preflight passed
-            # (wh-google-creds-file-picker.1.4); the kind lets WheelHouse
-            # route the failure case instead of suppressing it
-            # (wh-google-creds-file-picker.1.5).
-            title, message, kind = startup_notification(startup_error)
-            logger.info(f"[startup] Sending startup notification to Wheelhouse: {message}")
-            forwarder.send_notification(title, message, kind=kind)
-            logger.info("[startup] Startup notification sent")
-        threading.Thread(target=send_ready_notification, daemon=True).start()
+        threading.Thread(
+            target=send_startup_notification,
+            args=(forwarder, startup_error, mic, shutting_down,
+                  notification_lock, capture_failed),
+            daemon=True,
+        ).start()
 
     if cfg.debug.log_lifecycle:
         logger.info(f"[vad-debug] lead_in_ms={cfg.vad_lead_in_ms}")
 
     # Main processing loop
     try:
-        while not stop:
-            stall_msg = stall_tracker.record(mic.get_queue_size())
-            if stall_msg:
-                logger.info(stall_msg)
+        # capture_failed ends the loop the way `stop` does
+        # (wh-capture-winrt-required A9): the microphone never opened,
+        # so every further iteration is work done on audio that will
+        # never arrive. The read below has a 0.05 second timeout, so
+        # this condition is reached within one of those.
+        while not stop and not capture_failed.is_set():
+            # wh-stt-load-metrics.4.1.4: the sample first, the drain
+            # second. sample_consumer_iteration measures the iteration
+            # that has just ended, and through that iteration the
+            # utterance a queued line reports was still the active one,
+            # so its samples belong to that utterance's tail -- which is
+            # what emit_pending_load_lines' own docstring says. Draining
+            # first would read and clear the utterance stall window
+            # before this iteration's stall had been recorded into it;
+            # the next start() would then discard that stall, and the
+            # stall that coincides with the end of an utterance would
+            # reach no per-utterance line at all.
+            for stall_line in sample_consumer_iteration(
+                    mic, stall_tracker, utterance_load, segments,
+                    reporter=load_reporter):
+                logger.info(stall_line)
+
+            # wh-stt-load-metrics.4.1.1: the EOS fallback timer runs on
+            # its own thread and only queues its line. It is written
+            # here, on the thread that samples the same counters, so the
+            # two cannot overlap.
+            utterance_mgr.emit_pending_load_lines()
 
             # Check if restart was requested (thread-safe check)
             if restart_requested_event.is_set():
@@ -1429,7 +1995,17 @@ def main(argv=None):
                     title, message, kind = restart_completion_notification(
                         restart_cred_error
                     )
-                    forwarder.send_notification(title, message, kind=kind)
+                    # The same rule as the startup notice above: this is
+                    # the OTHER notification that can carry kind="ready",
+                    # and a ready that named no capture path would leave
+                    # WheelHouse's log line missing after every
+                    # credentials reload (wh-capture-winrt-required A4).
+                    # The capture is untouched by that reload, so the
+                    # name is as true here as at startup.
+                    forwarder.send_notification(
+                        title, message, kind=kind,
+                        capture_backend=(
+                            CAPTURE_BACKEND_NAME if kind == "ready" else ""))
 
                 # The restart block pauses this loop for seconds on purpose;
                 # don't count that pause as a scheduling stall.
@@ -1462,6 +2038,16 @@ def main(argv=None):
             current_time = time.time()
             
             # 1. Process Google STT responses
+            # Timed as one segment (wh-stt-load-metrics.4 G3) because
+            # the time can land in any of its parts: the response poll,
+            # the forwarding done inside process_google_response, or the
+            # 0.2s sleep that follows a None response. That sleep runs
+            # only after '[fsm] Streamer signaled an error or session
+            # end.', so that line sits inside the stall when the sleep
+            # was the cause (boss note, 2026-09-05). Bracketed rather
+            # than wrapped in a with-block: every exit from the loop
+            # below is a break, so control always reaches the add.
+            responses_started = time.perf_counter()
             if streaming:
                 while True:
                     try:
@@ -1487,8 +2073,12 @@ def main(argv=None):
                     except queue.Empty:
                         break
 
+            segments.add('responses',
+                         (time.perf_counter() - responses_started) * 1000)
+
             # 2. Read audio and process via AGC + Deflector
-            audio_frame = mic.read(timeout=0.05)
+            with segments.timing('mic_read'):
+                audio_frame = mic.read(timeout=0.05)
             if audio_frame is None:
                 mic_none_count += 1
                 if mic_none_count == 40:
@@ -1511,11 +2101,13 @@ def main(argv=None):
             mic_none_count = 0
             
             # Get raw VAD result BEFORE AGC (for AGC's is_speech parameter)
-            if cfg.debug.log_overflow_diagnostics:
-                t0 = time.perf_counter()
+            # Unconditional since wh-stt-load-metrics.4: the segment
+            # breakdown needs these two on every iteration, and three
+            # perf_counter reads cost less than the branch they
+            # replace. The [overflow-diag] averages below stay gated.
+            t0 = time.perf_counter()
             raw_is_speech = vad.is_speech(audio_frame)
-            if cfg.debug.log_overflow_diagnostics:
-                t1 = time.perf_counter()
+            t1 = time.perf_counter()
 
             # wh-2w8y: log every VAD transition while the gate is open. This
             # captures whether Silero saw silence inside a single utterance
@@ -1534,8 +2126,10 @@ def main(argv=None):
 
             # Apply Smart AGC - normalizes audio and adapts to noise floor
             agc_audio = agc.process(audio_frame, raw_is_speech)
+            t2 = time.perf_counter()
+            segments.add('vad', (t1 - t0) * 1000)
+            segments.add('agc', (t2 - t1) * 1000)
             if cfg.debug.log_overflow_diagnostics:
-                t2 = time.perf_counter()
                 vad_times_ms.append((t1 - t0) * 1000)
                 agc_times_ms.append((t2 - t1) * 1000)
             
@@ -1579,11 +2173,14 @@ def main(argv=None):
                 agc_avg = sum(agc_times_ms) / len(agc_times_ms) if agc_times_ms else 0
                 agc_max = max(agc_times_ms) if agc_times_ms else 0
 
-                stall_snap = stall_tracker.snapshot_and_reset_window()
-
+                # wh-stt-load-metrics.4 G1a: the stall summary that used
+                # to sit here is now the load reporter's periodic window
+                # line, under [debug] log_load_diagnostics. Two summaries
+                # of one tracker cannot coexist: each reads the window by
+                # emptying it, so whichever ran second would report a
+                # window the first had already taken.
                 logger.info(f"[overflow-diag] queues: mic={mic_q}, google_audio={streamer_diag.get('audio_q_size', 0)}, google_resp={streamer_diag.get('response_q_size', 0)}")
                 logger.info(f"[overflow-diag] timing: vad={vad_avg:.1f}ms(max={vad_max:.1f}), agc={agc_avg:.2f}ms(max={agc_max:.2f})")
-                logger.info(f"[overflow-diag] loop stalls: count={stall_snap['stalls']}, max_gap={stall_snap['max_gap_ms']:.0f}ms")
 
                 vad_times_ms.clear()
                 agc_times_ms.clear()
@@ -1640,8 +2237,9 @@ def main(argv=None):
 
                 # Send audio to Google
                 if streaming and utterance_mgr.state == UtteranceState.ACTIVE:
-                    for chunk in valid_chunks:
-                        streaming.send_audio(chunk)
+                    with segments.timing('send'):
+                        for chunk in valid_chunks:
+                            streaming.send_audio(chunk)
 
 
             # 4.5. Check for hard no-text timeout (catches persistent intermittent noise)
@@ -1671,6 +2269,13 @@ def main(argv=None):
                     break
 
     finally:
+        # Before mic.stop(): stopping capture is what releases the
+        # announcement thread's wait_ready(), so the event has to be set
+        # first or that thread reads it too late. begin_shutdown takes
+        # the notification lock, so the set cannot land between that
+        # thread's read of the event and its send
+        # (wh-provider-ready-handshake.1.2).
+        begin_shutdown(shutting_down, notification_lock)
         if streaming:
             logger.info(f"[metrics] Total stream active time: {streaming.elapsed:.2f}s (program exit)")
             streaming.finish()
@@ -1678,8 +2283,27 @@ def main(argv=None):
         if forwarder:
             forwarder.stop()
 
+    # wh-capture-winrt-required A9. `sys.exit(main())` is the last line
+    # of this module, so this IS the process exit code: a provider that
+    # could not open its microphone must not look like a clean stop, or
+    # WheelHouse sees a healthy exit for a service that never worked.
+    # After the finally, so the teardown above runs either way.
+    #
+    # REFUSAL_EXIT_CODE, not 1: the supervisor in
+    # shared_stt/launcher.py restarts any nonzero exit reached inside
+    # its fifteen-second crash window, and a machine whose client builds
+    # quickly reaches this refusal well inside it
+    # (wh-capture-winrt-required.1.5).
+    if capture_failed.is_set():
+        return REFUSAL_EXIT_CODE
     return 0
 
 
 if __name__ == "__main__":
+    from shared_audio.thread_priority import elevate_current_process
+
+    # High process class keeps STT streaming scheduled under a saturated
+    # CPU; the Below Normal class the Task Scheduler launch chain hands
+    # down starves it (wh-process-priority-durable).
+    elevate_current_process()
     sys.exit(main())

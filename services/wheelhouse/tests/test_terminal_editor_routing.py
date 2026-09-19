@@ -1,4 +1,7 @@
 """Tests for terminal editor event routing in LogicController."""
+import asyncio
+import logging
+
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
@@ -70,14 +73,39 @@ class TestTerminalEditorRouting:
 
     @pytest.mark.asyncio
     async def test_te_cancelled_sends_cancel_command(self):
-        """te_cancelled from GUI should send terminal_editor_cancelled to Input."""
+        """te_cancelled with no rid still notifies Input (recovery shape)."""
         from main import LogicController
         controller = MagicMock(spec=LogicController)
         controller.app = AsyncMock()
         controller._handle_te_cancelled = LogicController._handle_te_cancelled.__get__(controller)
+        controller._te_control_send_retry_delays = ()
+        controller._send_te_control_command = (
+            LogicController._send_te_control_command.__get__(controller)
+        )
 
         await controller._handle_te_cancelled()
-        controller.app.send_command.assert_called_once_with("terminal_editor_cancelled")
+        controller.app.send_request.assert_called_once_with(
+            "terminal_editor_cancelled", {"request_id": ""},
+        )
+
+    @pytest.mark.asyncio
+    async def test_te_cancelled_forwards_request_id(self):
+        """wh-overlay-slow-uia-stale-badges.14.17: the cancellation
+        carries the session's show request_id so the input-process
+        proxy can ignore a cancellation from an older session."""
+        from main import LogicController
+        controller = MagicMock(spec=LogicController)
+        controller.app = AsyncMock()
+        controller._handle_te_cancelled = LogicController._handle_te_cancelled.__get__(controller)
+        controller._te_control_send_retry_delays = ()
+        controller._send_te_control_command = (
+            LogicController._send_te_control_command.__get__(controller)
+        )
+
+        await controller._handle_te_cancelled("rid-s")
+        controller.app.send_request.assert_called_once_with(
+            "terminal_editor_cancelled", {"request_id": "rid-s"},
+        )
 
 
 class TestTerminalEditorAckRouting:
@@ -111,9 +139,13 @@ class TestTerminalEditorAckRouting:
         controller = MagicMock(spec=LogicController)
         controller.app = AsyncMock()
         controller._handle_te_event_ack = LogicController._handle_te_event_ack.__get__(controller)
+        controller._te_control_send_retry_delays = ()
+        controller._send_te_control_command = (
+            LogicController._send_te_control_command.__get__(controller)
+        )
 
         await controller._handle_te_event_ack("rid-1", "show", 99999)
-        controller.app.send_command.assert_called_once_with(
+        controller.app.send_request.assert_called_once_with(
             "_te_event_ack",
             {"request_id": "rid-1", "op": "show", "editor_hwnd": 99999},
         )
@@ -127,4 +159,216 @@ class TestTerminalEditorAckRouting:
         controller._handle_te_event_ack = LogicController._handle_te_event_ack.__get__(controller)
 
         await controller._handle_te_event_ack("", "show", 12345)
-        controller.app.send_command.assert_not_called()
+        controller.app.send_request.assert_not_called()
+
+
+class TestTeControlSendRetry:
+    """wh-overlay-slow-uia-stale-badges.14.19 + .14.24: the two
+    terminal-editor control handlers send through an ACKNOWLEDGED
+    request with bounded retries. Queue acceptance is not delivery
+    (.14.10), so send_command's True said nothing about whether the
+    Input process ever received the cleanup; the handlers now use
+    send_request and treat an error response, a TimeoutError, or an
+    IpcDeliveryError as a failed attempt. An ERROR is logged when
+    every attempt fails."""
+
+    def _controller(self, send_results):
+        from main import LogicController
+        controller = MagicMock(spec=LogicController)
+        controller.app = AsyncMock()
+        controller.app.send_request = AsyncMock(side_effect=send_results)
+        controller._te_control_send_retry_delays = (0.0,)
+        controller._send_te_control_command = (
+            LogicController._send_te_control_command.__get__(controller)
+        )
+        controller._handle_te_cancelled = (
+            LogicController._handle_te_cancelled.__get__(controller)
+        )
+        controller._handle_te_event_ack = (
+            LogicController._handle_te_event_ack.__get__(controller)
+        )
+        return controller
+
+    @pytest.mark.asyncio
+    async def test_te_cancelled_acknowledged_on_first_attempt(self):
+        controller = self._controller([{"status": "ok"}])
+        await controller._handle_te_cancelled("rid-s")
+        assert controller.app.send_request.await_count == 1
+        call = controller.app.send_request.await_args_list[0]
+        assert call.args == (
+            "terminal_editor_cancelled", {"request_id": "rid-s"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_te_cancelled_retries_after_timeout(self):
+        controller = self._controller([
+            asyncio.TimeoutError(), {"status": "ok"},
+        ])
+        await controller._handle_te_cancelled("rid-s")
+        assert controller.app.send_request.await_count == 2
+        for call in controller.app.send_request.await_args_list:
+            assert call.args == (
+                "terminal_editor_cancelled", {"request_id": "rid-s"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_te_cancelled_retries_after_error_response(self):
+        controller = self._controller([
+            {"error": True, "message": "boom"}, {"status": "ok"},
+        ])
+        await controller._handle_te_cancelled("rid-s")
+        assert controller.app.send_request.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_te_cancelled_logs_error_when_all_attempts_fail(self, caplog):
+        from app import IpcDeliveryError
+        controller = self._controller([
+            IpcDeliveryError("queue full"), asyncio.TimeoutError(),
+        ])
+        with caplog.at_level(logging.ERROR):
+            await controller._handle_te_cancelled("rid-s")
+        assert controller.app.send_request.await_count == 2
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_te_event_ack_retries_after_timeout(self):
+        controller = self._controller([
+            asyncio.TimeoutError(), {"status": "ok"},
+        ])
+        await controller._handle_te_event_ack("rid-1", "show", 99999)
+        assert controller.app.send_request.await_count == 2
+        for call in controller.app.send_request.await_args_list:
+            assert call.args == (
+                "_te_event_ack",
+                {"request_id": "rid-1", "op": "show", "editor_hwnd": 99999},
+            )
+
+    @pytest.mark.asyncio
+    async def test_te_event_ack_logs_error_when_all_attempts_fail(self, caplog):
+        controller = self._controller([
+            asyncio.TimeoutError(), asyncio.TimeoutError(),
+        ])
+        with caplog.at_level(logging.ERROR):
+            await controller._handle_te_event_ack("rid-1", "show", 99999)
+        assert controller.app.send_request.await_count == 2
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+class TestInputProcTeControlHandlers:
+    """wh-overlay-slow-uia-stale-badges.14.24: the input-process side of
+    the acknowledged terminal-editor control protocol. Both handlers put
+    the standard ok/error response when the IPC envelope carries a
+    request_id, and stay silent for fire-and-forget callers -- the same
+    contract as _handle_add_soft_allow_tuple (.14.14)."""
+
+    def _q(self):
+        from queue import Queue
+        return Queue()
+
+    def test_cancelled_handler_acks_success(self):
+        from input_proc import _handle_terminal_editor_cancelled
+        q = self._q()
+        ui = MagicMock()
+        _handle_terminal_editor_cancelled(
+            {"request_id": "rid-s"}, "env-1", q, ui,
+        )
+        ui.terminal_editor_cancelled.assert_called_once_with("rid-s")
+        resp = q.get_nowait()
+        assert resp["request_id"] == "env-1"
+        assert resp["status"] == "ok"
+        assert resp["action"] == "terminal_editor_cancelled"
+        assert q.empty()
+
+    def test_cancelled_handler_fire_and_forget_no_response(self):
+        from input_proc import _handle_terminal_editor_cancelled
+        q = self._q()
+        ui = MagicMock()
+        _handle_terminal_editor_cancelled({"request_id": "rid-s"}, None, q, ui)
+        ui.terminal_editor_cancelled.assert_called_once_with("rid-s")
+        assert q.empty()
+
+    def test_cancelled_handler_error_response_on_exception(self):
+        from input_proc import _handle_terminal_editor_cancelled
+        q = self._q()
+        ui = MagicMock()
+        ui.terminal_editor_cancelled.side_effect = RuntimeError("boom")
+        _handle_terminal_editor_cancelled(
+            {"request_id": "rid-s"}, "env-2", q, ui,
+        )
+        resp = q.get_nowait()
+        assert resp["request_id"] == "env-2"
+        assert resp.get("error") is True
+        assert resp["action"] == "terminal_editor_cancelled"
+        assert q.empty()
+
+    def test_te_event_ack_handler_acks_success(self):
+        from input_proc import _handle_te_event_ack_command
+        q = self._q()
+        ui = MagicMock()
+        _handle_te_event_ack_command(
+            {"request_id": "rid-1", "op": "show", "editor_hwnd": 555},
+            "env-3", q, ui,
+        )
+        ui.terminal_editor.on_event_ack.assert_called_once_with(
+            "rid-1", "show", 555,
+        )
+        resp = q.get_nowait()
+        assert resp["request_id"] == "env-3"
+        assert resp["status"] == "ok"
+        assert resp["action"] == "_te_event_ack"
+        assert q.empty()
+
+    def test_te_event_ack_handler_zero_hwnd_becomes_none(self):
+        from input_proc import _handle_te_event_ack_command
+        q = self._q()
+        ui = MagicMock()
+        _handle_te_event_ack_command(
+            {"request_id": "rid-1", "op": "submit_complete", "editor_hwnd": 0},
+            None, q, ui,
+        )
+        ui.terminal_editor.on_event_ack.assert_called_once_with(
+            "rid-1", "submit_complete", None,
+        )
+        assert q.empty()
+
+    def test_te_event_ack_handler_error_response_on_exception(self):
+        from input_proc import _handle_te_event_ack_command
+        q = self._q()
+        ui = MagicMock()
+        ui.terminal_editor.on_event_ack.side_effect = RuntimeError("boom")
+        _handle_te_event_ack_command(
+            {"request_id": "rid-1", "op": "show", "editor_hwnd": 5},
+            "env-4", q, ui,
+        )
+        resp = q.get_nowait()
+        assert resp["request_id"] == "env-4"
+        assert resp.get("error") is True
+        assert resp["action"] == "_te_event_ack"
+        assert q.empty()
+
+
+class TestCancelIdentityChain:
+    """wh-overlay-slow-uia-stale-badges.14.17: the session request_id
+    travels the whole cancellation chain -- GUI window signal ->
+    GuiManager forward -> Logic -> Input dispatch -> proxy."""
+
+    def test_gui_manager_forwards_cancel_request_id(self):
+        from gui import GuiManager
+        manager = MagicMock(spec=GuiManager)
+        manager.commands_to_logic_queue = MagicMock()
+
+        GuiManager._on_te_cancelled(manager, "rid-s")
+        manager.commands_to_logic_queue.put_nowait.assert_called_once_with(
+            {"action": "te_cancelled", "request_id": "rid-s"},
+        )
+
+    def test_ui_action_handler_routes_rid_to_gated_cleanup(self):
+        from ui.ui_action_handler import UIActionHandler
+        handler = MagicMock(spec=UIActionHandler)
+        handler.terminal_editor = MagicMock()
+
+        UIActionHandler.terminal_editor_cancelled(handler, "rid-s")
+        handler.terminal_editor.cancelled_by_gui.assert_called_once_with(
+            "rid-s",
+        )
+        handler.terminal_editor.force_cleanup.assert_not_called()

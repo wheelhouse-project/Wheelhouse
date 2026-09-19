@@ -151,7 +151,6 @@ dependencies = [
     { name = "tomlkit", marker = "sys_platform == 'win32'" },
     { name = "websockets", marker = "sys_platform == 'win32'" },
     { name = "wheelhouse-shared", marker = "sys_platform == 'win32'" },
-    { name = "winsdk", marker = "sys_platform == 'win32'" },
 ]
 
 [package.dev-dependencies]
@@ -173,7 +172,6 @@ requires-dist = [
     { name = "tomlkit", specifier = ">=0.13.2,<0.14" },
     { name = "websockets", specifier = ">=15.0.1,<16" },
     { name = "wheelhouse-shared", editable = "../shared" },
-    { name = "winsdk", specifier = ">=1.0.0b10,<2" },
 ]
 
 [package.metadata.requires-dev]
@@ -560,6 +558,7 @@ dependencies = [
     { name = "pysilero-vad", marker = "sys_platform == 'win32'" },
     { name = "sounddevice", marker = "sys_platform == 'win32'" },
     { name = "websockets", marker = "sys_platform == 'win32'" },
+    { name = "winsdk", marker = "sys_platform == 'win32'" },
 ]
 
 [package.metadata]
@@ -569,6 +568,7 @@ requires-dist = [
     { name = "pysilero-vad", specifier = ">=3.0,<3.3" },
     { name = "sounddevice", specifier = ">=0.5" },
     { name = "websockets", specifier = ">=13.0,<16" },
+    { name = "winsdk", marker = "sys_platform == 'win32'", specifier = "==1.0.0b10" },
 ]
 
 [package.metadata.requires-dev]

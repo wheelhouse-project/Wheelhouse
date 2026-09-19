@@ -569,7 +569,7 @@ class TestAudioProcessorIsReady:
 class TestTrailingSilenceHoldbackRelease:
     """Tests for releasing held-back words when trailing silence is detected.
 
-    Bug scenario: "new paragraph" spoken standalone with Zipformer.
+    Bug scenario: "new paragraph" spoken standalone with a streaming provider.
     The N-1 holdback sends stable "new" but holds back "paragraph".
     The final arrives after ~1300ms (VAD silence detection), but the speech
     processor's 700ms replacement timeout fires first, dictating "new"
@@ -659,7 +659,7 @@ class TestTrailingSilenceHoldbackRelease:
         """Held-back word should NOT be released while speech is ongoing.
 
         Normal N-1 holdback must remain active during speech to prevent
-        sending partial words that Zipformer hasn't committed yet.
+        sending partial words that the recognizer hasn't committed yet.
         """
         chunk = self._make_chunk(512)
 
@@ -972,3 +972,129 @@ class TestAudioProcessorHallucinationSuppression:
 
         mock_forwarder.send_final.assert_not_called()
         mock_forwarder.send_stable.assert_not_called()
+
+
+class TestFinalConfidencePassthrough:
+    """wh-7ou.7.1.1: an engine that exposes get_final_confidence() has its
+    measurement block attached to the final WebSocket message as the optional
+    "confidence" object. Engines without the method (Parakeet, Google) send
+    finals unchanged, and anything that is not a plain dict is discarded --
+    the block goes straight into a JSON payload."""
+
+    BLOCK = {
+        "min_word_probability": 0.85,
+        "max_no_speech_prob": 0.014,
+        "peak_avg_logprob": -0.63,
+        "word_count": 1,
+        "suppressed": False,
+        "rescued": True,
+    }
+
+    @pytest.fixture
+    def mock_forwarder(self):
+        forwarder = Mock()
+        forwarder.send_vad_start = Mock()
+        forwarder.send_stable = Mock()
+        forwarder.send_final = Mock()
+        return forwarder
+
+    def _make_engine(self):
+        engine = Mock()
+        engine.process_audio = Mock()
+        engine.is_ready = Mock(return_value=True)
+        engine.get_result = Mock(return_value="hello world")
+        engine.is_endpoint = Mock(return_value=True)
+        engine.reset = Mock()
+        engine.last_result = ""
+        return engine
+
+    def _make_processor(self, mock_engine, mock_forwarder, **kwargs):
+        from shared_stt.audio_processor import AudioProcessor
+        processor = AudioProcessor(
+            engine=mock_engine,
+            forwarder=mock_forwarder,
+            sample_rate=16000,
+            **kwargs,
+        )
+        processor.vad = Mock()
+        processor.vad.is_speech = Mock(return_value=True)
+        processor.vad.reset = Mock()
+        processor.agc = Mock()
+        processor.agc.process = Mock(return_value=b"\x00" * 512)
+        processor.agc.on_stt_outcome = Mock()
+        processor.lead_in_buffer = Mock()
+        processor.lead_in_buffer.get_lead_in = Mock(return_value=b"")
+        processor.lead_in_buffer.clear = Mock()
+        processor.lead_in_buffer.add = Mock()
+        return processor
+
+    def test_final_carries_engine_confidence_block(self, mock_forwarder):
+        """Endpoint final passes the engine's block as confidence=..."""
+        engine = self._make_engine()
+        engine.get_final_confidence = Mock(return_value=dict(self.BLOCK))
+        processor = self._make_processor(engine, mock_forwarder)
+        processor._vad_gate_open = True
+
+        processor._process_speech_audio(b"\x00" * 512)
+
+        mock_forwarder.send_final.assert_called_once_with(
+            "hello world", 0, trace_id=ANY, confidence=self.BLOCK
+        )
+
+    def test_engine_without_method_sends_final_unchanged(self, mock_forwarder):
+        """Engines that never grew get_final_confidence (Parakeet, Google)
+        must keep the pre-existing send_final call shape."""
+        engine = self._make_engine()
+        del engine.get_final_confidence  # Mock() would auto-create it
+        processor = self._make_processor(engine, mock_forwarder)
+        processor._vad_gate_open = True
+
+        processor._process_speech_audio(b"\x00" * 512)
+
+        mock_forwarder.send_final.assert_called_once_with(
+            "hello world", 0, trace_id=ANY
+        )
+
+    def test_none_block_sends_final_unchanged(self, mock_forwarder):
+        """A Whisper engine before any final inference returns None: the
+        final goes out without a confidence kwarg."""
+        engine = self._make_engine()
+        engine.get_final_confidence = Mock(return_value=None)
+        processor = self._make_processor(engine, mock_forwarder)
+        processor._vad_gate_open = True
+
+        processor._process_speech_audio(b"\x00" * 512)
+
+        mock_forwarder.send_final.assert_called_once_with(
+            "hello world", 0, trace_id=ANY
+        )
+
+    def test_non_dict_block_is_discarded(self, mock_forwarder):
+        """A bare Mock engine auto-creates get_final_confidence returning a
+        Mock object; only a plain dict may reach the JSON payload."""
+        engine = self._make_engine()  # get_final_confidence left as auto-Mock
+        processor = self._make_processor(engine, mock_forwarder)
+        processor._vad_gate_open = True
+
+        processor._process_speech_audio(b"\x00" * 512)
+
+        mock_forwarder.send_final.assert_called_once_with(
+            "hello world", 0, trace_id=ANY
+        )
+
+    def test_force_endpoint_final_carries_confidence_block(self, mock_forwarder):
+        """The VAD-silence force-finalize path attaches the block too: it is
+        the endpoint path Distil-Whisper actually takes in production."""
+        engine = self._make_engine()
+        engine.is_endpoint = Mock(return_value=False)
+        engine.finalize = Mock()
+        engine.get_final_confidence = Mock(return_value=dict(self.BLOCK))
+        processor = self._make_processor(
+            engine, mock_forwarder, force_endpoint_silence_ms=500
+        )
+
+        processor._force_finalize_and_reset()
+
+        mock_forwarder.send_final.assert_called_once_with(
+            "hello world", 0, trace_id=ANY, confidence=self.BLOCK
+        )

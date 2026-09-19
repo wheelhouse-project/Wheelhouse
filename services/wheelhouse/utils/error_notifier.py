@@ -20,8 +20,7 @@ import logging
 import time
 from typing import Dict, Optional
 
-from plyer import notification
-
+from utils.notice_text import send_notice
 from utils.notifier_worker import NotifierPayload, NotifierWorker
 
 
@@ -134,17 +133,18 @@ class ErrorNotificationHandler(logging.Handler):
         return message[: max_length - 17] + "...\n(See log)"
 
     def _send_notification(self, record: logging.LogRecord):
-        """Inline plyer call (legacy/unwired path)."""
+        """Send the notice directly (legacy/unwired path).
+
+        wh-notice-length-guard: ``_format_message`` above already caps
+        the body at 180 characters, well inside plyer's field. The
+        title does not go through that cap, and ``send_notice``
+        measures both -- a second layer behind the first, not a
+        replacement for it.
+        """
         try:
             title = self._format_title(record)
             message = self._format_message(record)
-            if hasattr(notification, "notify") and callable(notification.notify):
-                notification.notify(
-                    title=title,
-                    message=message,
-                    app_name="Wheelhouse",
-                    timeout=10,
-                )
+            send_notice(title, message, app_name="Wheelhouse", timeout=10)
         except Exception:
             # Silently fail -- notification is best-effort.
             pass

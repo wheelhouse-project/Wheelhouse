@@ -2,22 +2,35 @@
 
 from typing import Optional
 
+from ..number_word_parser import parse_number_word
 from .models import NavigationCommand
 
 MAX_COUNT = 50
-
-_WORD_TO_INT = {
-    "one": 1, "two": 2, "to": 2, "too": 2,
-    "three": 3, "four": 4, "for": 4,
-    "five": 5, "six": 6, "seven": 7,
-    "eight": 8, "nine": 9, "ten": 10,
-}
 
 _UNITS = {
     "character": "character", "characters": "character",
     "word": "word", "words": "word",
     "paragraph": "paragraph", "paragraphs": "paragraph",
 }
+
+# Spoken direction -> the direction the executor acts on. "write" is here
+# because the shipped speech model returns "go write three characters" for
+# the spoken words "go right three characters". The staged fragment
+# wh-voice-access-parity.1.13 covers the bare utterance with two pattern
+# blocks, but a chained utterance never reaches those blocks: the chain
+# comes through the cursor-navigate entry into this parser, which knew only
+# "right" and returned None, so the whole sentence was typed as text.
+# David ruled extend on 2026-08-25 (wh-voice-access-parity.4).
+#
+# "write" is accepted wherever "right" is accepted, which is wider than the
+# two staged blocks: both of those require a unit word, so the bare "go
+# write" now moves the caret one character right where it used to be
+# dictation. That single utterance is the whole of the widening, and it
+# joins "go right", which has always done exactly that. The alternative was
+# a parser where "write" works in some shapes and not others.
+# "write" is the only navigation homophone the fragment defines; the other
+# seven blocks in it are punctuation and delete/copy range commands.
+_DIRECTIONS = {"right": "right", "write": "right", "left": "left"}
 
 _SIMPLE_LANDMARKS = {"home", "end", "top", "bottom"}
 _COMPOUND_PREFIXES = {"start", "beginning", "end"}
@@ -110,9 +123,9 @@ class NavigationParser:
         pos = 0
 
         # Direction is required
-        if tokens[pos] not in ("right", "left"):
+        direction = _DIRECTIONS.get(tokens[pos])
+        if direction is None:
             return None
-        direction = tokens[pos]
         pos += 1
 
         count = 1
@@ -140,12 +153,37 @@ class NavigationParser:
 
     @staticmethod
     def _parse_count(text: str) -> Optional[int]:
-        """Convert spoken number or digit string to int (1-50). None if not a number."""
-        n = _WORD_TO_INT.get(text)
-        if n is not None:
-            return min(n, MAX_COUNT) if n > 0 else None
-        try:
-            n = int(text)
-            return min(n, MAX_COUNT) if n > 0 else None
-        except ValueError:
+        """Convert spoken number or digit string to int (1-50). None if not a number.
+
+        The reading is parse_number_word, the one word-to-integer
+        implementation in this service (wh-number-words-one-parser).
+        This method used to carry its own one..ten table, so "go right
+        fifteen characters" was unparseable and the whole utterance was
+        dictated. MAX_COUNT is unchanged: a larger count still clamps to
+        50 rather than being refused, exactly as the table version did.
+
+        A digit count whose VALUE is above 999 no longer reads as a
+        count. It used to clamp to 50 through int(), which accepted a
+        digit run of any length: "go right 1000 characters" and "go right
+        1000000 characters" were both counts worth 50. Now the parser
+        refuses a value above 999 and the segment falls through to
+        dictation.
+
+        The cutoff is the value, NOT the number of characters typed
+        (wh-number-words-one-parser.1.4). parse_number_word strips
+        leading zeroes before it applies its own three-digit bound, so
+        "0001" is still a count worth 1 and "00050" is still 50, exactly
+        as int() read them. Only a value above 999 changes, and that
+        change is recorded for the user's decision on
+        wh-number-words-one-parser.
+
+        crewcut: this reads ONE token, so a multi-word count ("go right
+        twenty three characters") is still unparseable here even though
+        the parser can read it. The caller walks the tokens one at a time
+        and would need to try the longest phrase first; that walk belongs
+        with the cursor-navigation work, not with the count fix.
+        """
+        n = parse_number_word(text, aliases=True)
+        if n is None:
             return None
+        return min(n, MAX_COUNT)

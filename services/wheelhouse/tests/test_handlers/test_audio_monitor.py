@@ -369,6 +369,88 @@ class TestMonitorAudioLoop:
 
 
 # ===========================================================================
+# Stop hold-off (wh-audio-pause-notice-repeats)
+# ===========================================================================
+
+class TestMonitorAudioStopHoldoff:
+    """'Not playing' waits until the sound has stayed quiet for the hold-off.
+
+    A dip in the sound shorter than the hold-off publishes nothing, so
+    listening does not switch off and on again for every quiet moment.
+
+    The fake clock advances one second per poll, whatever interval the loop
+    asks to sleep, so the peak lists below read as one reading per second.
+    No test waits in real time.
+    """
+
+    @staticmethod
+    async def _run(monitor, peaks):
+        """Run monitor_audio over peaks; return (is_playing, clock) per event."""
+        monitor._first_run = False
+        monitor._previous_audio_state = False
+        clock = {"now": 0.0}
+        polls = {"count": 0}
+        events = []
+
+        def fake_is_audio_playing():
+            peak = peaks[polls["count"]]
+            polls["count"] += 1
+            return peak > 0.05
+
+        async def fake_publish(event):
+            events.append((event.is_playing, clock["now"]))
+
+        async def fake_sleep(duration):
+            if polls["count"] >= len(peaks):
+                raise asyncio.CancelledError()
+            clock["now"] += 1.0
+
+        monitor.is_audio_playing = fake_is_audio_playing
+        monitor.event_bus.publish = AsyncMock(side_effect=fake_publish)
+        with patch("handlers.audio_monitor.monotonic",
+                   side_effect=lambda: clock["now"]),              patch("asyncio.sleep", side_effect=fake_sleep):
+            await monitor.monitor_audio()
+        assert polls["count"] == len(peaks)
+        return events
+
+    async def test_a_one_poll_dip_publishes_no_stop(self, audio_monitor):
+        events = await self._run(audio_monitor, [0.5, 0.0, 0.5])
+
+        assert [playing for playing, _ in events] == [True]
+
+    async def test_quiet_past_the_hold_off_publishes_one_stop_at_its_end(
+        self, audio_monitor
+    ):
+        from handlers.audio_monitor import AUDIO_STOP_HOLDOFF_SECONDS
+
+        events = await self._run(audio_monitor, [0.5, 0.0, 0.0, 0.0, 0.0])
+
+        # The first quiet reading is at 1.0 s; the stop is published only
+        # once the quiet has lasted the whole hold-off.
+        assert events == [(True, 0.0), (False, 1.0 + AUDIO_STOP_HOLDOFF_SECONDS)]
+
+    async def test_sound_returning_inside_the_hold_off_publishes_no_stop(
+        self, audio_monitor
+    ):
+        events = await self._run(audio_monitor, [0.5, 0.0, 0.0, 0.5])
+
+        assert [playing for playing, _ in events] == [True]
+
+    async def test_quiet_after_sound_returns_waits_a_whole_new_hold_off(
+        self, audio_monitor
+    ):
+        from handlers.audio_monitor import AUDIO_STOP_HOLDOFF_SECONDS
+
+        events = await self._run(
+            audio_monitor, [0.5, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0]
+        )
+
+        # The loud reading at 3.0 s ends the first quiet stretch, so the
+        # hold-off counts from the next quiet reading at 4.0 s, not from 1.0 s.
+        assert events == [(True, 0.0), (False, 4.0 + AUDIO_STOP_HOLDOFF_SECONDS)]
+
+
+# ===========================================================================
 # Adversarial
 # ===========================================================================
 

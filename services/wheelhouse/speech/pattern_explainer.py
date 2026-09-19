@@ -45,12 +45,46 @@ from .action_catalog import CATALOG_BY_NAME
 # a sentence; fall back to the raw expression instead of listing them all.
 _MAX_VARIANTS = 6
 
+# wh-explainer-allowlist-landmarks. An optional definite article is shown in
+# its article-bearing form only, so it contributes one spoken form instead of
+# two and does not multiply the variant count. Without this, the four landmark
+# navigation patterns -- "^go to (?:the )?(?:beginning|start) of (?:the )?X$"
+# -- cross-product to 2 x 2 x 2 = 8, pass _MAX_VARIANTS, and are quoted to the
+# user as a raw regular expression.
+#
+# Measured over speech/config/patterns.toml: "the " is the only article that
+# appears as an optional group body, in 30 places; there is no optional "a "
+# or "an ". The optional "this " (5 places) is deliberately NOT collapsed. It
+# is a demonstrative, not an article, and every collapse removes a spoken form
+# from what the Pattern Manager shows the user.
+#
+# David ruled this on 2026-08-25 in preference to raising _MAX_VARIANTS to 8,
+# which would print eight near-identical phrases per landmark command, half of
+# them unnatural English such as "go to start of word". The accepted
+# trade-off: the display no longer tells the user that the article-free form
+# ("go to end") also works. Both forms still MATCH; only the display changes.
+_COLLAPSIBLE_ARTICLES = frozenset({"the "})
+
 _PURE_GROUP_RE = re.compile(r"g\d+")
 _EMBEDDED_GROUP_RE = re.compile(r"\bg\d+\b")
 
 # Trigger-side fallback wording. tests/test_pattern_explainer.py keys the
 # shipped-pattern allowlist off this exact phrase.
 _FALLBACK_TEMPLATE = 'something matching the expression "{raw}"'
+
+# Zero-width boundary assertions the translator understands, listed as exact
+# strings. These two are \b with the hyphen taken out of the word set: a
+# pattern uses them when a listed word must not match inside a longer
+# hyphenated token (the shipped filler-sound filter, which must not strip the
+# "uh" out of "uh-huh"). Like \b they assert position only and contribute no
+# spoken content, so skipping them yields the same phrase list as the \b form.
+#
+# Deliberately an exact-string list, not a general lookaround parser. A
+# lookaround CAN assert real content ("(?=zoom)"), and translating one of
+# those as if it were a boundary would produce a wrong translation -- the one
+# failure this module promises never to produce. Anything not spelled exactly
+# like these two still falls back to quoting the raw expression.
+_ZERO_WIDTH_BOUNDARIES = (r"(?<![\w-])", r"(?![\w-])")
 
 # Internal-audience steps (audience == "internal" in the catalog) are
 # housekeeping the user never picked; describe them with one short fixed
@@ -178,7 +212,31 @@ def _split_alternation(body):
     return branches
 
 
-def _parse_trigger(raw):
+def _collapse_whitespace(text, *, keep_edges):
+    """Collapse every run of whitespace in ``text`` to a single space.
+
+    ``keep_edges`` is True only for an alternation branch. A branch is
+    glued between the text on either side of its group, so its leading and
+    trailing spaces are the ones that separate it from the neighbouring
+    words: the branch "the " of ``(?:the )?`` must stay "the ", or
+    ``^go to (?:the )?end$`` is shown to the user as "go to theend"
+    (wh-explainer-branch-space-loss). Only the whole pattern may strip its
+    own edges.
+    """
+    collapsed = " ".join(text.split())
+    if not keep_edges:
+        return collapsed
+    if not collapsed:
+        # Whitespace only: one space is the whole of what it contributes.
+        return " " if text else ""
+    if text[:1].isspace():
+        collapsed = " " + collapsed
+    if text[-1:].isspace():
+        collapsed = collapsed + " "
+    return collapsed
+
+
+def _parse_trigger(raw, *, _branch=False):
     """Translate a trigger regex into ``(variants, suffixes)``.
 
     ``variants`` is an ordered list of literal spoken phrases (the
@@ -188,6 +246,21 @@ def _parse_trigger(raw):
     ``"number"`` (from ``(\\d+)``), describing what may follow the phrase.
     Raises _UnsupportedConstruct on anything outside the supported subset.
     """
+    if not _branch and raw.startswith("^") and raw.endswith("$"):
+        # Only a required group enclosing the entire anchored phrase is
+        # transparent. Optional/quantified wrappers and backreferences retain
+        # the fallback. Terminal STT punctuation contributes no spoken words.
+        body = raw[1:-1]
+        while body.startswith("(") and _find_group_end(body, 0) == len(body) - 1:
+            inner = body[3:-1] if body.startswith("(?:") else body[1:-1]
+            if inner.startswith("?"):
+                raise _UnsupportedConstruct(raw)
+            if len(_split_alternation(inner)) != 1:
+                break
+            body = inner
+        if body.endswith("[.!?]?"):
+            body = body[:-6]
+        raw = "^" + body + "$"
     variants = [""]
     suffixes = []
     i = 0
@@ -214,6 +287,9 @@ def _parse_trigger(raw):
             if i != n - 1:
                 raise _UnsupportedConstruct(raw)
             i += 1
+        elif raw.startswith(r"[\s-]+", i):
+            _append_alternatives([" "])
+            i += len(r"[\s-]+")
         elif ch == "\\":
             if i + 1 >= n:
                 raise _UnsupportedConstruct(raw)
@@ -242,6 +318,14 @@ def _parse_trigger(raw):
                 optional = i + 2 < n and raw[i + 2] == "?"
                 _append_alternatives([nxt, ""] if optional else [nxt])
                 i += 2 + (1 if optional else 0)
+        elif ch == "(" and any(
+            raw.startswith(token, i) for token in _ZERO_WIDTH_BOUNDARIES
+        ):
+            # Boundary assertion: no spoken content, same as \b.
+            i += len(next(
+                token for token in _ZERO_WIDTH_BOUNDARIES
+                if raw.startswith(token, i)
+            ))
         elif ch == "(":
             end = _find_group_end(raw, i)
             content = raw[i + 1:end]
@@ -254,7 +338,12 @@ def _parse_trigger(raw):
                 raise _UnsupportedConstruct(raw)
             else:
                 body = content
-            if body in (".+", ".*"):
+            if (number_range := _grid_number_range(body)) is not None:
+                if (optional_after or suffixes
+                        or any(v and not v[-1].isspace() for v in variants)):
+                    raise _UnsupportedConstruct(raw)
+                suffixes.append((number_range, False))
+            elif body in (".+", ".*"):
                 suffixes.append(("words", body == ".*" or optional_after))
             elif body == r"\d+":
                 suffixes.append(("number", optional_after))
@@ -265,11 +354,16 @@ def _parse_trigger(raw):
             else:
                 alts = []
                 for branch in _split_alternation(body):
-                    branch_variants, branch_suffixes = _parse_trigger(branch)
+                    branch_variants, branch_suffixes = _parse_trigger(
+                        branch, _branch=True
+                    )
                     if branch_suffixes:
                         raise _UnsupportedConstruct(raw)
                     alts.extend(branch_variants)
-                if optional_after:
+                collapsible_article = (
+                    len(alts) == 1 and alts[0] in _COLLAPSIBLE_ARTICLES
+                )
+                if optional_after and not collapsible_article:
                     alts.append("")
                 _append_alternatives(alts)
             i = next_i
@@ -291,11 +385,13 @@ def _parse_trigger(raw):
     cleaned = []
     seen = set()
     for variant in variants:
-        collapsed = " ".join(variant.split())
+        collapsed = _collapse_whitespace(variant, keep_edges=_branch)
         if collapsed and collapsed not in seen:
             seen.add(collapsed)
             cleaned.append(collapsed)
     if not cleaned:
+        if len(suffixes) == 1 and suffixes[0][0].startswith("a "):
+            return [""], suffixes
         # Nothing speakable (pure captures/whitespace): fall back.
         raise _UnsupportedConstruct(raw)
     return cleaned, suffixes
@@ -308,13 +404,41 @@ def _phrase_display(variants):
     return f"{quoted[0]} (or {', '.join(quoted[1:])})"
 
 
+def _grid_number_range(body):
+    """Summarize only complete 1-9 literal sets, retaining representation
+    and homophone distinctions. No regex expansion or inferred missing values.
+    """
+    # crewcut: this deliberately supports the shipped 1-9 range only; add
+    # other ranges with completeness tests when a shipped trigger needs them.
+    if len(body) > 128:
+        return None
+    tokens = body.split("|")
+    if len(tokens) > 21:
+        return None
+    values = set(tokens)
+    words = set("one two three four five six seven eight nine".split())
+    digits = set("123456789")
+    aliases = [word for word in ("too", "to", "for") if word in values]
+    core = values - set(aliases)
+    if core == digits and not aliases:
+        return "a digit from 1 to 9"
+    if core not in (words, words | digits):
+        return None
+    noun = "a number from one to nine"
+    if core == words | digits:
+        noun += ", in words or digits"
+    if aliases:
+        noun += " (also accepts " + ", ".join(repr(word) for word in aliases) + ")"
+    return noun
+
+
 def _suffix_clauses(suffixes):
     parts = []
     for kind, optional in suffixes:
         noun = {
             "words": "any words",
             "letters": "any words made of letters and spaces",
-        }.get(kind, "a number")
+        }.get(kind, kind if kind.startswith("a ") else "a number")
         if optional:
             parts.append(f", optionally followed by {noun}")
         else:
@@ -517,6 +641,9 @@ def explain_pattern(pattern, hotword):
     else:
         display = _phrase_display(variants)
         clauses = _suffix_clauses(suffixes)
+        if variants == [""] and len(suffixes) == 1:
+            display = suffixes[0][0]
+            clauses = ""
 
     # --- Pattern kind -----------------------------------------------------
     kind = pattern_kind(pattern)

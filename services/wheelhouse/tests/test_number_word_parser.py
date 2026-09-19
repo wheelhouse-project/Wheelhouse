@@ -145,15 +145,95 @@ class TestUnresolvable:
     def test_garbage_returns_none(self, text):
         assert parse_number_word(text) is None
 
-    def test_units_only_compound_returns_none(self):
-        # "three twenty" is not a valid tens+units composition.
-        assert parse_number_word("three twenty") is None
-
     def test_double_tens_returns_none(self):
         assert parse_number_word("twenty thirty") is None
 
     def test_trailing_unit_word_returns_none(self):
         assert parse_number_word("twenty seven words") is None
+
+
+class TestColloquialHundredsPairing:
+    """wh-click-number-dictation: '<unit> <10..99 remainder>' pairing.
+
+    Users read three-digit badge numbers aloud as 'one twelve' (112), the
+    colloquial American hundreds form without the word 'hundred'. The
+    first token must be a unit 1..9 and the remainder must resolve to
+    10..99; a remainder of 1..9 is not a pairing -- that shape belongs to
+    digit-by-digit reading (TestDigitByDigitReading).
+    """
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("one twelve", 112),
+            ("one ten", 110),
+            ("one nineteen", 119),
+            ("one twenty", 120),
+            ("one twenty three", 123),
+            ("one twenty-three", 123),
+            ("three twenty", 320),
+            ("two ninety nine", 299),
+            ("nine ninety nine", 999),
+            ("number one twelve", 112),
+        ],
+    )
+    def test_pairing_resolves(self, text, expected):
+        assert parse_number_word(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "twelve twenty",  # head must be a unit 1..9, not a teen
+            "ten twenty",     # head must be a unit 1..9
+            "twenty twelve",  # head must be a unit, not a tens multiple
+            "one twenty three four",  # trailing token
+        ],
+    )
+    def test_non_pairing_shapes_return_none(self, text):
+        assert parse_number_word(text) is None
+
+
+class TestDigitByDigitReading:
+    """wh-click-number-dictation: digit-by-digit badge-number reading.
+
+    Users read a badge number one digit at a time: 'one seven' -> 17,
+    'one zero five' -> 105. Every token must be a single digit word
+    ('oh' counts as zero), two or three tokens total, and the leading
+    digit must be 1..9 because badge numbers never start with zero.
+    """
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("one seven", 17),
+            ("one two", 12),
+            ("four two", 42),
+            ("one one two", 112),
+            ("one two three", 123),
+            ("nine nine nine", 999),
+            ("one zero five", 105),
+            ("one oh five", 105),
+            ("seven zero", 70),
+            ("one oh", 10),
+            ("number one seven", 17),
+        ],
+    )
+    def test_digit_by_digit_resolves(self, text, expected):
+        assert parse_number_word(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "zero seven",          # leading zero
+            "oh seven",            # leading oh
+            "zero zero seven",     # leading zero, three digits
+            "one two three four",  # four digits exceeds 999
+            "oh",                  # 'oh' alone is not a number
+            "one oh oh oh",        # four tokens
+        ],
+    )
+    def test_non_digit_shapes_return_none(self, text):
+        assert parse_number_word(text) is None
 
 
 class TestUnicodeDigits:
@@ -290,3 +370,41 @@ class TestMalformedHyphens:
     def test_valid_in_word_hyphen_still_resolves(self):
         assert parse_number_word("twenty-three") == 23
         assert parse_number_word("one hundred twenty-three") == 123
+
+
+class TestLeadingNumberToken:
+    # wh-click-number-dictation: users naturally say "click number three"
+    # when badges are on screen, so the captured text arriving here is
+    # "number three". A single leading "number"/"numbers" token is dropped
+    # before parsing; everything after it must follow the existing grammar.
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("number one", 1),
+            ("number seven", 7),
+            ("number 75", 75),
+            ("numbers seven", 7),
+            ("numbers 12", 12),
+            ("number twenty-three", 23),
+            ("Number 7", 7),
+            ("NUMBER ninety", 90),
+            ("number one hundred and five", 105),
+        ],
+    )
+    def test_leading_number_token_is_dropped(self, text, expected):
+        assert parse_number_word(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "number",             # bare filler, no count -> by-name fallback
+            "numbers",
+            "number number one",  # only ONE leading token is dropped
+            "one number",         # the token is a prefix, never a suffix
+            "number first",       # ordinals still rejected after the drop
+            "number zero",        # range rules unchanged after the drop
+            "number banana",
+        ],
+    )
+    def test_number_token_edge_cases_return_none(self, text):
+        assert parse_number_word(text) is None

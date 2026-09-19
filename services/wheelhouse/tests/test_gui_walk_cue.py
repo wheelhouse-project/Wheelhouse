@@ -213,10 +213,10 @@ class TestSetWalkCue:
 
 class TestWalkCueTimerBounds:
     """wh-n29v.119.1: QTimer.start takes a signed 32-bit int, and
-    response_timeout_ms (carried as walk_timeout_ms) has NO upper bound. The
-    fallback interval must be clamped to the Qt timer range, and arming the
-    timer must fail closed so a start failure never leaves the cue stuck on
-    with no timer to clear it.
+    walk_timeout_ms arrives over the process boundary as an arbitrary integer
+    that this process never validates. The fallback interval must be clamped
+    to the Qt timer range, and arming the timer must refuse by default so a
+    start failure never leaves the cue stuck on with no timer to clear it.
     """
 
     def test_huge_walk_timeout_clamps_interval_and_keeps_cue_active(self, button):

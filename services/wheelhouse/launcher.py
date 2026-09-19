@@ -39,6 +39,7 @@ import os
 import psutil
 import subprocess
 import sys
+import threading
 import time
 from multiprocessing import shared_memory
 
@@ -78,6 +79,14 @@ RESTART_FLAG_PATH = ""
 # (wh-console-quickedit-freeze, 2026-07-05: GUI main thread Not Responding,
 # log frozen, supervisor blocked). ENABLE_EXTENDED_FLAGS must be set in the
 # same call or the QuickEdit bit is ignored.
+#
+# ENABLE_MOUSE_INPUT must be cleared alongside QuickEdit: with QuickEdit off
+# and mouse input on, conhost delivers every mouse event -- including the
+# scroll wheel -- to the console input buffer, which no WheelHouse process
+# ever reads. The wheel stops scrolling the window and unread input records
+# accumulate for the whole run (wh-log-console-freeze, 2026-08-08). With
+# both bits off, conhost handles the wheel itself and the viewport scrolls.
+_ENABLE_MOUSE_INPUT = 0x0010
 _ENABLE_QUICK_EDIT_MODE = 0x0040
 _ENABLE_EXTENDED_FLAGS = 0x0080
 _GENERIC_READ = 0x80000000
@@ -88,13 +97,15 @@ _OPEN_EXISTING = 3
 
 
 def disable_console_quick_edit(*, _kernel32=None):
-    """Turn off QuickEdit mode on the attached console, if there is one.
+    """Turn off QuickEdit and mouse input on the attached console, if any.
 
     Opens ``CONIN$`` directly instead of ``GetStdHandle(STD_INPUT_HANDLE)``
     because a redirected stdin would make GetStdHandle return a pipe handle
     on which GetConsoleMode fails (same lesson as ui/console_probe_helper.py).
     Deliberate selection stays available via the console system menu
-    (Edit > Mark); only the accidental click-drag path is removed.
+    (Edit > Mark); only the accidental click-drag path is removed. Mouse
+    input is cleared too so conhost keeps handling the scroll wheel itself
+    (wh-log-console-freeze); no WheelHouse process reads console input.
 
     Returns True when the mode was changed, False otherwise. Never raises:
     a headless launch (no console) or any API failure just leaves the mode
@@ -128,7 +139,9 @@ def disable_console_quick_edit(*, _kernel32=None):
             mode = ctypes.c_ulong(0)
             if not _kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 return False
-            new_mode = (mode.value | _ENABLE_EXTENDED_FLAGS) & ~_ENABLE_QUICK_EDIT_MODE
+            new_mode = (mode.value | _ENABLE_EXTENDED_FLAGS) & ~(
+                _ENABLE_QUICK_EDIT_MODE | _ENABLE_MOUSE_INPUT
+            )
             if not _kernel32.SetConsoleMode(handle, new_mode):
                 return False
             return True
@@ -137,18 +150,314 @@ def disable_console_quick_edit(*, _kernel32=None):
     except Exception:
         return False
 
-def cleanup_stale_resources():
-    """Idempotent cleanup of resources from a previous, potentially crashed run."""
-    logger.info("Performing failsafe cleanup of stale resources...")
-    if os.path.exists(PID_FILE_PATH):
+# Seconds to wait for the previous instance to exit after terminate() before
+# escalating to kill(). The launcher tears its children down and unlinks
+# shared memory on the way out, so it needs more than an instant.
+_STOP_PREVIOUS_WAIT_S = 5.0
+
+
+def write_instance_record(path, *, pid, create_time):
+    """Record this launcher's PID and creation time at ``path``.
+
+    The creation time is what makes the record safe to act on later.
+    Windows reuses PIDs, so a bare PID can point at an unrelated process
+    once the recorded one exits. ``stop_previous_instance`` kills a
+    process tree, so acting on a recycled PID would kill whatever the
+    user happens to be running under that number.
+    """
+    with open(path, 'w') as f:
+        f.write("%d %.6f" % (int(pid), float(create_time)))
+
+
+def read_instance_record(path):
+    """Return ``(pid, create_time_text)`` from ``path``, or None.
+
+    Returns None when the file is absent, unreadable, or not in the
+    two-field format. A bare PID with no creation time (the format older
+    builds wrote) also reads as None, so such a file can never authorise
+    a kill.
+    """
+    try:
+        with open(path, 'r') as f:
+            parts = f.read().strip().split()
+        if len(parts) != 2:
+            return None
+        pid = int(parts[0])
+        float(parts[1])          # validate, but keep the text for comparison
+        return (pid, parts[1])
+    except (IOError, OSError, ValueError):
+        return None
+
+
+def _owned_descendants(owner, descendants):
+    """Return the descendants that belong to WheelHouse itself.
+
+    Being a descendant of the launcher does NOT make a process ours. The
+    ``run`` voice action starts an arbitrary user program through a shell
+    (``speech/actions.py`` ``run_program``), so a document the user opened
+    by voice is a grandchild of the launcher. Terminating the whole
+    recursive tree would close that program and lose unsaved work.
+
+    The test is the executable: Logic, Input and GUI are started with
+    ``multiprocessing``, so they run the same interpreter as the launcher
+    that recorded them. A ``run`` target reached through the shell does
+    not. Any process whose executable cannot be read is left alone, so an
+    unreadable answer never authorises a kill.
+
+    This is a bound on the harm, not a complete ownership model. A
+    provider or helper that the Logic process started runs a different
+    executable and is left behind (wh-launcher-single-instance.2.1).
+    """
+    try:
+        owner_exe = os.path.normcase(owner.exe())
+    except Exception as exc:
+        logger.warning(
+            "Could not read the executable of the previous launcher (%s), "
+            "so its descendants cannot be identified. Stopping the "
+            "launcher alone.", exc,
+        )
+        return []
+
+    owned = []
+    for proc in descendants:
         try:
-            with open(PID_FILE_PATH, 'r') as f:
-                pid_str = f.read().strip()
-                if pid_str and psutil.pid_exists(int(pid_str)):
-                    pass # Logic for killing stale process is sound
-            os.remove(PID_FILE_PATH)
-        except (IOError, ValueError, psutil.Error):
+            is_ours = os.path.normcase(proc.exe()) == owner_exe
+        except Exception:
+            is_ours = False
+        if is_ours:
+            owned.append(proc)
+        else:
+            logger.info(
+                "Leaving PID %s alone: it is not a WheelHouse process.",
+                getattr(proc, "pid", "?"),
+            )
+    return owned
+
+
+def stop_previous_instance(path, *, _psutil=None):
+    """Stop the launcher recorded at ``path`` and its children.
+
+    Returns True when a previous instance was stopped, False otherwise.
+    Never raises: any failure leaves the caller free to start normally.
+    ``_psutil`` is a test seam.
+
+    Two details are load-bearing:
+
+    * The recorded creation time must match the live process before
+      anything is killed. A mismatch means the PID was reused, so the
+      record is stale and the live process belongs to somebody else.
+    * The parent is killed BEFORE its children. The old launcher
+      supervises its children and restarts them when they die, so killing
+      a child first can make the old supervisor respawn it. The child
+      list is read before the parent dies, because psutil finds children
+      through the parent.
+    """
+    ps = _psutil or psutil
+    record = read_instance_record(path)
+    if record is None:
+        # Absent, unreadable, or the legacy bare-PID format. Nothing can be
+        # identified from such a file, so remove it instead of leaving it
+        # for a later start to misread.
+        try:
+            os.remove(path)
+        except OSError:
             pass
+        return False
+    old_pid, recorded_create_time = record
+
+    if old_pid == os.getpid():
+        logger.warning(
+            "Instance record names this process (%s); ignoring it.", old_pid
+        )
+        return False
+
+    stopped = False
+    try:
+        try:
+            proc = ps.Process(old_pid)
+            live_create_time = "%.6f" % float(proc.create_time())
+        except ps.NoSuchProcess:
+            logger.info(
+                "Instance record names PID %s, which is gone. Clean start.",
+                old_pid,
+            )
+            proc = None
+            live_create_time = None
+        except Exception as exc:
+            # Windows can refuse access to the process object. Without the
+            # creation time the record cannot be confirmed, and an
+            # unconfirmed record must never authorise a kill.
+            logger.error(
+                "Could not identify the process recorded at PID %s (%s). "
+                "Leaving it alone.", old_pid, exc,
+            )
+            proc = None
+            live_create_time = None
+
+        if proc is not None:
+            if live_create_time != recorded_create_time:
+                logger.info(
+                    "PID %s is now a different process (created %s, record "
+                    "says %s). Leaving it alone.",
+                    old_pid, live_create_time, recorded_create_time,
+                )
+            else:
+                logger.warning(
+                    "A previous WheelHouse launcher (PID %s) is still "
+                    "running. Stopping it before this one starts.", old_pid
+                )
+                try:
+                    descendants = proc.children(recursive=True)
+                except Exception as exc:
+                    # Without the list the children outlive their parent,
+                    # but stopping the parent is still worth doing.
+                    logger.warning(
+                        "Could not list the children of PID %s (%s). "
+                        "Stopping the parent alone.", old_pid, exc,
+                    )
+                    descendants = []
+                children = _owned_descendants(proc, descendants)
+
+                # Parent first, then the children, each guarded on its own.
+                # One process this launcher may not terminate -- the old
+                # copy runs elevated and this one does not, or it exits
+                # between two calls -- must not cost the rest of the stop.
+                for target in [proc] + children:
+                    try:
+                        target.terminate()
+                    except Exception as exc:
+                        logger.warning(
+                            "Could not terminate PID %s: %s",
+                            getattr(target, "pid", "?"), exc,
+                        )
+                    else:
+                        if target is proc:
+                            stopped = True
+
+                try:
+                    gone, alive = ps.wait_procs(
+                        [proc] + children, timeout=_STOP_PREVIOUS_WAIT_S
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Could not wait for the previous instance to "
+                        "exit: %s", exc,
+                    )
+                    alive = []
+                for p in alive:
+                    logger.warning(
+                        "PID %s did not exit after terminate; killing it.",
+                        getattr(p, "pid", "?"),
+                    )
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+                if stopped:
+                    logger.info("Previous instance stopped.")
+                else:
+                    logger.error(
+                        "Could not stop the previous launcher (PID %s). "
+                        "Two copies may now be running.", old_pid,
+                    )
+    except Exception as exc:
+        logger.error(
+            "Could not stop the previous instance (PID %s): %s",
+            old_pid, exc, exc_info=True,
+        )
+
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return stopped
+
+
+def cleanup_stale_resources():
+    """Idempotent cleanup of resources from a previous, potentially crashed run.
+
+    Stops a previous launcher that is still running (wh-launcher-single-
+    instance). Before this, the function read the recorded PID and then
+    did nothing with it, so two full WheelHouse instances could run at
+    once. The only protection was outside the application, in the
+    scheduled task's StopExisting policy.
+    """
+    logger.info("Performing failsafe cleanup of stale resources...")
+    stop_previous_instance(PID_FILE_PATH)
+
+
+def restore_orphaned_ptt_volume():
+    """Put back a speaker level that a lost push-to-talk hold left lowered.
+
+    A Logic process that is lost during a hold never runs its release, so
+    the speakers stay at the lowered level. The Logic process writes a
+    record on disk before it lowers the level, and this restore reads that
+    record (wh-ptt-mute-orphaned-on-process-loss). Call it only when no
+    Logic process runs: a restore during a live hold raises the level while
+    the user still holds the key.
+
+    The restore runs in a daemon thread, and the launcher waits for it at
+    most SHUTDOWN_GRACE_PERIOD_S, as the bounded stop in
+    utils/notifier_worker.py waits for its worker. A Core Audio call that
+    does not return costs the launcher that time and no more. At the limit
+    the launcher sets the restore's cancel flag, logs a warning that names
+    the limit, and goes on. The restore checks the flag immediately before
+    its write and immediately before its record delete.
+
+    A failure is logged and never stops the launcher. restore_orphaned_volume
+    logs each result except "no record", so this function and the thread
+    log only an exception that comes out of it.
+
+    The restore module is imported here, on the launcher thread, before the
+    thread starts. When comtypes and pycaw are not loaded yet, the restore
+    thread loads them before its first Core Audio call, so a restore thread
+    that waits in a Core Audio call holds no import lock that the launcher
+    needs for "from main import start_logic_process".
+    """
+    cancel = threading.Event()
+    try:
+        from services.wheelhouse.utils.ptt_volume_record import restore_orphaned_volume
+
+        worker = threading.Thread(
+            target=_run_ptt_volume_restore,
+            args=(restore_orphaned_volume, cancel),
+            name="PttVolumeRestore",
+            daemon=True,
+        )
+        worker.start()
+    except Exception as exc:
+        logger.error(
+            "Could not restore the push-to-talk speaker level: %s", exc, exc_info=True,
+        )
+        return
+    worker.join(SHUTDOWN_GRACE_PERIOD_S)
+    if worker.is_alive():
+        # crewcut: the cancel flag stops only the steps that have not started.
+        # A device write, or a record delete, that the restore thread started
+        # before the flag was set can still land after the launcher goes on,
+        # for example during a hold of the next Logic process. No way to
+        # remove this is known: Python cannot stop a thread inside a foreign
+        # call. Running the restore in a child process that the launcher ends
+        # at the limit would stop more steps, but not a write that the audio
+        # service is already applying.
+        cancel.set()
+        logger.warning(
+            "The push-to-talk speaker restore did not finish within %s s. The "
+            "launcher goes on without it, and the restore stops before its next "
+            "write or record delete.",
+            SHUTDOWN_GRACE_PERIOD_S,
+        )
+
+
+def _run_ptt_volume_restore(restore, cancel):
+    """Run the restore on its thread. An exception is logged and not raised."""
+    try:
+        restore(cancel=cancel)
+    except Exception as exc:
+        logger.error(
+            "Could not restore the push-to-talk speaker level: %s", exc, exc_info=True,
+        )
+
 
 def _console_probe_helper_command():
     """Return the argv that launches the console-probe helper subprocess.
@@ -504,6 +813,17 @@ def _run_supervisor():
             "text will appear in logs."
         )
 
+    # --- Raise this process's priority class before spawning children ---
+    # A Task Scheduler launch starts the tree at Below Normal (task XML
+    # Priority default 7), which Windows propagates to every child and which
+    # starves the speech pipeline whenever the machine is saturated
+    # (wh-process-priority-durable). Children still elevate themselves: High
+    # does not propagate to children, only Below Normal and Idle do.
+    from services.wheelhouse.utils.process_priority import (
+        elevate_process_priority,
+    )
+    elevate_process_priority()
+
     # --- Harden the console before anything writes to it ---
     # Children inherit this console for stderr; QuickEdit stays disabled for
     # all of them because the mode lives on the console, not the process.
@@ -521,7 +841,39 @@ def _run_supervisor():
     RESTART_FLAG_PATH = os.path.join(APP_DATA_PATH, f"{APP_NAME.lower()}.restart")
     
     cleanup_stale_resources()
-    
+
+    # Claim the instance record for THIS launcher. cleanup_stale_resources
+    # has just stopped any previous launcher and removed the old record.
+    # The record holds the launcher's own PID, not the Logic process PID:
+    # the launcher is the process whose lifetime matches the application,
+    # and the one a second start has to stop (wh-launcher-single-instance).
+    try:
+        write_instance_record(
+            PID_FILE_PATH,
+            pid=os.getpid(),
+            create_time=psutil.Process(os.getpid()).create_time(),
+        )
+    except Exception as exc:
+        # Best effort: losing the record costs second-copy protection on
+        # the NEXT start, which is not a reason to refuse to start now.
+        logger.error("Could not write the instance record: %s", exc)
+
+    # No child of this launcher has started yet. When the instance record
+    # named a live launcher, cleanup_stale_resources has just stopped it and
+    # its children. A hold that a previous run lost is restored here, before
+    # a new Logic process can start a hold of its own
+    # (wh-ptt-mute-orphaned-on-process-loss). The restore comes after this
+    # launcher's instance record is written, so a later start during the
+    # restore finds this launcher and stops it, and no second WheelHouse
+    # starts.
+    # crewcut: a Logic process of a previous run that cleanup_stale_resources
+    # did not stop (its launcher was already gone, or the stop failed) can
+    # still be in a hold, and this restore then raises the level during that
+    # hold. To remove the limit, write the Logic process PID and creation
+    # time into the push-to-talk volume record, and skip the restore while
+    # that process runs.
+    restore_orphaned_ptt_volume()
+
     crash_count = 0
     should_restart = True
 
@@ -578,7 +930,12 @@ def _run_supervisor():
             # client checks ``proc.poll()`` directly inline). The launcher does
             # not run a redundant idle helper of its own.
 
-            with open(PID_FILE_PATH, 'w') as f: f.write(str(logic_proc.pid))
+            # The instance record is written once at startup and holds the
+            # LAUNCHER's PID. It deliberately is not rewritten here: the
+            # Logic process PID used to be written to this same file, which
+            # overwrote the record and left nothing able to identify the
+            # running instance (wh-launcher-single-instance). Nothing read
+            # the Logic PID.
 
             # Wait until a shutdown is signaled or a process crashes.
             while not shutdown_event.is_set():
@@ -618,6 +975,24 @@ def _run_supervisor():
             for p in [p for p in procs_to_join if p.is_alive()]:
                 logger.warning(f"Process {p.name} ({p.pid}) did not exit gracefully. Terminating.")
                 p.terminate()
+                # terminate() only asks Windows to end the process. The join
+                # waits until it has ended, so the restore below does not run
+                # while the Logic process can still hold the speakers down.
+                p.join(timeout=SHUTDOWN_GRACE_PERIOD_S)
+
+            # A hold that this cycle's Logic process lost is restored here,
+            # after every child has exited and before the restart decision
+            # (wh-ptt-mute-orphaned-on-process-loss).
+            still_running = [
+                p for p in [logic_proc, input_proc, gui_proc] if p and p.is_alive()
+            ]
+            if still_running:
+                logger.warning(
+                    "Push-to-talk speaker restore skipped because %s is still running.",
+                    ", ".join(f"{p.name} ({p.pid})" for p in still_running),
+                )
+            else:
+                restore_orphaned_ptt_volume()
 
             shm.close()
             shm.unlink()
@@ -643,9 +1018,16 @@ def _run_supervisor():
             else:
                 should_restart = False
         
-            if os.path.exists(PID_FILE_PATH):
-                try: os.remove(PID_FILE_PATH)
-                except OSError: pass
+    # The instance record is removed once the supervisor loop ends, NOT at
+    # the end of each iteration. A restart iteration keeps the same launcher
+    # process alive, so clearing the record between iterations would leave
+    # the restarted instance unidentifiable to a second start
+    # (wh-launcher-single-instance).
+    if os.path.exists(PID_FILE_PATH):
+        try:
+            os.remove(PID_FILE_PATH)
+        except OSError:
+            pass
 
     if crash_count >= MAX_CRASHES:
         logger.critical("Application crashed too many times. Aborting restart.")

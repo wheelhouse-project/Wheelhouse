@@ -311,6 +311,29 @@ def test_bool_item_display_number_raises():
         PaintOverlayEvent.from_dict(payload)
 
 
+def test_zero_item_display_number_raises():
+    """A real walk summary numbers its items 1..N, so 0 on the wire is
+    corruption or version skew, not a paintable item
+    (wh-overlay-bubble-badges.2.1)."""
+    payload = _evt().to_dict()
+    payload["items"][0]["display_number"] = 0
+    with pytest.raises(PaintOverlayEventSchemaError):
+        PaintOverlayEvent.from_dict(payload)
+
+
+def test_negative_item_display_number_raises():
+    """-1 is the paint manager's INTERNAL working-badge number
+    (WORKING_BADGE_NUMBER); an inbound wire item carrying it would draw the
+    working hourglass and report painted instead of being rejected as
+    malformed (wh-overlay-bubble-badges.2.1). The sentinel is constructed
+    only in-process by paint_working_badge and must never be accepted from
+    the wire."""
+    payload = _evt().to_dict()
+    payload["items"][0]["display_number"] = -1
+    with pytest.raises(PaintOverlayEventSchemaError):
+        PaintOverlayEvent.from_dict(payload)
+
+
 def test_bool_item_monitor_id_raises():
     payload = _evt().to_dict()
     payload["items"][0]["monitor_id"] = True

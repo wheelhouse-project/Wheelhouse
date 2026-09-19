@@ -561,76 +561,107 @@ def test_per_thread_record_order_preserved(isolated_root_logger):
 # ---------------------------------------------------------------------------
 
 
-def test_queue_overflow_does_not_block_producer(isolated_root_logger):
-    """Design contract test 5: queue overflow drops without blocking the producer.
+def test_queue_overflow_does_not_block_producer(isolated_root_logger, monkeypatch):
+    """Overflow must finish while the listener is held, using nonblocking puts.
 
-    Block the listener via a paused handler. Submit more records than
-    DEFAULT_LOG_QUEUE_MAXSIZE on the producer. Producer total time stays
-    well under what blocking on the queue would cost. Drop counter goes
-    above zero. After the listener is released, the synthesised drop-
-    summary record reaches the file.
+    A small real queue reaches the same full-queue path without a 10,000-record
+    disk/console backlog. Events establish the stalled consumer before filling
+    it. Inspecting put's blocking flag also detects short timed waits without
+    imposing a machine-speed-dependent latency threshold.
     """
+    import queue
     import threading
-    import time
 
     from utils import logging_setup
-    from utils.logging_setup import setup_logging
-    from utils.queue_logging import (
-        DEFAULT_LOG_QUEUE_MAXSIZE,
-        DROP_SUMMARY_INTERVAL,
-        _DroppingQueueHandler,
-    )
+    from utils.queue_logging import DROP_SUMMARY_INTERVAL, _DroppingQueueHandler
 
-    setup_logging({"LOG_LEVEL": "INFO"})
+    put_modes = []
+
+    class _ObservedQueue(queue.Queue):
+        def put(self, item, block=True, timeout=None):
+            if item is not None and item.name == "test.overflow":
+                put_modes.append(block)
+            return super().put(item, block=block, timeout=timeout)
+
+    log_queue = _ObservedQueue(maxsize=4)
+    monkeypatch.setattr(logging_setup, "make_log_queue", lambda: log_queue)
+    logging_setup.setup_logging({"LOG_LEVEL": "INFO"})
     listener = logging_setup.get_listener()
     assert listener is not None
+    # Drain setup messages before installing the gate and measuring counters.
+    listener.stop()
+    assert not listener.is_running
 
-    block_handler = threading.Event()  # Cleared = blocking.
+    entered = threading.Event()
+    release = threading.Event()
+    producer_done = threading.Event()
+    producer_errors = []
 
     class _PausableHandler(logging.Handler):
         def emit(self, record):
-            # Wait until the test releases us; bound the wait so a
-            # broken test cannot hang the listener forever.
-            block_handler.wait(timeout=10.0)
+            if record.msg == "hold-listener":
+                entered.set()
+                release.wait()  # Only finally releases this, never a timer.
 
-    pausable = _PausableHandler()
     original_handlers = listener.handlers
-    listener.handlers = (pausable,)
-
+    gate = _PausableHandler()
+    listener.handlers = (gate,) + original_handlers
     queue_handler = next(
         h for h in logging.getLogger().handlers
         if isinstance(h, _DroppingQueueHandler)
     )
+    initial_enqueued = queue_handler.enqueue_count
+    initial_dropped = queue_handler.drop_count
+    overflow_count = DROP_SUMMARY_INTERVAL + 50
+    n = log_queue.maxsize + overflow_count
 
+    def produce():
+        try:
+            for i in range(n):
+                logging.getLogger("test.overflow").info("overflow %d", i)
+        except BaseException as exc:
+            producer_errors.append(exc)
+        finally:
+            producer_done.set()
+
+    producer = threading.Thread(target=produce, name="overflow-producer", daemon=True)
+    listener.start()
+    monitor = listener._thread  # Retain the actual thread across stop().
     try:
-        # Enough records to overflow the queue plus enough drops to
-        # trigger the drop-summary path (DROP_SUMMARY_INTERVAL = 100).
-        n = DEFAULT_LOG_QUEUE_MAXSIZE + DROP_SUMMARY_INTERVAL + 50
-        child = logging.getLogger("test.overflow")
-        t0 = time.perf_counter()
-        for i in range(n):
-            child.info("overflow %d", i)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-
-        # Producer must not block. With put_nowait + drop-on-full, even
-        # n records well over maxsize finishes in tens of milliseconds.
-        assert elapsed_ms < 500.0, (
-            f"Producer blocked under overflow: {elapsed_ms:.1f} ms for {n} "
-            f"records. Queue should drop, not block."
+        logging.getLogger("test.overflow.gate").info("hold-listener")
+        assert entered.wait(timeout=5.0), "Listener did not enter the gate"
+        producer.start()
+        assert producer_done.wait(timeout=5.0), (
+            "Producer blocked under overflow while the listener was held"
         )
-
-        assert queue_handler.drop_count > 0, (
-            f"Expected drops, got drop_count={queue_handler.drop_count}"
-        )
+        assert not producer_errors, producer_errors
+        assert not release.is_set()
+        assert log_queue.full(), "Test did not reach a full queue"
+        assert len(put_modes) == n
+        assert not any(put_modes), "Enqueue requested a blocking/timed queue put"
+        assert queue_handler.enqueue_count - initial_enqueued == log_queue.maxsize + 1
+        assert queue_handler.drop_count - initial_dropped == overflow_count
     finally:
-        block_handler.set()  # Release listener before shutdown.
+        release.set()
+        if producer.ident is not None:
+            producer.join(timeout=5.0)
+        # Keep real handlers installed until all records and the drop summary
+        # drain. Join the monitor BEFORE shutdown_logging closes its streams.
+        listener.stop(timeout=5.0)
+        assert not producer.is_alive(), "Test-owned producer did not exit"
+        assert monitor is not None and not monitor.is_alive(), (
+            "Test-owned monitor must exit before handler/stream teardown"
+        )
         listener.handlers = original_handlers
+        gate.close()
         logging_setup.shutdown_logging()
 
     content = isolated_root_logger.read_text()
-    assert "Log queue dropped" in content, (
+    assert f"Log queue dropped {overflow_count} records" in content, (
         "Drop summary was never emitted to the file after overflow"
     )
+    for i in range(log_queue.maxsize):
+        assert f"overflow {i}" in content, "An accepted record was not drained"
 
 
 def test_listener_survives_handler_exception(isolated_root_logger):

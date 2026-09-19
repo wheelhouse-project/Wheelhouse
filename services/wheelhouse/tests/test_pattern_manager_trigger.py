@@ -46,6 +46,11 @@ def test_pattern_manager_command_accepts_all_three_phrases(tmp_path):
     assert compiled.fullmatch("patterns")
     assert compiled.fullmatch("pattern")
 
-    # Unchanged: it stays a hotword-gated command.
+    # It is a command, and it is protected against firing inside dictation.
+    # Until 2026-08-20 the protection was the hotword; now it is
+    # whole_utterance_only, so "patterns" spoken by itself opens the manager
+    # and "patterns are useful" dictates. The installer's Finish screen names
+    # the phrase without a hotword for the same reason.
     assert entry["pattern_type"] == "command"
-    assert entry["requires_hotword"] is True
+    assert entry.get("requires_hotword", False) is False
+    assert entry["whole_utterance_only"] is True

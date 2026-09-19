@@ -44,23 +44,40 @@ Decision tree (in order):
               evidence behind the list. Otherwise fall through to the
               default length-based branch.
 
-         c. verdict=False, reason='default_reject_paste_capable_class'
-              -> RejectedInsertionStrategy with the verdict set via
-              set_pending_verdict. The strategy emits a
-              text_target_rejected event that surfaces the rejection
-              toast with the Try-it-anyway button. This is the entry
-              point for the wh-9weum Phase 4 override flow. Earlier
-              wiring routed this reason directly to ClipboardOnly,
-              which silently pasted and never surfaced the toast in
-              production -- the wh-prio bug, fixed by
-              wh-soft-allow-verdict-tier.
-
-         d. verdict=False, any other reject reason
-              -> RejectedInsertionStrategy. Deliberate no-op: no
-              SendInput, no clipboard write, no shadow buffer update.
-              Includes default_reject (the wh-zndq trap and the empty-
+         c. verdict=False, ANY reject reason, and the context's
+            captured target identity is NOT the empty record
+              -> ClipboardOnlyStrategy (wh-paste-when-unverified.2).
+              The words are pasted with Ctrl+V instead of dropped.
+              Covers default_reject (the wh-zndq trap and the empty-
               ClassName non-browser case), denylist hits, stale_com,
-              not_focusable, no_focused_control.
+              not_focusable, no_focused_control, and the soft reject
+              default_reject_paste_capable_class. The reject never
+              reaches the default length-based branch below: that
+              branch sends keystrokes for short text, and keystrokes
+              into a browser page body are the one recorded harm here
+              (wh-fc1x.1, one page scroll per word in Brave).
+              set_pending_verdict is NOT called on this path.
+
+         c2. verdict=False and the captured target identity EQUALS a
+             fresh TargetIdentity()
+              -> RejectedInsertionStrategy, WITHOUT set_pending_verdict,
+              so the drop is silent (DEBUG only, no notice,
+              success=True, rejected_reason set). An all-zero identity
+              fails is_current() on its first line, so verified_paste
+              would refuse the paste before the send every time and log
+              that refusal at ERROR -- and an ERROR record IS a Windows
+              notification. Only the EMPTY record takes this route; an
+              identity captured properly that then went stale keeps the
+              paste and its ERROR refusal.
+
+         d. verdict=False and clipboard_only is None (legacy fixtures)
+              -> RejectedInsertionStrategy with the verdict set via
+              set_pending_verdict. Deliberate no-op: no SendInput, no
+              clipboard write, no shadow buffer update. The strategy
+              emits the text_target_rejected event that surfaces the
+              rejection toast with the Try-it-anyway button (the
+              wh-9weum Phase 4 override flow). Production wires
+              clipboard_only, so this path does not run there.
 
          When the router is constructed without a predicate (legacy
          test fixtures) this step is skipped and routing falls back
@@ -93,6 +110,7 @@ from typing import Callable, Optional
 
 from .context import UIContext
 from .strategies.base import InsertionStrategy
+from .target_identity import TargetIdentity
 from .text_target import TextTargetPredicate, TextTargetVerdict
 
 logger = logging.getLogger(__name__)
@@ -169,10 +187,10 @@ class InsertionRouter:
                 through to the default length-based branch
                 (VerifiedUnicodeStrategy / StandardStrategy) so older
                 fixtures that have not added the strategy continue to
-                work. Unknown soft rejects (reason
-                'default_reject_paste_capable_class') always route to
-                rejected_strategy regardless of this argument so the
-                Try-it-anyway override flow can run.
+                work. Since wh-paste-when-unverified.2 this strategy
+                also serves EVERY reject reason the predicate returns:
+                the words are pasted rather than dropped. When None,
+                those rejects fall back to rejected_strategy.
             elevation_checker: Optional callable taking the focused
                 control and returning one of "elevated",
                 "not_elevated", or "unknown"
@@ -279,18 +297,21 @@ class InsertionRouter:
         #          branch when clipboard_only is not wired.
         #      * verdict=True, any other reason
         #          -> fall through to the default branch.
-        #      * verdict=False, default_reject_paste_capable_class
+        #      * verdict=False, any reason, captured identity not the
+        #        empty record
+        #          -> ClipboardOnlyStrategy: paste the words with
+        #          Ctrl+V rather than drop them
+        #          (wh-paste-when-unverified.2).
+        #      * verdict=False and the captured identity IS the empty
+        #        record
+        #          -> RejectedInsertionStrategy with no pending
+        #          verdict: a silent drop, because the paste would be
+        #          refused pre-send and that refusal logs at ERROR,
+        #          which is a Windows notification.
+        #      * verdict=False and clipboard_only is None
         #          -> RejectedInsertionStrategy with set_pending_verdict
-        #          (rejection toast + Try-it-anyway button).
-        #      * verdict=False, any other reason
-        #          -> RejectedInsertionStrategy (hard refuse).
-        #
-        #    Earlier wiring routed default_reject_paste_capable_class
-        #    directly to ClipboardOnly, which silently pasted and
-        #    never surfaced the toast in production (the wh-prio bug).
-        #    The soft-allow accept tier now owns silent paste and
-        #    rejection routing owns the toast, so the override flow is
-        #    reachable end-to-end.
+        #          (legacy fixtures; production always wires
+        #          clipboard_only).
         if self.text_target is not None and self.rejected is not None:
             verdict = self.text_target.evaluate(
                 context.focused_control,
@@ -299,6 +320,78 @@ class InsertionRouter:
             )
             if not verdict.verdict:
                 self._log_rejection(verdict)
+                # wh-paste-when-unverified.2: a reject no longer drops
+                # the words. ClipboardOnlyStrategy pastes them with
+                # Ctrl+V, which is the delivery path with no recorded
+                # harm against a non-text control -- the one recorded
+                # harm here is KEYSTROKES into a browser page body
+                # (wh-fc1x.1, one page scroll per word in Brave), and
+                # the default length-based branch below is what sends
+                # them. Returning here keeps every reject away from it.
+                # set_pending_verdict is deliberately NOT called on
+                # this path: RejectedInsertionStrategy is not the
+                # strategy being returned, and a verdict parked on it
+                # would be consumed by a later insert that really does
+                # route there (the elevated refusal above).
+                #
+                # wh-paste-when-unverified.2, boss hard gate finding 1:
+                # a reject whose CAPTURED IDENTITY IS THE EMPTY RECORD
+                # is dropped silently instead of pasted. ui/context.py
+                # captures an identity on every context, and
+                # capture_target_identity returns the all-zero
+                # TargetIdentity() -- never None -- both when there is
+                # no focused control and when the control's reads
+                # raise. All seven fields are 0, so
+                # TargetIdentity.is_current() returns False on its
+                # FIRST line with no Windows call: verified_paste would
+                # refuse this paste before the send every time, not
+                # sometimes, and log that refusal at ERROR. An ERROR
+                # record IS a Windows notification
+                # (ErrorNotificationHandler sits on the root logger),
+                # and a second one followed on the letter-buffer path
+                # because ClipboardOnlyStrategy sets no
+                # rejected_reason. Returning self.rejected with NO
+                # pending verdict gives the four properties wanted
+                # here at once: DEBUG only, no notice, success=True (so
+                # raw_insert_text does not raise), and rejected_reason
+                # set (so end_utterance takes its WARNING arm).
+                #
+                # Emptiness is tested by EQUALITY against a fresh
+                # TargetIdentity(), never by calling is_current():
+                # equality needs no Windows call, so the guard itself
+                # cannot fail or flake. None is NOT the empty record --
+                # legacy fixtures build a UIContext without an identity
+                # and keep the paste above. An identity that was
+                # captured properly and THEN went stale also keeps the
+                # paste and its existing ERROR refusal, because a
+                # genuinely stale target is a real failure worth
+                # reporting. Only the empty record becomes a silent
+                # drop.
+                captured_identity = getattr(context, "target_identity", None)
+                if captured_identity == TargetIdentity():
+                    logger.debug(
+                        "Router: rejected text target with an EMPTY "
+                        "captured identity -> RejectedInsertionStrategy "
+                        "(silent drop; a paste would be refused "
+                        "pre-send and logged at ERROR) reason=%s "
+                        "class=%s process=%s",
+                        verdict.reason,
+                        verdict.class_name or "?",
+                        verdict.process_name or "?",
+                    )
+                    return self.rejected
+                if self.clipboard_only is not None:
+                    logger.debug(
+                        "Router: unverified text target -> "
+                        "ClipboardOnlyStrategy (paste, not drop) "
+                        "reason=%s class=%s process=%s",
+                        verdict.reason,
+                        verdict.class_name or "?",
+                        verdict.process_name or "?",
+                    )
+                    return self.clipboard_only
+                # No ClipboardOnlyStrategy wired (legacy fixtures
+                # only). Keep the pre-wh-paste-when-unverified refusal.
                 # wh-7318z: hand the verdict to the strategy so it can
                 # emit a structured text_target_rejected event during
                 # insert. The strategy ignores the call when it was

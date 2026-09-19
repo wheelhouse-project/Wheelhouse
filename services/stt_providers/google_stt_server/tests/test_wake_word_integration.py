@@ -11,6 +11,7 @@ Covers:
 import sys
 import time
 import threading
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -40,7 +41,6 @@ class TestWakeWordConfigValidation:
             "diagnostics": {},
             "debug": {},
             "latency": {},
-            "overflow_detection": {},
             "wake_word": {"enabled": True, "keyword": "computer"},
         }
         # Should not raise SystemExit
@@ -52,12 +52,11 @@ class TestWakeWordConfigLoading:
 
     def test_wake_word_fields_on_appconfig(self):
         """AppConfig should have wake word fields with correct defaults."""
-        from config_loader import AppConfig, LatencyConfig, DebugConfig, OverflowDetectionConfig, AGCConfig
+        from config_loader import AppConfig, LatencyConfig, DebugConfig, AGCConfig
 
         cfg = AppConfig(
             latency=LatencyConfig(stability_commit_threshold=0.89),
             debug=DebugConfig(),
-            overflow_detection=OverflowDetectionConfig(),
             agc=AGCConfig(),
         )
         assert cfg.wake_word_enabled is False
@@ -86,7 +85,6 @@ class TestWakeWordConfigLoading:
             "diagnostics": {},
             "debug": {},
             "latency": {},
-            "overflow_detection": {},
             "wake_word": wake_word_data,
         }
 
@@ -118,7 +116,6 @@ class TestWakeWordConfigLoading:
             "diagnostics": {},
             "debug": {},
             "latency": {},
-            "overflow_detection": {},
         }
 
         with patch("config_loader.argparse.ArgumentParser.parse_args", return_value=MagicMock(
@@ -150,6 +147,7 @@ class FakeDebugConfig:
     log_stream_responses: bool = False
     log_frame_stats: bool = False
     log_overflow_diagnostics: bool = False
+    log_load_diagnostics: bool = False
 
 
 @dataclass
@@ -169,21 +167,10 @@ class FakeAGCConfig:
 
 
 @dataclass
-class FakeOverflowConfig:
-    enabled: bool = False
-    overflow_threshold: int = 5
-    window_seconds: float = 30.0
-    restart_cooldown_seconds: float = 60.0
-    max_restart_attempts: int = 3
-    stable_reset_seconds: float = 300.0
-
-
-@dataclass
 class FakeAppConfig:
     latency: FakeLatencyConfig = field(default_factory=FakeLatencyConfig)
     debug: FakeDebugConfig = field(default_factory=FakeDebugConfig)
     agc: FakeAGCConfig = field(default_factory=FakeAGCConfig)
-    overflow_detection: FakeOverflowConfig = field(default_factory=FakeOverflowConfig)
     silence_finalize_ms: int = 2000
     max_no_text_seconds: float = 5.0
     forward_ws: bool = True
@@ -234,146 +221,161 @@ def make_forwarder() -> MagicMock:
     return fwd
 
 
-class TestWakeWordActivateCallback:
-    """Test the handle_wake_word_activate callback logic.
+def real_activate_callback(mode: str, detector_is_loaded: bool = True):
+    """Return main()'s own handle_wake_word_activate, plus its detector.
 
-    This tests the callback function that gets wired into WSForwarder.
-    The callback is called when transcription status changes:
+    The callback is nested inside main() and main() hands it to WSForwarder,
+    so patching that class captures the real function. The mic read raises
+    KeyboardInterrupt on its first call, which stops main() as soon as the
+    callback exists; a closure outlives the call that built it, so the
+    captured function still reads and writes the same cells the audio loop
+    reads.
+    """
+    args = MagicMock()
+    args.list_devices = False
+    args.ws_host = None
+    args.ws_port = None
+    cfg = make_config(wake_word_enabled=True, wake_word_mode=mode)
+
+    mock_detector = MagicMock()
+    mock_detector.is_loaded = detector_is_loaded
+
+    mock_mic = MagicMock()
+    mock_mic.read.side_effect = KeyboardInterrupt()
+
+    captured = {}
+
+    def capture_ws_init(**kwargs):
+        captured.update(kwargs)
+        return make_forwarder()
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("main.load_config", return_value=(args, cfg)))
+        stack.enter_context(patch("main.get_audio_provider", return_value=mock_mic))
+        stack.enter_context(patch("main.SileroVAD"))
+        stack.enter_context(patch("main.SmartAGC"))
+        stack.enter_context(patch("main.UsageMetrics"))
+        stack.enter_context(patch("main.WSForwarder", side_effect=capture_ws_init))
+        stack.enter_context(
+            patch("main.get_startup_banner", return_value="Test v1.0")
+        )
+        stack.enter_context(patch("main.logger"))
+        stack.enter_context(
+            patch(
+                "shared_stt.wake_word_detector.WakeWordDetector",
+                return_value=mock_detector,
+            )
+        )
+        from main import main as google_main
+        try:
+            google_main()
+        except (KeyboardInterrupt, SystemExit):
+            pass
+
+    callback = captured.get("wake_word_activate_callback")
+    assert callback is not None, (
+        "main() did not hand a wake_word_activate_callback to WSForwarder"
+    )
+    return callback, mock_detector
+
+
+def listening_state(callback) -> bool:
+    """Read the callback's own wake_word_listening cell.
+
+    The callback writes that variable with `nonlocal`, so it is a closure
+    cell of main() rather than an attribute of an object. That cell is the
+    value main()'s transcription-disabled branch reads before it feeds a
+    frame to the detector, so reading it asserts the real listening state.
+    """
+    names = callback.__code__.co_freevars
+    return callback.__closure__[names.index("wake_word_listening")].cell_contents
+
+
+class TestWakeWordActivateCallback:
+    """Test main()'s real handle_wake_word_activate callback.
+
+    The callback is what WSForwarder calls when transcription status changes:
     - reason=None -> transcription enabled (stop listening for wake word)
-    - reason="idle" -> transcription disabled due to idle (start listening)
-    - reason="audio"/"sonos" -> transcription disabled for other reasons
+    - reason="idle" -> transcription disabled after an idle pause
+    - reason="audio"/"sonos" -> transcription disabled for the other reasons
+
+    Which reasons arm the detector is one shared rule,
+    shared_stt.wake_word_detector.should_listen_for_wake_word; the shared
+    suite covers the rule itself and these tests cover this provider's use
+    of it. Every test here drives the production closure: the four that
+    predate wh-audio-suppression-control defined a copy of the rule inside
+    the test body and asserted against the copy, so they exercised no
+    provider code at all and could not see the C3 change.
     """
 
     def test_idle_reason_activates_in_idle_recovery_mode(self):
         """In idle_recovery mode, reason='idle' should start wake word listening."""
-        wake_word_listening = False
-        wake_word_mode = "idle_recovery"
+        callback, detector = real_activate_callback("idle_recovery")
 
-        mock_detector = MagicMock()
-        mock_detector.is_loaded = True
-
-        def handle_wake_word_activate(reason):
-            nonlocal wake_word_listening
-            if reason is None:
-                wake_word_listening = False
-                return
-            if not mock_detector or not mock_detector.is_loaded:
-                return
-            should_activate = False
-            if wake_word_mode == "idle_recovery":
-                should_activate = (reason == "idle")
-            elif wake_word_mode == "push_to_talk":
-                should_activate = (reason in ("idle", "audio", "sonos"))
-            if should_activate:
-                mock_detector.reset()
-                wake_word_listening = True
-            else:
-                wake_word_listening = False
-
-        handle_wake_word_activate("idle")
-        assert wake_word_listening is True
-        mock_detector.reset.assert_called_once()
+        callback("idle")
+        assert listening_state(callback) is True
+        detector.reset.assert_called_once()
 
     def test_audio_reason_does_not_activate_in_idle_recovery(self):
-        """In idle_recovery mode, reason='audio' should NOT start listening."""
-        wake_word_listening = False
-        wake_word_mode = "idle_recovery"
+        """wh-audio-suppression-auto: the sound pause has no voice way out.
 
-        mock_detector = MagicMock()
-        mock_detector.is_loaded = True
+        The detector armed on "audio" so the user could say the command
+        that switched audio suppression off. That command is gone, and so
+        is the recovery window it was spoken into.
+        """
+        callback, detector = real_activate_callback("idle_recovery")
 
-        def handle_wake_word_activate(reason):
-            nonlocal wake_word_listening
-            if reason is None:
-                wake_word_listening = False
-                return
-            if not mock_detector or not mock_detector.is_loaded:
-                return
-            should_activate = False
-            if wake_word_mode == "idle_recovery":
-                should_activate = (reason == "idle")
-            elif wake_word_mode == "push_to_talk":
-                should_activate = (reason in ("idle", "audio", "sonos"))
-            if should_activate:
-                mock_detector.reset()
-                wake_word_listening = True
-            else:
-                wake_word_listening = False
+        callback("audio")
+        assert listening_state(callback) is False
+        detector.reset.assert_not_called()
 
-        handle_wake_word_activate("audio")
-        assert wake_word_listening is False
+    def test_sonos_reason_does_not_activate_in_idle_recovery(self):
+        """The Sonos pause keeps the behaviour it has today in this mode."""
+        callback, detector = real_activate_callback("idle_recovery")
+
+        callback("sonos")
+        assert listening_state(callback) is False
+        detector.reset.assert_not_called()
 
     def test_audio_reason_activates_in_push_to_talk(self):
         """In push_to_talk mode, reason='audio' should start listening."""
-        wake_word_listening = False
-        wake_word_mode = "push_to_talk"
+        callback, detector = real_activate_callback("push_to_talk")
 
-        mock_detector = MagicMock()
-        mock_detector.is_loaded = True
+        callback("audio")
+        assert listening_state(callback) is True
+        detector.reset.assert_called_once()
 
-        def handle_wake_word_activate(reason):
-            nonlocal wake_word_listening
-            if reason is None:
-                wake_word_listening = False
-                return
-            if not mock_detector or not mock_detector.is_loaded:
-                return
-            should_activate = False
-            if wake_word_mode == "idle_recovery":
-                should_activate = (reason == "idle")
-            elif wake_word_mode == "push_to_talk":
-                should_activate = (reason in ("idle", "audio", "sonos"))
-            if should_activate:
-                mock_detector.reset()
-                wake_word_listening = True
-            else:
-                wake_word_listening = False
+    def test_sonos_reason_activates_in_push_to_talk(self):
+        """push_to_talk arms on every disable reason, unchanged."""
+        callback, detector = real_activate_callback("push_to_talk")
 
-        handle_wake_word_activate("audio")
-        assert wake_word_listening is True
+        callback("sonos")
+        assert listening_state(callback) is True
+        detector.reset.assert_called_once()
 
     def test_none_reason_deactivates_listening(self):
         """reason=None (transcription enabled) should stop wake word listening."""
-        wake_word_listening = True
+        callback, _detector = real_activate_callback("idle_recovery")
 
-        mock_detector = MagicMock()
-        mock_detector.is_loaded = True
-
-        def handle_wake_word_activate(reason):
-            nonlocal wake_word_listening
-            if reason is None:
-                wake_word_listening = False
-                return
-
-        handle_wake_word_activate(None)
-        assert wake_word_listening is False
+        callback("idle")
+        assert listening_state(callback) is True
+        callback(None)
+        assert listening_state(callback) is False
 
     def test_detector_not_loaded_does_not_activate(self):
-        """If detector is not loaded, listening should not activate."""
-        wake_word_listening = False
-        wake_word_mode = "idle_recovery"
+        """A provider whose detector never loaded does not start listening.
 
-        mock_detector = MagicMock()
-        mock_detector.is_loaded = False
+        The loaded check sits in main() ahead of the shared rule, so an idle
+        pause on a machine without openWakeWord leaves the listening state
+        False and resets nothing.
+        """
+        callback, detector = real_activate_callback(
+            "idle_recovery", detector_is_loaded=False
+        )
 
-        def handle_wake_word_activate(reason):
-            nonlocal wake_word_listening
-            if reason is None:
-                wake_word_listening = False
-                return
-            if not mock_detector or not mock_detector.is_loaded:
-                return
-            should_activate = False
-            if wake_word_mode == "idle_recovery":
-                should_activate = (reason == "idle")
-            if should_activate:
-                mock_detector.reset()
-                wake_word_listening = True
-            else:
-                wake_word_listening = False
-
-        handle_wake_word_activate("idle")
-        assert wake_word_listening is False
+        callback("idle")
+        assert listening_state(callback) is False
+        detector.reset.assert_not_called()
 
 
 class TestWakeWordMainLoopIntegration:
@@ -389,7 +391,6 @@ class TestWakeWordMainLoopIntegration:
 
     @patch("main.load_config")
     @patch("main.get_audio_provider")
-    @patch("main.get_available_providers", return_value=["sounddevice"])
     @patch("main.SileroVAD")
     @patch("main.SmartAGC")
     @patch("main.UsageMetrics")
@@ -399,7 +400,7 @@ class TestWakeWordMainLoopIntegration:
     def test_wake_word_detection_sends_event_and_reenables(
         self, mock_logger, mock_banner, mock_ws_class,
         mock_metrics, mock_agc, mock_vad,
-        mock_providers, mock_audio, mock_load_config
+        mock_audio, mock_load_config
     ):
         """When wake word detected while idle, should send event and re-enable transcription."""
         args = MagicMock()
@@ -407,7 +408,6 @@ class TestWakeWordMainLoopIntegration:
         args.ws_host = None
         args.ws_port = None
         cfg = make_config(wake_word_enabled=True, wake_word_keyword="computer")
-        cfg.overflow_detection.enabled = False
         mock_load_config.return_value = (args, cfg)
 
         mock_mic = MagicMock()
@@ -465,7 +465,6 @@ class TestWakeWordMainLoopIntegration:
 
     @patch("main.load_config")
     @patch("main.get_audio_provider")
-    @patch("main.get_available_providers", return_value=["sounddevice"])
     @patch("main.SileroVAD")
     @patch("main.SmartAGC")
     @patch("main.UsageMetrics")
@@ -475,7 +474,7 @@ class TestWakeWordMainLoopIntegration:
     def test_wake_word_not_created_when_disabled(
         self, mock_logger, mock_banner, mock_ws_class,
         mock_metrics, mock_agc, mock_vad,
-        mock_providers, mock_audio, mock_load_config
+        mock_audio, mock_load_config
     ):
         """When wake_word_enabled=False, no WakeWordDetector should be created."""
         args = MagicMock()
@@ -483,7 +482,6 @@ class TestWakeWordMainLoopIntegration:
         args.ws_host = None
         args.ws_port = None
         cfg = make_config(wake_word_enabled=False)
-        cfg.overflow_detection.enabled = False
         mock_load_config.return_value = (args, cfg)
 
         mock_mic = MagicMock()

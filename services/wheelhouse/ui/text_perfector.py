@@ -3,8 +3,17 @@
 This module handles intelligent text formatting including:
 - Spacing rules (when to add prefix space)
 - Capitalization (sentence-start detection)
-- Escape sequence processing (\\n, \\t, etc.)
+- Acronym case repair
 - Punctuation-aware formatting
+
+A backslash in the insertion string is a literal backslash. This module
+does not decode escape sequences (wh-insert-text-backslash-escape). An
+earlier version replaced the two-character sequences \\n, \\t and \\r
+with the control characters they name, which split the Windows path
+C:\\Windows\\System32\\notepad.exe across two lines. Callers that want a
+real newline use the insert_newlines action; callers that want the text
+inserted exactly as given use the insert_raw action or VERBATIM mode,
+both of which bypass this module.
 
 All functions are pure logic with no UI dependencies, making them
 easily testable and maintainable.
@@ -16,10 +25,12 @@ from typing import Optional
 
 
 class TextPerfector:
-    """Applies intelligent spacing, capitalization, and escape sequence handling to dictated text.
+    """Applies intelligent spacing and capitalization to dictated text.
 
     This class encapsulates all pure text transformation logic, with no dependencies
     on UI state, clipboard, or Windows APIs. All methods are deterministic and testable.
+    Every character of the insertion string reaches the target as given; a backslash
+    is a literal backslash and is never read as the start of an escape sequence.
     """
 
     def perfected_string(
@@ -61,10 +72,6 @@ class TextPerfector:
             >>> p.perfected_string("git", preceding_chars="", capitalize=False)
             "git"
         """
-        # Handle escape sequences and control characters literally
-        if self._is_literal_insertion(insertion_string):
-            return self._process_escape_sequences(insertion_string)
-
         # Fix misrecognized acronyms (e.g., "gPU" -> "GPU")
         insertion_string = self._fix_acronym_case(insertion_string)
 
@@ -215,42 +222,3 @@ class TextPerfector:
             return word
 
         return " ".join(_fix_word(w) for w in text.split(" "))
-
-    def _is_literal_insertion(self, text: str) -> bool:
-        """Check if text contains escape sequences requiring literal treatment.
-
-        Args:
-            text: Text to check
-
-        Returns:
-            True if text contains escape sequences
-        """
-        return '\\n' in text or '\\t' in text or '\\r' in text or text.startswith('\\')
-
-    def _process_escape_sequences(self, text: str) -> str:
-        """Convert escape sequences to their actual characters.
-
-        Handles common escape sequences:
-        - \\n → newline
-        - \\t → tab
-        - \\r → carriage return
-        - \\\\ → backslash
-
-        Args:
-            text: Text containing escape sequences
-
-        Returns:
-            Text with escape sequences converted to actual characters
-        """
-        escape_map = {
-            '\\n': '\n',
-            '\\t': '\t',
-            '\\r': '\r',
-            '\\\\': '\\'
-        }
-
-        result = text
-        for escape_seq, actual_char in escape_map.items():
-            result = result.replace(escape_seq, actual_char)
-
-        return result

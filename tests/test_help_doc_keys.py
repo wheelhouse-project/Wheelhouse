@@ -125,7 +125,7 @@ def test_help_doc_has_no_unresolved_placeholders():
 
 
 def test_help_doc_documents_current_install_path():
-    content = _HELP_DOC.read_text(encoding="utf-8")
+    content = _HELP_DOC.with_name("wheelhouse_install.md").read_text(encoding="utf-8")
     missing = [key for key in REQUIRED_CURRENT_CONTENT if key not in content]
     assert not missing, (
         "wheelhouse_help.md is missing required current install content: "

@@ -698,6 +698,63 @@ def test_summary_item_bad_bounds_length_raises():
         ShowNumberedOverlayResponse.from_dict(payload)
 
 
+def _single_item_payload(**extra: Any) -> dict[str, Any]:
+    payload = _ok_response().to_dict()
+    item = {
+        "item_id": "m1",
+        "display_number": 1,
+        "name": "Exit",
+        "role": "MenuItem",
+        "bounds": [110, 850, 980, 87],
+        "monitor_id": 0,
+    }
+    item.update(extra)
+    payload["snapshot_summary"] = {
+        "snapshot_id": "s1",
+        "created_at_monotonic": 1.0,
+        "items": [item],
+    }
+    return payload
+
+
+def test_summary_round_trip_keeps_bounds_outside_menu():
+    # wh-vscode-menu-badge-misplaced: the shared serializer carries the
+    # walk-time mark to the GUI.
+    marked = WalkSnapshotSummaryItem(
+        item_id="m1", display_number=1, name="Exit", role="MenuItem",
+        bounds=(110, 850, 980, 87), monitor_id=0, bounds_outside_menu=True,
+    )
+    resp = ShowNumberedOverlayResponse(
+        status="ok",
+        outcome="ok",
+        reason=None,
+        snapshot_id="s1",
+        snapshot_summary=WalkSnapshotSummary(
+            snapshot_id="s1", items=[marked], created_at_monotonic=1.0,
+        ),
+        trace_id="trace-1",
+        overlay_session_id=7,
+        paint_generation=2,
+    )
+    payload = resp.to_dict()
+    assert payload["snapshot_summary"]["items"][0]["bounds_outside_menu"] is True
+    restored = ShowNumberedOverlayResponse.from_dict(payload)
+    assert restored == resp
+
+
+def test_summary_item_missing_bounds_outside_menu_reads_false():
+    restored = ShowNumberedOverlayResponse.from_dict(_single_item_payload())
+    assert restored.snapshot_summary is not None
+    assert restored.snapshot_summary.items[0].bounds_outside_menu is False
+
+
+def test_summary_item_non_bool_bounds_outside_menu_raises():
+    payload = _single_item_payload(bounds_outside_menu="yes")
+    with pytest.raises(ShowNumberedOverlayResponseSchemaError) as exc_info:
+        ShowNumberedOverlayResponse.from_dict(payload)
+    assert "bounds_outside_menu" in str(exc_info.value)
+
+
 def test_summary_item_bool_display_number_raises():
     payload = _ok_response().to_dict()
     payload["snapshot_summary"] = {

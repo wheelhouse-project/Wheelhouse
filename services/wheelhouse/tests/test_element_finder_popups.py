@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from ui import uia_walker
 from ui.browser_dom_corrections import apply_dom_corrections
+from ui.confidence_scorer import score as score_match
 from ui.element_finder import ElementFinder, ForegroundContext
 from ui.element_types import ElementQuery
 from ui.uia_walker import (
@@ -31,6 +32,7 @@ from ui.uia_walker import (
     UIA_MENU,
     UIA_MENUITEM,
     UIA_TEXT,
+    WINUI_POPUP_CLASS_NAME,
     WalkResult,
     walk_owned_popups,
     walk_window,
@@ -105,6 +107,18 @@ def make_finder(primary_top_level, *, popup_walk_fn=None, clock=None, **override
         "dpi_resolver": fixed_dpi_resolver,
         "monitor_resolver": zero_monitor_resolver,
         "window_enumerator": lambda: [],
+        # Inert taskbar walk by default: the ElementFinder default is the
+        # REAL walk_taskbar_windows, whose default enumerator is a real
+        # EnumWindows -- a fixture-built finder handed a truthy fake
+        # automation would otherwise walk the HOST machine's real
+        # Shell_TrayWnd (deepseek finding wh-overlay-taskbar-numbers.5.2).
+        "taskbar_walk_fn": lambda **k: [],
+        # Inert popup-rectangle seam, same hermetic reason: the ElementFinder
+        # default is a real GetWindowRect, and POPUP_HWND (2001) can name a REAL
+        # window on the host machine, whose rectangle would then drop fixture
+        # matches at random (wh-winui-menu-click-refused.2). The covered-match
+        # tests below inject their own.
+        "window_rect_fn": lambda hwnd: None,
     }
     if clock is not None:
         kwargs["clock"] = clock
@@ -958,3 +972,496 @@ def test_overlay_walk_anchors_internal_deadline_on_one_clock_read():
     # deadline anchored on the SAME read as walk_start: budget == walk_deadline_ms.
     assert captured.get("walk_start") is not None
     assert captured["deadline"] == captured["walk_start"] + 1.0
+
+
+# ---------------------------------------------------------------------------
+# Application-window copies covered by an owned popup window
+# (wh-winui-menu-click-refused.2)
+#
+# A WinUI 3 application draws its menu in an owned top-level popup window AND
+# exposes the same menu items inside the application window's own accessibility
+# tree, at the same rectangles. Both walks return the item, so "click exit" is
+# ambiguous and the overlay paints two badges per menu item. The application
+# window's copy is the useless one: measured on Windows 11 Notepad on
+# 2026-08-14 it exposed neither an Invoke pattern nor an MSAA default action,
+# and its pixels belong to the popup, so ClickExecutor refused the coordinate
+# click as click_point_obstructed.
+#
+# The finder reads each walked popup window's rectangle through window_rect_fn
+# and drops every focused-window match that lies inside it.
+# ---------------------------------------------------------------------------
+
+# The popup window rectangle used below, (x, y, w, h) physical pixels. It
+# covers both menu-item rects _popup_walkresult builds (item 1 at y 20..50,
+# item 2 at y 60..90) with a margin.
+_POPUP_RECT = (0, 10, 200, 100)
+# A rect inside _POPUP_RECT -- the duplicate copy the application window
+# exposes for popup item 1. Same geometry as the popup's own item.
+_COVERED_RECT = FakeRect(10, 20, 110, 50)
+# A rect far outside _POPUP_RECT -- a real application control the menu does
+# not cover.
+_UNCOVERED_RECT = FakeRect(300, 300, 400, 340)
+
+
+def _rect_by_hwnd(table):
+    """window_rect_fn seam over {hwnd: rect}, recording the handles it read."""
+    calls: list[int] = []
+
+    def _fn(hwnd):
+        calls.append(hwnd)
+        return table.get(hwnd)
+
+    return _fn, calls
+
+
+_EXIT_QUERY = ElementQuery("exit", None, None, None, "exit")
+
+
+def _popup_walkresult_scored_for(query, *names):
+    """``_popup_walkresult`` with every match scored by the REAL scorer.
+
+    ``element_match_from_cached`` leaves ``score`` 0.0 and ``is_eligible``
+    False. In production ``walk_owned_popups`` runs the finder's score hook --
+    which is this same scorer, with this same query -- over its matches before
+    returning them, so a popup copy of a menu item scores EXACTLY what the
+    application window's copy of it scores. That equality is what made the
+    original report ambiguous, so the fixture reproduces it by scoring here
+    rather than by stamping a number. The finder never re-scores popup matches,
+    and ``decide()`` drops everything below ``min_confidence``.
+    """
+    result = _popup_walkresult(*names)
+    return replace(
+        result,
+        matches=[
+            replace(m, score=score_match(query, m), is_eligible=True)
+            for m in result.matches
+        ],
+    )
+
+
+def test_find_drops_focused_copy_covered_by_popup():
+    # THE ORIGINAL REPORT (wh-winui-menu-click-refused): "click exit" over the
+    # Notepad File menu. Both copies of "Exit" match and score the same, so
+    # decide() calls it ambiguous and the user gets a notice instead of a click
+    # -- the production log for trace T-17867363840 reads
+    # "ambiguous names=('Exit', 'Exit') finalists=2". With the covered copy
+    # dropped the popup copy wins outright.
+    primary = FakeTopLevel(FakeElementArray([el("Exit", rect=_COVERED_RECT)]))
+    rect_fn, _calls = _rect_by_hwnd({POPUP_HWND: _POPUP_RECT})
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [
+            _popup_walkresult_scored_for(_EXIT_QUERY, "Exit")
+        ],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.find(_EXIT_QUERY, fg())
+
+    assert result.outcome.outcome == "ok"
+    assert result.outcome.winner is not None
+    # The surviving "Exit" is the POPUP's, the one that can actually be clicked.
+    assert result.outcome.winner.source_window_hwnd == POPUP_HWND
+    assert [m.name for m in result.snapshot.matches] == ["Exit"]
+
+
+def test_find_keeps_focused_match_the_popup_does_not_cover():
+    # Only the covered copy goes. A control elsewhere in the application window
+    # still matches the query and still reaches decide().
+    primary = FakeTopLevel(FakeElementArray([
+        el("Exit", rect=_COVERED_RECT),
+        el("Exit full screen", rect=_UNCOVERED_RECT),
+    ]))
+    rect_fn, _calls = _rect_by_hwnd({POPUP_HWND: _POPUP_RECT})
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit")],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.find(ElementQuery("exit", None, None, None, "exit"), fg())
+
+    names = [m.name for m in result.snapshot.matches]
+    assert "Exit full screen" in names
+    # The application window's covered duplicate is gone; the popup's copy stays.
+    assert names.count("Exit") == 1
+    popup_names = [
+        m.name
+        for m in result.snapshot.matches
+        if m.source_window_hwnd == POPUP_HWND
+    ]
+    assert popup_names == ["Exit"]
+
+
+def test_find_unreadable_popup_rect_suppresses_nothing():
+    # FAIL OPEN. window_rect_fn returns None when the popup window closed
+    # between the walk and the read. A missing rectangle must leave every
+    # focused-window match in place -- an ambiguous outcome is a worse answer
+    # than a click, but a silently emptied match list is worse still.
+    primary = FakeTopLevel(FakeElementArray([el("Exit", rect=_COVERED_RECT)]))
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit")],
+        window_rect_fn=lambda hwnd: None,
+    )
+    result = finder.find(ElementQuery("exit", None, None, None, "exit"), fg())
+
+    assert [m.name for m in result.snapshot.matches] == ["Exit", "Exit"]
+
+
+def test_overlay_walk_drops_focused_copy_covered_by_popup():
+    # Overlay path, same duplication: without the drop the WinUI menu gets two
+    # badges per item and the application window's badge cannot be clicked.
+    focused = _MultiTopLevel([
+        _interactive_el("Exit", rect=_COVERED_RECT),
+        _interactive_el("Save", rect=_UNCOVERED_RECT),
+    ])
+    rect_fn, _calls = _rect_by_hwnd({POPUP_HWND: _POPUP_RECT})
+
+    finder = make_multi_finder(
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit", "Print")],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.overlay_walk(_fg_top(focused))
+
+    assert result.outcome == "ok"
+    items = result.summary.items
+    # Save (uncovered, focused) keeps its badge; the covered "Exit" copy is
+    # gone; both popup items are numbered. Renumber stays contiguous.
+    assert [i.name for i in items] == ["Save", "Exit", "Print"]
+    assert [i.display_number for i in items] == [1, 2, 3]
+    assert [i.item_id for i in items] == ["uia-1", "uia-2", "uia-3"]
+    matches = result.snapshot.matches
+    assert [m.source_window_hwnd for m in matches] == [
+        0, POPUP_HWND, POPUP_HWND,
+    ]
+
+
+def test_overlay_walk_keeps_taskbar_matches_under_a_popup():
+    # The taskbar is a different window, never a source of duplicate menu-item
+    # copies, and a menu opening near the screen edge can overlap it. Taskbar
+    # matches are NOT filtered -- only the focused window's own matches are.
+    focused = _MultiTopLevel([_interactive_el("Save", rect=_UNCOVERED_RECT)])
+    rect_fn, _calls = _rect_by_hwnd({POPUP_HWND: _POPUP_RECT})
+    taskbar_match = replace(
+        _popup_walkresult("Taskbar button").matches[0],
+        source_window_hwnd=3001,
+        source_window_is_shell=True,
+    )
+    taskbar_result = replace(
+        _popup_walkresult("Taskbar button"), matches=[taskbar_match]
+    )
+
+    finder = make_multi_finder(
+        automation=object(),
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit")],
+        taskbar_walk_fn=lambda **k: [taskbar_result],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.overlay_walk(_fg_top(focused))
+
+    # The taskbar button's rect lies inside the popup rectangle, and it keeps
+    # its badge anyway.
+    assert "Taskbar button" in [i.name for i in result.summary.items]
+
+
+def test_find_reads_each_popup_window_rect_once():
+    # One blocking Win32 round trip per popup WINDOW, not per popup match. Two
+    # menu items from the same popup window must cost one rectangle read.
+    primary = FakeTopLevel(FakeElementArray([el("Exit", rect=_COVERED_RECT)]))
+    rect_fn, calls = _rect_by_hwnd({POPUP_HWND: _POPUP_RECT})
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit", "Print")],
+        window_rect_fn=rect_fn,
+    )
+    finder.find(ElementQuery("exit", None, None, None, "exit"), fg())
+
+    assert calls == [POPUP_HWND]
+
+
+# ---------------------------------------------------------------------------
+# The by-name path's narrower rule, and what an admitted non-menu popup may do
+# (deepseek findings wh-winui-menu-click-refused.4.1 / .4.2 / .4.3).
+#
+# The overlay asks "can the user see this control?", and geometry answers that.
+# The by-name path asks only "is this focused match the popup's own copy of the
+# control the user named?", and geometry alone does NOT answer that: a drop
+# there can leave decide() with nothing, and find() answers not_found by
+# walking OTHER top-level windows.
+# ---------------------------------------------------------------------------
+
+# A second popup window: the WinUI popup host class draws tooltips and teaching
+# tips as well as menus, so the class-name arm admits them too.
+TOOLTIP_HWND = 2002
+
+# "click bold" -- no role word. ClickCommandParser emits role=None, and
+# _query_has_role then walks with query_has_role=False, which keeps Text
+# controls (a tooltip's content is Text).
+_BOLD_QUERY = ElementQuery("bold", None, None, None, "bold")
+
+
+def _score_walkresult(result, query):
+    """Score every match in ``result`` with the REAL scorer, as production does."""
+    return replace(
+        result,
+        matches=[
+            replace(m, score=score_match(query, m), is_eligible=True)
+            for m in result.matches
+        ],
+    )
+
+
+def _popup_walkresult_of(elements, *, source_window_hwnd=POPUP_HWND):
+    """A popup WalkResult over explicit fake elements, in the order given.
+
+    ``_popup_walkresult`` builds MenuItems at fixed stacked rectangles. This
+    one takes the elements as they are, so a test can choose the control type
+    (a tooltip's Text) or the rectangle (one item of a menu, not the first).
+    """
+    matches = [
+        uia_walker.element_match_from_cached(
+            element,
+            display_number=i,
+            source_window_hwnd=source_window_hwnd,
+        )
+        for i, element in enumerate(elements, start=1)
+    ]
+    return WalkResult(
+        matches=matches,
+        _keepalive_automation=object(),
+        _keepalive_cache_request=object(),
+        _keepalive_element_array=FakeElementArray([]),
+        _keepalive_top_level_element=object(),
+        deadline_truncated=False,
+    )
+
+
+def test_find_keeps_a_covered_focused_match_the_popup_does_not_duplicate():
+    # A control the open menu hides, whose name the menu does NOT repeat, is
+    # not a duplicate of anything. Dropping it leaves decide() with nothing,
+    # and find() answers not_found by walking OTHER top-level windows -- so
+    # "click bold" over a WinUI menu could invoke the Bold button of a
+    # DIFFERENT application sitting behind this one.
+    primary = FakeTopLevel(FakeElementArray([el("Bold", rect=_COVERED_RECT)]))
+    rect_fn, _calls = _rect_by_hwnd({POPUP_HWND: _POPUP_RECT})
+    enumerations: list[int] = []
+
+    def _recording_enumerator():
+        enumerations.append(1)
+        return []
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit", "Print")],
+        window_rect_fn=rect_fn,
+        window_enumerator=_recording_enumerator,
+    )
+    result = finder.find(_BOLD_QUERY, fg())
+
+    assert result.outcome.outcome == "ok"
+    assert result.outcome.winner is not None
+    assert result.outcome.winner.name == "Bold"
+    # The restricted fall-back never ran: its first act is to enumerate the
+    # top-level windows, and nothing enumerated them.
+    assert enumerations == []
+
+
+def test_find_ignores_a_popup_match_that_is_not_clickable():
+    # A WinUI tooltip is drawn by the same popup host class as a WinUI menu, so
+    # the walk admits it, and its content is a Text control. On the by-name
+    # path a role-less query keeps Text alive and decide() never requires an
+    # Invoke pattern, so the tooltip's text competed with the control it
+    # describes and the answer went ambiguous instead of clicking. Nothing in a
+    # popup that cannot be clicked reaches decide(), and a popup with nothing
+    # clickable in it is not even measured -- so its rectangle can never drop
+    # the control it describes either.
+    primary = FakeTopLevel(FakeElementArray([el("Bold", rect=_UNCOVERED_RECT)]))
+    tooltip = _score_walkresult(
+        _popup_walkresult_of(
+            [el("Bold", control_type=UIA_TEXT, role="text",
+                invoke_supported=False, rect=FakeRect(0, 0, 400, 60))],
+            source_window_hwnd=TOOLTIP_HWND,
+        ),
+        _BOLD_QUERY,
+    )
+    # A rectangle covering the whole fake desktop: were the tooltip's window
+    # measured, it would drop the Bold button as well.
+    rect_fn, calls = _rect_by_hwnd({TOOLTIP_HWND: (0, 0, 4000, 4000)})
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [tooltip],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.find(_BOLD_QUERY, fg())
+
+    assert result.outcome.outcome == "ok"
+    assert result.outcome.winner is not None
+    assert result.outcome.winner.source_window_hwnd == 0
+    assert [m.name for m in result.snapshot.matches] == ["Bold"]
+    assert calls == []
+
+
+def test_find_keeps_a_non_clickable_popup_match_for_a_browser_foreground():
+    # SCOPE PIN. Over a Chromium-family foreground the popup walk deliberately
+    # runs with query_has_role=False AND the DOM-correction hook, and the fold
+    # rules leave Text candidates the by-name path has always scored. The
+    # clickable filter above is for native walks only, so this is unchanged.
+    primary = FakeTopLevel(FakeElementArray([el("Bold", rect=_UNCOVERED_RECT)]))
+    folded = _score_walkresult(
+        _popup_walkresult_of(
+            [el("Bold", control_type=UIA_TEXT, role="text",
+                invoke_supported=False, rect=FakeRect(0, 0, 40, 20))],
+            source_window_hwnd=TOOLTIP_HWND,
+        ),
+        _BOLD_QUERY,
+    )
+    rect_fn, calls = _rect_by_hwnd({TOOLTIP_HWND: (0, 0, 40, 20)})
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [folded],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.find(_BOLD_QUERY, fg(process_name="chrome.exe"))
+
+    assert [m.name for m in result.snapshot.matches] == ["Bold", "Bold"]
+    assert calls == [TOOLTIP_HWND]
+
+
+def test_find_raising_window_rect_fn_suppresses_nothing():
+    # Same fail-open direction as an unreadable rectangle. win32gui's
+    # GetWindowRect raises on a handle that has already gone, and every other
+    # per-window seam on the popup path is guarded, so this one is too.
+    primary = FakeTopLevel(FakeElementArray([el("Exit", rect=_COVERED_RECT)]))
+
+    def _raises(hwnd):
+        raise OSError("invalid window handle")
+
+    finder, _ = make_finder(
+        primary,
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit")],
+        window_rect_fn=_raises,
+    )
+    result = finder.find(ElementQuery("exit", None, None, None, "exit"), fg())
+
+    assert [m.name for m in result.snapshot.matches] == ["Exit", "Exit"]
+
+
+def test_overlay_walk_drops_a_copy_the_popup_walk_did_not_return():
+    # The geometry is the popup WINDOW's rectangle, not the union of the
+    # matches the popup walk returned. Here the popup walk returned only its
+    # second item, and the application window's copy of the FIRST item sits
+    # inside the popup window but outside every returned match. A union rule
+    # would keep that copy and badge a control the menu hides.
+    focused = _MultiTopLevel([
+        _interactive_el("New tab", rect=FakeRect(10, 20, 110, 50)),
+        _interactive_el("Save", rect=_UNCOVERED_RECT),
+    ])
+    rect_fn, _calls = _rect_by_hwnd({POPUP_HWND: _POPUP_RECT})
+    partial = _popup_walkresult_of(
+        [el("Print", control_type=UIA_MENUITEM, role="menu item",
+            rect=FakeRect(10, 60, 110, 90))]
+    )
+
+    finder = make_multi_finder(
+        popup_walk_fn=lambda h, **k: [partial],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.overlay_walk(_fg_top(focused))
+
+    assert result.outcome == "ok"
+    assert result.summary is not None
+    assert [i.name for i in result.summary.items] == ["Save", "Print"]
+
+
+def test_overlay_walk_drops_a_badge_inside_the_popup_window_below_the_menu():
+    # ACCEPTED CONSEQUENCE, pinned so it cannot change by accident. The popup
+    # window is slightly larger than the menu it draws: measured on Notepad on
+    # 2026-08-14 the host window ran y 212..1591 while its 13 items ran
+    # y 233..1522, leaving 21 px at the top and 69 px at the bottom for the
+    # drop shadow. A focused-window control inside that margin is not behind a
+    # menu item, and the overlay drops its badge anyway, because the pass
+    # measures the window rather than the drawn menu. The by-name path does not
+    # share this: there the name must match a popup item as well.
+    focused = _MultiTopLevel([
+        _interactive_el("In the shadow", rect=FakeRect(30, 1540, 230, 1580)),
+        _interactive_el("Below the menu", rect=FakeRect(30, 1600, 230, 1640)),
+    ])
+    rect_fn, _calls = _rect_by_hwnd({POPUP_HWND: (-15, 212, 809, 1379)})
+
+    finder = make_multi_finder(
+        popup_walk_fn=lambda h, **k: [_popup_walkresult("Exit")],
+        window_rect_fn=rect_fn,
+    )
+    result = finder.overlay_walk(_fg_top(focused))
+
+    assert result.outcome == "ok"
+    assert result.summary is not None
+    assert [i.name for i in result.summary.items] == ["Below the menu", "Exit"]
+
+
+# UIA_PaneControlTypeId. The WinUI popup host reports this, not Menu.
+_UIA_PANE = 50033
+
+
+class _WinUIPopupElement(_MenuPopupElement):
+    """The WinUI popup host element: same two reads, but it reports Pane.
+
+    Measured on Windows 11 Notepad on 2026-08-14: the host window's UIA control
+    type is Pane (50033), so the control-type arm of ``_is_owned_popup`` never
+    matches it and the class name is the only thing that admits it.
+    """
+
+    def __init__(self, element_array):
+        super().__init__(element_array)
+        self.CurrentControlType = _UIA_PANE
+
+
+def test_find_real_popup_walk_admits_the_winui_host_by_class_name():
+    # The composed production chain, driven end to end over the WinUI class arm
+    # (the four walker tests drive enumerate_owned_popups alone). A regression
+    # that re-checked the control type between enumeration and the walk would
+    # reject this popup -- it is a Pane -- and the menu item would not merge.
+    primary = FakeTopLevel(FakeElementArray([el("Save")]))
+
+    popup_element = _WinUIPopupElement(
+        FakeElementArray([
+            el("Exit", control_type=UIA_MENUITEM, role="menu item"),
+        ])
+    )
+    shared_root = _SharedRootAutomation(popup_element)
+
+    def _primary_walk(top_level, **kwargs):
+        kwargs.pop("automation", None)
+        return walk_window(primary, automation=shared_root, **kwargs)
+
+    finder = ElementFinder(
+        automation=shared_root,
+        walk_fn=_primary_walk,
+        # NO popup_walk_fn override -- the REAL walk_owned_popups default runs.
+        dpi_resolver=fixed_dpi_resolver,
+        monitor_resolver=zero_monitor_resolver,
+        window_enumerator=lambda: [],
+        window_rect_fn=lambda hwnd: None,
+    )
+
+    leaf_fakes = {
+        "enumerator": lambda: [POPUP_HWND],
+        "owner_fn": lambda hwnd: FOCUSED_HWND,
+        "class_name_fn": lambda hwnd: WINUI_POPUP_CLASS_NAME,
+        "visible_fn": lambda hwnd: True,
+    }
+    with patch.dict(walk_owned_popups.__kwdefaults__, leaf_fakes):
+        result = finder.find(
+            ElementQuery("exit", None, None, None, "exit"), fg()
+        )
+
+    popup_matches = [
+        m for m in result.snapshot.matches if m.source_window_hwnd != 0
+    ]
+    assert [m.name for m in popup_matches] == ["Exit"]
+    assert popup_matches[0].source_window_hwnd == POPUP_HWND

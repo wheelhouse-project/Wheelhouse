@@ -9,12 +9,20 @@ PatternMatcher), so the answer cannot drift from runtime behavior:
   text right now -- first match wins in merged-catalog order, wake word
   assumed spoken (the requires_hotword flag is reported instead of a
   silent no-match).
-* run_test_draft(draft, text, patterns, matcher): build a create-shaped
-  draft via the same paths create_pattern uses (a bad draft is a
-  draft_error string, NOT a handler failure), simulate the catalog merge
-  (same trigger key replaces in place, new trigger appends after
-  everything), honor exclude_pattern_id so an edited pattern does not
-  shadow itself, and answer which pattern responds first.
+* run_test_draft(draft, text, patterns, matcher, *, catalog): build a
+  create-shaped draft via the same paths create_pattern uses (a bad draft
+  is a draft_error string, NOT a handler failure), work out the pattern
+  list a save would produce, honor exclude_pattern_id so an edited pattern
+  does not shadow itself, and answer which pattern responds first.
+
+  Given a catalog it PERFORMS the save into a copy of the catalog's raw
+  user entries and asks the catalog to build the result
+  (wh-pattern-override-doc-id.3.5). Given None it falls back to simulating
+  the merge over the built list handed in as `patterns` -- same trigger key
+  replaces in place, a new trigger appends after everything. The parameter
+  is keyword-only and has NO default, so every test below says catalog=None
+  out loud; tests/test_pattern_tester_save_agreement.py covers the catalog
+  path against a real save.
 
 The module tests run against small in-memory pattern lists shaped like
 PatternCatalog.get_all_patterns() entries; the handler tests round-trip the
@@ -227,6 +235,7 @@ class TestRunTestDraft:
         patterns = [_entry("^save$")]
         result = pattern_tester.run_test_draft(
             _draft(trigger="deploy"), "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert result["draft_error"] is None
@@ -245,6 +254,7 @@ class TestRunTestDraft:
         patterns = [_entry("^save$")]
         result = pattern_tester.run_test_draft(
             _draft(phrases=["save"]), "save", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "existing"
         assert result["shadowed_by"] == {
@@ -269,6 +279,7 @@ class TestRunTestDraft:
         ]
         result = pattern_tester.run_test_draft(
             _draft(trigger="save"), "save", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "draft"
         assert result["shadowed_by"] is None
@@ -280,6 +291,7 @@ class TestRunTestDraft:
         ]
         result = pattern_tester.run_test_draft(
             _draft(trigger="deploy"), "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "existing"
         # trigger_display comes from the same PatternManager helper the
@@ -298,6 +310,7 @@ class TestRunTestDraft:
         patterns = [_entry("^save$")]
         result = pattern_tester.run_test_draft(
             _draft(trigger="   "), "save", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert result["draft_error"] == "Trigger phrase cannot be empty"
@@ -309,6 +322,7 @@ class TestRunTestDraft:
         result = pattern_tester.run_test_draft(
             _draft(trigger="warp", action_type="teleport", action_params={}),
             "warp", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert "Unknown action type" in result["draft_error"]
@@ -319,6 +333,7 @@ class TestRunTestDraft:
         result = pattern_tester.run_test_draft(
             _draft(phrases=["editor", "Editor"]), "editor",
             patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert "Duplicate phrase" in result["draft_error"]
@@ -332,6 +347,7 @@ class TestRunTestDraft:
         )
         result = pattern_tester.run_test_draft(
             draft, "code editor", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "draft"
         assert result["resolved_steps"] == [
@@ -340,6 +356,7 @@ class TestRunTestDraft:
         # Command phrases are anchored: extra words mean no response.
         partial = pattern_tester.run_test_draft(
             draft, "code editor please", patterns, _matcher(),
+        catalog=None,
         )
         assert partial["winner"] == "none"
         assert partial["draft_matches"] is False
@@ -352,6 +369,7 @@ class TestRunTestDraft:
         result = pattern_tester.run_test_draft(
             _draft(trigger="deploy", requires_hotword=True),
             "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "draft"
 
@@ -367,12 +385,14 @@ class TestRunTestDraft:
         excluded = pattern_tester.run_test_draft(
             _draft(trigger="ship it", exclude_pattern_id=deploy_id),
             "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert excluded["winner"] == "none"
         assert excluded["shadowed_by"] is None
         # Contrast: without the exclusion the stale self would respond.
         stale = pattern_tester.run_test_draft(
             _draft(trigger="ship it"), "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert stale["winner"] == "existing"
         assert stale["shadowed_by"]["pattern_id"] == deploy_id
@@ -389,6 +409,7 @@ class TestRunTestDraft:
         result = pattern_tester.run_test_draft(
             _draft(trigger="deploy", exclude_pattern_id=deploy_id),
             "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "draft"
         assert result["shadowed_by"] is None
@@ -397,6 +418,7 @@ class TestRunTestDraft:
         patterns = [_entry("^save$")]
         result = pattern_tester.run_test_draft(
             _draft(trigger="deploy"), "hello world", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "none"
         assert result["draft_matches"] is False
@@ -433,6 +455,7 @@ class TestDraftDuplicateTrigger:
         patterns = [_entry("^deploy$", is_user=True)]
         result = pattern_tester.run_test_draft(
             _draft(trigger="deploy"), "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert result["draft_error"] is not None
@@ -448,6 +471,7 @@ class TestDraftDuplicateTrigger:
                 exclude_pattern_id=PatternManager.pattern_id("^deploy$"),
             ),
             "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["draft_error"] is None
         assert result["winner"] == "draft"
@@ -458,6 +482,7 @@ class TestDraftDuplicateTrigger:
         patterns = [_entry("^deploy$", is_user=False)]
         result = pattern_tester.run_test_draft(
             _draft(trigger="deploy"), "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["draft_error"] is None
         assert result["winner"] == "draft"
@@ -478,6 +503,7 @@ class TestRunTestDraftRaw:
                 actions=[{"function": "activate", "params": ["g2"]}],
             ),
             "open notepad", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert result["draft_error"] is not None
@@ -495,6 +521,7 @@ class TestRunTestDraftRaw:
         )
         result = pattern_tester.run_test_draft(
             draft, "find hello world", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert result["draft_error"] is None
@@ -509,6 +536,7 @@ class TestRunTestDraftRaw:
         patterns = [_entry("^save$")]
         result = pattern_tester.run_test_draft(
             _raw_draft("^(unclosed$"), "save", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert "does not compile" in result["draft_error"]
@@ -522,6 +550,7 @@ class TestRunTestDraftRaw:
         result = pattern_tester.run_test_draft(
             _raw_draft(r"\bdeploy\b", pattern_type="command"),
             "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert result["draft_error"] is not None
@@ -532,6 +561,7 @@ class TestRunTestDraftRaw:
         result = pattern_tester.run_test_draft(
             _raw_draft("^deploy$", actions=[]), "deploy",
             patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert "action step" in result["draft_error"]
@@ -545,6 +575,7 @@ class TestRunTestDraftRaw:
         ]
         result = pattern_tester.run_test_draft(
             _raw_draft("^save$"), "save", patterns, _matcher(),
+        catalog=None,
         )
         assert result["winner"] == "draft"
         assert result["shadowed_by"] is None
@@ -554,10 +585,12 @@ class TestRunTestDraftRaw:
         draft = _raw_draft("^ship$", trigger="deploy", phrases=["deploy"])
         hit = pattern_tester.run_test_draft(
             draft, "ship", patterns, _matcher(),
+        catalog=None,
         )
         assert hit["winner"] == "draft"
         miss = pattern_tester.run_test_draft(
             draft, "deploy", patterns, _matcher(),
+        catalog=None,
         )
         assert miss["winner"] == "none"
 
@@ -571,11 +604,13 @@ class TestRunTestDraftRaw:
         )
         yes = pattern_tester.run_test_draft(
             draft, "repeat 3", patterns, _matcher(),
+        catalog=None,
         )
         assert yes["winner"] == "draft"
         assert yes["groups"] == ["3"]
         no = pattern_tester.run_test_draft(
             draft, "repeat xyz", patterns, _matcher(),
+        catalog=None,
         )
         assert no["winner"] == "none"
 
@@ -596,6 +631,7 @@ class TestBoundedMatching:
         draft = _raw_draft(PATHOLOGICAL_EXPR)
         result = pattern_tester.run_test_draft(
             draft, PATHOLOGICAL_TEXT, patterns, _matcher(),
+        catalog=None,
         )
         assert result["success"] is True
         assert result["draft_error"] == (
@@ -645,6 +681,11 @@ class _FakeTextParser:
     """Same wiring TextParser.__init__ does, minus action execution."""
 
     def __init__(self, catalog):
+        # The catalog itself, exactly as TextParser.__init__ keeps it. The
+        # pm_test_draft handler passes it to run_test_draft so the preview
+        # can perform the save rather than re-derive it
+        # (wh-pattern-override-doc-id.3.5).
+        self.pattern_catalog = catalog
         self.patterns = catalog.get_all_patterns()
         self.matcher = PatternMatcher(catalog)
 

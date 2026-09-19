@@ -110,6 +110,7 @@ def test_capabilities_is_the_first_frame_on_connect(monkeypatch):
         "type": "capabilities",
         "provider": "google_stt",
         "emits_eos": True,
+        "wake_word_available": False,
     }
 
 
@@ -151,6 +152,7 @@ def test_defaults_declare_no_eos(monkeypatch):
         "type": "capabilities",
         "provider": "",
         "emits_eos": False,
+        "wake_word_available": False,
     }
 
 
@@ -160,7 +162,7 @@ _PROVIDERS_DIR = Path(__file__).parent.parent.parent
 def test_provider_mains_declare_their_capabilities():
     """Source-level drift alarm: each provider main must pass its
     capability declaration to WSForwarder. Google is the only eos
-    emitter today; the two local providers declare False explicitly."""
+    emitter today; the local providers declare False explicitly."""
     google = (_PROVIDERS_DIR / "google_stt_server" / "main.py").read_text(
         encoding="utf-8"
     )
@@ -176,7 +178,7 @@ def test_provider_mains_declare_their_capabilities():
     assert "emits_eos=False" in distil
     assert 'provider_name="distil_medium_en"' in distil
     assert "emits_eos=False" in sherpa
-    assert 'provider_name="sherpa_offline_parakeet"' in sherpa
+    assert 'provider_name="parakeet_tdt"' in sherpa
 
 
 class _FailingSendWS(_FakeWS):
@@ -211,4 +213,5 @@ def test_capabilities_send_failure_reconnects_cleanly(monkeypatch):
         "type": "capabilities",
         "provider": "google_stt",
         "emits_eos": True,
+        "wake_word_available": False,
     }, "reconnect after a failed capabilities send must declare again"

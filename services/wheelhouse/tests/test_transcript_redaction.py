@@ -143,11 +143,17 @@ class TestSpeechNotifierLogRedaction:
         import logging
 
         monkeypatch.delenv(ENV_VAR, raising=False)
+        import plyer
+
         import utils.speech_notifier as sn_mod
 
         sent = {}
+        # wh-notice-length-guard: the notice leaves through
+        # utils.notice_text.send_notice now, so plyer itself is where
+        # the delivered text can be read. Reading it here also proves
+        # the length guard passes a short body through untouched.
         monkeypatch.setattr(
-            sn_mod.notification, "notify", lambda **kw: sent.update(kw)
+            plyer.notification, "notify", lambda **kw: sent.update(kw)
         )
         notifier = sn_mod.SpeechNotifier(enabled=True)
         with caplog.at_level(logging.DEBUG, logger="utils.speech_notifier"):

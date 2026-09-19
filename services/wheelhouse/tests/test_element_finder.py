@@ -43,6 +43,7 @@ UIA_EDIT = uia_walker.UIA_EDIT
 UIA_DATAITEM = uia_walker.UIA_DATAITEM
 UIA_TREEITEM = uia_walker.UIA_TREEITEM
 UIA_CHECKBOX = uia_walker.UIA_CHECKBOX
+UIA_MENUITEM = uia_walker.UIA_MENUITEM
 UIA_TEXT = 50020  # UIA_TextControlTypeId
 UIA_GROUP = 50026  # UIA_GroupControlTypeId
 UIA_HEADING = 50036  # UIA_HeaderControlTypeId stand-in for "heading"
@@ -467,6 +468,22 @@ def make_multi_finder(**overrides):
         "dpi_resolver": fixed_dpi_resolver,
         "monitor_resolver": zero_monitor_resolver,
         "window_enumerator": lambda: [],
+        # Inert additional-subtree walks by default: the ElementFinder
+        # defaults are the REAL walk_owned_popups / walk_taskbar_windows,
+        # whose default enumerator is a real EnumWindows -- a fixture-built
+        # finder handed a truthy fake automation would otherwise walk the
+        # HOST machine's real Shell_TrayWnd (deepseek finding
+        # wh-overlay-taskbar-numbers.5.2). Tests exercising popup/taskbar
+        # behaviour inject their own walk fns.
+        "popup_walk_fn": lambda h, **k: [],
+        "taskbar_walk_fn": lambda **k: [],
+        # Inert popup-rectangle seam, for the same hermetic reason: the
+        # ElementFinder default is a real GetWindowRect, and a fake popup HWND
+        # such as 2001 can name a REAL window on the host machine, whose
+        # rectangle would then drop fixture matches at random
+        # (wh-winui-menu-click-refused.2). Tests exercising the covered-match
+        # drop inject their own.
+        "window_rect_fn": lambda hwnd: None,
     }
     kwargs.update(overrides)
     return ElementFinder(**kwargs)
@@ -2814,6 +2831,126 @@ def test_collapse_preserves_input_order_of_survivors():
     assert survivors == [first, inner, last]
 
 
+def test_collapse_keeps_the_invocable_outer_over_a_dead_inner_same_name():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # wh-vscode-menu-badge-misplaced. The real VS Code File > Exit rectangles,
+    # read from a live walk. Chromium exposes the row twice under one name: a
+    # MenuItem that offers InvokePattern, and a Group inside it that offers
+    # nothing. Rule 3 pairs them (same name, inner fully inside the outer).
+    # Keeping the inner leaves a badge on a control the executor cannot press,
+    # so it degrades to a coordinate click on whatever the rectangle covers.
+    # The invocable copy wins instead.
+    menu_item = _cm((2360, 2059, 1033, 87), n=72, name="Exit",
+                    control_type_id=UIA_MENUITEM, invoke_supported=True)
+    dead_group = _cm((2360, 2078, 1033, 48), n=73, name="Exit",
+                     control_type_id=UIA_GROUP, invoke_supported=False)
+    survivors = collapse_near_identical_containers([menu_item, dead_group])
+    assert survivors == [menu_item]
+
+
+def test_collapse_keeps_the_invocable_outer_over_a_dead_inner_same_rect():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # Same preference under rule 1 (near-identical rectangle), where the two
+    # names differ. Specificity loses to pressability: a non-interactive inner
+    # with no press path cannot carry the badge for the pair.
+    outer = _cm((0, 0, 200, 20), n=1, name="Row", invoke_supported=True)
+    inner = _cm((0, 0, 200, 20), n=2, name="Open", control_type_id=UIA_GROUP,
+                invoke_supported=False)
+    survivors = collapse_near_identical_containers([outer, inner])
+    assert survivors == [outer]
+
+
+def test_collapse_keeps_an_invocable_unnamed_wrapper_over_a_dead_inner():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # Rule 2's justification is that the wrapper's click action "is normally
+    # reachable through the enclosed control". When the enclosed control is a
+    # non-interactive container with no press path that justification does not
+    # hold, so the wrapper keeps the badge even though it is unnamed.
+    wrapper = _cm((0, 0, 819, 83), n=1, name="  ", control_type_id=UIA_GROUP,
+                  invoke_supported=True)
+    inner = _cm((0, 0, 160, 61), n=2, name="Starred",
+                control_type_id=UIA_GROUP, invoke_supported=False)
+    survivors = collapse_near_identical_containers([wrapper, inner])
+    assert survivors == [wrapper]
+
+
+def test_collapse_keeps_the_inner_when_neither_copy_is_invocable():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # The preference only fires when the outer can be pressed and the inner
+    # cannot. With no press path on either side there is nothing to prefer, so
+    # the original keep-the-inner direction stands.
+    outer = _cm((0, 0, 200, 20), n=1, name="Exit", invoke_supported=False)
+    inner = _cm((0, 0, 200, 20), n=2, name="Exit", invoke_supported=False)
+    survivors = collapse_near_identical_containers([outer, inner])
+    assert survivors == [inner]
+
+
+def test_collapse_keeps_the_inner_when_both_copies_are_invocable():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # A tie also keeps the original direction: the inner, more specific control
+    # is the better badge when both can be pressed.
+    outer = _cm((0, 0, 200, 20), n=1, name="Exit", invoke_supported=True)
+    inner = _cm((0, 0, 200, 20), n=2, name="Exit", invoke_supported=True)
+    survivors = collapse_near_identical_containers([outer, inner])
+    assert survivors == [inner]
+
+
+def test_collapse_chain_keeps_the_innermost_invocable_link():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # A three-deep Chromium chain where only the middle link can be pressed.
+    # The outermost loses to it as a plain earlier match; the dead leaf loses
+    # to it under the new preference. Exactly one badge survives, on the only
+    # control the executor can invoke.
+    a = _cm((0, 0, 200, 20), n=1, name="Row", control_type_id=UIA_GROUP,
+            invoke_supported=False)
+    b = _cm((0, 0, 200, 20), n=2, name="Row", invoke_supported=True)
+    c = _cm((1, 0, 198, 19), n=3, name="Row", control_type_id=UIA_GROUP,
+            invoke_supported=False)
+    survivors = collapse_near_identical_containers([a, b, c])
+    assert survivors == [b]
+
+
+def test_collapse_does_not_drop_a_dead_inner_when_the_outer_drops_too():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # reviewer_0 finding wh-vscode-menu-badge-misplaced.1.1. The preference
+    # drops the dead inner because the outer keeps the pair's press path. When
+    # the outer then loses its own badge to a later invocable partner, that
+    # justification is gone and the dead inner has no substitute: its region is
+    # disjoint from the survivor's, so nothing else covers those pixels.
+    wrapper = _cm((0, 0, 400, 100), n=1, name="", control_type_id=UIA_GROUP,
+                  invoke_supported=True)
+    dead_child = _cm((0, 0, 390, 30), n=2, name="Starred",
+                     control_type_id=UIA_GROUP, invoke_supported=False)
+    live_child = _cm((0, 60, 390, 30), n=3, name="Open", invoke_supported=True)
+    survivors = collapse_near_identical_containers(
+        [wrapper, dead_child, live_child]
+    )
+    assert survivors == [dead_child, live_child]
+
+
+def test_collapse_keeps_an_interactive_inner_that_offers_no_invoke():
+    from ui.element_finder import collapse_near_identical_containers
+
+    # reviewer_0 finding wh-vscode-menu-badge-misplaced.1.2. invoke_supported is
+    # a proxy for pressability, not a measurement of it: a badge pick tries a
+    # guarded coordinate click first and MSAA DoDefaultAction after it, so a
+    # Toggle-only CheckBox inside a Chromium wrapper is pressable and is a
+    # target of its own. The preference must not swallow it.
+    wrapper = _cm((12, 843, 819, 83), n=1, name="", control_type_id=UIA_GROUP,
+                  invoke_supported=True)
+    checkbox = _cm((230, 854, 69, 70), n=2, name="Select",
+                   control_type_id=UIA_CHECKBOX, invoke_supported=False)
+    survivors = collapse_near_identical_containers([wrapper, checkbox])
+    assert survivors == [checkbox]
+
+
 def test_overlay_walk_collapses_same_rect_container_and_renumbers():
     # End-to-end: a non-browser walk yields ListItem + same-rect Hyperlink +
     # a separate Button. The overlay must badge TWO controls (the link and the
@@ -3699,3 +3836,237 @@ def test_snapshot_ids_unique_across_finder_instances():
     finder_a = ElementFinder(**kwargs)
     finder_b = ElementFinder(**kwargs)
     assert finder_a._snapshot_salt != finder_b._snapshot_salt
+
+
+# ---------------------------------------------------------------------------
+# drop_matches_covered_by_popups (wh-winui-menu-click-refused.2)
+#
+# A WinUI 3 application draws its menu in an owned top-level popup window AND
+# exposes the same menu items inside the application window's own accessibility
+# tree. Once the popup is walked (wh-winui-menu-click-refused.1) both walks
+# return the item, and collapse_near_identical_containers refuses to pair
+# matches from different walked windows, so every menu item would get two
+# badges. The copy to keep is the popup one: measured on Notepad 2026-08-14 it
+# exposes a working Invoke pattern, while the application-window copy exposed
+# neither Invoke nor an MSAA default action and its pixels belong to the popup
+# window, which made every click on it refuse as click_point_obstructed.
+# ---------------------------------------------------------------------------
+
+
+def test_drop_covered_removes_the_application_window_copy_of_a_menu_item():
+    """The duplicate has the SAME rectangle as the popup's own item.
+
+    Real numbers from the Notepad File menu on 2026-08-14: the popup window
+    rectangle was (-15, 212) to (794, 1591) and the Exit item sat at
+    (30, 1435, 719, 87) in BOTH walks.
+    """
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    exit_copy = _cm((30, 1435, 719, 87), n=31, name="Exit")
+    popup_rect = (-15, 212, 809, 1379)
+    assert drop_matches_covered_by_popups([exit_copy], [popup_rect]) == []
+
+
+def test_drop_covered_keeps_controls_outside_the_popup():
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    toolbar_button = _cm((900, 100, 60, 40), n=2, name="Bold")
+    popup_rect = (-15, 212, 809, 1379)
+    survivors = drop_matches_covered_by_popups([toolbar_button], [popup_rect])
+    assert survivors == [toolbar_button]
+
+
+def test_drop_covered_with_no_popups_changes_nothing():
+    """The common case: no menu is open, so the whole set survives untouched."""
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    matches = [
+        _cm((0, 0, 100, 20), n=1, name="One"),
+        _cm((0, 30, 100, 20), n=2, name="Two"),
+    ]
+    assert drop_matches_covered_by_popups(matches, []) == matches
+
+
+def test_drop_covered_keeps_a_control_the_popup_only_partly_overlaps():
+    """A control the menu clips the edge of is still mostly visible and usable.
+
+    The share is measured over the CONTROL's own area, so a control that is
+    half outside the popup keeps its badge.
+    """
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    straddling = _cm((700, 300, 200, 40), n=3, name="Straddles")
+    popup_rect = (-15, 212, 809, 1379)  # right edge at x=794
+    survivors = drop_matches_covered_by_popups([straddling], [popup_rect])
+    assert survivors == [straddling]
+
+
+def test_drop_covered_ignores_a_degenerate_popup_rectangle():
+    """A zero-area rectangle must never drop anything.
+
+    A popup window read at the wrong moment can report an empty rectangle, and
+    a rule that treated that as covering everything would erase every badge.
+    """
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    match = _cm((30, 1435, 719, 87), n=31, name="Exit")
+    assert drop_matches_covered_by_popups([match], [(0, 0, 0, 0)]) == [match]
+
+
+def test_drop_covered_checks_every_popup_rectangle():
+    """Two menus can be open at once: a menu and its open submenu."""
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    in_first = _cm((30, 1435, 719, 87), n=31, name="Exit")
+    in_second = _cm((900, 400, 200, 40), n=32, name="Recent file")
+    outside = _cm((1500, 90, 60, 40), n=33, name="Bold")
+    rects = [(-15, 212, 809, 1379), (880, 380, 400, 300)]
+    survivors = drop_matches_covered_by_popups(
+        [in_first, in_second, outside], rects
+    )
+    assert survivors == [outside]
+
+
+# The 0.90 threshold, pinned from both sides (deepseek finding
+# wh-winui-menu-click-refused.4.3 item 2). The popup rectangle below is 100x100
+# at the origin and each control is 100x100, so the overlapping height IS the
+# percentage: a control at y=11 has 89 of its 100 rows inside, one at y=9 has
+# 91. Only a threshold in (0.89, 0.91] passes both tests.
+
+
+def test_drop_covered_keeps_a_control_just_under_the_threshold():
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    just_under = _cm((0, 11, 100, 100), n=1, name="Bold")
+    survivors = drop_matches_covered_by_popups([just_under], [(0, 0, 100, 100)])
+    assert survivors == [just_under]
+
+
+def test_drop_covered_drops_a_control_just_over_the_threshold():
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    just_over = _cm((0, 9, 100, 100), n=1, name="Bold")
+    assert drop_matches_covered_by_popups([just_over], [(0, 0, 100, 100)]) == []
+
+
+# duplicate_names -- the by-name path's narrower rule
+# (wh-winui-menu-click-refused.4.1). Geometry alone answers the overlay's
+# question ("can the user see this control?"). It does NOT answer the by-name
+# path's question, which is only ever "is this focused match the popup's own
+# copy of the control the user named?". A drop on the by-name path costs more
+# than a badge: it can turn the decision into not_found, and find() answers
+# not_found by walking OTHER top-level windows, so a control behind the menu
+# that the menu does not duplicate must survive.
+
+
+def test_drop_covered_duplicate_names_keeps_a_covered_control_it_does_not_name():
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    behind_the_menu = _cm((30, 1435, 719, 87), n=31, name="Bold")
+    survivors = drop_matches_covered_by_popups(
+        [behind_the_menu],
+        [(-15, 212, 809, 1379)],
+        duplicate_names=frozenset({"exit"}),
+    )
+    assert survivors == [behind_the_menu]
+
+
+def test_drop_covered_duplicate_names_still_drops_the_named_duplicate():
+    """Name comparison is stripped and case-folded, like the overlay's pass."""
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    exit_copy = _cm((30, 1435, 719, 87), n=31, name="  Exit ")
+    survivors = drop_matches_covered_by_popups(
+        [exit_copy],
+        [(-15, 212, 809, 1379)],
+        duplicate_names=frozenset({"exit"}),
+    )
+    assert survivors == []
+
+
+def test_drop_covered_duplicate_names_keeps_an_unnamed_covered_control():
+    """An unnamed control can never be the popup's copy of a named one."""
+    from ui.element_finder import drop_matches_covered_by_popups
+
+    unnamed = _cm((30, 1435, 719, 87), n=31, name="")
+    survivors = drop_matches_covered_by_popups(
+        [unnamed],
+        [(-15, 212, 809, 1379)],
+        duplicate_names=frozenset({""}),
+    )
+    assert survivors == [unnamed]
+
+
+# ---------------------------------------------------------------------------
+# Walk-time mark carried into the summary (wh-vscode-menu-badge-misplaced).
+#
+# The walker marks a browser-walk row whose rectangle is not fully inside the
+# Menu element that precedes it. The summary is what crosses to the GUI, so
+# both summary builders must carry the mark, and a non-browser walk must
+# leave it at its default.
+# ---------------------------------------------------------------------------
+
+_MENU_RECT = FakeRect(100, 100, 1100, 900)
+_EXIT_OUTSIDE_MENU = FakeRect(110, 850, 1090, 937)  # bottom 937 > 900
+
+
+def _menu_with_exit_row():
+    return [
+        el("", control_type=uia_walker.UIA_MENU, role="menu", rect=_MENU_RECT,
+           invoke_supported=False),
+        el("Exit", control_type=UIA_MENUITEM, role="menu item",
+           rect=_EXIT_OUTSIDE_MENU),
+    ]
+
+
+def test_find_browser_summary_carries_bounds_outside_menu():
+    finder, _ = make_finder(FakeArrayTopLevel(_menu_with_exit_row()))
+    result = finder.find(ElementQuery("exit", None, None, None, "exit"),
+                         fg(process_name="chrome.exe"))
+
+    exit_items = [i for i in result.summary.items if i.name == "Exit"]
+    assert [i.bounds_outside_menu for i in exit_items] == [True]
+
+
+def test_find_non_browser_summary_leaves_bounds_outside_menu_false():
+    # The same tree and the same role-less query, but a native process: the
+    # walk is not a browser walk, so nothing is marked.
+    finder, _ = make_finder(FakeArrayTopLevel(_menu_with_exit_row()))
+    result = finder.find(ElementQuery("exit", None, None, None, "exit"),
+                         fg(process_name="notepad.exe"))
+
+    exit_items = [i for i in result.summary.items if i.name == "Exit"]
+    assert [i.bounds_outside_menu for i in exit_items] == [False]
+
+
+def test_overlay_walk_browser_summary_carries_bounds_outside_menu():
+    finder = make_multi_finder()
+    result = _overlay_walk(finder, FakeArrayTopLevel(_menu_with_exit_row()),
+                           process_name="chrome.exe")
+
+    assert result.summary is not None
+    exit_items = [i for i in result.summary.items if i.name == "Exit"]
+    assert [i.bounds_outside_menu for i in exit_items] == [True]
+
+
+def test_filter_and_renumber_summary_keeps_bounds_outside_menu():
+    summary = WalkSnapshotSummary(
+        snapshot_id="snap-1",
+        items=[
+            WalkSnapshotSummaryItem(
+                item_id="uia-1", display_number=1, name="Save", role="menu item",
+                bounds=(110, 800, 980, 80), monitor_id=0,
+            ),
+            WalkSnapshotSummaryItem(
+                item_id="uia-2", display_number=2, name="Exit", role="menu item",
+                bounds=(110, 850, 980, 87), monitor_id=0,
+                bounds_outside_menu=True,
+            ),
+        ],
+        created_at_monotonic=1.0,
+    )
+
+    rebuilt = ElementFinder.filter_and_renumber_summary(summary, ["uia-2"])
+
+    assert [(i.name, i.display_number, i.bounds_outside_menu)
+            for i in rebuilt.items] == [("Exit", 1, True)]

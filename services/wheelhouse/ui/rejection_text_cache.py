@@ -78,12 +78,41 @@ class CacheResult:
     this HWND before running ClipboardOnlyStrategy so the paste lands
     on the originally-rejected window rather than the toast button the
     user clicked. See wh-override-paste-focus-drift.
+
+    ``target_root`` is the GetAncestor(GA_ROOT) normalization of
+    ``target_hwnd`` taken at rejection time
+    (wh-ensure-focused-same-process-fallback.1.7). The retry handler
+    compares the live root of the cached HWND against this snapshot to
+    detect a SAME-process handle recycle, which the PID guard cannot
+    see: a destroyed Brave helper HWND reborn as a child of another
+    Brave top-level window keeps the cached PID but normalizes to a
+    different root. 0 means no snapshot was recorded (rejection-time
+    normalization failure); the retry handler refuses to replay such
+    an entry when it claims a target (token_expired -- the .1.8/.1.11
+    fail-closed contract), the same way it refuses a missing marker.
+
+    ``target_tag`` is the window-property provenance marker written
+    onto the target window OBJECT at rejection time via SetProp
+    (wh-ensure-focused-same-process-fallback.1.12). Every other guard
+    compares numeric handle values, so a handle recycled as a NEW
+    same-PID top-level window that is its own GA_ROOT aliases them
+    all. The property dies with the window object, so the retry
+    handler re-reads it (GetProp) and refuses on any mismatch --
+    a recycled handle reads 0, or a survivor marker from an earlier
+    Input-process run, which matches only on equal 43-bit salts
+    (about 2**-43 per pair of runs, the accepted residual documented
+    at _RUN_SALT in ui/hwnd_utils.py). 0 means no marker
+    was recorded; the retry handler refuses such entries when they
+    carry a nonzero HWND (same refuse-outright contract as the .1.8
+    root gate).
     """
 
     status: CacheStatus
     text: Optional[str] = None
     target_hwnd: int = 0
     target_process_id: int = 0
+    target_root: int = 0
+    target_tag: int = 0
 
 
 _MISS = CacheResult(CacheStatus.MISS, None)
@@ -103,15 +132,16 @@ class RejectionTextCache:
         self._time_source: Callable[[], float] = time_source or time.monotonic
         # OrderedDict gives us O(1) eviction of the oldest entry on
         # overflow. Insertion order matches the order we want to evict
-        # in: oldest first. Entry shape:
-        # (text, target_hwnd, target_process_id, stored_at).
+        # in: oldest first. Entry shape: (text, target_hwnd,
+        # target_process_id, target_root, target_tag, stored_at).
         self._entries: (
-            "OrderedDict[str, tuple[str, int, int, float]]"
+            "OrderedDict[str, tuple[str, int, int, int, int, float]]"
         ) = OrderedDict()
 
     def put(
         self, token: str, text: str,
         target_hwnd: int = 0, target_process_id: int = 0,
+        target_root: int = 0, target_tag: int = 0,
     ) -> None:
         """Store ``text`` under ``token``. Replaces any previous value.
 
@@ -122,9 +152,12 @@ class RejectionTextCache:
         ``target_hwnd`` is the top-level window handle that had focus
         when the rejection was emitted. The retry handler reads it
         back to restore foreground to the original window before
-        pasting (wh-override-paste-focus-drift). Defaults to 0, which
-        the retry handler treats as 'no refocus needed' so legacy
-        callers that omit the argument continue to work.
+        pasting (wh-override-paste-focus-drift). Defaults to 0, a
+        data-shape default only, NOT replay permission: the retry
+        handler returns token_expired for an entry whose hwnd is 0
+        (wh-ensure-focused-same-process-fallback.1.8/.1.11 fail-closed
+        contract). A replayable entry needs the complete hwnd/root/tag
+        identity.
 
         ``target_process_id`` is the OS process ID owning the
         focused control at rejection time. The retry handler uses
@@ -135,6 +168,24 @@ class RejectionTextCache:
         unrelated window (wh-override-paste-focus-drift.1.2).
         Defaults to 0, which the retry handler treats as 'no PID
         recorded -- skip the identity check'.
+
+        ``target_root`` is the GetAncestor(GA_ROOT) normalization of
+        ``target_hwnd`` taken at rejection time
+        (wh-ensure-focused-same-process-fallback.1.7). The retry
+        handler compares the live root of the cached HWND against it
+        to detect a same-process handle recycle, which the PID check
+        alone cannot see. Defaults to 0, a data-shape default only:
+        the retry handler returns token_expired for an entry whose
+        root snapshot is 0 (the .1.8/.1.11 fail-closed contract).
+
+        ``target_tag`` is the SetProp provenance marker written onto
+        the target window object at rejection time
+        (wh-ensure-focused-same-process-fallback.1.12). The retry
+        handler re-reads the property from the live window and
+        refuses on mismatch; a recycled numeric handle names a new
+        window object, whose property read returns 0. Defaults to 0,
+        which the retry handler refuses for entries carrying a
+        nonzero HWND.
 
         wh-override-multiword-retry: the assignment is exception-safe
         by construction. We assign the new tuple first (single dict
@@ -149,7 +200,10 @@ class RejectionTextCache:
         """
 
         now = self._time_source()
-        self._entries[token] = (text, target_hwnd, target_process_id, now)
+        self._entries[token] = (
+            text, target_hwnd, target_process_id, target_root,
+            target_tag, now,
+        )
         self._entries.move_to_end(token, last=True)
         # Evict oldest entries until we are within max_entries.
         while len(self._entries) > self.max_entries:
@@ -198,12 +252,16 @@ class RejectionTextCache:
         entry = self._entries.get(token)
         if entry is None:
             return _MISS
-        text, target_hwnd, target_process_id, stored_at = entry
+        (
+            text, target_hwnd, target_process_id, target_root,
+            target_tag, stored_at,
+        ) = entry
         if self._time_source() - stored_at >= self.ttl_seconds:
             del self._entries[token]
-            return CacheResult(CacheStatus.EXPIRED, None, 0, 0)
+            return CacheResult(CacheStatus.EXPIRED, None, 0, 0, 0, 0)
         return CacheResult(
             CacheStatus.HIT, text, target_hwnd, target_process_id,
+            target_root, target_tag,
         )
 
     def get(self, token: str) -> Optional[str]:
@@ -228,7 +286,9 @@ class RejectionTextCache:
         now = self._time_source()
         expired = [
             token
-            for token, (_text, _hwnd, _pid, stored_at) in self._entries.items()
+            for token, (
+                _text, _hwnd, _pid, _root, _tag, stored_at,
+            ) in self._entries.items()
             if now - stored_at >= self.ttl_seconds
         ]
         for token in expired:

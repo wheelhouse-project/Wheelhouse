@@ -90,22 +90,6 @@ class MockApp:
         self.outputs.clear()
 
 
-class MockContextMirror:
-    """Mock context mirror that doesn't use shared memory."""
-
-    def __init__(self):
-        self._context = {"app_name": "TestApp", "window_title": "Test Window", "timestamp": 0.0}
-
-    def init_reader(self):
-        pass
-
-    def read_context(self) -> dict:
-        return self._context
-
-    def set_context(self, ctx: dict):
-        self._context = ctx
-
-
 class SpeechPipelineHarness:
     """Test harness for the speech processing pipeline.
 
@@ -134,7 +118,7 @@ class SpeechPipelineHarness:
         # Create TextParser
         self.text_parser = TextParser(self.mock_speech_handler, self.catalog)
 
-        # Create SpeechProcessor with mocked context mirror
+        # Create SpeechProcessor
         self.processor = SpeechProcessor(
             word_queue=self.word_queue,
             catalog=self.catalog,
@@ -144,9 +128,13 @@ class SpeechPipelineHarness:
             command_timeout_ms=1000,
             hotword="x-ray"
         )
-
-        # Replace context mirror with mock
-        self.processor.context_mirror = MockContextMirror()
+        # Production wires speech_handler.speech_processor to the real
+        # processor; action functions (the cursor_navigate dictation
+        # fallback, the grid fallback) reach _send_to_dictation through
+        # it. Without this line the MagicMock handler hands them a
+        # non-awaitable auto-attribute
+        # (wh-overlay-slow-uia-stale-badges.7.1.5).
+        self.mock_speech_handler.speech_processor = self.processor
 
         self._elapsed = 0.0
         self._utterance_counter = 0

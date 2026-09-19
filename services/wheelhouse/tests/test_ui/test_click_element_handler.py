@@ -432,6 +432,50 @@ def test_click_element_in_handles_own_response_allowlist():
     assert "click_element" in _HANDLES_OWN_RESPONSE
 
 
+def test_transient_com_error_logs_warning_not_error(handler, caplog):
+    # wh-overlay-walk-theme-error: the same transient stale-window COMError
+    # class start_overlay_walk can hit (a theme switch rebuilding the shell
+    # mid-walk) can also escape the by-name walk. The response stays today's
+    # execution_failed/invoke_com_error, but the log level must be WARNING:
+    # ERROR-level records pop a Windows notification box
+    # (ErrorNotificationHandler) for a blip that resolves on the next attempt.
+    import logging
+
+    try:
+        from comtypes import COMError
+        transient = COMError(
+            -2147220991,
+            "An event was unable to invoke any of the subscribers",
+            (None, None, None, None, None),
+        )
+    except ImportError:
+        transient = OSError("stale window during shell rebuild")
+
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+
+    boom_finder = MagicMock()
+    boom_finder.find.side_effect = transient
+    handler._click_element_finder = boom_finder
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=_foreground()), \
+            caplog.at_level(logging.DEBUG):
+        handler.click_element(
+            query=ElementQuery("cancel", "Button", None, None, "cancel"),
+            trace_id="trace-transient",
+            request_id="req-click-1",
+        )
+
+    resp = _last_response(handler)
+    assert resp.outcome == "execution_failed"
+    assert resp.reason == "invoke_com_error"
+    handler_records = [
+        r for r in caplog.records if "click_element" in r.getMessage()
+    ]
+    assert not [r for r in handler_records if r.levelno >= logging.ERROR]
+    assert [r for r in handler_records if r.levelno == logging.WARNING]
+
+
 # ---------------------------------------------------------------------------
 # Production-wiring regression: _get_click_executor injects a REAL coordinate
 # seam, not the raising placeholder (wh-l4h.1 coordinate-click wiring slice).
@@ -717,6 +761,74 @@ def test_get_click_executor_injects_real_popup_probe_seams(handler):
     assert captured.get("popup_owner_fn") is uia_walker._default_owner_of
     assert captured["popup_visible_fn"] is not None
     assert captured["popup_owner_fn"] is not None
+
+
+def test_get_click_executor_threads_verification_budget(handler):
+    # wh-overlay-slow-uia-stale-badges.6: the validated [click]
+    # verification_budget_ms must reach the executor, or the pre-click
+    # verification budget silently stays at the constructor default.
+    from ui.click_config import ClickConfig
+
+    handler._click_config = ClickConfig.from_raw(
+        {"verification_budget_ms": 750}
+    )
+
+    captured: dict = {}
+
+    class _RecordingExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    with patch("ui.click_executor.ClickExecutor", _RecordingExecutor):
+        handler._get_click_executor()
+
+    assert captured.get("verification_budget_ms") == 750
+
+
+def test_get_click_executor_injects_real_gesture_click_seam(handler):
+    # wh-click-gesture-param: a right click / double click goes through the
+    # separate gesture seam. Without the injection the executor's raising
+    # placeholder refuses every gesture, so the wiring is load-bearing.
+    from ui.ui_action_handler import _win32_gesture_click
+
+    captured: dict = {}
+
+    class _RecordingExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    with patch("ui.click_executor.ClickExecutor", _RecordingExecutor):
+        handler._get_click_executor()
+
+    assert captured.get("gesture_click_fn") is _win32_gesture_click
+
+
+def test_win32_gesture_click_forwards_button_and_count():
+    # The wrapper is the only place the spoken gesture becomes SendInput
+    # parameters; it must pass both through unchanged and stay fail-soft.
+    from ui.ui_action_handler import _win32_gesture_click
+
+    calls: list[tuple] = []
+
+    def _fake_click_at(x, y, *, button="left", click_count=1):
+        calls.append((x, y, button, click_count))
+        return (True, 2 * click_count, None)
+
+    with patch("utils.win_input_sender.click_at", new=_fake_click_at):
+        assert _win32_gesture_click(11, 22, "right", 1) == (True, 2, None)
+        assert _win32_gesture_click(11, 22, "left", 2) == (True, 4, None)
+
+    assert calls == [(11, 22, "right", 1), (11, 22, "left", 2)]
+
+
+def test_win32_gesture_click_is_fail_soft():
+    from ui.ui_action_handler import _win32_gesture_click
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("SendInput exploded")
+
+    with patch("utils.win_input_sender.click_at", new=_boom):
+        assert _win32_gesture_click(11, 22, "right", 1) == (False, 0, None)
 
 
 def test_create_automation_failure_is_memoised_no_retry_storm(handler):

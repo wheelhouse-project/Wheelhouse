@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import uuid
 from queue import Queue
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from ui.context import UIContext
 from ui.rejection_text_cache import RejectionTextCache
@@ -353,16 +353,18 @@ class TestMultiWordAggregation:
         assert last_msg is not None
         assert cache.get(last_msg["correlation_token"]) == "alpha beta gamma"
 
-    def test_aggregation_upgrades_zero_hwnd_when_later_fragment_resolves(
+    def test_aggregation_splits_off_complete_fragment_from_zero_identity_entry(
         self,
     ):
-        # wh-override-multiword-retry.2.1 (deepseek finding): if the
-        # first fragment's HWND lookup failed (stale COM, no top-level)
-        # the cache stored target_hwnd=0. A later fragment whose lookup
-        # succeeds carries strictly better information; the retry
-        # handler would otherwise paste into whatever holds foreground
-        # at click time (the toast button). The append path upgrades
-        # 0 to a non-zero HWND when a later fragment resolves one.
+        # wh-ensure-focused-same-process-fallback.1.15 (codex round
+        # 10): the old upgrade path re-bound the earlier fragments'
+        # text to a LATER fragment's window without any proof the
+        # earlier text was dictated at that window -- a focus switch
+        # between same-key windows pasted fragment-1 text into the
+        # fragment-2 window. An entry with no provenance tag can
+        # never be proven to share a window with anything, so a
+        # complete later fragment starts its OWN entry (replayable
+        # alone) and the incomplete entry stays behind, unreplayable.
         queue: Queue = Queue()
         cache = RejectionTextCache()
         strategy = RejectedInsertionStrategy(
@@ -397,14 +399,450 @@ class TestMultiWordAggregation:
         strategy.set_pending_verdict(_make_verdict())
         strategy.insert("hello", context_bad)
         strategy.set_pending_verdict(_make_verdict())
-        strategy.insert("world", context_good)
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xCAFE,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=5,
+        ):
+            strategy.insert("world", context_good)
+        msg1 = queue.get_nowait()
+        msg2 = queue.get_nowait()
+        assert msg1["correlation_token"] != msg2["correlation_token"]
+        from ui.rejection_text_cache import CacheStatus
+        result1 = cache.resolve(msg1["correlation_token"])
+        assert result1.status is CacheStatus.HIT
+        assert result1.text == "hello"
+        assert result1.target_hwnd == 0
+        result2 = cache.resolve(msg2["correlation_token"])
+        assert result2.status is CacheStatus.HIT
+        assert result2.text == "world"
+        assert result2.target_hwnd == 0xCAFE
+        assert result2.target_root == 0xCAFE
+        assert result2.target_tag == 5
+
+    def test_identity_capture_refuses_marker_written_after_recycle(self):
+        # wh-ensure-focused-same-process-fallback.1.17 (codex round
+        # 11): _resolve_target_identity sampled the root BEFORE
+        # writing the provenance marker. Windows can destroy the
+        # target after GetAncestor returns its own-root handle and
+        # recycle the numeric handle as a new same-PID own-root
+        # top-level before SetProp runs -- the marker then lands on
+        # the RECYCLED window and the cache stores an identity every
+        # retry-time probe confirms against the wrong window. The
+        # resolve must acquire the marker first and re-acquire it
+        # after the root sample; tag_hwnd_provenance returns the
+        # existing marker for a live object and a NEW unique marker
+        # for a recycled one, so inequality proves the object died
+        # mid-resolve and the entry must store tag 0 (unreplayable).
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0xAAAA
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        # Model the window OBJECT separately from the numeric handle:
+        # markers live on the object and die with it. The root-sample
+        # call destroys the object and recycles the handle, exactly
+        # the interleave codex described.
+        live_window = ["A"]
+        markers: dict = {}
+        next_marker = [7]
+
+        def fake_tag(hwnd):
+            win = live_window[0]
+            if win not in markers:
+                markers[win] = next_marker[0]
+                next_marker[0] += 1
+            return markers[win]
+
+        def fake_normalize(hwnd):
+            # GetAncestor answers for the live object; then the
+            # object dies and the handle is reborn as own-root B.
+            live_window[0] = "B"
+            return 0xAAAA
+
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            side_effect=fake_tag,
+        ), patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            side_effect=fake_normalize,
+        ):
+            strategy.insert("hello", context)
         msg = queue.get_nowait()
-        _ = queue.get_nowait()
         from ui.rejection_text_cache import CacheStatus
         result = cache.resolve(msg["correlation_token"])
         assert result.status is CacheStatus.HIT
-        assert result.target_hwnd == 0xCAFE
-        assert result.target_process_id == 4242
+        assert result.text == "hello"
+        assert result.target_tag == 0
+
+    def test_identity_capture_refuses_recycle_before_first_tag(self):
+        # wh-ensure-focused-same-process-fallback.1.26 (codex round
+        # 17): the .1.17 recheck only covers a recycle AFTER the
+        # first tag. If the target dies and its handle is recycled as
+        # a same-PID own-root window BETWEEN the NativeWindowHandle
+        # read and the FIRST tag_hwnd_provenance call, the first tag
+        # lands on the recycled window, the root sample and the .1.17
+        # re-tag both see the recycled window consistently, and every
+        # retry-time probe then proves the wrong window. The resolve
+        # must re-derive the top-level from the control AFTER tagging
+        # and store tag 0 unless the control still resolves to the
+        # tagged handle -- a stale control (its window died) raises,
+        # which must read as refusal.
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0xAAAA
+        live_window = ["A"]
+
+        def get_top():
+            # wh-ensure-focused-same-process-fallback.1.29 (codex
+            # round 18): the control answers for whichever window
+            # OBJECT is currently alive, not for a call count. While
+            # window A lives, the lookup resolves normally; once the
+            # recycle happens (fake_tag flips live_window), the
+            # control's element is stale and the lookup raises. A
+            # call-count fixture answered the same way no matter WHEN
+            # the re-derive ran, so a regression that moved the
+            # re-derive BEFORE tagging -- where it still sees live
+            # window A and blesses the tag -- passed the old test.
+            if live_window[0] == "A":
+                return top
+            raise RuntimeError("UIA element not available")
+
+        ctrl.GetTopLevelControl.side_effect = get_top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        markers: dict = {}
+        next_marker = [7]
+
+        def fake_tag(hwnd):
+            # The recycle lands BEFORE the first SetProp: window A
+            # dies as the first tag call runs, so the marker is
+            # written onto recycled window B and stays stable for the
+            # .1.17 re-tag. Tying the recycle to the tag call is what
+            # makes this fixture prove ORDER (.1.29): only a
+            # re-derive that runs AFTER this flip observes the stale
+            # control and refuses.
+            live_window[0] = "B"
+            win = live_window[0]
+            if win not in markers:
+                markers[win] = next_marker[0]
+                next_marker[0] += 1
+            return markers[win]
+
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            side_effect=fake_tag,
+        ), patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xAAAA,
+        ):
+            strategy.insert("hello", context)
+        msg = queue.get_nowait()
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.text == "hello"
+        assert result.target_tag == 0
+
+    def test_identity_capture_refuses_when_control_rebinds_elsewhere(self):
+        # wh-ensure-focused-same-process-fallback.1.26 companion: the
+        # post-tag re-derive can also come back with a DIFFERENT
+        # top-level handle (the control's element re-resolved into
+        # another window's tree). Any answer other than the tagged
+        # handle must store tag 0.
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top_a = MagicMock()
+        top_a.NativeWindowHandle = 0xAAAA
+        top_b = MagicMock()
+        top_b.NativeWindowHandle = 0xBBBB
+        calls = {"n": 0}
+
+        def get_top():
+            calls["n"] += 1
+            return top_a if calls["n"] == 1 else top_b
+
+        ctrl.GetTopLevelControl.side_effect = get_top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=9,
+        ), patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xAAAA,
+        ):
+            strategy.insert("hello", context)
+        msg = queue.get_nowait()
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.text == "hello"
+        assert result.target_tag == 0
+
+    def test_aggregation_splits_when_fragments_prove_different_windows(self):
+        # wh-ensure-focused-same-process-fallback.1.15 (codex round
+        # 10): the aggregation key is (process, class, control_type,
+        # reason) -- two windows of the same app share it. Before this
+        # fix, a focus switch between same-key windows A and B
+        # appended B's text onto A's entry, and the retry pasted B's
+        # words into A. The provenance markers prove the fragments
+        # came from different window objects, so the strategy must
+        # start a separate entry for the B fragment.
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl_a = MagicMock()
+        ctrl_a.ControlTypeName = "Pane"
+        top_a = MagicMock()
+        top_a.NativeWindowHandle = 0xAAAA
+        ctrl_a.GetTopLevelControl.return_value = top_a
+        context_a = UIContext(
+            focused_control=ctrl_a,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        ctrl_b = MagicMock()
+        ctrl_b.ControlTypeName = "Pane"
+        top_b = MagicMock()
+        top_b.NativeWindowHandle = 0xBBBB
+        ctrl_b.GetTopLevelControl.return_value = top_b
+        context_b = UIContext(
+            focused_control=ctrl_b,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            side_effect=lambda h: h,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            side_effect=lambda h: {0xAAAA: 5, 0xBBBB: 9}[h],
+        ):
+            strategy.set_pending_verdict(_make_verdict())
+            strategy.insert("hello", context_a)
+            strategy.set_pending_verdict(_make_verdict())
+            strategy.insert("world", context_b)
+        msg1 = queue.get_nowait()
+        msg2 = queue.get_nowait()
+        assert msg1["correlation_token"] != msg2["correlation_token"]
+        from ui.rejection_text_cache import CacheStatus
+        result1 = cache.resolve(msg1["correlation_token"])
+        assert result1.status is CacheStatus.HIT
+        assert result1.text == "hello"
+        assert result1.target_hwnd == 0xAAAA
+        assert result1.target_tag == 5
+        result2 = cache.resolve(msg2["correlation_token"])
+        assert result2.status is CacheStatus.HIT
+        assert result2.text == "world"
+        assert result2.target_hwnd == 0xBBBB
+        assert result2.target_root == 0xBBBB
+        assert result2.target_tag == 9
+
+    def test_aggregation_splits_when_fragment_identity_unresolved(self):
+        # wh-ensure-focused-same-process-fallback.1.15: a fragment
+        # whose provenance tagging fails cannot be proven to share a
+        # window with the complete cached entry -- even when its
+        # HANDLE VALUE matches, because a recycled handle carries the
+        # same value while naming a different window object. The
+        # complete entry stays clean and replayable; the unproven
+        # fragment starts its own (unreplayable) entry.
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0xAAAA
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xAAAA,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=5,
+        ):
+            strategy.insert("hello", context)
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xAAAA,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=0,
+        ):
+            strategy.insert("world", context)
+        msg1 = queue.get_nowait()
+        msg2 = queue.get_nowait()
+        assert msg1["correlation_token"] != msg2["correlation_token"]
+        from ui.rejection_text_cache import CacheStatus
+        result1 = cache.resolve(msg1["correlation_token"])
+        assert result1.status is CacheStatus.HIT
+        assert result1.text == "hello"
+        assert result1.target_tag == 5
+        result2 = cache.resolve(msg2["correlation_token"])
+        assert result2.status is CacheStatus.HIT
+        assert result2.text == "world"
+        assert result2.target_tag == 0
+
+    def test_aggregation_keeps_first_root_when_same_window_proven(self):
+        # First-fragment-is-source-of-truth survives the .1.15 gate:
+        # when the markers prove the same window, the entry keeps the
+        # first fragment's root snapshot even if a later fragment's
+        # normalization returns a different root (reparenting during
+        # the utterance). The retry handler's live-root comparison is
+        # the layer that decides what to do about the drift.
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0xAAAA
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xAAAA,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=5,
+        ):
+            strategy.insert("hello", context)
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xBBBB,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=5,
+        ):
+            strategy.insert("world", context)
+        msg1 = queue.get_nowait()
+        msg2 = queue.get_nowait()
+        assert msg1["correlation_token"] == msg2["correlation_token"]
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg1["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.text == "hello world"
+        assert result.target_root == 0xAAAA
+
+    def test_aggregation_merges_unresolvable_fragments(self):
+        # wh-ensure-focused-same-process-fallback.1.15, deliberate
+        # design: when NEITHER side carries a provenance marker, the
+        # fragments merge under one token. The merged entry can never
+        # paste (the retry handler refuses tag=0 outright), so no
+        # wrong-window replay is possible; merging keeps the GUI's
+        # one-toast-one-token behaviour for the common transient
+        # failure. This is NOT a 0 == 0 identity credit -- nothing
+        # downstream treats the merged entry as proven.
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0xAAAA
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xAAAA,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=0,
+        ):
+            strategy.set_pending_verdict(_make_verdict())
+            strategy.insert("hello", context)
+            strategy.set_pending_verdict(_make_verdict())
+            strategy.insert("world", context)
+        msg1 = queue.get_nowait()
+        msg2 = queue.get_nowait()
+        assert msg1["correlation_token"] == msg2["correlation_token"]
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg1["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.text == "hello world"
+        assert result.target_tag == 0
 
     def test_aggregation_does_not_overwrite_nonzero_hwnd(self):
         # The upgrade only applies when the cached HWND is 0. A
@@ -871,7 +1309,9 @@ class TestCachePopulation:
 
     def test_cache_stores_zero_hwnd_when_focused_control_has_no_top_level(self):
         """When the focused control's top-level lookup fails, the cache
-        entry stores target_hwnd=0 and the retry handler skips refocus.
+        entry stores target_hwnd=0. The retry handler refuses such an
+        entry outright with token_expired (.1.11) -- 0 is a data-shape
+        default, not replay permission.
         """
 
         queue: Queue = Queue()
@@ -936,6 +1376,479 @@ class TestCachePopulation:
         assert result.status is CacheStatus.HIT
         assert result.target_hwnd == 0x12345
         assert result.target_process_id == 4242
+
+    def test_cache_stores_target_root_snapshot(self):
+        """wh-ensure-focused-same-process-fallback.1.7: the strategy must
+        also cache the GA_ROOT normalization of the target HWND taken
+        at rejection time. The retry handler compares the live root
+        against this snapshot to detect a same-process handle recycle,
+        which the PID guard alone cannot see. The stored value is the
+        NORMALIZED root, not the raw HWND -- the two differ when UIA's
+        top-level is a child of the actual Win32 root.
+        """
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0x12345
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="Zed::Window",
+            process_id=4242,
+        )
+
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+        ) as mock_normalize:
+            mock_normalize.return_value = 0x99999
+            strategy.insert("hello", context)
+        mock_normalize.assert_called_once_with(0x12345)
+        msg = queue.get_nowait()
+        token = msg["correlation_token"]
+        result = cache.resolve(token)
+        from ui.rejection_text_cache import CacheStatus
+        assert result.status is CacheStatus.HIT
+        assert result.target_hwnd == 0x12345
+        assert result.target_root == 0x99999
+
+    def test_cache_stores_provenance_tag(self):
+        """wh-ensure-focused-same-process-fallback.1.12: the strategy
+        tags the target window OBJECT at rejection time (SetProp) and
+        caches the marker. The retry handler re-reads the property
+        from the live window and refuses on mismatch -- the one probe
+        a SAME-RUN numeric handle recycle cannot alias (cross-run,
+        equal 43-bit salts collide at about 2**-43 per pair of runs
+        -- the accepted residual at _RUN_SALT), because the property
+        dies with the window object.
+        """
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0x12345
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="Zed::Window",
+            process_id=4242,
+        )
+
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0x12345,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=7,
+        ) as mock_tag:
+            strategy.insert("hello", context)
+        # .1.17: the resolve acquires the marker BEFORE the root
+        # sample and re-acquires it after -- two calls, same handle.
+        # Equal results across the pair prove the window object
+        # survived the resolve, so the tag is stored.
+        assert mock_tag.call_count == 2
+        for tag_call in mock_tag.call_args_list:
+            assert tag_call.args == (0x12345,)
+        msg = queue.get_nowait()
+        result = cache.resolve(msg["correlation_token"])
+        from ui.rejection_text_cache import CacheStatus
+        assert result.status is CacheStatus.HIT
+        assert result.target_tag == 7
+
+    def test_cache_stores_zero_root_when_normalization_fails(self):
+        """When the rejection-time GA_ROOT normalization fails, the entry
+        stores target_root=0. The retry handler returns token_expired
+        for such an entry (.1.8/.1.11) -- a replayable entry needs the
+        complete hwnd/root/tag identity.
+        """
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0x12345
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="Zed::Window",
+            process_id=4242,
+        )
+
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+        ) as mock_normalize:
+            mock_normalize.return_value = None
+            strategy.insert("hello", context)
+        msg = queue.get_nowait()
+        token = msg["correlation_token"]
+        result = cache.resolve(token)
+        from ui.rejection_text_cache import CacheStatus
+        assert result.status is CacheStatus.HIT
+        assert result.target_hwnd == 0x12345
+        assert result.target_root == 0
+
+    def test_aggregation_split_entry_carries_full_identity(self):
+        """wh-ensure-focused-same-process-fallback.1.15: when a
+        complete fragment splits away from an unprovable cached entry,
+        the FRESH entry must carry the fragment's full identity --
+        hwnd, pid, root snapshot, and provenance tag -- so its own
+        retry passes every gate. A fresh entry missing any of them
+        would be refused at retry and the split would silently lose
+        the replayable half.
+        """
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl_bad = MagicMock()
+        ctrl_bad.ControlTypeName = "Pane"
+        ctrl_bad.GetTopLevelControl.side_effect = RuntimeError("stale com")
+        context_bad = UIContext(
+            focused_control=ctrl_bad,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        ctrl_good = MagicMock()
+        ctrl_good.ControlTypeName = "Pane"
+        top_good = MagicMock()
+        top_good.NativeWindowHandle = 0xCAFE
+        ctrl_good.GetTopLevelControl.return_value = top_good
+        context_good = UIContext(
+            focused_control=ctrl_good,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        strategy.insert("hello", context_bad)
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xCAFE,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=5,
+        ):
+            strategy.insert("world", context_good)
+        _ = queue.get_nowait()
+        msg2 = queue.get_nowait()
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg2["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.text == "world"
+        assert result.target_hwnd == 0xCAFE
+        assert result.target_process_id == 4242
+        assert result.target_root == 0xCAFE
+        assert result.target_tag == 5
+
+    def test_aggregation_upgrades_rootless_entry_from_later_fragment(self):
+        """wh-ensure-focused-same-process-fallback.1.13: a first fragment
+        can resolve a nonzero HWND while the GA_ROOT normalization
+        transiently fails, caching (hwnd, pid, root=0) -- an entry the
+        .1.8 retry gate refuses outright. The append path only
+        re-resolved when the cached HWND was 0, so a second fragment
+        with a complete identity re-wrote root=0 and left the whole
+        aggregated dictation unrecoverable. The upgrade must also run
+        for a rootless cached identity, and take the later fragment's
+        complete (hwnd, root) pair.
+        """
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0x12345
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=None,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=5,
+        ):
+            # Fragment 1: HWND resolves, root normalization fails.
+            strategy.insert("hello", context)
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0x12345,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=5,
+        ):
+            # Fragment 2: complete identity.
+            strategy.insert("world", context)
+        msg = queue.get_nowait()
+        _ = queue.get_nowait()
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.target_hwnd == 0x12345
+        assert result.target_root == 0x12345
+
+    def test_aggregation_keeps_rootless_entry_when_no_fragment_completes(self):
+        """The rootless upgrade must stay refuse-by-default: when every
+        fragment's normalization fails, the entry keeps root=0 (the
+        .1.8 gate then refuses the retry). The upgrade never invents a
+        root and never takes a partial identity."""
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0x12345
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+        ) as mock_normalize:
+            mock_normalize.return_value = None
+            strategy.set_pending_verdict(_make_verdict())
+            strategy.insert("hello", context)
+            strategy.set_pending_verdict(_make_verdict())
+            strategy.insert("world", context)
+        msg = queue.get_nowait()
+        _ = queue.get_nowait()
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.target_hwnd == 0x12345
+        assert result.target_root == 0
+
+    def test_aggregation_splits_off_tagged_fragment_from_tagless_entry(self):
+        """wh-ensure-focused-same-process-fallback.1.15: a first
+        fragment can resolve hwnd and root while SetProp transiently
+        fails, caching tag=0 -- an entry that can never be proven to
+        share a window with anything, even a fragment carrying the
+        SAME handle value (a recycled handle keeps the value while
+        naming a new window object). A later complete fragment must
+        NOT be appended or have its identity grafted onto that entry
+        (the pre-.1.15 upgrade did exactly that and re-bound the
+        earlier text to an unproven window); it starts its own
+        replayable entry, and the tagless entry stays behind,
+        refused at retry."""
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl = MagicMock()
+        ctrl.ControlTypeName = "Pane"
+        top = MagicMock()
+        top.NativeWindowHandle = 0x12345
+        ctrl.GetTopLevelControl.return_value = top
+        context = UIContext(
+            focused_control=ctrl,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0x12345,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=0,
+        ):
+            # Fragment 1: hwnd and root resolve, tagging fails.
+            strategy.insert("hello", context)
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0x12345,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=9,
+        ):
+            # Fragment 2: complete identity.
+            strategy.insert("world", context)
+        msg1 = queue.get_nowait()
+        msg2 = queue.get_nowait()
+        assert msg1["correlation_token"] != msg2["correlation_token"]
+        from ui.rejection_text_cache import CacheStatus
+        result1 = cache.resolve(msg1["correlation_token"])
+        assert result1.status is CacheStatus.HIT
+        assert result1.text == "hello"
+        assert result1.target_tag == 0
+        result2 = cache.resolve(msg2["correlation_token"])
+        assert result2.status is CacheStatus.HIT
+        assert result2.text == "world"
+        assert result2.target_hwnd == 0x12345
+        assert result2.target_root == 0x12345
+        assert result2.target_tag == 9
+
+    def test_aggregation_zero_hwnd_not_upgraded_by_untagged_identity(self):
+        """wh-ensure-focused-same-process-fallback.1.12: the upgrade
+        takes only a COMPLETE identity, and the provenance tag is part
+        of it. A later fragment that resolves hwnd and root but whose
+        SetProp fails must not half-upgrade a no-identity entry."""
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl_bad = MagicMock()
+        ctrl_bad.ControlTypeName = "Pane"
+        ctrl_bad.GetTopLevelControl.side_effect = RuntimeError("stale com")
+        context_bad = UIContext(
+            focused_control=ctrl_bad,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        ctrl_good = MagicMock()
+        ctrl_good.ControlTypeName = "Pane"
+        top_good = MagicMock()
+        top_good.NativeWindowHandle = 0xCAFE
+        ctrl_good.GetTopLevelControl.return_value = top_good
+        context_good = UIContext(
+            focused_control=ctrl_good,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        strategy.insert("hello", context_bad)
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=0xCAFE,
+        ), patch(
+            "ui.strategies.specific.tag_hwnd_provenance",
+            return_value=0,
+        ):
+            strategy.insert("world", context_good)
+        msg = queue.get_nowait()
+        _ = queue.get_nowait()
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.target_hwnd == 0
+        assert result.target_tag == 0
+
+    def test_aggregation_zero_hwnd_not_upgraded_by_partial_identity(self):
+        """wh-ensure-focused-same-process-fallback.1.13: the upgrade
+        takes only a COMPLETE (nonzero hwnd AND root) replacement. A
+        later fragment that resolves an HWND but whose root
+        normalization fails must not half-upgrade a no-identity entry:
+        the partial (hwnd, root=0) shape is refused by the retry
+        handler exactly like hwnd=0, and pairing the text with a
+        half-verified window invites misdirected pastes if the gates
+        ever relax."""
+
+        queue: Queue = Queue()
+        cache = RejectionTextCache()
+        strategy = RejectedInsertionStrategy(
+            response_queue=queue, text_cache=cache,
+        )
+        ctrl_bad = MagicMock()
+        ctrl_bad.ControlTypeName = "Pane"
+        ctrl_bad.GetTopLevelControl.side_effect = RuntimeError("stale com")
+        context_bad = UIContext(
+            focused_control=ctrl_bad,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        ctrl_good = MagicMock()
+        ctrl_good.ControlTypeName = "Pane"
+        top_good = MagicMock()
+        top_good.NativeWindowHandle = 0xCAFE
+        ctrl_good.GetTopLevelControl.return_value = top_good
+        context_good = UIContext(
+            focused_control=ctrl_good,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="zed.exe",
+            class_name="zed::Workspace",
+            process_id=4242,
+        )
+        strategy.set_pending_verdict(_make_verdict())
+        strategy.insert("hello", context_bad)
+        strategy.set_pending_verdict(_make_verdict())
+        with patch(
+            "ui.strategies.specific.normalize_hwnd_for_foreground_compare",
+            return_value=None,
+        ):
+            strategy.insert("world", context_good)
+        msg = queue.get_nowait()
+        _ = queue.get_nowait()
+        from ui.rejection_text_cache import CacheStatus
+        result = cache.resolve(msg["correlation_token"])
+        assert result.status is CacheStatus.HIT
+        assert result.target_hwnd == 0
+        assert result.target_root == 0
 
 
 # ---------------------------------------------------------------------------

@@ -68,8 +68,17 @@ draft timeout becomes the ``draft_error`` string, and a saved-pattern
 timeout aborts the whole test with a failure naming the pattern.
 """
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from .pattern_identity import (
+    DOC_ID_KEY,
+    ORIGIN_KEY,
+    ORIGIN_OWN,
+    is_valid_doc_id,
+    legacy_candidates,
+    runtime_entry_identity,
+    runtime_text_candidates,
+)
 from .pattern_manager import PatternManager
 from .pattern_matcher import _MATCHER_PUNCT_STRIP, _normalize_first_word_in_text
 from .pattern_transform import transform_pattern
@@ -287,6 +296,67 @@ def run_test_phrase(
     return {"success": True, "match": None}
 
 
+def _resolve_draft(draft: Dict[str, Any]):
+    """Resolve a draft to ``((regex, actions), None)`` or ``(None, error)``.
+
+    The one call into ``PatternManager._resolve_block_content``, which is
+    the same seam ``create_pattern`` and ``update_pattern`` use, so a draft
+    can never validate differently from the save it previews. Both the
+    compiled preview entry and the ``[[pattern]]`` block the save would
+    write are derived from this one answer rather than resolving twice.
+    """
+    try:
+        regex, _stored_phrases, actions, _explicit_type = (
+            PatternManager._resolve_block_content(
+                draft.get("trigger"),
+                draft.get("pattern_type", "command"),
+                draft.get("action_type"),
+                draft.get("action_params"),
+                draft.get("phrases"),
+                draft.get("expression"),
+                draft.get("actions"),
+            )
+        )
+    except KeyError as exc:
+        return None, f"Missing required value: {exc}"
+    except ValueError as exc:
+        return None, str(exc)
+    return (regex, actions), None
+
+
+def _draft_block(draft: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The ``[[pattern]]`` block a save of this draft would write.
+
+    Raw, not built: this is what goes back into the user file, so the
+    catalog can merge and build it exactly as a save followed by a reload
+    would (wh-pattern-override-doc-id.3.5). Returns None when the draft
+    does not resolve, which the caller has already reported as a
+    ``draft_error``.
+
+    ``requires_hotword`` is carried only when true, matching the block
+    writer: a false value is the default and is not written.
+
+    ``origin`` is written unconditionally because this is the block a
+    CREATE would write, and ``create_pattern`` marks every block it writes
+    as the person's own rule. ``_edited_block`` takes it back out for an
+    edit, where ``update_pattern`` preserves the block on disk instead
+    (wh-pattern-override-doc-id.3.3).
+    """
+    resolved, error = _resolve_draft(draft)
+    if error is not None:
+        return None
+    assert resolved is not None
+    regex, actions = resolved
+    block: Dict[str, Any] = {"pattern": regex, "actions": actions}
+    if draft.get("requires_hotword", False):
+        block["requires_hotword"] = True
+    draft_doc_id = draft.get(DOC_ID_KEY)
+    if is_valid_doc_id(draft_doc_id):
+        block[DOC_ID_KEY] = draft_doc_id
+    block[ORIGIN_KEY] = ORIGIN_OWN
+    return block
+
+
 def _build_draft_entry(draft: Dict[str, Any]):
     """Build a catalog-shaped entry for the draft, via create_pattern's paths.
 
@@ -303,30 +373,20 @@ def _build_draft_entry(draft: Dict[str, Any]):
     the draft does not validate/compile -- the error string is
     user-readable and becomes ``draft_error`` (NOT a handler failure).
     """
+    resolved, error = _resolve_draft(draft)
+    if error is not None:
+        return None, error
+    assert resolved is not None
+    regex, actions = resolved
     try:
-        regex, _stored_phrases, actions, _explicit_type = (
-            PatternManager._resolve_block_content(
-                draft.get("trigger"),
-                draft.get("pattern_type", "command"),
-                draft.get("action_type"),
-                draft.get("action_params"),
-                draft.get("phrases"),
-                draft.get("expression"),
-                draft.get("actions"),
-            )
-        )
         # Compile exactly the way PatternCatalog._build_structures does:
         # numeric transform first, then IGNORECASE.
         transformed, meta = transform_pattern(regex)
         compiled = re.compile(transformed, re.IGNORECASE)
     except re.error as exc:
         return None, f"Expression does not compile: {exc}"
-    except KeyError as exc:
-        return None, f"Missing required value: {exc}"
-    except ValueError as exc:
-        return None, str(exc)
 
-    return {
+    entry: Dict[str, Any] = {
         "compiled_pattern": compiled,
         # Same auto-detection as _build_structures: the ^ anchor decides.
         "pattern_type": "command" if regex.startswith("^") else "replacement",
@@ -336,7 +396,23 @@ def _build_draft_entry(draft: Dict[str, Any]):
         "is_greedy": meta.get("is_greedy", False),
         "raw_pattern": regex,
         "is_user": True,
-    }, None
+    }
+    # A Customize draft carries the built-in's doc_id, and the merge keys on
+    # it, so the simulation needs it to place the draft where the save will
+    # (wh-pattern-override-doc-id A6). Only a well-formed id: a malformed one
+    # merges on text, and carrying it would make the entry claim an identity
+    # the merge does not honor.
+    draft_doc_id = draft.get(DOC_ID_KEY)
+    if is_valid_doc_id(draft_doc_id):
+        entry[DOC_ID_KEY] = draft_doc_id
+    # No ``origin`` here, deliberately. The draft carries no such field,
+    # and this entry feeds ``_simulate_merge``, which cannot tell a create
+    # from an edit: marking it would agree with a create and disagree with
+    # an edit of a customization saved before ids existed. That path is
+    # already wrong in the states wh-pattern-override-doc-id.3.5 records
+    # and survives only for the tests that pass no catalog; the shipped
+    # path is ``_simulate_save``, which models the real block instead.
+    return entry, None
 
 
 def _simulate_merge(
@@ -346,15 +422,53 @@ def _simulate_merge(
 ) -> List[Dict[str, Any]]:
     """Place the draft in the merged list per PatternCatalog._merge_entries.
 
-    Same trigger key (strip+casefold of the raw expression) replaces the
-    existing entry IN PLACE -- which is also how an unchanged-trigger edit
-    lands, since the excluded stale entry has the draft's own key. A new
-    key appends after everything. When the excluded entry is removed
-    without a key match elsewhere, the draft takes its slot: the rewritten
-    user block keeps its file position, so its merged position among the
-    appended user entries is unchanged.
+    Same identity replaces the existing entry IN PLACE -- which is also how
+    an unchanged-trigger edit lands, since the excluded stale entry has the
+    draft's own identity. A new identity appends after everything. When the
+    excluded entry is removed without a match elsewhere, the draft takes its
+    slot: the rewritten user block keeps its file position, so its merged
+    position among the appended user entries is unchanged.
+
+    The identity comes from ``speech.pattern_identity``, the rule the real
+    merge uses, so the preview cannot answer a different question from the
+    save it previews. It used to be a local copy of the normalized-text key,
+    which stopped agreeing the moment the merge moved to ``doc_id``: a
+    Customize draft for a built-in whose expression a release had rewritten
+    was shown losing, then won on save (wh-pattern-override-doc-id A6).
+    A draft that identifies as nothing matches nothing here and appends,
+    which is what the real merge does with it too.
+
+    A draft carrying no doc_id -- an edit of a rule saved before ids
+    existed -- is placed by the merge's legacy rule instead: when exactly
+    one entry carries its expression, the save lands in that entry's slot,
+    so the preview must too (wh-pattern-override-doc-id A4). Two or more
+    is the ambiguous case the merge refuses to resolve, and the draft
+    appends here exactly as it will there.
+
+    crewcut: this re-derives the placement from the BUILT list, which has
+    lost three facts the merge decides with -- the user file's order, the
+    rows the build dropped, and the identity a legacy resolution attached
+    to a row carrying no id -- so it is wrong in the states
+    wh-pattern-override-doc-id.3.5 records. ``run_test_draft`` uses
+    ``_simulate_save`` instead whenever it is given a catalog, which the
+    Logic process always is. This path remains for the callers that hand
+    in a list of entries they built by hand rather than a catalog: the
+    match-semantics tests in tests/test_pattern_tester.py and the
+    placement tests in tests/test_pattern_tester_doc_id.py. Remove it by
+    rebuilding those tests on a real ``PatternCatalog`` over a temporary
+    pair of TOML files, the way tests/test_pattern_tester_save_agreement.py
+    does, and then dropping the ``catalog=None`` argument they pass.
     """
-    draft_key = PatternManager._trigger_key(draft_entry["raw_pattern"])
+    draft_key = runtime_entry_identity(draft_entry)
+    target_key = draft_key
+    if draft_key is not None and not any(
+        runtime_entry_identity(entry) == draft_key for entry in patterns
+    ):
+        matches = legacy_candidates(
+            draft_entry, draft_key, runtime_text_candidates(patterns),
+        )
+        if len(matches) == 1:
+            target_key = matches[0]
     simulated: List[Dict[str, Any]] = []
     placed = False
     excluded_slot: Optional[int] = None
@@ -362,7 +476,8 @@ def _simulate_merge(
     for entry in patterns:
         if (
             not placed
-            and PatternManager._trigger_key(_raw_pattern(entry)) == draft_key
+            and target_key is not None
+            and runtime_entry_identity(entry) == target_key
         ):
             simulated.append(draft_entry)
             placed = True
@@ -384,11 +499,175 @@ def _simulate_merge(
     return simulated
 
 
+def _user_expressions(
+    patterns: List[Dict[str, Any]], catalog,
+) -> List[str]:
+    """The expressions the SAVE's duplicate-trigger check would compare.
+
+    The save reads the user FILE, not a built list:
+    ``PatternManager._find_user_trigger_collision`` walks
+    ``_load_pattern_dicts(self.user_patterns_file)``, which keeps every
+    table whose ``pattern`` value is a string, actions or no actions. The
+    build is stricter -- ``PatternCatalog._build_structures`` keeps an
+    entry only ``if pattern_str and actions_list`` -- so a user block with
+    an empty action list is absent from the built list entirely. Reading
+    the built list therefore missed such a block and let the preview
+    simulate a save the save refuses (wh-pattern-override-doc-id.3.5).
+
+    With a catalog, this returns the raw user entries filtered exactly as
+    ``_load_pattern_dicts`` filters them. Without one, it falls back to the
+    built list's user rows, which is all a caller passing None can offer.
+    """
+    if catalog is not None:
+        return [
+            entry["pattern"]
+            for entry in catalog.get_raw_user_entries()
+            if isinstance(entry.get("pattern"), str)
+        ]
+    return [
+        _raw_pattern(entry) for entry in patterns if entry.get("is_user")
+    ]
+
+
+def _simulate_save(
+    catalog,
+    draft_block: Dict[str, Any],
+    exclude_pattern_id: Optional[str],
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Build the pattern list the save would produce, and find the draft.
+
+    The save rewrites ONE ``[[pattern]]`` block of the user file in place
+    (``PatternManager.update_pattern``) or appends one
+    (``create_pattern``), and the catalog then merges and builds the whole
+    file again. This does the same thing to the catalog's own raw entries
+    and asks the catalog to build the result, so the preview answers the
+    question the save answers rather than a re-derivation of it
+    (wh-pattern-override-doc-id.3.5).
+
+    Args:
+        catalog: The live ``PatternCatalog``.
+        draft_block: The block a save of this draft would write.
+        exclude_pattern_id: The id of the block being edited, or None for
+            a create.
+
+    Returns:
+        ``(patterns, draft_row)``. ``draft_row`` is the built entry the
+        draft became, or None when the build produced no rule for it.
+    """
+    system_entries = catalog.get_raw_system_entries()
+    rebuilt: List[Dict[str, Any]] = []
+    replaced = False
+    for entry in catalog.get_raw_user_entries():
+        expression = entry.get("pattern")
+        if (
+            not replaced
+            and exclude_pattern_id
+            and isinstance(expression, str)
+            and PatternManager.pattern_id(expression) == exclude_pattern_id
+        ):
+            block = _edited_block(entry, draft_block)
+            saved_id = PatternManager._doc_id_for_save(
+                block.get(DOC_ID_KEY), block["pattern"], system_entries,
+                expression,
+            )
+            if saved_id is None:
+                block.pop(DOC_ID_KEY, None)
+            rebuilt.append(block)
+            replaced = True
+            continue
+        rebuilt.append(entry)
+    if not replaced:
+        # A create, or an edit of a block that is no longer in the file.
+        # ``create_pattern`` appends, and an edit whose target has vanished
+        # fails the save outright, so appending is right for the first and
+        # harmless for the second.
+        block = dict(draft_block)
+        if PatternManager._doc_id_for_save(
+            block.get(DOC_ID_KEY), block["pattern"], system_entries,
+        ) is None:
+            block.pop(DOC_ID_KEY, None)
+        rebuilt.append(block)
+
+    # crewcut: this call costs about 266 ms on the shipped catalog (320
+    # patterns), and it runs on the Logic process asyncio loop, so speech
+    # matching stops for that long on each try-it press. Most of it is re
+    # compilation: 1438 of 2188 compile calls miss the 512-entry cache,
+    # which CPython clears whole when it fills, and both _merge_entries
+    # (through slot_identity -> transform_pattern) and _build_structures
+    # transform and compile all 320 patterns. It is the catalog's own load
+    # work run again, and the SAVE already stops the same loop for 575 ms
+    # in reload(), so the preview costs less than half of what pressing
+    # Save costs today. Accepted for now (boss ruling 2026-09-06, recorded
+    # as overridable by David).
+    #
+    # The remedy is NOT simply moving this to a thread. reload() swaps
+    # _raw_system_entries and _raw_user_entries in two separate statements
+    # (pattern_catalog.py:999-1000), run_test_draft reads the user list
+    # twice (the duplicate-trigger check, then this function) and
+    # build_from_user_entries reads the system list a third time, so a
+    # reload landing in between can pair entries from two file states.
+    # Removing this limit means one swapped attribute holding both raw
+    # lists, a single snapshot read here, and an audit of every self read
+    # inside _build_structures. safe_regex is already thread-safe (the
+    # RLock at safe_regex.py:41 serializes match_bounded), so that half of
+    # the move is free.
+    simulated = catalog.build_from_user_entries(rebuilt)
+
+    # The draft's own row, by the expression it saves under. Two user rows
+    # cannot share one expression: the duplicate-trigger guard above
+    # rejects the draft before this runs. ``is_user`` keeps a built-in
+    # carrying the same expression from being mistaken for it.
+    #
+    # None means the build produced no rule for the draft, which is the
+    # honest answer -- the saved rule would not run. Every draft that
+    # reaches here has already resolved and compiled, and the block writer
+    # cannot produce an empty action list, so the case is not reachable
+    # from the editor today; it is handled rather than asserted because
+    # the build's rejection rules are not this module's to guarantee.
+    expression = draft_block.get("pattern")
+    for entry in simulated:
+        if entry.get("is_user") and entry.get("raw_pattern") == expression:
+            return simulated, entry
+    return simulated, None
+
+
+def _edited_block(
+    existing: Dict[str, Any], draft_block: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The block ``update_pattern`` would write over ``existing``.
+
+    The content comes from the draft and the ``doc_id`` comes from the
+    block already in the file: the id names the built-in the RULE replaces,
+    not the edit, so ``update_pattern`` carries the stored one forward and
+    ignores any id the draft carries. ``_simulate_save`` then applies the
+    shared trigger-move decision to that stored identity, just as the writer
+    does, before asking the catalog to resolve the resulting block.
+
+    ``origin`` is taken from the stored block for the same reason, and it
+    is REMOVED when the stored block has none. An edit of a customization
+    saved before ids existed leaves that rule eligible for the legacy
+    migration, so a preview that added the key would show the rule losing
+    its built-in when the save leaves it attached
+    (wh-pattern-override-doc-id.3.3).
+    """
+    block = dict(draft_block)
+    block.pop(DOC_ID_KEY, None)
+    stored_doc_id = existing.get(DOC_ID_KEY)
+    if is_valid_doc_id(stored_doc_id):
+        block[DOC_ID_KEY] = stored_doc_id
+    block.pop(ORIGIN_KEY, None)
+    if existing.get(ORIGIN_KEY) == ORIGIN_OWN:
+        block[ORIGIN_KEY] = ORIGIN_OWN
+    return block
+
+
 def run_test_draft(
     draft: Dict[str, Any],
     text: str,
     patterns: List[Dict[str, Any]],
     matcher,
+    *,
+    catalog,
 ) -> Dict[str, Any]:
     """Answer pm_test_draft: for ``text``, does the draft respond first?
 
@@ -401,6 +680,18 @@ def run_test_draft(
         text: What the user typed into the try-it line.
         patterns: The live merged pattern list (``TextParser.patterns``).
         matcher: The live ``PatternMatcher``.
+        catalog: The live ``PatternCatalog``. With it the placement comes
+            from the catalog's own merge and build over the raw user file
+            with the draft's block written into it, which is the save
+            itself rather than a re-derivation of it. See ``_simulate_save``
+            and the note on ``_simulate_merge`` about the callers that
+            pass None (wh-pattern-override-doc-id.3.5).
+
+            Keyword-only and WITHOUT a default on purpose. A default would
+            let a later production caller take the re-derivation path with
+            nothing at the call site to show it; an explicit ``None``
+            written at every call site is that sign. Only the test files
+            pass None today.
 
     Returns:
         ``{success, draft_error, draft_matches, winner, shadowed_by,
@@ -426,7 +717,7 @@ def run_test_draft(
     }
 
     draft_entry, error = _build_draft_entry(draft)
-    if error is not None:
+    if draft_entry is None:
         response["draft_error"] = error
         return response
 
@@ -438,10 +729,7 @@ def run_test_draft(
     # win: overriding a built-in is the Customize flow working as designed.
     draft_key = PatternManager._trigger_key(draft_entry["raw_pattern"])
     exclude_id = draft.get("exclude_pattern_id")
-    for entry in patterns:
-        if not entry.get("is_user"):
-            continue
-        raw = _raw_pattern(entry)
+    for raw in _user_expressions(patterns, catalog):
         if PatternManager._trigger_key(raw) != draft_key:
             continue
         if exclude_id and PatternManager.pattern_id(raw) == exclude_id:
@@ -451,9 +739,18 @@ def run_test_draft(
         )
         return response
 
-    simulated = _simulate_merge(
-        patterns, draft_entry, draft.get("exclude_pattern_id"),
-    )
+    draft_block = _draft_block(draft) if catalog is not None else None
+    if draft_block is not None:
+        simulated, draft_row = _simulate_save(
+            catalog, draft_block, exclude_id,
+        )
+        if draft_row is not None:
+            # The rest of this function identifies the draft by object
+            # identity, and the catalog built its own entry. Use that one:
+            # it is the row the save produces, transforms and all.
+            draft_entry = draft_row
+    else:
+        simulated = _simulate_merge(patterns, draft_entry, exclude_id)
 
     for entry in simulated:
         try:

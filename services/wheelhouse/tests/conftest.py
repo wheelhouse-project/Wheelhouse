@@ -204,7 +204,6 @@ def mock_state_manager():
     manager._speech_suppressed_by_idle = False
     manager.interim_results_enabled = True
     manager.stt_websocket_connection = None
-    manager._stt_manager = None
     manager._remote_stt_launcher = None
     manager.send_state_update = Mock()
     manager.toggle_speech_enabled_state = Mock()
@@ -232,3 +231,47 @@ def mock_websocket_manager():
     ws.send_to = AsyncMock()
     ws.is_connected = Mock(return_value=False)
     return ws
+
+
+# ---------------------------------------------------------------------------
+# Hermeticity guard: never deliver a real Windows notice from a test run
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_real_notices_from_the_speech_notifier(request, monkeypatch):
+    """Stop SpeechNotifier delivering real toasts to the developer's desktop.
+
+    ``SpeechNotifier._send_notification`` is a user-facing call site, not a
+    debug one: ``state_manager`` calls it directly for the audio-pause,
+    speech-off and audio-suppression notices (wh-audio-suppression-control),
+    and two more call sites live in ``integrations/websocket_manager.py`` and
+    ``main.py``. Ordinary StateManager tests therefore reach plyer. Measured
+    on 2026-09-15 with this guard replaced by a recorder: five test files
+    (test_state_manager.py, test_ptt_integration.py,
+    test_ptt_release_restores_speech.py, test_ptt_mode_consistency.py,
+    test_ptt_endpoint_identity.py) asked for 115 real notices in one run.
+
+    Both module objects below are the SAME file under two names,
+    ``utils.speech_notifier`` and
+    ``services.wheelhouse.utils.speech_notifier``, because the top of this
+    file puts the service directory and the project root on ``sys.path``.
+    Python keeps one module object per name, each with its own copy of the
+    ``send_notice`` it imported, so a patch of one does not touch the other.
+    A test that asserts a notice was sent should assert on
+    ``speech_notifier._send_notification`` rather than on plyer.
+    """
+    # Two test files drive the SpeechNotifier's real delivery: they patch
+    # plyer.notification themselves and assert on what it receives, so the
+    # stub below would empty the very dict they read. Patching plyer already
+    # stops a real notice, so exempting them delivers nothing to the desktop.
+    # The list is complete: grep -rln "SpeechNotifier" over
+    # services/wheelhouse/tests/ names this file and exactly those two.
+    exempt_modules = ("test_speech_notifier", "test_transcript_redaction")
+    if request.module.__name__.endswith(exempt_modules):
+        return
+    import utils.speech_notifier as notifier_module
+    import services.wheelhouse.utils.speech_notifier as aliased_notifier_module
+
+    undelivered = Mock(return_value=True)
+    monkeypatch.setattr(notifier_module, "send_notice", undelivered)
+    monkeypatch.setattr(aliased_notifier_module, "send_notice", undelivered)

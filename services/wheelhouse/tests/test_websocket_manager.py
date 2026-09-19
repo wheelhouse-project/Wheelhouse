@@ -25,6 +25,8 @@ import asyncio
 import json
 import logging
 import struct
+from types import SimpleNamespace
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, Mock, patch, PropertyMock
 
@@ -806,13 +808,26 @@ class TestNotificationHandling:
         """A notification with 'ready' in the message should call signal_provider_ready()."""
         launcher = MagicMock()
         launcher.signal_provider_ready = MagicMock()
+        launcher.launch_generation.return_value = 2
         manager.remote_stt_launcher = launcher
         manager.state_manager = None
 
         messages = [{
+            # The provider declares itself first, as every shipped
+            # provider does. This test is about a classified ready, not
+            # about the provisional question, and a connection that never
+            # declares itself now has its ready dropped
+            # (wh-ready-connection-stamp.2). The kind is required since
+            # the substring fallback was removed; without it this frame is
+            # an ordinary notice (wh-ready-connection-stamp.2.2.1).
+            "type": "capabilities",
+            "provider": "google_stt",
+            "emits_eos": False,
+        }, {
             "type": "notification",
             "title": "STT Provider",
-            "message": "Provider is ready for transcription"
+            "message": "Provider is ready for transcription",
+            "kind": "ready",
         }]
         ws = _make_mock_ws(messages)
         await manager.handle_connection(ws)
@@ -890,11 +905,20 @@ class TestNotificationHandling:
         (review finding wh-google-creds-file-picker.1.5)."""
         launcher = MagicMock()
         launcher.is_starting = True
+        launcher.launch_generation.return_value = 3
         mock_sm, mock_notifier = self._state_manager_with_notifier()
         manager.remote_stt_launcher = launcher
         manager.state_manager = mock_sm
 
         messages = [{
+            # The provider declares itself first, as every shipped
+            # provider does. Without that declaration the failure is
+            # dropped rather than attributed to a guessed launch
+            # (wh-launch-generation.1.2).
+            "type": "capabilities",
+            "provider": "google_stt",
+            "emits_eos": False,
+        }, {
             "type": "notification",
             "title": "Google STT",
             "message": (
@@ -908,10 +932,369 @@ class TestNotificationHandling:
 
         launcher.signal_provider_startup_failed.assert_called_once()
         launcher.signal_provider_ready.assert_not_called()
+        # The dismiss names the launch that owns this connection, so the
+        # GUI can drop it if a replacement has landed since
+        # (wh-launch-addressed-notices).
         mock_sm.state_to_gui_queue.put_nowait.assert_any_call(
-            {"action": "hide_working"}
+            {"action": "hide_working", "owner": "stt:3"}
         )
         mock_notifier._send_notification.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ready_kind_dismisses_the_dialog_naming_its_own_launch(
+        self, manager
+    ):
+        """kind="ready" closes the working dialog, and the dismiss says
+        which launch it is for.
+
+        Every provider shares one dialog, so a ready from a launch the
+        user has already replaced must not close the replacement's
+        loading display. Only the GUI can decide that, against the order
+        the two messages were sent in, so the launch that owns this
+        connection travels with the dismiss
+        (wh-launch-addressed-notices).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.launch_generation.return_value = 3
+        mock_sm, _mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            # The declaration binds this connection to launch 3, the
+            # same way it does in the startup_failed test above.
+            "type": "capabilities",
+            "provider": "google_stt",
+            "emits_eos": False,
+        }, {
+            "type": "notification",
+            "title": "Google STT",
+            "message": "Provider is ready for transcription",
+            "kind": "ready",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_called_once_with(3)
+        mock_sm.state_to_gui_queue.put_nowait.assert_any_call(
+            {"action": "hide_working", "owner": "stt:3"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_ready_from_an_undeclared_connection_is_dropped(
+        self, manager, caplog
+    ):
+        """A connection that never declared its provider keeps the
+        connect-time guess, so its ready must not complete a launch.
+
+        The guess names whichever launch was starting when this
+        connection arrived. A provider left running by a previous run of
+        WheelHouse reconnects into a launch this launcher never started,
+        becomes the active client, and its ready would end the CURRENT
+        launch's starting state -- for a launch whose own provider may
+        never have reported ready. The signal is dropped and logged
+        against the provisional stamp, the same shape the startup_failed
+        branch above already uses (wh-ready-connection-stamp.2).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.current_launch_generation.return_value = 6
+        mock_sm, _mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            # No capabilities message: this connection never declares
+            # its provider, so the stamp stays provisional.
+            "type": "notification",
+            "title": "Google STT",
+            "message": "Provider is ready for transcription",
+            "kind": "ready",
+        }]
+        ws = _make_mock_ws(messages)
+        with caplog.at_level(
+            logging.INFO, logger="integrations.websocket_manager"
+        ):
+            await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_not_called()
+        assert "provisional launch stamp 6" in caplog.text, caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_ready_does_not_dismiss_the_dialog(
+        self, manager
+    ):
+        """The dismiss travels with the same guessed stamp the dropped
+        signal carried, so it must be dropped with it.
+
+        A provisional connection's stamp is the connect-time guess, and
+        the GUI applies a dismiss whose launch matches the dialog's owner
+        (or names no launch at all). Sending it here closed the CURRENT
+        launch's loading display on a ready the handler had just declared
+        un-attributable, while that launch's own provider was still
+        warming up -- the visual half of the defect the signal drop
+        removes. The launch's own monitor hides the dialog at its
+        deadline, so nothing is lost by leaving it up
+        (wh-ready-connection-stamp.2.1.1).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.current_launch_generation.return_value = 6
+        mock_sm, _mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            # No capabilities message, as in the drop test above.
+            "type": "notification",
+            "title": "Google STT",
+            "message": "Provider is ready for transcription",
+            "kind": "ready",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_not_called()
+        # Matched on the action alone, never on the whole message, for
+        # the reason test_launch_generation.py records: a bare-dict
+        # assertion is true whatever the code does.
+        assert [
+            call.args[0]
+            for call in mock_sm.state_to_gui_queue.put_nowait.call_args_list
+            if call.args
+            and isinstance(call.args[0], dict)
+            and call.args[0].get("action") == "hide_working"
+        ] == []
+
+    @pytest.mark.asyncio
+    async def test_a_ready_from_a_declared_connection_still_signals(
+        self, manager
+    ):
+        """A provider that declared itself is bound to its own launch,
+        so its ready is delivered with that launch's generation.
+
+        The drop above must not cost the ordinary case. Every shipped
+        provider sends a capabilities message naming the name WheelHouse
+        launched it under, so _rebind_launch_stamp moves the stamp off
+        the guess before any notification arrives. The guess here is 9
+        and the declared launch is 4, so a ready carrying 4 proves the
+        rebound stamp is what travels (wh-ready-connection-stamp.2).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.current_launch_generation.return_value = 9
+        launcher.launch_generation.return_value = 4
+        mock_sm, _mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "capabilities",
+            "provider": "google_stt",
+            "emits_eos": False,
+        }, {
+            "type": "notification",
+            "title": "Google STT",
+            "message": "Provider is ready for transcription",
+            "kind": "ready",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_called_once_with(4)
+
+    # Each shipped provider's identifier in its capabilities message, and
+    # for the readiness cases the title it sends. This file cannot import
+    # the providers: the wheelhouse service and each provider service have
+    # separate virtual environments. The test that catches a provider
+    # which stops sending kind="ready" lives on the provider side, as
+    # test_the_ready_notice_carries_kind_ready in that provider's own
+    # tests/test_startup_readiness.py. Ids carry no spaces, because the
+    # mutation gate reads a collected id up to its first space
+    # (wh-ready-connection-stamp.2.2.1).
+    _SHIPPED_PROVIDERS = [
+        pytest.param("google_stt", id="google"),
+        pytest.param("distil_medium_en", id="distil"),
+        pytest.param("parakeet_tdt", id="parakeet"),
+    ]
+
+    _SHIPPED_READY_NOTICES = [
+        pytest.param("google_stt", "Google STT", id="google"),
+        pytest.param(
+            "distil_medium_en", "Distil-Whisper Medium (GPU)", id="distil"),
+        pytest.param("parakeet_tdt", "Parakeet v3 (GPU)", id="parakeet"),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", _SHIPPED_PROVIDERS)
+    async def test_a_duplicate_hint_notice_is_not_a_ready(
+        self, manager, provider
+    ):
+        """Saying "boost" twice on one word must tell the user so.
+
+        "ready" is a substring of "already", so the kind-less fallback
+        read this notice as a readiness signal on a declared, active
+        connection: it completed the launch, closed the working dialog,
+        and continued before the notice, so the user saw nothing at all.
+        All three shipped providers send it with no kind, for every hint
+        (google_stt_server/main.py:1134, distil_medium_en/main.py:331,
+        sherpa_offline_parakeet_stt_server/main.py:422). The manual
+        checklist's say-boost-twice step is this case
+        (wh-ready-connection-stamp.2.2.1).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = False
+        launcher.current_launch_generation.return_value = 9
+        launcher.launch_generation.return_value = 4
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "capabilities",
+            "provider": provider,
+            "emits_eos": False,
+        }, {
+            "type": "notification",
+            "title": "STT Hint",
+            "message": "Hint 'testword' already exists",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_not_called()
+        # Matched on the action alone, never on the whole message, for
+        # the reason test_launch_generation.py records: a bare-dict
+        # assertion is true whatever the code does.
+        assert [
+            call.args[0]
+            for call in mock_sm.state_to_gui_queue.put_nowait.call_args_list
+            if call.args
+            and isinstance(call.args[0], dict)
+            and call.args[0].get("action") == "hide_working"
+        ] == []
+        mock_notifier._send_notification.assert_called_once_with(
+            "STT Hint", "Hint 'testword' already exists"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", [
+        pytest.param("distil_medium_en", id="distil"),
+        pytest.param("parakeet_tdt", id="parakeet"),
+    ])
+    async def test_a_failed_hint_save_notice_is_not_a_ready(
+        self, manager, provider
+    ):
+        """A hint that could not be written must say so.
+
+        distil_medium_en (main.py:339) and the sherpa parakeet provider
+        (main.py:430) report a failed write with no kind, so a selected
+        word containing "ready" turned the only feedback a failed write
+        produces into a readiness signal, and the user was told nothing
+        about a hint that was never saved
+        (wh-ready-connection-stamp.2.2.1).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = False
+        launcher.current_launch_generation.return_value = 9
+        launcher.launch_generation.return_value = 4
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "capabilities",
+            "provider": provider,
+            "emits_eos": False,
+        }, {
+            "type": "notification",
+            "title": "STT Error",
+            "message": "Could not save hint 'ready'",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_not_called()
+        mock_notifier._send_notification.assert_called_once_with(
+            "STT Error", "Could not save hint 'ready'"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider,title", _SHIPPED_READY_NOTICES)
+    async def test_each_shipped_providers_ready_completes_its_launch(
+        self, manager, provider, title
+    ):
+        """Every provider's real ready notice still ends its own launch.
+
+        All three send "Transcription service ready" with kind="ready":
+        google_stt_server/main.py:198, distil_medium_en/main.py:530 and
+        sherpa_offline_parakeet_stt_server/main.py:591. Dropping the
+        kind-less fallback must cost none of them their launch, and the
+        generation must be the rebound one, not the connect-time guess
+        (wh-ready-connection-stamp.2.2.1).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.current_launch_generation.return_value = 9
+        launcher.launch_generation.return_value = 4
+        mock_sm, _mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "capabilities",
+            "provider": provider,
+            "emits_eos": False,
+        }, {
+            "type": "notification",
+            "title": title,
+            "message": "Transcription service ready",
+            "kind": "ready",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_called_once_with(4)
+
+    @pytest.mark.asyncio
+    async def test_a_kind_less_notice_saying_ready_no_longer_signals(
+        self, manager
+    ):
+        """A notice carrying no kind is a notice, whatever its words say.
+
+        This is the removed fallback's direct inverse. Guessing from the
+        text bought nothing once every shipped provider sent kind="ready",
+        and it cost the notices the two tests above name. A provider that
+        sends no kind cannot complete a launch by any route: this launcher
+        never started it, so its connection stays provisional and its
+        ready is dropped before this branch
+        (wh-ready-connection-stamp.2.2.1).
+        """
+        launcher = MagicMock()
+        launcher.is_starting = False
+        launcher.current_launch_generation.return_value = 9
+        launcher.launch_generation.return_value = 4
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "capabilities",
+            "provider": "google_stt",
+            "emits_eos": False,
+        }, {
+            "type": "notification",
+            "title": "STT Provider",
+            "message": "Provider is ready for transcription",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        launcher.signal_provider_ready.assert_not_called()
+        mock_notifier._send_notification.assert_called_once_with(
+            "STT Provider", "Provider is ready for transcription"
+        )
 
     @pytest.mark.asyncio
     async def test_error_kind_bypasses_startup_suppression(self, manager):
@@ -995,6 +1378,31 @@ class _GatedWS:
         await self._gate.wait()
         for m in self._messages:
             yield m
+
+
+class _LateBoundWS:
+    """A fake websocket that json-encodes each message dict at yield time.
+
+    Lets a test hook fill in message fields AFTER construction but before
+    delivery -- needed by the apply-reply correlation tests, where the
+    result frame must echo the apply_id that send_command_to_active_stt
+    generates mid-connection (wh-7ou.7.6.9).
+    """
+
+    def __init__(self, messages, remote_address=("127.0.0.1", 9999)):
+        self.messages = messages
+        self.remote_address = remote_address
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(payload)
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for m in self.messages:
+            yield json.dumps(m) if isinstance(m, dict) else m
 
 
 async def _wait_until(predicate, timeout=2.0):
@@ -1096,6 +1504,11 @@ class TestStaleClientNotificationGate:
             "type": "notification",
             "title": "STT Provider",
             "message": "Provider is ready for transcription",
+            # Classified, so the stale-frame gate stays this test's
+            # subject. Without a kind the frame is no longer a ready at
+            # all and the assertion below would hold for the wrong reason
+            # (wh-ready-connection-stamp.2.2.1).
+            "kind": "ready",
         }])
 
         launcher.signal_provider_ready.assert_not_called()
@@ -2266,3 +2679,1675 @@ class TestSettlingActivityState:
             if c.args and c.args[0] == 'settling'
         ]
         assert settling_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Calibration typing gate (wh-7ou.7.2.3, spec Section 6.2)
+# ---------------------------------------------------------------------------
+
+class _FakeCalibrationController:
+    """Stand-in for speech.calibration_controller.CalibrationController.
+
+    Mirrors exactly the surface the WebSocket manager consumes: the
+    ``capturing`` property, ``handle_final`` (which, like the real
+    controller, returns True only while the word/noise stages are
+    capturing), and the two provider-event methods.
+    """
+
+    def __init__(self, capturing=False, session_active=None):
+        self.capturing = capturing
+        # Real-controller invariant: capturing implies session_active.
+        self.session_active = (
+            capturing if session_active is None else session_active
+        )
+        self.finals = []
+        self.engine_results = []
+        self.provider_connects = 0
+
+    def handle_final(self, text, confidence):
+        self.finals.append((text, confidence))
+        return self.capturing
+
+    def on_engine_settings_result(self, ok, error):
+        self.engine_results.append((ok, error))
+
+    def on_provider_connected(self):
+        self.provider_connects += 1
+
+
+def _wire_calibration_controller(manager, controller):
+    """Attach *controller* through the production lookup chain.
+
+    In production main.py wires manager.speech_handler to the
+    SpeechHandler, whose ``logic_controller`` exposes
+    ``_get_calibration_controller()``. The gate must resolve the
+    controller through that chain, not through a bespoke attribute.
+    """
+    logic = SimpleNamespace(_get_calibration_controller=lambda: controller)
+    manager.speech_handler = SimpleNamespace(logic_controller=logic)
+
+
+# A contract-shaped confidence block (message contract part A.1).
+_CAL_CONFIDENCE = {
+    "min_word_probability": 0.42,
+    "max_no_speech_prob": 0.011,
+    "peak_avg_logprob": -0.31,
+    "word_count": 1,
+    "suppressed": True,
+    "rescued": False,
+}
+
+
+class TestCalibrationTypingGate:
+    """While a calibration session is capturing, every transcript event
+    (interim, stable, final) is handed to the CalibrationController and
+    nothing is forwarded into the speech pipeline -- this single gate is
+    what guarantees nothing gets typed and no command fires mid-session
+    (spec Section 6.2). Outside the capture stages transcripts must flow
+    normally so voice clicking works on the intro and review screens
+    (spec Section 3.7). Wake-word and status messages always flow.
+    """
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.state_manager = None
+        app = MagicMock()
+        app.send_command = AsyncMock()
+        mgr.set_app(app)
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_final_diverted_to_controller_during_capture(self, manager):
+        """A final during capture goes to the controller -- text plus the
+        contract confidence block -- and queues no WordEvents at all."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "final", "text": "comma", "utterance_id": 500,
+            "confidence": _CAL_CONFIDENCE,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        assert controller.finals == [("comma", _CAL_CONFIDENCE)]
+        assert _drain_queue(manager.word_queue) == []
+        manager._app.send_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_diverted_final_still_flashes_confirmed_and_cancels_watchdog(
+        self, manager
+    ):
+        """Status keeps flowing during capture: the GUI green flash and the
+        idle-watchdog cancel are status side effects, not pipeline ones."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+        watchdog = MagicMock()
+        manager._idle_watchdog_handle = watchdog
+
+        messages = [{
+            "type": "final", "text": "comma", "utterance_id": 501,
+            "confidence": _CAL_CONFIDENCE,
+        }]
+        ws = _make_mock_ws(messages)
+        with patch.object(manager, '_write_activity_state') as mock_write:
+            await manager.handle_connection(ws)
+
+        mock_write.assert_any_call('confirmed', 501)
+        watchdog.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_clean_confidence_final_diverted_during_capture(
+        self, manager
+    ):
+        """A capture-stage final whose confidence block carries a CLEAN
+        verdict (suppressed=false) must also divert. Distinct from the
+        suppressed-verdict case above so the typing gate is proven
+        independently of the wh-7ou.7.6.11 verdict gate downstream --
+        a leak of clean finals cannot be re-caught by that gate."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        clean = dict(_CAL_CONFIDENCE, suppressed=False)
+        messages = [{
+            "type": "final", "text": "comma", "utterance_id": 505,
+            "confidence": clean,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        assert controller.finals == [("comma", clean)]
+        assert _drain_queue(manager.word_queue) == []
+
+    @pytest.mark.asyncio
+    async def test_declined_final_flows_while_session_active(
+        self, manager
+    ):
+        """When the controller declines a final (a click utterance --
+        the one allowlisted channel, wh-7ou.7.6.3) it must flow into the
+        pipeline unchanged: this is what keeps 'click start' working."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=True,
+        )
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "final", "text": "click start", "utterance_id": 502}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        # The hand-off was offered (race-free single decision point)...
+        assert controller.finals == [("click start", None)]
+        # ...and declined, so the words reached the pipeline.
+        events = _drain_queue(manager.word_queue)
+        words = [e.word for e in events if e.word]
+        assert words == ["click", "start"]
+        end_markers = [e for e in events if e.is_utterance_end_marker]
+        assert len(end_markers) >= 1
+
+    @pytest.mark.asyncio
+    async def test_final_flows_normally_without_controller(self, manager):
+        """No calibration wiring at all (speech_handler is None): the gate
+        must be inert and dictation unaffected."""
+        assert manager.speech_handler is None
+
+        messages = [{"type": "final", "text": "hello", "utterance_id": 503}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        words = [e.word for e in events if e.word]
+        assert words == ["hello"]
+
+    @pytest.mark.asyncio
+    async def test_controller_lookup_failure_fails_open(self, manager):
+        """A broken lookup must forward transcripts normally: silently
+        killing all dictation would be worse than a missed measurement."""
+        logic = SimpleNamespace(
+            _get_calibration_controller=Mock(side_effect=RuntimeError("boom")),
+        )
+        manager.speech_handler = SimpleNamespace(logic_controller=logic)
+
+        messages = [{"type": "final", "text": "hello", "utterance_id": 504}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        words = [e.word for e in events if e.word]
+        assert words == ["hello"]
+
+    @pytest.mark.asyncio
+    async def test_handle_final_exception_fails_open(self, manager):
+        """The real controller never raises, but the gate must not trust
+        that: a raising hand-off forwards the final normally."""
+        class _Broken(_FakeCalibrationController):
+            def handle_final(self, text, confidence):
+                raise RuntimeError("synthetic hand-off failure")
+
+        _wire_calibration_controller(manager, _Broken(capturing=True))
+
+        messages = [{"type": "final", "text": "hello", "utterance_id": 505}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        words = [e.word for e in events if e.word]
+        assert words == ["hello"]
+
+    @pytest.mark.asyncio
+    async def test_stable_diverted_during_capture(self, manager):
+        """Stables (the interim/provisional text) during capture must not
+        type anything: no WordEvents, no delta tracking, no 'settling'
+        claim, no start_utterance command."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "stable", "text": "comma", "utterance_id": 510}]
+        ws = _make_mock_ws(messages)
+        with patch.object(manager, '_write_activity_state') as mock_write:
+            await manager.handle_connection(ws)
+
+        assert _drain_queue(manager.word_queue) == []
+        assert manager._sent_stable_text == ""
+        settling_calls = [
+            c for c in mock_write.call_args_list
+            if c.args and c.args[0] == 'settling'
+        ]
+        assert settling_calls == []
+        manager._app.send_command.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stable_dropped_on_non_capture_screens_while_active(
+        self, manager
+    ):
+        """The gate holds for the WHOLE session (wh-7ou.7.6.3): even on
+        the intro/review screens, provisional text must not type. Click
+        commands fire from finals, so dropping stables costs nothing."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=True,
+        )
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "stable", "text": "hello", "utterance_id": 511}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        assert _drain_queue(manager.word_queue) == []
+        assert manager._sent_stable_text == ""
+
+    @pytest.mark.asyncio
+    async def test_stable_flows_when_no_session(self, manager):
+        """An idle controller (window closed, wrong-provider notice):
+        stables type normally."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=False,
+        )
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "stable", "text": "hello", "utterance_id": 511}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        words = [e.word for e in events if e.word]
+        assert "hello" in words
+
+    @pytest.mark.asyncio
+    async def test_final_from_non_active_client_dropped_during_session(
+        self, manager
+    ):
+        """A stale (superseded) provider's late final must never become
+        a calibration measurement, and during a session it must not
+        type either -- it is dropped outright (wh-7ou.7.6.6). Clean
+        confidence on purpose: a suppressed final would be dropped by
+        the non-active verdict gate (wh-7ou.7.6.13) even without the
+        session guard, so only the clean final pins the guard itself."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "final", "text": "comma", "utterance_id": 520,
+            "confidence": dict(_CAL_CONFIDENCE, suppressed=False),
+        }]
+        ws = _make_mock_ws(messages)
+
+        # A newer provider connects right after this one registers, so
+        # this client's queued frame is processed while it is no longer
+        # the active stream.
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede):
+            await manager.handle_connection(ws)
+
+        assert controller.finals == []
+        assert _drain_queue(manager.word_queue) == []
+
+    @pytest.mark.asyncio
+    async def test_final_from_non_active_client_leaves_status_untouched_during_session(
+        self, manager
+    ):
+        """The sender check must run BEFORE the final's status side
+        effects: a stale client's late final must not flash the GUI
+        green or cancel the shared idle watchdog while a session runs
+        (wh-7ou.7.6.6 round-3 rebuttal). Clean confidence for the same
+        reason as the drop test above: the non-active verdict gate
+        (wh-7ou.7.6.13) would drop a suppressed final before its status
+        side effects anyway; only the clean final exercises the guard."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+        # A lingering second client keeps remove_client's last-client
+        # watchdog cleanup out of the picture, so the assertions see
+        # what the final handler itself did.
+        lingering = AsyncMock()
+        lingering.remote_address = ("127.0.0.1", 9302)
+        manager._clients.add(lingering)
+
+        messages = [{
+            "type": "final", "text": "comma", "utterance_id": 530,
+            "confidence": dict(_CAL_CONFIDENCE, suppressed=False),
+        }]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede), \
+                patch.object(manager, '_write_activity_state') as mock_write, \
+                patch.object(manager, '_cancel_idle_watchdog') as mock_cancel:
+            await manager.handle_connection(ws)
+
+        mock_write.assert_not_called()
+        mock_cancel.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_vad_start_from_non_active_client_ignored_during_session(
+        self, manager
+    ):
+        """A stale client's vad_start must not fire the GUI hearing
+        pulse or arm the shared idle watchdog while a session runs
+        (wh-7ou.7.6.6 round-3 rebuttal)."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "vad_start", "utterance_id": 531}]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede), \
+                patch.object(manager, '_write_activity_state') as mock_write, \
+                patch.object(manager, '_arm_idle_watchdog') as mock_arm:
+            await manager.handle_connection(ws)
+
+        mock_write.assert_not_called()
+        mock_arm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_vad_start_from_non_active_client_flows_when_no_session(
+        self, manager
+    ):
+        """No calibration session: stale-client frames keep their
+        pre-existing behavior. The sender gate is calibration-scoped."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=False,
+        )
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "vad_start", "utterance_id": 532}]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede), \
+                patch.object(manager, '_write_activity_state') as mock_write:
+            await manager.handle_connection(ws)
+
+        mock_write.assert_called_once_with('hearing', 532)
+
+    @pytest.mark.asyncio
+    async def test_stable_from_non_active_client_does_not_rearm_watchdog_during_session(
+        self, manager
+    ):
+        """The session-wide stable drop already keeps stale stables out
+        of the pipeline, but the watchdog re-arm ran first; a stale
+        client must not slide the shared watchdog forward
+        (wh-7ou.7.6.6 round-3 rebuttal)."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "stable", "text": "hello", "utterance_id": 533,
+        }]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede), \
+                patch.object(manager, '_arm_idle_watchdog') as mock_arm:
+            await manager.handle_connection(ws)
+
+        mock_arm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_eos_from_non_active_client_ignored_during_session(
+        self, manager
+    ):
+        """A stale client's eos must not change the retraction policy
+        state for a colliding utterance id while a session runs
+        (wh-7ou.7.6.6 round-3 rebuttal)."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+        # A lingering second client keeps remove_client's last-client
+        # stream reset out of the picture, so the assertion sees what
+        # the eos handler itself did.
+        lingering = AsyncMock()
+        lingering.remote_address = ("127.0.0.1", 9301)
+        manager._clients.add(lingering)
+
+        messages = [{"type": "eos", "utterance_id": 534}]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede):
+            await manager.handle_connection(ws)
+
+        assert manager._eos_received_for_utterance_id != 534
+        assert manager._eos_observed_in_stream is False
+
+    @pytest.mark.asyncio
+    async def test_wake_word_from_non_active_client_ignored_during_session(
+        self, manager
+    ):
+        """A stale client's wake-word frame must not publish a wake
+        event mid-session (wh-7ou.7.6.6 round-3 rebuttal). The active
+        client's wake words keep flowing (spec Section 6.2)."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+        sm = MagicMock()
+        sm.event_bus.publish = AsyncMock()
+        manager.state_manager = sm
+
+        messages = [{"type": "wake_word_detected", "keyword": "computer"}]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede):
+            await manager.handle_connection(ws)
+
+        sm.event_bus.publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_final_from_non_active_client_flows_when_no_session(
+        self, manager
+    ):
+        """No calibration session: the stale-client final keeps its
+        pre-existing behavior (flows normally). The sender gate is
+        scoped to calibration only."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=False,
+        )
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "final", "text": "hello", "utterance_id": 521}]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede):
+            await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        words = [e.word for e in events if e.word]
+        assert words == ["hello"]
+
+    @pytest.mark.asyncio
+    async def test_stable_still_arms_idle_watchdog_during_capture(
+        self, manager
+    ):
+        """The idle watchdog protects the GUI 'hearing' pulse -- status,
+        not pipeline -- so a diverted stable still slides it forward."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "stable", "text": "comma", "utterance_id": 512}]
+        ws = _make_mock_ws(messages)
+        with patch.object(manager, '_arm_idle_watchdog') as mock_arm:
+            await manager.handle_connection(ws)
+
+        mock_arm.assert_called_once_with(512)
+
+    @pytest.mark.asyncio
+    async def test_vad_start_flows_normally_during_capture(self, manager):
+        """vad_start is a status message: the GUI hearing pulse must keep
+        working while the calibration window shows a word."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{"type": "vad_start", "utterance_id": 513}]
+        ws = _make_mock_ws(messages)
+        with patch.object(manager, '_write_activity_state') as mock_write:
+            await manager.handle_connection(ws)
+
+        mock_write.assert_called_once_with('hearing', 513)
+
+    @pytest.mark.asyncio
+    async def test_wake_word_flows_normally_during_capture(self, manager):
+        """Wake-word messages keep flowing during capture (spec 6.2)."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+        sm = MagicMock()
+        sm.event_bus.publish = AsyncMock()
+        manager.state_manager = sm
+
+        messages = [{"type": "wake_word_detected", "keyword": "computer"}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        sm.event_bus.publish.assert_awaited_once()
+        assert _drain_queue(manager.word_queue) == []
+
+    @pytest.mark.asyncio
+    async def test_diverted_final_closes_open_pipeline_utterance(self, manager):
+        """Capture can begin mid-utterance (Start clicked while speaking):
+        stables already queued words downstream, so the diverted final must
+        close the open utterance with an end marker -- and only an end
+        marker -- and reset delta tracking, mirroring the normal final
+        path. Otherwise the clipboard manager downstream waits forever."""
+        controller = _FakeCalibrationController(capturing=True)
+        _wire_calibration_controller(manager, controller)
+        # A lingering second client keeps remove_client's disconnect
+        # cleanup out of the queue so only the gate's own marker shows.
+        lingering = AsyncMock()
+        lingering.remote_address = ("127.0.0.1", 9300)
+        manager._clients.add(lingering)
+        manager.current_utterance_id = 600
+        manager._last_stable_utterance_id = 600
+        manager._sent_stable_text = "hello"
+        manager._processed_word_count = 1
+
+        messages = [{"type": "final", "text": "hello there", "utterance_id": 600}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        word_events = [e for e in events if e.word]
+        end_markers = [e for e in events if e.is_utterance_end_marker]
+        assert word_events == []
+        assert len(end_markers) == 1
+        assert end_markers[0].utterance_id == 600
+        assert manager._sent_stable_text == ""
+        assert manager._processed_word_count == 0
+        assert manager._last_stable_utterance_id is None
+
+
+class TestSendCommandToActiveStt:
+    """Calibration commands target the active stream only
+    (wh-7ou.7.6.6). send_command_to_stt broadcasts to every connected
+    client -- including superseded providers kept connected in DISABLED
+    state -- and a stale whisper provider honoring set_calibration_mode
+    or apply_engine_settings would act on a session that is not its own.
+    """
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.state_manager = None
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_sends_only_to_the_active_client(self, manager):
+        active = AsyncMock()
+        active.remote_address = ("127.0.0.1", 1001)
+        stale = AsyncMock()
+        stale.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {active, stale}
+        manager._active_stt_client = active
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+
+        active.send.assert_awaited_once()
+        (payload,), _ = active.send.await_args
+        assert json.loads(payload) == {
+            "type": "set_calibration_mode", "enabled": True,
+        }
+        stale.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_active_client_drops_without_raising(self, manager):
+        stale = AsyncMock()
+        stale.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {stale}
+        manager._active_stt_client = None
+
+        await manager.send_command_to_active_stt(
+            "apply_engine_settings", single_word_min_probability=0.15,
+        )
+
+        stale.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_failure_does_not_raise(self, manager):
+        active = AsyncMock()
+        active.remote_address = ("127.0.0.1", 1001)
+        active.send = AsyncMock(side_effect=RuntimeError("gone"))
+        manager._clients = {active}
+        manager._active_stt_client = active
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_the_send_succeeds(self, manager):
+        """Callers (the calibration apply path, wh-7ou.7.6.7) need to
+        know whether the command actually left this process."""
+        active = AsyncMock()
+        active.remote_address = ("127.0.0.1", 1001)
+        manager._clients = {active}
+        manager._active_stt_client = active
+
+        sent = await manager.send_command_to_active_stt(
+            "apply_engine_settings", single_word_min_probability=0.15,
+        )
+        assert sent is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_with_no_active_client(self, manager):
+        manager._clients = set()
+        manager._active_stt_client = None
+
+        sent = await manager.send_command_to_active_stt(
+            "apply_engine_settings", single_word_min_probability=0.15,
+        )
+        assert sent is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_the_send_raises(self, manager):
+        active = AsyncMock()
+        active.remote_address = ("127.0.0.1", 1001)
+        active.send = AsyncMock(side_effect=RuntimeError("gone"))
+        manager._clients = {active}
+        manager._active_stt_client = active
+
+        sent = await manager.send_command_to_active_stt(
+            "apply_engine_settings", single_word_min_probability=0.15,
+        )
+        assert sent is False
+
+
+class TestSuppressedVerdictGate:
+    """wh-7ou.7.6.11: a final that carries the provider filter's own
+    suppressed=true verdict WITH text present can only be a
+    calibration-bypass final -- outside the bypass the provider empties
+    the transcript before sending, so such text never arrives. When no
+    session consumes it (the session just ended and the mode-off command
+    is still in flight, or a stale provider never received mode-off),
+    the manager applies the verdict itself: the text must not type or
+    execute."""
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.state_manager = None
+        app = MagicMock()
+        app.send_command = AsyncMock()
+        mgr.set_app(app)
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_suppressed_verdict_final_dropped_when_no_session(
+        self, manager
+    ):
+        """No calibration wiring at all: the verdict gate must still
+        hold -- this is the stale-provider case, where the session (and
+        even the controller) may be long gone."""
+        messages = [{
+            "type": "final", "text": "delete everything", "utterance_id": 700,
+            "confidence": _CAL_CONFIDENCE,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        assert [e.word for e in events if e.word] == []
+
+    @pytest.mark.asyncio
+    async def test_suppressed_verdict_final_dropped_after_session_ended(
+        self, manager
+    ):
+        """The mode-off in-flight window: the controller exists but the
+        session is over, so it declines the final -- the verdict gate
+        must catch it before the pipeline does."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=False,
+        )
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "final", "text": "delete everything", "utterance_id": 701,
+            "confidence": _CAL_CONFIDENCE,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        assert [e.word for e in events if e.word] == []
+
+    @pytest.mark.asyncio
+    async def test_clean_verdict_final_flows_when_no_session(self, manager):
+        """suppressed=false is the filter passing the transcript: the
+        gate must not touch it."""
+        clean = dict(_CAL_CONFIDENCE, suppressed=False)
+        messages = [{
+            "type": "final", "text": "hello", "utterance_id": 702,
+            "confidence": clean,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        assert [e.word for e in events if e.word] == ["hello"]
+
+    @pytest.mark.asyncio
+    async def test_final_without_confidence_flows_when_no_session(
+        self, manager
+    ):
+        """Providers that attach no confidence block (Parakeet, cloud)
+        are untouched by the gate."""
+        messages = [{"type": "final", "text": "hello", "utterance_id": 703}]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        assert [e.word for e in events if e.word] == ["hello"]
+
+    @pytest.mark.asyncio
+    async def test_open_utterance_closed_with_end_marker_on_drop(
+        self, manager
+    ):
+        """Stables typed before the verdict arrives stay (the provider's
+        own filter has the same limitation), but the open utterance must
+        be closed with an end marker so downstream state resets -- the
+        same treatment the diverted-final path applies."""
+        # A lingering second client keeps remove_client's disconnect
+        # cleanup out of the queue so only the gate's own marker shows
+        # (the same masking countermeasure as
+        # test_diverted_final_closes_open_pipeline_utterance).
+        lingering = AsyncMock()
+        lingering.remote_address = ("127.0.0.1", 9301)
+        manager._clients.add(lingering)
+
+        messages = [
+            {"type": "stable", "text": "delete", "utterance_id": 704},
+            {
+                "type": "final", "text": "delete everything",
+                "utterance_id": 704, "confidence": _CAL_CONFIDENCE,
+            },
+        ]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        words = [e.word for e in events if e.word]
+        assert words == ["delete"]
+        end_markers = [e for e in events if e.is_utterance_end_marker]
+        assert len(end_markers) >= 1
+
+    @pytest.mark.asyncio
+    async def test_non_active_suppressed_final_never_closes_colliding_utterance(
+        self, manager
+    ):
+        """wh-7ou.7.6.13: utterance ids are per-provider counters, so a
+        stale non-active client's bypassed final can collide with the
+        active stream's live utterance id. The drop must not close the
+        ACTIVE stream's utterance or reset its delta state -- those
+        belong to a stream that produced nothing here."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=False,
+        )
+        _wire_calibration_controller(manager, controller)
+        lingering = AsyncMock()
+        lingering.remote_address = ("127.0.0.1", 9303)
+        manager._clients.add(lingering)
+
+        ws = AsyncMock()
+        ws.remote_address = ("127.0.0.1", 9304)
+        ws.send = AsyncMock()
+
+        async def _stable_then_superseded_final():
+            # While active: opens pipeline utterance 0 (the "B" role).
+            yield json.dumps(
+                {"type": "stable", "text": "hello", "utterance_id": 0}
+            )
+            # A newer provider is promoted; the queued bypassed final
+            # (the "A" role) arrives with a colliding utterance id.
+            manager._active_stt_client = object()
+            yield json.dumps({
+                "type": "final", "text": "delete everything",
+                "utterance_id": 0, "confidence": _CAL_CONFIDENCE,
+            })
+
+        ws.__aiter__ = Mock(return_value=_stable_then_superseded_final())
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        assert [e.word for e in events if e.word] == ["hello"]
+        assert [e for e in events if e.is_utterance_end_marker] == []
+        assert manager.current_utterance_id == 0
+        assert manager._sent_stable_text == "hello"
+
+    @pytest.mark.asyncio
+    async def test_non_active_suppressed_final_leaves_status_untouched(
+        self, manager
+    ):
+        """wh-7ou.7.6.13: the drop must run before the 'confirmed' flash
+        and the shared-watchdog cancel -- a stream that typed nothing
+        must not report success or unarm the active stream's watchdog."""
+        controller = _FakeCalibrationController(
+            capturing=False, session_active=False,
+        )
+        _wire_calibration_controller(manager, controller)
+        lingering = AsyncMock()
+        lingering.remote_address = ("127.0.0.1", 9305)
+        manager._clients.add(lingering)
+
+        messages = [{
+            "type": "final", "text": "delete everything",
+            "utterance_id": 705, "confidence": _CAL_CONFIDENCE,
+        }]
+        ws = _make_mock_ws(messages)
+        orig_add = manager.add_client
+
+        async def add_then_supersede(websocket):
+            await orig_add(websocket)
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_then_supersede), \
+                patch.object(manager, '_write_activity_state') as mock_write, \
+                patch.object(manager, '_cancel_idle_watchdog') as mock_cancel:
+            await manager.handle_connection(ws)
+
+        mock_write.assert_not_called()
+        mock_cancel.assert_not_called()
+        assert _drain_queue(manager.word_queue) == []
+
+
+class TestCalibrationModeOffTargeting:
+    """wh-7ou.7.6.11 (provider-switch path): add_client promotes the new
+    provider BEFORE the controller learns of the connect, so a
+    session-ending mode-off aimed at "the active client" would go to a
+    provider that never had the bypass on -- and leave the provider that
+    DOES have it on bypassing its filter until disconnect or the
+    10-minute lazy timeout. The off must follow the client that last
+    received mode-on."""
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.state_manager = None
+        return mgr
+
+    @staticmethod
+    def _frames(ws):
+        return [json.loads(c.args[0]) for c in ws.send.await_args_list]
+
+    @pytest.mark.asyncio
+    async def test_mode_off_targets_the_mode_on_client(self, manager):
+        distil = AsyncMock()
+        distil.remote_address = ("127.0.0.1", 1001)
+        other = AsyncMock()
+        other.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {distil, other}
+        manager._active_stt_client = distil
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        # Provider switch: the new client is promoted before the
+        # controller ends the session.
+        manager._active_stt_client = other
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=False,
+        )
+
+        assert {
+            "type": "set_calibration_mode", "enabled": False,
+        } in self._frames(distil)
+        assert all(
+            f.get("type") != "set_calibration_mode"
+            for f in self._frames(other)
+        )
+
+    @pytest.mark.asyncio
+    async def test_mode_off_falls_back_to_active_when_bound_client_gone(
+        self, manager
+    ):
+        """The bound client disconnecting clears its own bypass provider-
+        side, so the off falls back to the active client (an idempotent
+        no-op there) instead of failing."""
+        distil = AsyncMock()
+        distil.remote_address = ("127.0.0.1", 1001)
+        other = AsyncMock()
+        other.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {distil, other}
+        manager._active_stt_client = distil
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        manager.remove_client(distil)
+        manager._active_stt_client = other
+
+        sent = await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=False,
+        )
+
+        assert sent is True
+        assert {
+            "type": "set_calibration_mode", "enabled": False,
+        } in self._frames(other)
+
+    @pytest.mark.asyncio
+    async def test_mode_off_binding_clears_after_use(self, manager):
+        """One off consumes the binding: a later off (no session of its
+        own) must not chase the old client."""
+        distil = AsyncMock()
+        distil.remote_address = ("127.0.0.1", 1001)
+        other = AsyncMock()
+        other.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {distil, other}
+        manager._active_stt_client = distil
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=False,
+        )
+        manager._active_stt_client = other
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=False,
+        )
+
+        off_to_distil = [
+            f for f in self._frames(distil)
+            if f == {"type": "set_calibration_mode", "enabled": False}
+        ]
+        assert len(off_to_distil) == 1
+        assert {
+            "type": "set_calibration_mode", "enabled": False,
+        } in self._frames(other)
+
+    @pytest.mark.asyncio
+    async def test_mode_off_reaches_every_enabled_client(self, manager):
+        """wh-7ou.7.6.12: a same-provider reconnect mid-capture enables
+        calibration mode on the NEW client while the old one is still
+        live (add_client only disables its transcription, which never
+        touches the engine bypass). The off must reach every client
+        whose bypass was turned on, not just the most recent one."""
+        distil = AsyncMock()
+        distil.remote_address = ("127.0.0.1", 1001)
+        other = AsyncMock()
+        other.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {distil, other}
+        manager._active_stt_client = distil
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        # Reconnect: the new client is promoted and the controller
+        # re-enables calibration mode on it (spec Section 5.2).
+        manager._active_stt_client = other
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=False,
+        )
+
+        off = {"type": "set_calibration_mode", "enabled": False}
+        assert off in self._frames(distil)
+        assert off in self._frames(other)
+
+    @pytest.mark.asyncio
+    async def test_mode_off_reaches_earlier_client_when_second_enable_fails(
+        self, manager
+    ):
+        """wh-7ou.7.6.12: a failed enable to the newly promoted client
+        must not lose the earlier client whose bypass IS on -- the off
+        still has to reach it."""
+        distil = AsyncMock()
+        distil.remote_address = ("127.0.0.1", 1001)
+        other = AsyncMock()
+        other.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {distil, other}
+        manager._active_stt_client = distil
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        manager._active_stt_client = other
+        other.send.side_effect = ConnectionError("gone mid-promote")
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        other.send.side_effect = None
+
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=False,
+        )
+
+        assert {
+            "type": "set_calibration_mode", "enabled": False,
+        } in self._frames(distil)
+
+    @pytest.mark.asyncio
+    async def test_mode_off_completes_despite_stalled_bound_client(
+        self, manager
+    ):
+        """wh-7ou.7.6.14: a stalled bound client's send can block on
+        backpressure forever. The off must complete within its bound
+        anyway -- the binding set was already consumed, so nothing ever
+        retries a target this call abandons."""
+        from integrations import websocket_manager as wsm
+
+        stalled = AsyncMock()
+        stalled.remote_address = ("127.0.0.1", 1001)
+
+        async def _never(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        manager._clients = {stalled}
+        manager._active_stt_client = stalled
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        stalled.send = Mock(side_effect=_never)
+
+        with patch.object(
+            wsm, "_CAL_MODE_OFF_SEND_TIMEOUT_S", 0.05, create=True,
+        ):
+            sent = await asyncio.wait_for(
+                manager.send_command_to_active_stt(
+                    "set_calibration_mode", enabled=False,
+                ),
+                timeout=2.0,
+            )
+        assert sent is False
+
+    @pytest.mark.asyncio
+    async def test_mode_off_reaches_second_client_despite_stalled_first(
+        self, manager
+    ):
+        """wh-7ou.7.6.14: one stalled bound client must not starve the
+        others -- the healthy provider would otherwise stay in
+        calibration mode until its 600-second engine timeout."""
+        from integrations import websocket_manager as wsm
+
+        stalled = AsyncMock()
+        stalled.remote_address = ("127.0.0.1", 1001)
+
+        async def _never(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        manager._clients = {stalled}
+        manager._active_stt_client = stalled
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+        stalled.send = Mock(side_effect=_never)
+
+        healthy = AsyncMock()
+        healthy.remote_address = ("127.0.0.1", 1002)
+        manager._clients = {stalled, healthy}
+        manager._active_stt_client = healthy
+        await manager.send_command_to_active_stt(
+            "set_calibration_mode", enabled=True,
+        )
+
+        with patch.object(
+            wsm, "_CAL_MODE_OFF_SEND_TIMEOUT_S", 0.05, create=True,
+        ):
+            await asyncio.wait_for(
+                manager.send_command_to_active_stt(
+                    "set_calibration_mode", enabled=False,
+                ),
+                timeout=2.0,
+            )
+        assert {
+            "type": "set_calibration_mode", "enabled": False,
+        } in self._frames(healthy)
+
+
+class TestEngineSettingsResultRouting:
+    """engine_settings_result frames (contract part A.4) route to the
+    calibration controller's on_engine_settings_result and never enter
+    the speech pipeline."""
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.state_manager = None
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_engine_settings_result_routed_to_controller(self, manager):
+        """A failure result carries its exact error text to the controller
+        (the save_failed screen shows it under Show details)."""
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "engine_settings_result", "ok": False, "error": "disk full",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        assert controller.engine_results == [(False, "disk full")]
+        assert _drain_queue(manager.word_queue) == []
+
+    @pytest.mark.asyncio
+    async def test_engine_settings_result_ok_true(self, manager):
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "engine_settings_result", "ok": True, "error": None,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        assert controller.engine_results == [(True, None)]
+
+    @pytest.mark.asyncio
+    async def test_engine_settings_result_without_controller_is_dropped(
+        self, manager
+    ):
+        """No controller wired: the frame is dropped without crashing and
+        without reaching the unexpected-type path or the pipeline."""
+        messages = [{
+            "type": "engine_settings_result", "ok": True, "error": None,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        assert _drain_queue(manager.word_queue) == []
+
+    @pytest.mark.asyncio
+    async def test_engine_settings_result_from_stale_client_is_ignored(
+        self, manager
+    ):
+        """A superseded provider's late result describes an old generation
+        and must not steer the live session (same gate as notifications)."""
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        stale_gate = asyncio.Event()
+        active_gate = asyncio.Event()
+        stale_ws = _GatedWS(
+            [{"type": "engine_settings_result", "ok": True, "error": None}],
+            stale_gate, ("127.0.0.1", 9101),
+        )
+        active_ws = _GatedWS([], active_gate, ("127.0.0.1", 9102))
+
+        stale_task = asyncio.create_task(manager.handle_connection(stale_ws))
+        await _wait_until(lambda: manager._active_stt_client is stale_ws)
+        active_task = asyncio.create_task(manager.handle_connection(active_ws))
+        await _wait_until(lambda: manager._active_stt_client is active_ws)
+
+        stale_gate.set()
+        await stale_task
+        active_gate.set()
+        await active_task
+
+        assert controller.engine_results == []
+
+    @pytest.mark.asyncio
+    async def test_result_from_apply_target_accepted_after_supersede(
+        self, manager
+    ):
+        """wh-7ou.7.6.6 round-4 rebuttal: the client the apply was SENT
+        to owns the reply. If an orphan connect promotes another client
+        between the apply send and the reply, dropping the reply as
+        non-active strands the controller in the applying state until
+        the inactivity timeout, typing gate held."""
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "engine_settings_result", "ok": True, "error": None,
+        }]
+        ws = _LateBoundWS(messages)
+        orig_add = manager.add_client
+
+        async def add_apply_then_supersede(websocket):
+            await orig_add(websocket)
+            assert await manager.send_command_to_active_stt(
+                "apply_engine_settings", single_word_min_probability=0.15,
+            )
+            messages[0]["apply_id"] = json.loads(ws.sent[-1]).get("apply_id")
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_apply_then_supersede):
+            await manager.handle_connection(ws)
+
+        assert controller.engine_results == [(True, None)]
+
+    @pytest.mark.asyncio
+    async def test_late_reply_from_a_previous_apply_ignored(self, manager):
+        """wh-7ou.7.6.9: client identity cannot distinguish two applies
+        on the same live connection. A delayed reply from an earlier,
+        abandoned apply (cancelled session, provider write that hung)
+        must not be read as the current apply's answer -- only the reply
+        echoing the current apply's id counts, and the binding keeps
+        waiting for it."""
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        messages = [
+            {"type": "engine_settings_result", "ok": False, "error": "stale"},
+            {"type": "engine_settings_result", "ok": True, "error": None},
+        ]
+        ws = _LateBoundWS(messages)
+        orig_add = manager.add_client
+
+        async def add_two_applies(websocket):
+            await orig_add(websocket)
+            assert await manager.send_command_to_active_stt(
+                "apply_engine_settings", single_word_min_probability=0.10,
+            )
+            messages[0]["apply_id"] = json.loads(ws.sent[-1]).get("apply_id")
+            assert await manager.send_command_to_active_stt(
+                "apply_engine_settings", single_word_min_probability=0.15,
+            )
+            messages[1]["apply_id"] = json.loads(ws.sent[-1]).get("apply_id")
+
+        with patch.object(manager, 'add_client', add_two_applies):
+            await manager.handle_connection(ws)
+
+        assert controller.engine_results == [(True, None)]
+
+    @pytest.mark.asyncio
+    async def test_reply_missing_the_apply_id_ignored_while_apply_pending(
+        self, manager
+    ):
+        """A reply that does not echo the in-flight apply's id cannot be
+        correlated to that apply and must not steer the save
+        (wh-7ou.7.6.9)."""
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        messages = [{
+            "type": "engine_settings_result", "ok": True, "error": None,
+        }]
+        ws = _LateBoundWS(messages)
+        orig_add = manager.add_client
+
+        async def add_and_apply(websocket):
+            await orig_add(websocket)
+            assert await manager.send_command_to_active_stt(
+                "apply_engine_settings", single_word_min_probability=0.15,
+            )
+
+        with patch.object(manager, 'add_client', add_and_apply):
+            await manager.handle_connection(ws)
+
+        assert controller.engine_results == []
+
+    @pytest.mark.asyncio
+    async def test_result_from_other_client_ignored_while_apply_pending(
+        self, manager
+    ):
+        """While an apply is in flight, even the CURRENT active client
+        cannot answer for it -- only the client the apply went to. A
+        promoted orphan echoing a result must not steer the save."""
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        target = AsyncMock()
+        target.remote_address = ("127.0.0.1", 9201)
+        manager._clients.add(target)
+        manager._active_stt_client = target
+        assert await manager.send_command_to_active_stt(
+            "apply_engine_settings", single_word_min_probability=0.15,
+        )
+
+        # A different client connects, becomes active, and sends a
+        # result the apply target never produced.
+        messages = [{
+            "type": "engine_settings_result", "ok": True, "error": None,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        assert controller.engine_results == []
+
+    @pytest.mark.asyncio
+    async def test_result_binding_clears_after_the_reply(self, manager):
+        """The binding covers exactly one reply: once consumed, a later
+        duplicate from the same (now superseded) client falls back to
+        the active-client gate and is ignored."""
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        messages = [
+            {"type": "engine_settings_result", "ok": True, "error": None},
+            {"type": "engine_settings_result", "ok": False, "error": "late"},
+        ]
+        ws = _LateBoundWS(messages)
+        orig_add = manager.add_client
+
+        async def add_apply_then_supersede(websocket):
+            await orig_add(websocket)
+            assert await manager.send_command_to_active_stt(
+                "apply_engine_settings", single_word_min_probability=0.15,
+            )
+            apply_id = json.loads(ws.sent[-1]).get("apply_id")
+            messages[0]["apply_id"] = apply_id
+            messages[1]["apply_id"] = apply_id
+            manager._active_stt_client = object()
+
+        with patch.object(manager, 'add_client', add_apply_then_supersede):
+            await manager.handle_connection(ws)
+
+        assert controller.engine_results == [(True, None)]
+
+
+class TestCalibrationProviderConnect:
+    """Every provider (re)connect is reported to the calibration
+    controller: mid-capture it re-enables calibration mode (the provider
+    reset it on disconnect, spec 5.2); post-apply it completes the
+    session (the settings restart finished)."""
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.state_manager = None
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_add_client_notifies_calibration_controller(self, manager):
+        controller = _FakeCalibrationController()
+        _wire_calibration_controller(manager, controller)
+
+        ws = AsyncMock()
+        ws.remote_address = ("127.0.0.1", 9200)
+        await manager.add_client(ws)
+
+        assert controller.provider_connects == 1
+
+    @pytest.mark.asyncio
+    async def test_add_client_survives_controller_failure(self, manager):
+        """A raising on_provider_connected must not break registration:
+        the client still joins and becomes the active stream."""
+        class _Broken(_FakeCalibrationController):
+            def on_provider_connected(self):
+                raise RuntimeError("synthetic connect failure")
+
+        _wire_calibration_controller(manager, _Broken())
+
+        ws = AsyncMock()
+        ws.remote_address = ("127.0.0.1", 9201)
+        await manager.add_client(ws)
+
+        assert ws in manager._clients
+        assert manager._active_stt_client is ws
+
+
+class TestCaptureBackendLogLine:
+    """WheelHouse writes which capture path the provider took.
+
+    wh-capture-winrt-required A4. The provider's refusal (A3) covers the
+    case where winsdk is missing. It cannot cover a provider that starts
+    and captures through a path nobody expected, which is what happened
+    on 2026-09-05: a run captured through PortAudio for hours and no line
+    anywhere in wheelhouse.log said so. The ready notification is the one
+    frame that knows the answer, so the line is written where that frame
+    is read.
+    """
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        return mgr
+
+    @staticmethod
+    def _ready_messages(provider="google_stt", backend="winrt",
+                        title="Google STT"):
+        """A declared connection followed by its ready notice.
+
+        The capabilities frame must come FIRST. Without it the connection
+        stays provisional and _rebind_launch_stamp never runs, so the
+        ready is dropped before any of this is reached
+        (wh-ready-connection-stamp.2).
+        """
+        notice = {
+            "type": "notification",
+            "title": title,
+            "message": "Provider is ready for transcription",
+            "kind": "ready",
+        }
+        if backend is not None:
+            notice["capture_backend"] = backend
+        return [{
+            "type": "capabilities",
+            "provider": provider,
+            "emits_eos": False,
+        }, notice]
+
+    def _launcher(self):
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.current_launch_generation.return_value = 4
+        launcher.launch_generation.return_value = 4
+        return launcher
+
+    @staticmethod
+    def _capture_lines(caplog):
+        """The ready lines that speak about capture, and only those.
+
+        Asserting on the whole of caplog.text would pass on the
+        capabilities line, which already names the provider and has
+        nothing to do with this criterion.
+        """
+        return [
+            r.getMessage() for r in caplog.records
+            if "capture" in r.getMessage().lower()
+            and "ready" in r.getMessage().lower()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_ready_writes_the_capture_backend_to_the_log(
+        self, manager, caplog
+    ):
+        """The whole point of A4: an operator reading wheelhouse.log can
+        answer "which capture path did this run use?" without attaching a
+        debugger. The name is the provider's own report of what its
+        factory built."""
+        manager.remote_stt_launcher = self._launcher()
+        manager.state_manager = None
+
+        ws = _make_mock_ws(self._ready_messages())
+        with caplog.at_level(
+            logging.INFO, logger="integrations.websocket_manager"
+        ):
+            await manager.handle_connection(ws)
+
+        lines = self._capture_lines(caplog)
+        assert lines, caplog.text
+        assert "winrt" in " ".join(lines).lower(), lines
+        assert "Google STT" in " ".join(lines), lines
+
+    @pytest.mark.asyncio
+    async def test_the_line_reports_the_backend_the_provider_named(
+        self, manager, caplog
+    ):
+        """Not a constant WheelHouse prints regardless. A line that always
+        said "winrt" would have stayed just as green through the
+        2026-09-05 PortAudio run, which is the defect this criterion
+        exists for, so the test drives a different name and requires that
+        name to appear."""
+        manager.remote_stt_launcher = self._launcher()
+        manager.state_manager = None
+
+        ws = _make_mock_ws(self._ready_messages(backend="portaudio"))
+        with caplog.at_level(
+            logging.INFO, logger="integrations.websocket_manager"
+        ):
+            await manager.handle_connection(ws)
+
+        lines = self._capture_lines(caplog)
+        assert lines, caplog.text
+        assert "portaudio" in " ".join(lines).lower(), lines
+
+    @pytest.mark.asyncio
+    async def test_a_ready_without_the_field_says_so_rather_than_guessing(
+        self, manager, caplog
+    ):
+        """An older provider, or one still to be built, sends no
+        capture_backend. Naming a path for it would be an invention, and
+        an invented "winrt" is exactly the false assurance A4 removes.
+        Saying the provider did not report one is the honest line."""
+        manager.remote_stt_launcher = self._launcher()
+        manager.state_manager = None
+
+        ws = _make_mock_ws(self._ready_messages(backend=None))
+        with caplog.at_level(
+            logging.INFO, logger="integrations.websocket_manager"
+        ):
+            await manager.handle_connection(ws)
+
+        lines = self._capture_lines(caplog)
+        assert lines, caplog.text
+        assert "winrt" not in " ".join(lines).lower(), lines
+
+
+class TestWinrtRefusalReachesTheUser:
+    """The refusal a provider sends must arrive as a notice, unchanged.
+
+    wh-capture-winrt-required A4, at the boss's direction: A3 proved the
+    provider puts the approved wording on the socket, which is only half
+    the claim. A message WheelHouse drops, truncates, or replaces with a
+    generic failure leaves the user exactly where the defect left them --
+    a speech engine that does not work and no statement of why. This
+    class covers the other half: the text the provider sent is the text
+    the user is shown.
+
+    The wording is spelled out here rather than imported. The wheelhouse
+    service and the provider shared package have separate virtual
+    environments, so this file cannot import WINRT_REQUIRED_MESSAGE; the
+    same reason the _SHIPPED_PROVIDERS list above spells out provider
+    identifiers. A copy is the cost of the process boundary, and a
+    divergence is caught on the provider side, where
+    tests/test_winrt_capture_required.py holds the same literal against
+    the constant.
+    """
+
+    # Exactly the text David approved, including the full stops and the
+    # two instructions. Not paraphrased: the second sentence is what a
+    # user acts on and the third is what a developer acts on.
+    APPROVED = (
+        "The speech service cannot start: the audio package winsdk is "
+        "not installed. Re-run the WheelHouse installer. Developers: "
+        "run bootstrap.ps1."
+    )
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_text_reaches_the_user_notice_unchanged(
+        self, manager
+    ):
+        """The end-to-end claim of A3 plus A4, on the WheelHouse side.
+
+        This behaviour predates the change -- websocket_manager falls
+        through to the toast after the startup_failed branch, deliberately
+        (wh-google-creds-file-picker.1.5) -- so this test could not be
+        made to fail by writing it first. Its red state was produced by
+        mutation instead: suppressing that fall-through (a `continue` at
+        the end of the startup_failed branch) fails it. That is a
+        mutation proof, not red-first evidence, and it is recorded as one.
+        """
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.launch_generation.return_value = 3
+        mock_notifier = MagicMock()
+        mock_notifier._send_notification = MagicMock()
+        mock_sm = MagicMock()
+        mock_sm.speech_notifier = mock_notifier
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "capabilities",
+            "provider": "parakeet_tdt",
+            "emits_eos": True,
+        }, {
+            "type": "notification",
+            "title": "Parakeet v3 (GPU)",
+            "message": self.APPROVED,
+            "kind": "startup_failed",
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        # The launcher's starting state ends, so the user is not left
+        # watching a working dialog for an engine that will never start.
+        launcher.signal_provider_startup_failed.assert_called_once_with(3)
+        # And the notice carries the provider's own words. An assertion
+        # on a substring would pass on a truncated message, which is one
+        # of the failures this test exists to catch, so it compares the
+        # whole string.
+        mock_notifier._send_notification.assert_called_once()
+        shown = mock_notifier._send_notification.call_args.args[1]
+        assert shown == self.APPROVED, shown

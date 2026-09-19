@@ -9,6 +9,9 @@ Tests cover:
 
 from unittest.mock import Mock, patch, MagicMock, call
 import ctypes
+import logging
+from ctypes import wintypes
+import sys
 
 import pytest
 
@@ -757,3 +760,658 @@ class TestTypeStringVerifiedChunkDebugLog:
             msg = record.getMessage()
             assert "sent=" in msg
             assert "expected=" in msg
+
+
+# ---------------------------------------------------------------------------
+# Extended-key flag tests (wh-arrow-keys-missing-extended-flag)
+# ---------------------------------------------------------------------------
+
+
+class TestExtendedKeyFlag:
+    """_build_press_keys_events must set KEYEVENTF_EXTENDEDKEY.
+
+    Windows gives the navigation cluster the E0 scan-code prefix. Without
+    KEYEVENTF_EXTENDEDKEY, SendInput derives the NUMPAD scan code from the
+    virtual key code instead. An application that reads the virtual key
+    code sees the right key, but anything that reads the scan code sees a
+    numpad key. Measured 2026-08-15 with NVDA 2026.1.1: NVDA named the
+    arrow keys numpad2, numpad8, numpad4 and numpad6, bound them to its
+    review cursor, and consumed all of them, so the keys never reached the
+    application.
+
+    These tests read the constructed event list. They never call SendInput,
+    because a real injection would type into whatever window holds the
+    focus on this shared desktop.
+    """
+
+    # Local copies of the Win32 values, so a wrong constant in the module
+    # under test cannot make these tests agree with it.
+    EXTENDED = 0x0001
+    KEYUP = 0x0002
+
+    @staticmethod
+    def _events(*keys):
+        """Return [(wVk, dwFlags), ...] for a chord, in send order."""
+        from utils.win_input_sender import _build_press_keys_events
+
+        events, count = _build_press_keys_events(tuple(keys))
+        assert count == len(events)
+        return [(e.ii.ki.wVk, e.ii.ki.dwFlags) for e in events]
+
+    @pytest.mark.parametrize("key", ["up", "down", "left", "right"])
+    def test_an_arrow_key_carries_the_flag_on_the_down_and_the_up(self, key):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        vk = VK_CODE_MAP[key]
+        assert self._events(key) == [
+            (vk, self.EXTENDED),
+            (vk, self.EXTENDED | self.KEYUP),
+        ]
+
+    @pytest.mark.parametrize(
+        "key",
+        ["home", "end", "pageup", "pagedown", "insert", "delete", "del",
+         "printscreen"],
+    )
+    def test_every_other_extended_key_carries_the_flag(self, key):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        vk = VK_CODE_MAP[key]
+        assert self._events(key) == [
+            (vk, self.EXTENDED),
+            (vk, self.EXTENDED | self.KEYUP),
+        ]
+
+    @pytest.mark.parametrize(
+        "key",
+        ["a", "z", "0", "9", "enter", "tab", "space", "backspace", "esc",
+         "f1", "f12", "ctrl", "shift", "alt", "win", "capslock", "pause",
+         ".", "/"],
+    )
+    def test_an_ordinary_key_does_not_carry_the_flag(self, key):
+        for _vk, flags in self._events(key):
+            assert flags & self.EXTENDED == 0
+
+    def test_a_chord_extends_only_the_arrow_and_not_the_modifier(self):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        ctrl = VK_CODE_MAP["ctrl"]
+        right = VK_CODE_MAP["right"]
+        assert self._events("ctrl", "right") == [
+            (ctrl, 0),
+            (right, self.EXTENDED),
+            (right, self.EXTENDED | self.KEYUP),
+            (ctrl, self.KEYUP),
+        ]
+
+    def test_a_two_modifier_chord_keeps_its_release_order(self):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        ctrl = VK_CODE_MAP["ctrl"]
+        shift = VK_CODE_MAP["shift"]
+        home = VK_CODE_MAP["home"]
+        assert self._events("ctrl", "shift", "home") == [
+            (ctrl, 0),
+            (shift, 0),
+            (home, self.EXTENDED),
+            (home, self.EXTENDED | self.KEYUP),
+            (shift, self.KEYUP),
+            (ctrl, self.KEYUP),
+        ]
+
+    def test_the_set_holds_the_extended_codes_that_have_no_key_name_yet(self):
+        """numlock, right ctrl, right alt and numpad divide are extended.
+
+        None of the four is in VK_CODE_MAP today, so no chord can reach
+        them. wh-voice-access-parity.2.17 adds the numpad names. Keying the
+        set on the virtual key code rather than the key name means those
+        four are already right when the names arrive.
+        """
+        from utils.win_input_sender import EXTENDED_VK_CODES
+
+        assert 0x90 in EXTENDED_VK_CODES   # VK_NUMLOCK
+        assert 0xA3 in EXTENDED_VK_CODES   # VK_RCONTROL
+        assert 0xA5 in EXTENDED_VK_CODES   # VK_RMENU, right alt
+        assert 0x6F in EXTENDED_VK_CODES   # VK_DIVIDE, numpad slash
+
+    def test_the_set_excludes_every_numpad_key_that_is_not_extended(self):
+        """The numpad digits and its other operators are NOT extended.
+
+        Only the numpad divide and the numpad enter carry the E0 prefix.
+        This test exists so wh-voice-access-parity.2.17 cannot add the
+        numpad names and mark the whole block extended.
+        """
+        from utils.win_input_sender import EXTENDED_VK_CODES
+
+        for vk in range(0x60, 0x6A):       # VK_NUMPAD0 to VK_NUMPAD9
+            assert vk not in EXTENDED_VK_CODES
+        for vk in (0x6A, 0x6B, 0x6D, 0x6E):  # multiply, add, subtract, decimal
+            assert vk not in EXTENDED_VK_CODES
+
+    def test_a_released_extended_key_keeps_the_flag_in_the_recovery_path(self):
+        """_send_modifier_keyups must match the flag it released.
+
+        The recovery path releases keys after a short SendInput. A key-up
+        without the flag does not match the key-down that carried it, so a
+        scan-code reader can hold the key down for ever.
+        """
+        from utils.win_input_sender import VK_CODE_MAP
+
+        with patch("utils.win_input_sender.user32") as mock_user32, \
+                patch("utils.win_input_sender.kernel32"):
+            from utils.win_input_sender import _send_modifier_keyups
+
+            mock_user32.SendInput.return_value = 2
+            _send_modifier_keyups(("insert", "t"))
+
+            array = mock_user32.SendInput.call_args[0][1]._obj
+            sent = [(e.ii.ki.wVk, e.ii.ki.dwFlags) for e in array]
+
+        assert sent == [
+            (VK_CODE_MAP["t"], self.KEYUP),
+            (VK_CODE_MAP["insert"], self.EXTENDED | self.KEYUP),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Held-modifier tests (wh-arrow-keys-missing-extended-flag, second gap)
+# ---------------------------------------------------------------------------
+
+
+class TestHeldModifierKeys:
+    """A chord must hold its modifier down while the other key is pressed.
+
+    _build_press_keys_events held only ctrl, shift, alt and win, so
+    press_keys('insert', 't') sent insert down, insert up, t down, t up --
+    a sequence, not a chord. Measured 2026-08-15 with NVDA 2026.1.1: that
+    call produced kb(desktop):t, and a hand-built chord that held insert
+    down produced kb(desktop):NVDA+t. Insert and Caps Lock are the two keys
+    NVDA accepts as its own modifier, so neither NVDA chord could be
+    expressed at all.
+
+    These tests read the constructed event list. They never call SendInput.
+    """
+
+    EXTENDED = 0x0001
+    KEYUP = 0x0002
+
+    @staticmethod
+    def _events(*keys):
+        from utils.win_input_sender import _build_press_keys_events
+
+        events, count = _build_press_keys_events(tuple(keys))
+        assert count == len(events)
+        return [(e.ii.ki.wVk, e.ii.ki.dwFlags) for e in events]
+
+    def test_insert_stays_down_while_the_other_key_is_pressed(self):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        insert = VK_CODE_MAP["insert"]
+        t = VK_CODE_MAP["t"]
+        assert self._events("insert", "t") == [
+            (insert, self.EXTENDED),
+            (t, 0),
+            (t, self.KEYUP),
+            (insert, self.EXTENDED | self.KEYUP),
+        ]
+
+    def test_capslock_stays_down_while_the_other_key_is_pressed(self):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        capslock = VK_CODE_MAP["capslock"]
+        h = VK_CODE_MAP["h"]
+        assert self._events("capslock", "h") == [
+            (capslock, 0),
+            (h, 0),
+            (h, self.KEYUP),
+            (capslock, self.KEYUP),
+        ]
+
+    def test_insert_with_an_older_modifier_keeps_the_release_order(self):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        shift = VK_CODE_MAP["shift"]
+        insert = VK_CODE_MAP["insert"]
+        t = VK_CODE_MAP["t"]
+        assert self._events("shift", "insert", "t") == [
+            (shift, 0),
+            (insert, self.EXTENDED),
+            (t, 0),
+            (t, self.KEYUP),
+            (insert, self.EXTENDED | self.KEYUP),
+            (shift, self.KEYUP),
+        ]
+
+    @pytest.mark.parametrize("key", ["insert", "capslock"])
+    def test_the_new_modifier_alone_is_still_one_press_and_one_release(
+        self, key,
+    ):
+        """A single key must not change shape because it can now be held."""
+        from utils.win_input_sender import VK_CODE_MAP
+
+        vk = VK_CODE_MAP[key]
+        extended = self.EXTENDED if key == "insert" else 0
+        assert self._events(key) == [
+            (vk, extended),
+            (vk, extended | self.KEYUP),
+        ]
+
+    def test_shift_insert_keeps_the_exact_order_it_had_before(self):
+        """A chord in which both keys are now held modifiers.
+
+        Shift and Insert both go down in the first pass and come up in
+        reverse in the last, which is the same order the older code
+        produced when only shift was held. No shipped command sends this
+        shape: the 63 unique key lists in speech/config/patterns.toml
+        were extracted and counted, and none of them holds insert or
+        capslock. The test is a regression guard for the ordering, not a
+        record of a shipped command.
+        """
+        from utils.win_input_sender import VK_CODE_MAP
+
+        shift = VK_CODE_MAP["shift"]
+        insert = VK_CODE_MAP["insert"]
+        assert self._events("shift", "insert") == [
+            (shift, 0),
+            (insert, self.EXTENDED),
+            (insert, self.EXTENDED | self.KEYUP),
+            (shift, self.KEYUP),
+        ]
+
+    def test_an_ordinary_chord_is_untouched(self):
+        from utils.win_input_sender import VK_CODE_MAP
+
+        ctrl = VK_CODE_MAP["ctrl"]
+        c = VK_CODE_MAP["c"]
+        assert self._events("ctrl", "c") == [
+            (ctrl, 0),
+            (c, 0),
+            (c, self.KEYUP),
+            (ctrl, self.KEYUP),
+        ]
+
+    def test_two_ordinary_keys_stay_a_sequence(self):
+        """Only a named modifier is held. Two ordinary keys still type.
+
+        This is the guard against the wider rule of holding every key
+        except the last. That rule would turn press_keys('a', 'b') into a
+        chord and stop it typing 'ab'.
+        """
+        from utils.win_input_sender import VK_CODE_MAP
+
+        a = VK_CODE_MAP["a"]
+        b = VK_CODE_MAP["b"]
+        assert self._events("a", "b") == [
+            (a, 0),
+            (a, self.KEYUP),
+            (b, 0),
+            (b, self.KEYUP),
+        ]
+
+    def test_the_held_set_names_every_modifier_and_nothing_else(self):
+        from utils.win_input_sender import HELD_MODIFIER_VK_CODES, VK_CODE_MAP
+
+        for key in ("ctrl", "shift", "alt", "win", "lwin", "insert",
+                    "capslock"):
+            assert VK_CODE_MAP[key] in HELD_MODIFIER_VK_CODES
+        for key in ("a", "enter", "tab", "delete", "del", "up", "home",
+                    "f1", "esc", "space"):
+            assert VK_CODE_MAP[key] not in HELD_MODIFIER_VK_CODES
+
+
+# ---------------------------------------------------------------------------
+# root_window_at_point must leave the process-shared user32 alone
+# (wh-number-badge-problems)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="drives the real user32 hit test")
+class TestRootWindowAtPointLeavesTheSharedUser32Alone:
+    """The click hit test must not leave a signature on ``ctypes.windll.user32``.
+
+    ``ctypes.windll`` caches one ``WinDLL`` per library and one function
+    object per name for the whole process, so a signature assigned to
+    ``ctypes.windll.user32.GetAncestor`` applies to every caller. uiautomation
+    2.0.29 ``GetAncestor`` passes ``ctypes.c_int(flag)`` as argument 2, and on
+    Windows ``c_int`` is ``c_long``; against ``argtypes=[c_void_p, c_uint]``
+    that raises ``ArgumentError: argument 2: TypeError: 'c_long' object cannot
+    be interpreted as an integer`` -- the text in trace T-17881312777. Every
+    later ``Control.GetTopLevelControl()`` in the Input process then fails
+    until restart, and every text-insertion strategy refuses because none can
+    resolve the target window. The same helper's ``WindowFromPoint`` signature
+    breaks ``input_proc.py``'s click-target check, which passes a
+    ``wintypes.POINT``.
+
+    The ``saved_signatures`` fixture snapshots whatever signatures the
+    process had before each test and restores them after, so the tests do
+    not change the rest of the run. The snapshot is the reference: the
+    claim is "unchanged", not "pristine", because uiautomation sets
+    ``restype = c_void_p`` on the shared ``GetAncestor`` and
+    ``WindowFromPoint`` at import (uiautomation.py lines 129 and 137), so
+    any pytest process that imported it first is not pristine. The fixture
+    deliberately does NOT clear the signatures first: a helper that
+    pollutes the shared object at import time must be caught too, and a
+    pre-cleared fixture would hide it.
+    """
+
+    _NAMES = ("GetAncestor", "WindowFromPoint")
+
+    @pytest.fixture
+    def saved_signatures(self):
+        user32 = ctypes.windll.user32
+        saved = {
+            name: (getattr(user32, name).argtypes, getattr(user32, name).restype)
+            for name in self._NAMES
+        }
+        try:
+            yield saved
+        finally:
+            for name, (argtypes, restype) in saved.items():
+                fn = getattr(user32, name)
+                fn.argtypes = argtypes
+                fn.restype = restype
+
+    @pytest.fixture
+    def shared_user32(self, saved_signatures):
+        return ctypes.windll.user32
+
+    def test_the_uiautomation_get_ancestor_call_form_still_works_after_a_hit_test(
+        self, shared_user32,
+    ):
+        from utils.win_input_sender import root_window_at_point
+
+        root = root_window_at_point(0, 0)
+        try:
+            # Exactly uiautomation.GetAncestor's call: a c_void_p handle and a
+            # c_int flag (c_long on Windows) against the shared function.
+            shared_user32.GetAncestor(ctypes.c_void_p(root), ctypes.c_int(2))
+        except ctypes.ArgumentError as exc:
+            pytest.fail(
+                f"the hit test left a signature on the shared GetAncestor: {exc}"
+            )
+
+    def test_the_input_proc_window_from_point_call_form_still_works_after_a_hit_test(
+        self, shared_user32,
+    ):
+        from utils.win_input_sender import root_window_at_point
+
+        root_window_at_point(0, 0)
+        try:
+            # Exactly input_proc.py's on_user_click call: a wintypes.POINT
+            # against the shared function.
+            shared_user32.WindowFromPoint(wintypes.POINT(0, 0))
+        except ctypes.ArgumentError as exc:
+            pytest.fail(
+                f"the hit test left a signature on the shared WindowFromPoint: {exc}"
+            )
+
+    def test_the_shared_function_objects_carry_no_signature_after_a_hit_test(
+        self, shared_user32, saved_signatures,
+    ):
+        from utils.win_input_sender import root_window_at_point
+
+        root_window_at_point(0, 0)
+        for name in self._NAMES:
+            fn = getattr(shared_user32, name)
+            # argtypes is checked outright, not against the snapshot: the
+            # module-level binding runs at import, before the snapshot, so
+            # an import-time pollution would already be in the snapshot.
+            # Nothing else sets argtypes on these two shared objects (grep
+            # for ``user32.GetAncestor.argtypes`` and
+            # ``user32.WindowFromPoint.argtypes`` over the service and
+            # .venv/Lib/site-packages, 2026-09-01: only
+            # scripts/probe_settle_events.py, which no test imports).
+            assert fn.argtypes is None, name
+            # restype must be unchanged, not pristine: see the class docstring.
+            assert fn.restype is saved_signatures[name][1], name
+
+    def test_the_hit_test_still_reports_the_root_window_at_the_point(self):
+        # Stays green before and after the fix: the private signatures must
+        # keep answering the same root pywin32 reports for the same point.
+        win32gui = pytest.importorskip("win32gui")
+        if isinstance(win32gui, MagicMock):
+            pytest.skip("pywin32 is stubbed on this host")
+        win32api = pytest.importorskip("win32api")
+        from utils.win_input_sender import root_window_at_point
+
+        def oracle(x, y):
+            hwnd = win32gui.WindowFromPoint((x, y))
+            return win32gui.GetAncestor(hwnd, 2) if hwnd else 0
+
+        # A point some top-level window provably covers: the centre of the
+        # foreground window, else the centre of the primary monitor. A fixed
+        # (0, 0) is uncovered on a bare desktop (the desktop window's own
+        # GA_ROOT is 0, and an uncovered point has no window at all), which
+        # failed this test against correct code.
+        candidates = []
+        foreground = win32gui.GetForegroundWindow()
+        if foreground:
+            left, top, right, bottom = win32gui.GetWindowRect(foreground)
+            candidates.append(((left + right) // 2, (top + bottom) // 2))
+        candidates.append(
+            (win32api.GetSystemMetrics(0) // 2, win32api.GetSystemMetrics(1) // 2)
+        )
+        for x, y in candidates:
+            expected = oracle(x, y)
+            if expected:
+                break
+        else:
+            pytest.skip(f"no top-level window covers any of {candidates} here")
+        actual = root_window_at_point(x, y)
+        if actual != expected:
+            # The screen can change between the two reads; one re-read
+            # settles that race without loosening the comparison.
+            expected = oracle(x, y)
+        assert actual == expected
+
+
+class TestCallerNotifiesLowersTheRefusalRecord:
+    """wh-keyboard-refusal-notice: the keyword that removes the second box.
+
+    ``ErrorNotificationHandler`` shows a generic ``[ERROR]`` box for every
+    ERROR record. A caller that writes its own notice would give the user
+    two boxes for one refusal, so it passes ``caller_notifies=True`` and the
+    refusal record drops to WARNING. The refusal keeps its full detail in
+    the log either way.
+
+    The DEFAULT must stay ERROR. Fifteen call sites of the verified
+    variants, and every ``press_keys`` caller, rely on that box today
+    (boss e7 ruling A).
+    """
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_a_default_short_send_still_logs_error(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import verified_press_keys
+
+        mock_user32.SendInput.return_value = 1  # one of two events
+        mock_kernel.GetLastError.return_value = 0
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, accepted, expected = verified_press_keys("a")
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records if "short SendInput" in r.getMessage()
+        ] == ["ERROR"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_caller_notifies_lowers_a_short_send_to_warning(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import verified_press_keys
+
+        mock_user32.SendInput.return_value = 1
+        mock_kernel.GetLastError.return_value = 0
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, accepted, expected = verified_press_keys(
+                "a", caller_notifies=True
+            )
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records if "short SendInput" in r.getMessage()
+        ] == ["WARNING"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_a_default_unknown_key_still_logs_error(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import verified_press_keys
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, accepted, expected = verified_press_keys("shhift")
+
+        assert (ok, accepted, expected) == (False, 0, 0)
+        assert [
+            r.levelname for r in caplog.records if "are not valid" in r.getMessage()
+        ] == ["ERROR"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_caller_notifies_lowers_an_unknown_key_to_warning(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import verified_press_keys
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, accepted, expected = verified_press_keys(
+                "shhift", caller_notifies=True
+            )
+
+        assert (ok, accepted, expected) == (False, 0, 0)
+        assert [
+            r.levelname for r in caplog.records if "are not valid" in r.getMessage()
+        ] == ["WARNING"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_press_keys_keeps_its_error_whatever_the_callers_do(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        """press_keys has no keyword and writes no notice of its own."""
+        from utils.win_input_sender import press_keys
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            press_keys("shhift")
+
+        assert [
+            r.levelname for r in caplog.records if "are not valid" in r.getMessage()
+        ] == ["ERROR"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_a_default_partial_typing_still_logs_error(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import type_string_verified
+
+        mock_user32.SendInput.return_value = 0
+        mock_kernel.GetLastError.return_value = 5
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, sent, error = type_string_verified("ab")
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records
+            if "type_string_verified" in r.getMessage()
+        ] == ["ERROR"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_caller_notifies_lowers_partial_typing_to_warning(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import type_string_verified
+
+        mock_user32.SendInput.return_value = 0
+        mock_kernel.GetLastError.return_value = 5
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, sent, error = type_string_verified("ab", caller_notifies=True)
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records
+            if "type_string_verified" in r.getMessage()
+        ] == ["WARNING"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_a_default_raising_send_still_logs_error(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import verified_press_keys
+
+        mock_user32.SendInput.side_effect = OSError("the desktop is gone")
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, accepted, expected = verified_press_keys("a")
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records
+            if "SendInput raised" in r.getMessage()
+        ] == ["ERROR"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_caller_notifies_lowers_a_raising_send_to_warning(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import verified_press_keys
+
+        mock_user32.SendInput.side_effect = OSError("the desktop is gone")
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, accepted, expected = verified_press_keys(
+                "a", caller_notifies=True
+            )
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records
+            if "SendInput raised" in r.getMessage()
+        ] == ["WARNING"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_a_default_raising_typing_still_logs_error(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import type_string_verified
+
+        mock_user32.SendInput.side_effect = OSError("the desktop is gone")
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, sent, error = type_string_verified("ab")
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records
+            if "sendinput exception" in r.getMessage()
+        ] == ["ERROR"]
+
+    @patch("utils.win_input_sender.user32")
+    @patch("utils.win_input_sender.kernel32")
+    def test_caller_notifies_lowers_raising_typing_to_warning(
+        self, mock_kernel, mock_user32, caplog
+    ):
+        from utils.win_input_sender import type_string_verified
+
+        mock_user32.SendInput.side_effect = OSError("the desktop is gone")
+
+        with caplog.at_level(logging.DEBUG, logger="utils.win_input_sender"):
+            ok, sent, error = type_string_verified("ab", caller_notifies=True)
+
+        assert ok is False
+        assert [
+            r.levelname for r in caplog.records
+            if "sendinput exception" in r.getMessage()
+        ] == ["WARNING"]

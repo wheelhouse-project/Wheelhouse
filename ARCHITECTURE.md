@@ -16,13 +16,14 @@ Launcher (supervisor, launcher.py)
     +-- Input Process (input_proc.py)                 Windows input injection
     +-- GUI Process (gui.py)                          system tray, notices
 
-STT (configured via config.toml stt.mode; "remote" is the default and
-the supported mode -- the installer sets up remote providers only):
+STT (one mode; the installer sets up remote providers only):
     Remote mode:  RemoteSTTLauncher starts a provider process from
                   services/stt_providers/<provider>/ (each has its own uv venv)
-    In-process:   STTManager inside the logic process. Development mode:
-                  its extra speech packages are not installed by the
-                  installer, and without them speech recognition stays off
+
+Remote is the only mode. The engine that used to run inside the logic
+process is gone. The config.toml stt.mode key still parses and selects
+nothing; a value the program cannot run is written to the log once at
+WARNING and the program starts anyway.
 ```
 
 The separation is deliberate: a crash in speech recognition, input
@@ -60,7 +61,7 @@ flowchart LR
 | STT -> Logic | WebSocket | JSON | Streaming transcripts |
 | Logic -> Input | SharedMemory (64 KB) | Pickle | UI commands |
 | Input -> Logic | Response queue | Pickle | Command results |
-| Logic <-> GUI | Queues | JSON | State sync, commands |
+| Logic <-> GUI | Queues (multiprocessing) | Pickle (Python dicts) | State sync, commands |
 
 ## Logic process
 
@@ -70,7 +71,7 @@ flowchart LR
   coordination, TV control, audio monitoring (speech suppression while
   other audio plays), voice-controlled mouse, the keyboard filter used
   during dictation, the speech pipeline container, the AI client, and the
-  STT launcher or in-process manager.
+  STT launcher.
 - **StateManager** — state synchronization with the GUI.
 - **EventBus** — publish/subscribe used by services and plugins.
 - **PluginRegistry** — auto-discovers plugins (Sonos speakers, Sony TVs,
@@ -123,9 +124,9 @@ against Windows:
 - **UIActionHandler** — the command executor.
 - **Text-target check** — before any keystroke or clipboard write, a check
   decides whether the focused control accepts dictated text (real text
-  controls pass; approved controls paste silently; unproven editors get a
-  rejection notice with a Try-it-anyway button; controls with no useful
-  identity are rejected silently).
+  controls pass; approved controls paste silently; unproven controls receive
+  a Ctrl+V paste instead of keystrokes, with no notice; controls with no
+  useful identity are rejected silently).
 - **InsertionRouter** — picks a text-insertion strategy per target:
   Unicode SendInput for short text in normal applications, a
   clipboard-based strategy for long text, variants for Flutter apps and
@@ -134,7 +135,7 @@ against Windows:
   insertion, selection transforms, per-utterance accumulation.
 - **Voice element clicking** — walks the focused window's UI Automation
   tree to find and click controls by name, plus a numbered overlay
-  ("apply numbers" / "click 5") painted by the GUI process.
+  ("show numbers" / "x-ray click 5") painted by the GUI process.
 
 ## Key entry points
 

@@ -26,9 +26,41 @@ COMMAND_TIMEOUT_MS = 700
 GREEDY_TIMEOUT_MS = 5000
 COMMAND_COMPLETION_WAIT_MS = 1000
 
-# Silence WheelHouse speech while other audio is playing.
-ENABLE_AUDIO_SUPPRESSION = true
+# Sound this computer plays can reach the microphone and be typed as speech.
+# "auto" asks Windows once, at startup, whether the default microphone has an
+# echo canceller.
+# With an echo canceller, sound from this computer does not pause listening.
+# Without one, listening pauses while the default output device plays sound.
+# That includes a screen reader.
+# If Windows cannot answer, listening pauses as it does without an echo
+# canceller.
+# Set true to pause even with an echo canceller, or false to never pause.
+# Listening resumes about 3 to 13 seconds after the sound stops.
+# A push-to-talk hold that mutes the speakers resumes listening for that hold.
+# Switching speech on also resumes listening, until the next time sound starts.
+# A microphone plugged in or chosen after startup is checked at the next start.
+ENABLE_AUDIO_SUPPRESSION = "auto"
+
+# Pause listening while a Sonos speaker plays music from a streaming service.
+# This needs the Sonos plugin: set enabled = true under [plugins.sonos].
+# Sound from a Sonos line-in or TV input does not pause listening.
+# Listening resumes at the next check after the music stops.
+# The check runs every polling_interval seconds, 2 in this file.
+# Listening also resumes when WheelHouse cannot reach the speaker.
+# Switching speech on resumes listening only until the next check finds music.
+# The wake word and a push-to-talk hold do not end this pause.
+# An echo canceller cannot remove this music, because it never passes through
+# this computer.
 ENABLE_SONOS_SUPPRESSION = true
+
+# Pause listening when nobody uses the keyboard or mouse for a while.
+# The wait is idle_timeout_minutes under [plugins.idle_monitor], 10 minutes in
+# this file.
+# Listening resumes within about 4 seconds of keyboard or mouse use.
+# Saying the wake word, holding push-to-talk, or switching speech on also
+# resumes it.
+# An echo canceller removes only this computer's own sound.
+# In an empty room, this pause stops a TV or other voices from being typed.
 ENABLE_IDLE_SUPPRESSION = true
 
 LOG_FILE = ""
@@ -45,9 +77,37 @@ LOG_LEVEL = "INFO"
 # dictate (including passwords) accumulates in the rotated log files.
 LOG_TRANSCRIPTS = false
 
+# Thumb wheel. With the mouse inside this many pixels of the left screen
+# edge the wheel changes TV brightness; anywhere else it changes volume.
 SIDE_OFFSET = 10
+# How much each wheel tick counts toward brightness, on the 0-100 scale.
+# Ticks add up, and nothing goes to the TV until the total reaches 2,
+# one native TV step. At 1.0 two ticks make one step; at 0.25 eight
+# ticks make one step, so a slow roll gives finer control.
 BRIGHTNESS_INCREMENT = 1.0
+# How much each wheel tick changes the volume. There is no per-command
+# cap for volume because a Sonos round trip is about 40 ms.
 VOLUME_INCREMENT = 0.5
+
+# Thumb wheel feel (wh-mouse-wheel-sensitivity). The wheel's raw reports
+# are batched into 50 ms windows; these three keys decide how much of each
+# batch the brightness and volume zones act on.
+# Ticks a gesture must reach before it acts. 1 makes every tick act at once.
+THUMB_WHEEL_DEAD_ZONE_TICKS = 3
+# A pause longer than this, in milliseconds, ends the gesture: the next
+# touch starts in the dead zone again.
+THUMB_WHEEL_GESTURE_GAP_MS = 500
+# The most ticks one 50 ms batch may apply; the excess is discarded. This is
+# the speed limit for a fast flick.
+THUMB_WHEEL_MAX_TICKS_PER_BATCH = 3
+# The most native TV steps one brightness command may carry. Each
+# command takes about 400 ms (a Samsung reads, writes, and reads back),
+# and ticks that arrive during that wait add up. When the wait ends the
+# total is capped at this many steps and the rest is discarded, so the
+# TV never keeps moving after the wheel stops. 1 moves one step per
+# round trip (smoothest); 2 moves two, about twice as fast. Below 1
+# counts as 1. Missing means 2.
+BRIGHTNESS_STEPS_PER_COMMAND = 2
 
 # The small on-screen status button. These three values match the
 # fallbacks the application itself uses when a key is absent
@@ -69,15 +129,6 @@ ICON_PATH = "WheelHouse.ico"
 [brightness_coordinator]
 software_dimmer = "gamma_dimmer"
 unwinding_threshold = 10
-flux_transition_percent = 2
-flux_dim_hotkey = [
-    "alt",
-    "pagedown",
-]
-flux_brighten_hotkey = [
-    "alt",
-    "pageup",
-]
 
 [plugins.internal_panel]
 enabled = true
@@ -86,6 +137,12 @@ enabled = true
 # Set true only if you have Sonos speakers on your network.
 enabled = false
 polling_interval = 2
+# Optional fallback IP address, used only when autodiscovery finds no speaker.
+# Leave unset or empty to rely on autodiscovery.
+# speaker_ip = ""
+# Optional per-request timeouts in seconds (defaults shown).
+# request_connect_timeout = 2.0
+# request_read_timeout = 5.0
 
 [plugins.system_volume]
 enabled = true
@@ -172,22 +229,24 @@ interaction_mode = "toggle"
 ptt_safety_timeout_seconds = 30
 
 [stt]
+# WheelHouse has one speech-engine mode: it starts a separate provider
+# process and reads the words from it. There is no "mode" key to set here.
+# A config.toml left over from an older build may still carry
+# stt.mode = "in_process". WheelHouse runs the one mode it has anyway, and
+# writes one warning to the log naming the value it read.
+#
 # Which speech-to-text provider to use. "google_stt" needs a Google Cloud
 # account; local providers need no account.
 last_provider = "parakeet_tdt"
 
 [stt.google]
-boost_words = []
-# Full path to the Google service-account key file (JSON). Wheelhouse
-# writes this when you pick the file from the tray menu's "Google Cloud
-# Credentials" item. Empty means the GOOGLE_APPLICATION_CREDENTIALS
-# environment variable is used instead.
+# Full path to the Google service-account key file (JSON). Type the path
+# here yourself, doubling each backslash, and restart Wheelhouse. Empty
+# means the GOOGLE_APPLICATION_CREDENTIALS environment variable is used
+# instead.
 credentials_file = ""
 
-[stt.azure]
-# Azure Speech Services key, only if you use the Azure provider.
-subscription_key = ""
-region = "eastus"
+# The [stt.azure] section was removed after release 1.0.7: Wheelhouse no longer ships an Azure speech provider.
 
 [ai]
 # Master switch for the optional AI text-correction and help-chat features.
@@ -241,9 +300,6 @@ startup_timeout_seconds = 90
 gem_url = "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
 max_response_tokens = 800
 
-[terminal]
-submit_delay_ms = 100
-
 [click]
 enabled = true
 use_focus_targeting = true
@@ -255,12 +311,37 @@ tiebreaker_influence_logical_px = 400
 notice_max_names = 3
 enable_screen_reader_flag = false
 snapshot_ttl_seconds = 30
+# How long to wait for a reply to a click, in milliseconds. Accepted range
+# 100 to 10000; a value outside it turns clicking off.
 response_timeout_ms = 3000
 walk_deadline_ms = 2500
+# How long to wait for a read of the window's clickable things (show numbers,
+# the refresh after a focus change, the re-read after a click). Separate from
+# response_timeout_ms, which limits a click reply.
+screen_read_timeout_ms = 10000
 min_substring_query_length = 4
 min_substring_overlap_ratio = 0.6
 enable_coordinate_click_on_com_error = false
-overlay_badge_font_pt = 12
+overlay_badge_font_pt = 8
+# Draw a drop shadow behind each overlay number. Off by default: the bubble's
+# border already separates it from the background.
+overlay_badge_shadow = false
+# Color of the numbered overlay's speech bubbles. "light" and "dark" name the
+# BUBBLE's own color (light = white bubble with a black number, dark =
+# near-black bubble with a white number), not the system theme. "auto" picks
+# per paint from the Windows app theme: system dark theme -> light bubble,
+# system light theme -> dark bubble.
+overlay_badge_theme = "auto"
+
+# Mouse grid ("show grid"). Cell side length in physical pixels
+# below which a spoken number stops narrowing the grid -- a cell that small
+# already locates the pointer to within a click's precision.
+grid_min_cell_px = 24
+# How long the grid's "drag" spends moving from the mark to the destination.
+# The movement is gradual because many applications ignore a drag whose pointer
+# jumps straight to the destination: they never see the intermediate movement
+# that makes them begin the drag.
+drag_duration_ms = 250
 
 browser_processes = [
     "brave.exe",
@@ -278,3 +359,15 @@ browser_processes = [
     "ChatGPT.exe",
 ]
 browser_processes_extend = []
+
+[actions]
+# Settings for the pattern actions that capture text (run_capture, ask_ai).
+# The most characters a captured output may hold. Longer output makes the
+# step fail rather than insert an incomplete piece of it into your document.
+# The ceiling is 15360, which keeps the text inside the message that carries
+# it between Wheelhouse's processes.
+output_cap_chars = 10000
+# How many seconds run_capture waits for the program to finish when the
+# pattern gives no timeout number of its own. 60 is the most any waiting
+# step will wait, because voice commands wait their turn while a step runs.
+run_capture_timeout_default_s = 10

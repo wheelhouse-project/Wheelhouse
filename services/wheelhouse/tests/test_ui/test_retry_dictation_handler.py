@@ -45,6 +45,8 @@ from services.wheelhouse.shared.retry_dictation_by_token import (
     STATUS_TOKEN_EXPIRED,
     STATUS_UNKNOWN_TOKEN,
 )
+from ui.context import UIContext
+from ui.hwnd_utils import top_level_hwnd_from_control
 from ui.rejection_text_cache import (
     CacheResult,
     CacheStatus,
@@ -70,6 +72,22 @@ def handler():
     Mirrors the fixture in test_ui_action_handler.py. Strategy classes
     are NOT patched because the production code uses isinstance()
     checks against them.
+
+    normalize_hwnd_for_foreground_compare defaults to returning
+    0x12345 -- the canonical test HWND -- so HIT-path tests whose cache
+    entry carries target_hwnd=0x12345/target_root=0x12345 pass the
+    root gates without each repeating the patch. Tests that exercise
+    root drift or normalization failure patch it locally; the inner
+    patch wins inside its ``with`` block.
+
+    read_hwnd_provenance defaults to returning 7 -- the canonical test
+    provenance marker -- so HIT-path entries carrying target_tag=7
+    pass the .1.12 tag gates the same way. Tag-mismatch tests patch it
+    locally.
+
+    top_level_hwnd_from_control defaults to returning 0x12345 so the
+    .1.16 capture-binding gate resolves the captured control back to
+    the canonical target window. Capture-drift tests patch it locally.
     """
     with patch(f"{_MOD}.TextPerfector"), \
          patch(f"{_MOD}.ClipboardOperations"), \
@@ -78,7 +96,19 @@ def handler():
          patch(f"{_MOD}.UtteranceClipboardManager"), \
          patch(f"{_MOD}.ShadowBufferManager"), \
          patch(f"{_MOD}.TerminalEditorProxy"), \
-         patch(f"{_MOD}.InsertionRouter"):
+         patch(f"{_MOD}.InsertionRouter"), \
+         patch(
+             f"{_MOD}.normalize_hwnd_for_foreground_compare",
+             return_value=0x12345,
+         ), \
+         patch(
+             f"{_MOD}.read_hwnd_provenance",
+             return_value=7,
+         ), \
+         patch(
+             f"{_MOD}.top_level_hwnd_from_control",
+             return_value=0x12345,
+         ):
 
         from ui.ui_action_handler import UIActionHandler
 
@@ -107,7 +137,11 @@ def handler():
 class TestCacheHit:
     def test_hit_runs_clipboard_only_strategy(self, handler):
         token = _new_token()
-        handler.rejection_text_cache.put(token, "the original text")
+        handler.rejection_text_cache.put(
+            token, "the original text",
+            target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
 
         with patch(f"{_MOD}.capture_context") as mock_capture:
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
@@ -122,9 +156,40 @@ class TestCacheHit:
         args, _kwargs = handler.clipboard_only_strategy.insert.call_args
         assert args[0] == "the original text"
 
+    def test_hit_passes_cached_identity_to_strategy(self, handler):
+        # wh-ensure-focused-same-process-fallback.1.18 (codex round
+        # 11): every handler-level provenance probe runs BEFORE
+        # ClipboardOnlyStrategy re-resolves its paste target from the
+        # captured control, and the clipboard verify loop inside
+        # verified_paste leaves a real interval before the Ctrl+V. The
+        # handler must hand the verified cached identity (tagged
+        # window, marker) down to the strategy so the paste path can
+        # re-read the marker immediately before the keystroke.
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "the original text",
+            target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture:
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.clipboard_only_strategy.insert.assert_called_once()
+        _args, kwargs = handler.clipboard_only_strategy.insert.call_args
+        assert kwargs.get("retry_identity") == (0x12345, 7)
+
     def test_hit_response_carries_verified_outcome(self, handler):
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.clipboard_only_strategy.insert.return_value = InsertionResult(
             success=True, clipboard_dirty=True, retry_outcome="verified",
         )
@@ -153,7 +218,10 @@ class TestCacheHit:
         # click would be silently short-circuited by the duplicate
         # check.
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello world")
+        handler.rejection_text_cache.put(
+            token, "hello world", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.clipboard_only_strategy.insert.return_value = InsertionResult(
             success=True, clipboard_dirty=True, retry_outcome="verified",
         )
@@ -175,7 +243,10 @@ class TestCacheHit:
         # bucket map stays synchronised with the cache without waiting
         # for the next emission's prune.
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello world")
+        handler.rejection_text_cache.put(
+            token, "hello world", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.clipboard_only_strategy.insert.return_value = InsertionResult(
             success=True, clipboard_dirty=True, retry_outcome="verified",
         )
@@ -194,7 +265,10 @@ class TestCacheHit:
 
     def test_hit_unverified_outcome_does_not_call_forget_token(self, handler):
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello world")
+        handler.rejection_text_cache.put(
+            token, "hello world", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.clipboard_only_strategy.insert.return_value = InsertionResult(
             success=True, clipboard_dirty=True, retry_outcome="unverified",
         )
@@ -215,7 +289,10 @@ class TestCacheHit:
         # can click Try-it-anyway again; Logic does not consume the
         # token on this outcome either.
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello world")
+        handler.rejection_text_cache.put(
+            token, "hello world", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.clipboard_only_strategy.insert.return_value = InsertionResult(
             success=True, clipboard_dirty=True, retry_outcome="unverified",
         )
@@ -234,7 +311,10 @@ class TestCacheHit:
 
     def test_hit_response_carries_unverified_outcome(self, handler):
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.clipboard_only_strategy.insert.return_value = InsertionResult(
             success=True, clipboard_dirty=True, retry_outcome="unverified",
         )
@@ -261,7 +341,10 @@ class TestCacheHit:
         # forwarder maps any non-success status to the canonical
         # follow-up wording (wh-vbvgf.1.1).
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.clipboard_only_strategy.insert.return_value = InsertionResult(
             success=False, clipboard_dirty=True, retry_outcome="unverified",
         )
@@ -284,7 +367,10 @@ class TestCacheHit:
         # is forced regardless of what context the predicate would have
         # rejected with.
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.router = MagicMock()  # router.get_strategy must not be called
 
         with patch(f"{_MOD}.capture_context") as mock_capture:
@@ -304,7 +390,10 @@ class TestCacheHit:
         # The handler must wrap the strategy call in clipboard_context to
         # restore the user's prior clipboard contents (wh-vbvgf.1.2).
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.utterance_manager.is_in_utterance.return_value = False
 
         with patch(f"{_MOD}.clipboard_context") as mock_ctx, \
@@ -324,7 +413,10 @@ class TestCacheHit:
         # already restore the clipboard. A second clipboard_context wrap
         # would double-restore (wh-vbvgf.1.2).
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.utterance_manager.is_in_utterance.return_value = True
 
         with patch(f"{_MOD}.clipboard_context") as mock_ctx, \
@@ -351,7 +443,10 @@ class TestCacheHit:
         produce a different paste."""
 
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
         handler.utterance_manager.is_in_utterance.return_value = False
 
         with patch(f"{_MOD}.clipboard_context"), \
@@ -416,14 +511,21 @@ class TestCacheHit:
         """
 
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello", target_hwnd=0x12345)
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
 
         call_log: list[str] = []
         handler.window_manager.ensure_focused.side_effect = (
             lambda hwnd: call_log.append(f"refocus({hwnd:#x})") or True
         )
 
-        with patch(f"{_MOD}.capture_context") as mock_capture:
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_normalize.return_value = 0x12345
             def _capture_side_effect():
                 call_log.append("capture")
                 return MagicMock(focused_control=MagicMock())
@@ -440,11 +542,19 @@ class TestCacheHit:
             f"expected refocus before capture, got {call_log}"
         )
 
-    def test_hit_with_zero_hwnd_skips_refocus(self, handler):
-        """When the cache entry has target_hwnd=0 (legacy or stale-COM
-        rejection), the retry handler must NOT call ensure_focused.
-        Calling ensure_focused(0) would no-op anyway but the contract
-        is to skip the call entirely so the win32 layer is not touched.
+    def test_hit_zero_hwnd_refuses_replay(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.11: a cache entry
+        with target_hwnd=0 (rejection-time HWND lookup failed -- stale
+        COM, no top-level) carries NO target identity at all. Every
+        identity guard in the handler sits inside an ``if target_hwnd:``
+        block, so such an entry used to skip the PID check, the root
+        gates, AND the refocus, then paste into whatever window holds
+        foreground when the user clicks Try-it-anyway -- the original
+        wh-override-paste-focus-drift toast-button failure, resurrected
+        for exactly the entries whose target is least known. The
+        handler must refuse outright: no refocus, no capture, no
+        paste, token_expired so the GUI surfaces the canonical
+        follow-up wording.
         """
 
         token = _new_token()
@@ -459,6 +569,12 @@ class TestCacheHit:
             )
 
         handler.window_manager.ensure_focused.assert_not_called()
+        mock_capture.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
 
     def test_hit_pid_mismatch_emits_token_expired_and_skips_paste(self, handler):
         """wh-override-paste-focus-drift.1.2: when the cached target HWND
@@ -508,13 +624,19 @@ class TestCacheHit:
         handler.rejection_text_cache.put(
             token, "hello",
             target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
         )
 
         with patch(f"{_MOD}.capture_context") as mock_capture, \
-             patch(f"{_MOD}.win32process") as mock_win32process:
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
             mock_win32process.GetWindowThreadProcessId.return_value = (
                 0, 4242,
             )
+            mock_normalize.return_value = 0x12345
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
             handler.retry_dictation_by_token(
                 correlation_token=token,
@@ -536,10 +658,16 @@ class TestCacheHit:
         handler.rejection_text_cache.put(
             token, "hello",
             target_hwnd=0x12345, target_process_id=0,
+            target_root=0x12345,
+            target_tag=7,
         )
 
         with patch(f"{_MOD}.capture_context") as mock_capture, \
-             patch(f"{_MOD}.win32process") as mock_win32process:
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_normalize.return_value = 0x12345
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
             handler.retry_dictation_by_token(
                 correlation_token=token,
@@ -596,10 +724,17 @@ class TestCacheHit:
         """
 
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello", target_hwnd=0xDEAD)
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0xDEAD, target_root=0xDEAD,
+            target_tag=7,
+        )
         handler.window_manager.ensure_focused.return_value = False
 
-        with patch(f"{_MOD}.capture_context") as mock_capture:
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_normalize.return_value = 0xDEAD
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
             handler.retry_dictation_by_token(
                 correlation_token=token,
@@ -608,6 +743,510 @@ class TestCacheHit:
             )
 
         handler.window_manager.ensure_focused.assert_called_once_with(0xDEAD)
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_root_drift_emits_token_expired_and_skips_paste(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.7: the PID guard alone
+        cannot see a SAME-process handle recycle. The rejected Brave
+        helper HWND H was its own GA_ROOT at rejection time; H's window
+        closes and Windows reuses H for a CHILD of another Brave
+        top-level B in the same browser process. The live PID still
+        matches, and ensure_focused's normalized strict compare maps H
+        to B and credits it -- the paste would land in B, a window the
+        user never dictated into. The handler must compare the live
+        GA_ROOT of H against the rejection-time snapshot and fail
+        closed on drift, before ensure_focused runs.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            # H now normalizes to a DIFFERENT root: Windows recycled it
+            # as a child of another same-process top-level window.
+            mock_normalize.return_value = 0x22222
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        mock_normalize.assert_called_once_with(0x12345)
+        handler.window_manager.ensure_focused.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_root_unresolvable_emits_token_expired(self, handler):
+        """When a root snapshot exists but the live normalization fails
+        (GetAncestor error, destroyed handle), the handler cannot prove
+        the handle still names the rejection-time window. Fail closed
+        with token_expired rather than refocus a handle of unknown
+        identity.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            mock_normalize.return_value = None
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.window_manager.ensure_focused.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_root_match_proceeds_with_refocus(self, handler):
+        """Happy path for the root guard: the live GA_ROOT of the cached
+        HWND equals the rejection-time snapshot (the invisible Brave
+        helper is still alive and still its own root). The handler
+        proceeds to ensure_focused and the paste -- the guard must not
+        break the same-process fallback it protects.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            mock_normalize.return_value = 0x12345
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.window_manager.ensure_focused.assert_called_once_with(0x12345)
+        handler.clipboard_only_strategy.insert.assert_called_once()
+
+    def test_hit_root_drift_during_refocus_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.9: the pre-refocus
+        root check alone cannot cover the refocus interval. The first
+        normalization sees the live helper H and matches the snapshot;
+        Windows recycles H as a child of foreground sibling B during
+        ensure_focused (whose strict normalized compare then credits
+        B); a handler that captures and pastes on that credit sends
+        the text into B. The handler must re-normalize the handle
+        AFTER a successful ensure_focused, immediately before
+        capture_context, and refuse on drift.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            # First (pre-refocus) call sees the live helper; the
+            # second (post-refocus) call sees the recycled handle's
+            # new root.
+            mock_normalize.side_effect = [0x12345, 0x22222]
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        assert mock_normalize.call_count == 2
+        handler.window_manager.ensure_focused.assert_called_once_with(0x12345)
+        mock_capture.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_root_unresolvable_after_refocus_refuses(self, handler):
+        """When the post-refocus normalization fails (handle destroyed
+        mid-refocus), the handler cannot prove the handle still names
+        the rejection-time window. Refuse by default rather than
+        capture and paste against a handle of unknown identity.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            mock_normalize.side_effect = [0x12345, None]
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        mock_capture.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_missing_root_snapshot_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.8: a cached entry
+        with a nonzero HWND but target_root=0 (rejection-time GA_ROOT
+        normalization failed) must refuse, not skip the root check.
+        The cache lives only in Input-process memory, so no persisted
+        legacy entry needs a skip path -- and skipping recreates the
+        .1.7 wrong-window sequence for exactly the entries whose
+        rejection-time identity is least known. This IS the same-PID
+        child-reuse regression: the live PID still matches, and only
+        the missing snapshot separates this replay from .1.7's.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare"
+             ) as mock_normalize:
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        mock_normalize.assert_not_called()
+        handler.window_manager.ensure_focused.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_missing_provenance_tag_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.12: a cached entry
+        with a nonzero HWND but target_tag=0 (rejection-time SetProp
+        failed, or a legacy caller omitted it) must refuse, not skip
+        the tag check -- the same refuse-outright contract as the
+        .1.8 root gate, for the same reason: skipping recreates the
+        recycle exposure for exactly the entries whose rejection-time
+        identity is least known.
+
+        read_hwnd_provenance is patched to 0 here so the live window
+        also reads untagged: 0 == 0 must never count as a match, and
+        only the zero-tag refusal separates this replay from a paste.
+        (With the fixture default of 7, the mismatch check downstream
+        would mask a dropped zero-tag gate -- the mutation-gate M42
+        false pass, 2026-08-23.)
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.read_hwnd_provenance",
+                 return_value=0,
+             ):
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.window_manager.ensure_focused.assert_not_called()
+        mock_capture.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_provenance_tag_mismatch_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.12: the live
+        window's property no longer carries the rejection-time marker.
+        This is the recycled-as-own-root case every handle-value guard
+        aliases: Windows reused the numeric handle for a NEW same-PID
+        top-level window that is its own GA_ROOT, so normalize returns
+        the handle itself (matching the snapshot), the PID matches,
+        and ensure_focused's strict compare credits it. Only the
+        window-OBJECT property tells the two windows apart -- the new
+        object never carried it, so the read returns 0.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.read_hwnd_provenance",
+                 return_value=0,
+             ):
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.window_manager.ensure_focused.assert_not_called()
+        mock_capture.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_provenance_tag_lost_during_refocus_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.12: the pre-check
+        cannot cover the refocus interval -- the window can be
+        destroyed and its handle recycled DURING ensure_focused, after
+        every earlier probe passed. Re-read the property after the
+        successful refocus, immediately before capture_context, and
+        refuse when the marker is gone (the recycled object reads 0).
+        The first read (pre-check) sees the marker; the second
+        (post-refocus) does not.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_process_id=4242,
+            target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(f"{_MOD}.win32process") as mock_win32process, \
+             patch(
+                 f"{_MOD}.read_hwnd_provenance",
+                 side_effect=[7, 0],
+             ):
+            mock_win32process.GetWindowThreadProcessId.return_value = (
+                0, 4242,
+            )
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.window_manager.ensure_focused.assert_called_once_with(0x12345)
+        mock_capture.assert_not_called()
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_capture_resolves_to_different_window_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.16 (codex round
+        10): every probe above capture_context validates the CACHED
+        handle, but ClipboardOnlyStrategy derives its paste target
+        from the freshly captured control. A focus change during
+        capture_context (UIA focus resolution, psutil, top-level walk
+        -- a real interval) hands the strategy a different window and
+        the cached text pastes there. The handler must bind the
+        captured control back to the verified target root and refuse
+        on mismatch.
+
+        read_hwnd_provenance stays at the fixture default (7 for any
+        handle) on purpose: the root comparison must be the only gate
+        separating refusal from a paste, so the mutation gate can
+        prove the root comparison is load-bearing.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
+
+        def _normalize(hwnd):
+            return {0x12345: 0x12345, 0xBEEF: 0xBEEF}[hwnd]
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(
+                 f"{_MOD}.top_level_hwnd_from_control",
+                 return_value=0xBEEF,
+             ), \
+             patch(
+                 f"{_MOD}.normalize_hwnd_for_foreground_compare",
+                 side_effect=_normalize,
+             ):
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_capture_returns_no_resolvable_control_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.16: when the
+        captured control cannot be resolved to a top-level handle
+        (no focused control, stale COM, zero NativeWindowHandle),
+        the handler cannot prove the capture landed on the verified
+        target. Fail closed -- pasting anyway would deliver into
+        whatever capture_context happened to return.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(
+                 f"{_MOD}.top_level_hwnd_from_control",
+                 return_value=None,
+             ):
+            mock_capture.return_value = MagicMock(focused_control=None)
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"
+
+    def test_hit_capture_tag_gone_after_capture_refuses(self, handler):
+        """wh-ensure-focused-same-process-fallback.1.16: the captured
+        top-level resolves to the same root by handle value, but the
+        provenance marker is gone -- the window object was recycled
+        during capture_context and the recycled handle normalizes to
+        itself. The root comparison alone cannot see this (handle
+        values alias); the property re-read on the captured top-level
+        is the probe a SAME-RUN recycle cannot alias (cross-run,
+        equal 43-bit salts collide at about 2**-43 per pair of runs
+        -- the accepted residual at _RUN_SALT). Reads: pre-refocus 7,
+        post-refocus 7, post-capture 0.
+        """
+
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
+
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(
+                 f"{_MOD}.read_hwnd_provenance",
+                 side_effect=[7, 7, 0],
+             ):
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
         handler.clipboard_only_strategy.insert.assert_not_called()
         msg = handler.response_queue.put.call_args[0][0]
         parsed = RetryDictationByTokenResponse.from_dict(msg)
@@ -713,7 +1352,10 @@ class TestPrivacy:
 
     def test_response_payload_does_not_contain_cached_text(self, handler):
         token = _new_token()
-        handler.rejection_text_cache.put(token, self.SECRET)
+        handler.rejection_text_cache.put(
+            token, self.SECRET, target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
 
         with patch(f"{_MOD}.capture_context") as mock_capture:
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
@@ -734,7 +1376,10 @@ class TestPrivacy:
 
     def test_log_lines_do_not_contain_cached_text(self, handler, caplog):
         token = _new_token()
-        handler.rejection_text_cache.put(token, self.SECRET)
+        handler.rejection_text_cache.put(
+            token, self.SECRET, target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
 
         with patch(f"{_MOD}.capture_context") as mock_capture:
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
@@ -823,7 +1468,10 @@ class TestMalformedRequest:
 class TestResponseEnvelope:
     def test_response_carries_request_id(self, handler):
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
 
         with patch(f"{_MOD}.capture_context") as mock_capture:
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
@@ -838,7 +1486,10 @@ class TestResponseEnvelope:
 
     def test_response_carries_action_name(self, handler):
         token = _new_token()
-        handler.rejection_text_cache.put(token, "hello")
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
 
         with patch(f"{_MOD}.capture_context") as mock_capture:
             mock_capture.return_value = MagicMock(focused_control=MagicMock())
@@ -850,3 +1501,64 @@ class TestResponseEnvelope:
 
         msg = handler.response_queue.put.call_args[0][0]
         assert msg.get("action") == "retry_dictation_by_token"
+
+
+# ---------------------------------------------------------------------------
+# Focused-control read failure during the retry capture
+# ---------------------------------------------------------------------------
+
+
+class TestFocusReadFailure:
+    """Pin the refusal reason when capture_context reports a failed read.
+
+    wh-insert-focus-read-stall changed ``ui.context.capture_context`` so a
+    focused-control read that raises returns a UIContext carrying
+    ``focused_control=None`` and ``focus_read_failed=True``, instead of
+    letting the COM error escape. Before that change the error reached this
+    function's own outer ``except`` block (the "ClipboardOnlyStrategy raised"
+    handler) and the emitted token_expired carried
+    ``reason="strategy_error"``. Now the .1.16 capture-binding gate meets a
+    control it cannot resolve to a top-level handle, so ``captured_root`` is
+    None and the emitted reason is ``"target_window_gone"``. The boss
+    accepted the new reason string on 2026-09-18; this test pins it so any
+    later change to it is deliberate.
+    """
+
+    def test_failed_focus_read_emits_target_window_gone(self, handler):
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello",
+            target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
+
+        failed_read_context = UIContext(
+            focused_control=None,
+            is_flutter=False,
+            is_terminal=False,
+            process_name="",
+            class_name="",
+            focus_read_failed=True,
+        )
+
+        # The fixture stubs top_level_hwnd_from_control to return the
+        # canonical handle for any argument. Restore the real resolver here
+        # so the absent control resolves the way production resolves it
+        # (no control -> None).
+        with patch(f"{_MOD}.capture_context") as mock_capture, \
+             patch(
+                 f"{_MOD}.top_level_hwnd_from_control",
+                 side_effect=top_level_hwnd_from_control,
+             ):
+            mock_capture.return_value = failed_read_context
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+        handler.clipboard_only_strategy.insert.assert_not_called()
+        msg = handler.response_queue.put.call_args[0][0]
+        parsed = RetryDictationByTokenResponse.from_dict(msg)
+        assert parsed.status == STATUS_TOKEN_EXPIRED
+        assert parsed.reason == "target_window_gone"

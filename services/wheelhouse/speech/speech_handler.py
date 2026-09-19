@@ -46,6 +46,7 @@ from .speech_processor import SpeechProcessor
 
 logger = logging.getLogger(__name__)
 
+
 class SpeechHandler:
     """Service container for speech processing components.
     
@@ -77,7 +78,22 @@ class SpeechHandler:
 
         # Create PatternCatalog first (single source of truth for patterns).
         # It loads the system file plus the writable user file and merges them.
-        self.pattern_catalog = PatternCatalog(self.patterns_file, self.user_patterns_file)
+        #
+        # THE ONE CATALOG THAT MAY WRITE. A pattern saved before doc_ids
+        # existed names no built-in, so every load recovers the association
+        # from the expression text -- and a release that rewrites that text
+        # breaks it. This load writes the recovered name into the user file
+        # so the association survives (wh-pattern-override-doc-id.3.1). The
+        # flag is passed here and nowhere else: this is the Logic process's
+        # own catalog, the one load every person gets whether or not they
+        # ever open the Pattern Manager window. Every other catalog -- the
+        # editor's, the try-it preview's, a tool's, a test's -- is built
+        # without the flag and never touches the file.
+        self.pattern_catalog = PatternCatalog(
+            self.patterns_file,
+            self.user_patterns_file,
+            migrate_legacy_ids=True,
+        )
         
         # Create TextParser with patterns from catalog (no independent loading)
         self.text_parser = TextParser(self, self.pattern_catalog)

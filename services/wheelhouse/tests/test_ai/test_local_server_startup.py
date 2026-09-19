@@ -172,6 +172,21 @@ class TestWhetherALauncherIsBuilt:
         assert command[command.index("--port") + 1] == "8899"
         assert command[command.index("-m") + 1] == r"C:\models\gemma.gguf"
 
+    def test_the_configured_model_name_reaches_the_command_line(self):
+        """The name from [ai.server] model must reach llama-server as its
+        alias, or /v1/models reports the model file path and the AI Model
+        menu shows the one model twice (wh-ai-model-alias)."""
+        manager = _manager({
+            "ai.enabled": True,
+            "ai.server.base_url": "http://127.0.0.1:8899/v1",
+            "ai.server.model": "gemma-4-e4b",
+            "ai.runtime": _runtime_config(),
+        })
+        launcher = manager._build_local_ai_launcher()
+        assert launcher is not None
+        command = launcher.build_command()
+        assert command[command.index("--alias") + 1] == "gemma-4-e4b"
+
     def test_the_launcher_is_given_somewhere_to_record_the_process_id(self):
         """Crash recovery only works if the launcher knows where to write.
 

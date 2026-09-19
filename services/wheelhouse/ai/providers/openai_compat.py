@@ -276,7 +276,10 @@ class OpenAIProvider:
                         ids.append(str(ident))
                 elif isinstance(entry, str):
                     ids.append(entry)
-        return ids
+        # llama.cpp's /v1/models carries the same model under BOTH the
+        # OpenAI-style "data" key and the Ollama-style "models" key, so the
+        # two loops above collect it twice (wh-ai-models-dedupe).
+        return list(dict.fromkeys(ids))
 
     async def list_models(self) -> list[str]:
         """GET <base_url>/models, returning the model ids.

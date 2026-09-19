@@ -233,6 +233,7 @@ def test_summary_types_exact_field_set_and_exclude_control_ref() -> None:
         "role",
         "bounds",
         "monitor_id",
+        "bounds_outside_menu",  # wh-vscode-menu-badge-misplaced
     }
     summary_fields = {f.name for f in dataclasses.fields(WalkSnapshotSummary)}
     assert summary_fields == {"snapshot_id", "items", "created_at_monotonic"}

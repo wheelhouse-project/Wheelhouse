@@ -22,7 +22,6 @@ from speech.command_engine import TextParser
 
 from services.wheelhouse.tests.e2e.os_mocks import Recording
 from services.wheelhouse.tests.e2e.app_adapter import AppAdapter
-from services.wheelhouse.tests.test_speech_pipeline import MockContextMirror
 
 
 class E2EPipelineHarness:
@@ -37,13 +36,27 @@ class E2EPipelineHarness:
     """
 
     def __init__(self, catalog=None, context_kwargs: Optional[dict] = None,
-                 greedy_timeout_ms: Optional[int] = None):
+                 greedy_timeout_ms: Optional[int] = None,
+                 foreground_hwnd: Optional[int] = None,
+                 action_handler_foreground: bool = False):
         self.word_queue: asyncio.Queue = asyncio.Queue()
         self._utterance_counter = 0
         self._elapsed = 0.0
 
-        # AppAdapter creates real UIActionHandler and owns OS-level patches
-        self.app = AppAdapter(Recording(), context_kwargs=context_kwargs)
+        # AppAdapter creates real UIActionHandler and owns OS-level patches.
+        # foreground_hwnd stays None for a normal run, which leaves the
+        # focus stand-ins naming the window the mocked focused control
+        # resolves to. A test passes a different handle to make every
+        # focus proof refuse (wh-review-pattern-fixes.46).
+        # action_handler_foreground stays False for every existing
+        # test; a retract test passes True so the retract focus gate
+        # can be reached (wh-spaced-punctuation-names-unresolved.3.1.2).
+        self.app = AppAdapter(
+            Recording(),
+            context_kwargs=context_kwargs,
+            foreground_hwnd=foreground_hwnd,
+            action_handler_foreground=action_handler_foreground,
+        )
         self.recording = self.app.recording
 
         # Use provided catalog or load fresh (for standalone usage)
@@ -81,9 +94,23 @@ class E2EPipelineHarness:
         if greedy_timeout_ms is not None:
             processor_kwargs["greedy_timeout_ms"] = greedy_timeout_ms
         self.processor = SpeechProcessor(**processor_kwargs)
-
-        # Replace context mirror with mock (avoids shared memory access)
-        self.processor.context_mirror = MockContextMirror()
+        # wh-spaced-punctuation-names-unresolved.3.1.6: production
+        # gives TextParser a speech_handler whose ``speech_processor``
+        # is the real processor, and ``command_engine._execute_rule``
+        # reaches for it on every text-insertion step -- to consult the
+        # editor route (command_engine.py:411-437), to consult the
+        # screen-read gate (:463-472), and to report back what the step
+        # put on screen. Without this line that attribute was an
+        # auto-created MagicMock, so every replacement insertion in
+        # every e2e test logged "maybe_route_to_editor raised ...
+        # object MagicMock can't be used in 'await' expression" and
+        # then measured a rule that consulted nothing. Both consults
+        # are inert here by construction -- ``logic_controller`` is
+        # unset, so ``maybe_route_to_editor`` returns False at its
+        # first line, and the gate answers False unless a test wires a
+        # screen-read controller -- so this restores the production
+        # wiring without changing what any existing test measures.
+        self.mock_speech_handler.speech_processor = self.processor
 
     async def start(self):
         """Start the speech processor."""
@@ -113,6 +140,19 @@ class E2EPipelineHarness:
             start_of_utterance=start_of_utterance,
             end_of_utterance=end_of_utterance,
             utterance_id=utterance_id,
+            # wh-spaced-punctuation-names-unresolved.3.1.5: the first
+            # word of an utterance carries the app's start_utterance
+            # count, exactly as WebSocketManager stamps it
+            # (integrations/websocket_manager.py:1295 and :1541). A
+            # test that never sends the command leaves the count at 0
+            # on every word, and 0 is not smaller than 0, so the
+            # processor's comparison keeps its record -- which is what
+            # every pre-existing e2e test measured before this field
+            # existed.
+            utterance_start_generation=(
+                getattr(self.app, 'utterance_start_generation', None)
+                if start_of_utterance else None
+            ),
         )
         await self.word_queue.put(event)
         if allow_processing:
@@ -160,6 +200,31 @@ class E2EPipelineHarness:
         )
         await self.word_queue.put(event)
         await asyncio.sleep(0.01)
+
+    async def send_retraction_marker(self, utterance_id: int,
+                                     full_text: str):
+        """Send a Mode-3 retraction marker and the end marker after it.
+
+        The shape is the production one
+        (integrations/websocket_manager.py:_handle_mode3_retract): an
+        empty word event carrying ``is_retraction_marker`` and the
+        corrected final, then the separate empty end marker, both for
+        the same utterance id. Nothing else in the e2e harness could
+        drive the retract IPC, and the retract's SCOPE is what
+        wh-spaced-punctuation-names-unresolved.3.1.2 is about.
+        """
+        event = WordEvent(
+            word="",
+            start_of_utterance=False,
+            end_of_utterance=False,
+            utterance_id=utterance_id,
+            is_retraction_marker=True,
+            retraction_full_text=full_text,
+        )
+        await self.word_queue.put(event)
+        await asyncio.sleep(0.05)
+        await self.send_utterance_end_marker(utterance_id)
+        await asyncio.sleep(0.05)
 
     async def wait_for_timeout(self, timeout_ms: int = 500):
         """Wait for timeout to expire (lets processor buffer timeout trigger)."""

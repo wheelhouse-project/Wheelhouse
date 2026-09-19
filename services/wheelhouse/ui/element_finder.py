@@ -137,7 +137,9 @@ from ui.uia_walker import (
     WALK_TRANSIENT_RETRY_ATTEMPTS,
     WalkResult,
     is_interactive_control_type,
+    make_caching_enumerator,
     walk_owned_popups,
+    walk_taskbar_windows,
     walk_window,
 )
 from ui.window_fallback import (
@@ -202,6 +204,15 @@ _NEAR_IDENTICAL_AREA_RATIO = 0.90
 # 0.70). 0.5 means "at least half inside": a genuinely contained control
 # scores 1.0, adjacent controls with slightly sloppy bounds score near 0.
 _WRAPPER_OVERLAP_SHARE = 0.5
+# wh-winui-menu-click-refused.2: the minimum share of a focused-window match's
+# own area that must lie inside an owned popup window's rectangle before the
+# match is treated as a duplicate of, or as hidden behind, that popup's
+# contents. A WinUI application exposes its menu items in the application
+# window's accessibility tree as well as in the popup window that draws them,
+# and the two copies report the SAME rectangle, so the real duplicates score
+# 1.0. 0.90 leaves room for a border pixel without dropping a control the menu
+# merely clips: a control half outside the popup keeps its badge.
+_POPUP_COVER_MIN_SHARE = 0.90
 
 
 def _overlap_share_of_later(
@@ -224,6 +235,86 @@ def _overlap_share_of_later(
     if x2 <= x1 or y2 <= y1:
         return 0.0
     return ((x2 - x1) * (y2 - y1)) / (lw * lh)
+
+
+def drop_matches_covered_by_popups(
+    matches: list[ElementMatch],
+    popup_rects: list[tuple[int, int, int, int]],
+    *,
+    duplicate_names: Optional[frozenset[str]] = None,
+) -> list[ElementMatch]:
+    """Drop focused-window matches that an owned popup window covers.
+
+    wh-winui-menu-click-refused.2. A WinUI 3 application draws a menu in its own
+    owned top-level window and ALSO exposes the same menu items inside the
+    application window's accessibility tree. Both walks therefore return the
+    item, at the same rectangle.
+    ``collapse_near_identical_containers`` cannot remove the pair: it refuses to
+    pair matches whose ``source_window_hwnd`` differ, because pre-order ancestry
+    only holds within one subtree. Without this pass every menu item gets two
+    badges.
+
+    The popup copy is the one worth keeping. Measured on Windows 11 Notepad on
+    2026-08-14: the popup copy exposes a working Invoke pattern, while the
+    application-window copy exposed neither Invoke nor an MSAA default action,
+    and its pixels belong to the popup window, so the click-point hit test in
+    ``ClickExecutor`` refused every click on it as ``click_point_obstructed``.
+
+    A match is dropped when at least ``_POPUP_COVER_MIN_SHARE`` of its OWN area
+    lies inside one popup rectangle. Measuring the share over the match rather
+    than over the popup keeps a large control that the menu merely clips: a
+    control half outside the popup stays.
+
+    ``duplicate_names`` narrows the rule to duplicates, and the two call sites
+    ask different questions (wh-winui-menu-click-refused.4.1):
+
+    * ``None`` (the OVERLAY path) drops on geometry alone. The question there
+      is "can the user see this control?", and a control the menu hides must
+      not carry a badge. Note that the popup WINDOW is a little larger than the
+      menu it draws -- on Notepad the host ran y 212..1591 around items that ran
+      y 233..1522 -- so a control inside that shadow margin is dropped too.
+      That over-drop costs a badge and nothing else.
+    * A set of stripped, case-folded names (the BY-NAME path) additionally
+      requires the match to carry one of them. The question there is only "is
+      this focused match the popup's own copy of the control the user named?",
+      and geometry alone does not answer it. A by-name drop costs more than a
+      badge: it can leave ``decide()`` with nothing, and ``find()`` answers
+      ``not_found`` by walking OTHER top-level windows, so dropping a control
+      that merely sits behind the menu could send the click into a different
+      application. An empty name never matches, because an unnamed control
+      cannot be the popup's copy of a named one.
+
+    ``matches`` is the FOCUSED-window set only. Never pass popup-sourced matches
+    in: each popup item lies inside its own popup rectangle and would drop
+    itself. ``popup_rects`` are ``(x, y, w, h)`` in physical pixels, the same
+    space as ``ElementMatch.bounds``. An empty list returns the input unchanged,
+    which is the common case (no menu open). A degenerate rectangle drops
+    nothing, because ``_overlap_share_of_later`` scores it 0.0.
+    """
+    if not popup_rects:
+        return list(matches)
+    return [
+        match
+        for match in matches
+        if not (
+            _is_a_popup_duplicate_name(match, duplicate_names)
+            and any(
+                _overlap_share_of_later(rect, match.bounds)
+                >= _POPUP_COVER_MIN_SHARE
+                for rect in popup_rects
+            )
+        )
+    ]
+
+
+def _is_a_popup_duplicate_name(
+    match: ElementMatch, duplicate_names: Optional[frozenset[str]]
+) -> bool:
+    """Name half of the by-name drop rule; always True when names do not apply."""
+    if duplicate_names is None:
+        return True
+    name = match.name.strip().casefold()
+    return bool(name) and name in duplicate_names
 
 
 def collapse_near_identical_containers(
@@ -259,7 +350,28 @@ def collapse_near_identical_containers(
        tell them apart by name either.
 
     In every rule the inner, more specific element keeps the badge -- the
-    same keep-the-inner direction as the browser fold rules.
+    same keep-the-inner direction as the browser fold rules -- WITH ONE
+    EXCEPTION, ``_outer_is_the_pressable_copy``. When the outer offers
+    ``invoke_supported``, the inner offers none, AND the inner's control type
+    is not interactive, the pair keeps the OUTER
+    (wh-vscode-menu-badge-misplaced). Chromium exposes a VS Code menu row
+    twice under one name: a MenuItem that offers InvokePattern and a Group
+    inside it that offers nothing. Keep-the-inner put the badge on the Group,
+    so ``ClickExecutor`` found no press pattern and degraded to a coordinate
+    click on whatever the rectangle covered. Pressability outranks
+    specificity: a collapse must not discard the only copy of a control the
+    executor can press. A tie in either direction -- both invocable, or
+    neither -- keeps the inner as before.
+
+    The exception fires only while the OUTER itself survives (reviewer_0
+    finding wh-vscode-menu-badge-misplaced.1.1). An outer that also pairs
+    with a match the exception does NOT cover loses its own badge to that
+    match, and a dead inner dropped in its favour would then have no
+    surviving substitute -- rules 2 and 3 pair on half-overlap, so two
+    partners of one outer can cover disjoint pixels. This pass therefore
+    collects an outer's partners before it drops anything: it drops every
+    partner only when the exception covers every one of them, and otherwise
+    drops the outer exactly as it did before the exception existed.
 
     Deliberately conservative:
 
@@ -280,9 +392,19 @@ def collapse_near_identical_containers(
       drop.
     * Containment is judged against the ORIGINAL list, not the survivors, so
       a nested CHAIN (unnamed wrapper > same-named cell > control) collapses
-      to the innermost leaf in one pass; drops only ever remove the EARLIER
-      element of a pair, so the innermost element of a chain always
-      survives.
+      in one pass -- to the innermost leaf where the exception never fires,
+      and to the outermost invocable link where it fires all the way down.
+      The result always keeps at least one survivor, and the LAST match of
+      the list is the proof. It has no later partner, so it never drops as
+      an outer; it can drop only as an inner, and the outer that drops it is
+      invocable (the exception requires that), pairs with nothing the
+      exception fails to cover (or it would have dropped instead of
+      dropping), and cannot itself drop as an inner (the exception only
+      drops non-invocable inners). That outer survives. Note what is NOT
+      claimed: an invocable match is not protected in general -- a later
+      z-stacked sibling with a near-identical rectangle still takes its
+      badge under rule 1 (reviewer_0 finding
+      wh-vscode-menu-badge-misplaced.1.3).
 
     Accepted trade-offs (recorded on the bead): an unnamed wrapper whose
     click action has no equivalent enclosed control loses its badge; a grid
@@ -304,10 +426,12 @@ def collapse_near_identical_containers(
     distinguish two fully overlapping controls either, and the click lands on
     the same pixels.
 
-    Complexity: O(n^2) pairwise scan with an early break per dropped outer,
-    over the already-filtered clickable set (tens to low hundreds of items) --
-    the same accepted bound as ``apply_dom_corrections``' containment scan,
-    pure in-memory arithmetic, no COM reads.
+    Complexity: O(n^2) pairwise scan over the already-filtered clickable set
+    (tens to low hundreds of items) -- the same accepted bound as
+    ``apply_dom_corrections``' containment scan, pure in-memory arithmetic,
+    no COM reads. Each outer now scans its whole tail instead of breaking at
+    its first partner, because the exception cannot be decided until every
+    partner is known; the worst case is unchanged.
     """
     if len(matches) < 2:
         return list(matches)
@@ -318,31 +442,85 @@ def collapse_near_identical_containers(
         if outer_area <= 0:
             continue
         outer_name = outer.name.strip().casefold()
-        for j in range(i + 1, len(matches)):
-            inner = matches[j]
-            if inner.source_window_hwnd != outer.source_window_hwnd:
-                continue
-            # Rule 1: near-identical rectangle (strict containment + area
-            # ratio, unchanged from round 1).
-            if _rect_within(inner.bounds, outer.bounds):
-                _, _, inner_w, inner_h = inner.bounds
-                if inner_w * inner_h >= _NEAR_IDENTICAL_AREA_RATIO * outer_area:
-                    dropped.add(i)
-                    break
-            # Rules 2 and 3: the later match at least half inside the
-            # earlier one, and the earlier is unnamed (wrapper div) or both
-            # share one accessible name (same visual target twice).
-            share = _overlap_share_of_later(outer.bounds, inner.bounds)
-            if share >= _WRAPPER_OVERLAP_SHARE:
-                if not outer_name:
-                    dropped.add(i)
-                    break
-                if outer_name == inner.name.strip().casefold():
-                    dropped.add(i)
-                    break
+        # Collect every later match this one pairs with BEFORE dropping
+        # anything. The exception below keeps the outer, so it is only correct
+        # while the outer itself survives, and whether it survives depends on a
+        # partner further down the list -- a single forward scan cannot answer
+        # that (reviewer_0 finding wh-vscode-menu-badge-misplaced.1.1).
+        partners = [
+            j
+            for j in range(i + 1, len(matches))
+            if matches[j].source_window_hwnd == outer.source_window_hwnd
+            and _pairs_for_collapse(
+                outer.bounds, outer_area, outer_name, matches[j]
+            )
+        ]
+        if not partners:
+            continue
+        if all(_outer_is_the_pressable_copy(outer, matches[j]) for j in partners):
+            dropped.update(partners)
+            continue
+        dropped.add(i)
     if not dropped:
         return list(matches)
     return [m for i, m in enumerate(matches) if i not in dropped]
+
+
+def _pairs_for_collapse(
+    outer_bounds: tuple[int, int, int, int],
+    outer_area: int,
+    outer_name: str,
+    inner: ElementMatch,
+) -> bool:
+    """True when ``inner`` is the same visual target as the earlier match.
+
+    The three rules of :func:`collapse_near_identical_containers`, read in
+    order. ``outer_name`` is already stripped and case-folded; ``outer_area``
+    is already known positive.
+    """
+    # Rule 1: near-identical rectangle (strict containment + area ratio).
+    if _rect_within(inner.bounds, outer_bounds):
+        _, _, inner_w, inner_h = inner.bounds
+        if inner_w * inner_h >= _NEAR_IDENTICAL_AREA_RATIO * outer_area:
+            return True
+    # Rules 2 and 3: the later match at least half inside the earlier one, and
+    # the earlier is unnamed (wrapper div) or both share one accessible name
+    # (the same visual target twice).
+    share = _overlap_share_of_later(outer_bounds, inner.bounds)
+    if share < _WRAPPER_OVERLAP_SHARE:
+        return False
+    if not outer_name:
+        return True
+    return outer_name == inner.name.strip().casefold()
+
+
+def _outer_is_the_pressable_copy(
+    outer: ElementMatch, inner: ElementMatch
+) -> bool:
+    """True when a paired outer and inner must keep the OUTER badge.
+
+    The wh-vscode-menu-badge-misplaced exception to keep-the-inner. All three
+    conditions are load-bearing:
+
+    * the outer offers ``invoke_supported`` -- otherwise there is no press
+      path to prefer it for;
+    * the inner offers none -- a tie keeps the original direction;
+    * the inner's control type is NOT interactive. ``invoke_supported`` is a
+      proxy for pressability, not a measurement of it (reviewer_0 finding
+      wh-vscode-menu-badge-misplaced.1.2): a badge pick tries a guarded
+      coordinate click first and MSAA ``DoDefaultAction`` after it, so a
+      Toggle-only CheckBox or an Electron button with no Invoke pattern is
+      still pressable and is still a target of its own.
+      ``collapse_unnamed_invoke_duplicates_of_named_controls`` refuses to drop
+      interactive control types for the same reason. Only a NON-interactive
+      inner -- a Group or a Text that a browser walk keeps alive for the fold
+      rules -- is a dead copy of the outer.
+    """
+    if not outer.invoke_supported or inner.invoke_supported:
+        return False
+    return not is_interactive_control_type(
+        inner.control_type_id, query_has_role=True
+    )
 
 
 # wh-overlay-browser-dupes: the minimum intersection area, as a share of the
@@ -806,6 +984,7 @@ class ElementFinder:
         clock: Callable[[], float] = time.monotonic,
         walk_fn: Callable[..., WalkResult] = walk_window,
         popup_walk_fn: Callable[..., list[WalkResult]] = walk_owned_popups,
+        taskbar_walk_fn: Callable[..., list[WalkResult]] = walk_taskbar_windows,
         walk_deadline_ms: Optional[float] = None,
         automation: Any = None,
         window_enumerator: Callable[
@@ -815,6 +994,15 @@ class ElementFinder:
             [tuple[int, int, int, int]], Optional[tuple[int, int, int, int]]
         ] = resolve_monitor_rect,
         focused_window_rect_resolver: Callable[
+            [int], Optional[tuple[int, int, int, int]]
+        ] = resolve_window_rect,
+        # wh-winui-menu-click-refused.2: reads an owned popup window's screen
+        # rectangle as (x, y, w, h) physical pixels, or None when the window
+        # closed between the walk and this read. A None result suppresses
+        # nothing, so an unreadable popup leaves every focused-window badge in
+        # place. Separate from focused_window_rect_resolver -- same production
+        # function, different job -- so the two can be faked independently.
+        window_rect_fn: Callable[
             [int], Optional[tuple[int, int, int, int]]
         ] = resolve_window_rect,
         enable_offmonitor_fallback: bool = False,
@@ -862,6 +1050,15 @@ class ElementFinder:
         # per-request deadline. It returns one WalkResult per owned popup that
         # produced a usable (non-truncated) walk.
         self._popup_walk_fn = popup_walk_fn
+        self._window_rect_fn = window_rect_fn
+        # Injected taskbar shell-window walker (wh-overlay-taskbar-numbers).
+        # Default is the real uia_walker.walk_taskbar_windows; tests inject a
+        # fake. ONLY overlay_walk calls it (the numbered overlay covers the
+        # taskbar; the by-name find() stays focused-window-only), with the
+        # primary walk's automation root + cache_request, the overlay score
+        # hook, the one shared per-request deadline, and exclude_hwnd = the
+        # walked focused window so a focused taskbar is never walked twice.
+        self._taskbar_walk_fn = taskbar_walk_fn
         # Bounds the Input-side UIA walk so it cannot keep the command-reader
         # loop blocked past the Logic-side click awaiter ([click]
         # response_timeout_ms). This is the DURATION (ms); find() turns it into
@@ -1077,6 +1274,7 @@ class ElementFinder:
                     popup_results=popup_results,
                     cursor_at_walk=foreground.cursor_at_walk,
                     cursor_monitor_id=cursor_monitor_id,
+                    is_browser=popup_is_browser,
                 )
 
         # Restricted fall-back (v5): ONLY when the focused-window walk (plus any
@@ -1294,6 +1492,7 @@ class ElementFinder:
         # subtree's COM chain stays alive for the life of the stored snapshot.
         walk_results: list[WalkResult] = [walk_result]
         popup_matches: list[ElementMatch] = []
+        popup_window_rects: list[tuple[int, int, int, int]] = []
 
         # Owned-popup walk (wh-n29v.75): fold the focused window's owned #32768 /
         # UIA-Menu popup items into the numbered overlay so "show numbers" can
@@ -1309,6 +1508,13 @@ class ElementFinder:
         # the candidate list and the contiguous renumber below runs over the
         # combined set (focused matches first in reading order, popup matches
         # appended).
+        # ONE top-level-window enumeration serves BOTH additional-subtree
+        # walks below: the popup walk and the taskbar walk each detect their
+        # windows from the same EnumWindows pass, so they share a caching
+        # enumerator instead of each paying its own blocking Win32 round trip
+        # (deepseek finding wh-overlay-taskbar-numbers.5.1). The wrapper is
+        # lazy -- a walk the budget gate skips never triggers the enumeration.
+        shared_enumerator = make_caching_enumerator()
         if self._popup_share_allows(deadline, walk_start):
             # Same browser wiring as the primary walk: for a Chromium-family
             # foreground query_has_role is False (== not is_browser, the value
@@ -1326,11 +1532,68 @@ class ElementFinder:
                 score_hook=overlay_score_hook,
                 deadline=deadline,
                 clock=self._clock,
+                enumerator=shared_enumerator,
             )
             if popup_results:
                 walk_results.extend(popup_results)
                 for popup_result in popup_results:
                     popup_matches.extend(popup_result.matches)
+                # Read the popup WINDOW rectangles here, next to the walk that
+                # produced them: the windows are open right now, so a rectangle
+                # read later (after the taskbar walk) is more likely to fail
+                # against a menu the user already dismissed
+                # (wh-winui-menu-click-refused.2).
+                popup_window_rects = self._popup_window_rects(popup_matches)
+
+        # Taskbar shell-window walk (wh-overlay-taskbar-numbers, v1 scope:
+        # focused window + taskbar). The numbered overlay also walks the
+        # visible taskbar shell windows -- primary taskbar, per-monitor
+        # secondary taskbars, and the tray-overflow flyout when open -- so
+        # taskbar buttons get numbers (Voice Access parity). Shares the
+        # PRIMARY walk's automation root + cache_request and the one
+        # per-request deadline, and re-consults the SAME budget gate as the
+        # popup walk: by this point the clock also reflects the popup walks,
+        # so a budget they exhausted ships the overlay without the taskbar
+        # suffix ("better to ship results than time out"). The overlay score
+        # hook re-stamps each taskbar match's monitor_id from its own bounds,
+        # which is what lands a secondary-taskbar badge on its own monitor.
+        # exclude_hwnd is the window the primary walk covered: when the
+        # taskbar itself IS the focused window, walking it here again would
+        # double-badge every button. Only this overlay path walks the
+        # taskbar; the by-name find() never does. Matches are appended AFTER
+        # the popup matches so the contiguous renumber below gives taskbar
+        # controls the highest numbers.
+        #
+        # The walk requires the SHARED automation root: the production wiring
+        # always supplies one (a finder is not built at all when the COM root
+        # is unavailable), while a finder constructed without it cannot share
+        # a root with the per-window walks. Unlike the popup default -- which
+        # is inert against a fake focused HWND because no real window is
+        # owned by it -- the default taskbar walk would find the HOST
+        # machine's real Shell_TrayWnd from inside fake-driven tests, so the
+        # automation gate is also what keeps headless tests hermetic.
+        taskbar_matches: list[ElementMatch] = []
+        if self._automation is not None and self._popup_share_allows(
+            deadline, walk_start
+        ):
+            taskbar_results = self._taskbar_walk_fn(
+                automation=self._automation,
+                cache_request=walk_result._keepalive_cache_request,
+                monitor_id=cursor_monitor_id,
+                score_hook=overlay_score_hook,
+                deadline=deadline,
+                clock=self._clock,
+                exclude_hwnd=(
+                    focused_top_level
+                    if isinstance(focused_top_level, int)
+                    else foreground.foreground_window
+                ),
+                enumerator=shared_enumerator,
+            )
+            if taskbar_results:
+                walk_results.extend(taskbar_results)
+                for taskbar_result in taskbar_results:
+                    taskbar_matches.extend(taskbar_result.matches)
 
         # reviewer_1 finding 39.1: a browser overlay walks with
         # query_has_role=False (load-bearing -- the fold rules need Text / Group /
@@ -1359,7 +1622,25 @@ class ElementFinder:
         # filter applies to popup matches too -- a popup walked with
         # query_has_role=False can leave non-interactive scaffolding the fold
         # did not match.
-        combined = list(walk_result.matches) + popup_matches
+        #
+        # Focused-window matches an owned popup COVERS are dropped first
+        # (wh-winui-menu-click-refused.2): a WinUI 3 application exposes its
+        # menu items in the application window's tree as well as in the popup
+        # window that draws them, so the same item would otherwise get two
+        # badges -- and the application window's badge cannot be clicked (no
+        # Invoke pattern, no MSAA default action, and its pixels belong to the
+        # popup). Only the FOCUSED matches are filtered. The popup matches are
+        # each inside their own popup rectangle and would drop themselves; the
+        # taskbar matches belong to a different window that can never hold a
+        # duplicate of this application's menu, and a menu opening near the
+        # screen edge can overlap the taskbar.
+        combined = (
+            drop_matches_covered_by_popups(
+                list(walk_result.matches), popup_window_rects
+            )
+            + popup_matches
+            + taskbar_matches
+        )
         clickable = [
             match
             for match in combined
@@ -1536,6 +1817,38 @@ class ElementFinder:
     def latest_summary(self) -> Optional[WalkSnapshotSummary]:
         """Return the most-recently-added WalkSnapshotSummary, or None."""
         stored = self._latest_stored()
+        return stored.summary if stored is not None else None
+
+    def get_summary(self, snapshot_id: str) -> Optional[WalkSnapshotSummary]:
+        """Return the STORED summary for ``snapshot_id``, or None if it is gone.
+
+        The post-click settle re-read needs this
+        (wh-overlay-slow-uia-stale-badges.2): when the settled read matches the
+        snapshot Logic still holds, the answer must carry that snapshot's OWN
+        summary, because a ``WalkSnapshotSummary`` names the snapshot it was
+        projected from and the response schema REFUSES a disagreement --
+        ``StartOverlayWalkResponse`` raises on
+        ``snapshot_summary.snapshot_id != snapshot_id``
+        (shared/start_overlay_walk.py:266), since Logic keys the retained
+        summary by the top-level id. Pairing the held id with the fresh walk's
+        summary would therefore be rejected at the process boundary and the
+        whole response lost.
+
+        The item ids are NOT the reason, and an earlier version of this
+        comment said they were. Measured: two walks of an unchanged window
+        mint the same ids, because an item id is ``<walker source>-<index>``
+        (:1732) and neither part carries the snapshot id.
+
+        Returns the stored object rather than re-projecting the snapshot. A
+        re-projection would be a second source of truth for a list the GUI has
+        already painted; this cannot drift from it. Runs ``get_snapshot``
+        first, so the TTL sweep and the recency touch behave exactly as they
+        do for any other read of that id.
+        """
+
+        if self.get_snapshot(snapshot_id) is None:
+            return None
+        stored = self._stored.get(snapshot_id)
         return stored.summary if stored is not None else None
 
     def _latest_stored(self) -> Optional[_StoredSnapshot]:
@@ -1786,17 +2099,25 @@ class ElementFinder:
         return True
 
     def refresh_snapshot_ttl(self, snapshot_id: str) -> bool:
-        """Slide a still-visible snapshot's TTL window forward to "now".
+        """Slide a still-RETAINED snapshot's TTL window forward to "now".
 
         The Input-store COUNTERPART to the Logic-side 15s overlay keepalive
         (main.py ``_fire_overlay_keepalive``). The keepalive re-puts the
         Logic resolver-cache summary so "click N" keeps resolving; this
-        re-stamps the Input store's ``ttl_anchor`` so the snapshot the overlay
-        still shows does not age out of THIS store while the badges are on
-        screen. Without it the two stores expire independently: Logic keeps
-        resolving "click N" and dispatching the click, but the Input store has
-        already TTL-swept the snapshot, so the click reports ``snapshot_expired``
-        on a still-visible overlay (wh-overlay-snapshot-keepalive).
+        re-stamps the Input store's ``ttl_anchor`` so the snapshot Logic still
+        holds does not age out of THIS store. Without it the two stores expire
+        independently: Logic keeps resolving "click N" and dispatching the
+        click, but the Input store has already TTL-swept the snapshot, so the
+        click reports ``snapshot_expired`` on a still-visible overlay
+        (wh-overlay-snapshot-keepalive, the motivating failure).
+
+        Retained, NOT necessarily visible: Logic also sends this while its
+        overlay is PAUSED or POST_CLICK_SETTLING, where the badges are cleared
+        but the snapshot is still needed -- for a repaint on resume, or for the
+        post-click comparison. See ``_overlay_keepalive_states`` in main.py for
+        the contract (wh-overlay-slow-uia-stale-badges.13.6). This store cannot
+        tell the cases apart and does not need to: a refresh arrives only while
+        the snapshot is needed.
 
         Deliberately DISTINCT from :meth:`pin`. ``pin`` blocks LRU eviction only
         and does NOT slide TTL (the stale-pin cleanup boundary: a pinned
@@ -1931,6 +2252,48 @@ class ElementFinder:
         checkpoint = walk_start + _POPUP_PRIMARY_DEADLINE_SHARE * budget
         return self._clock() < checkpoint
 
+    def _popup_window_rects(
+        self, popup_matches: list[ElementMatch]
+    ) -> list[tuple[int, int, int, int]]:
+        """Screen rectangles of the windows ``popup_matches`` came from.
+
+        wh-winui-menu-click-refused.2. Feeds
+        :func:`drop_matches_covered_by_popups`, which needs the popup WINDOW's
+        rectangle -- not the union of its matches' rectangles, which would miss
+        a menu item the walk did not return.
+
+        Reads one rectangle per DISTINCT source window, so a menu with twenty
+        items still costs one blocking Win32 round trip. A window that
+        contributed no match to ``popup_matches`` is never measured at all: on
+        the by-name path that is how an admitted popup with nothing clickable in
+        it -- a WinUI tooltip is drawn by the same window class as a WinUI menu
+        -- is kept from dropping the very control it describes
+        (wh-winui-menu-click-refused.4.2).
+
+        A window whose rectangle does not read contributes nothing, which
+        suppresses nothing -- the fail-open direction. Both failure shapes land
+        there: ``None`` from the production ``resolve_window_rect``, and a raise
+        from any seam that does not swallow its own errors (``GetWindowRect``
+        raises on a handle whose window has closed). A zero
+        ``source_window_hwnd`` marks a focused-window match and is skipped; it
+        can appear here only if a popup walk mis-stamped one, and asking for the
+        focused window's own rectangle would drop every badge in it.
+        """
+        seen: set[int] = set()
+        rects: list[tuple[int, int, int, int]] = []
+        for match in popup_matches:
+            hwnd = match.source_window_hwnd
+            if not hwnd or hwnd in seen:
+                continue
+            seen.add(hwnd)
+            try:
+                rect = self._window_rect_fn(hwnd)
+            except Exception:  # noqa: BLE001 -- unreadable rect suppresses nothing
+                continue
+            if rect is not None:
+                rects.append(rect)
+        return rects
+
     def _merge_popups_and_decide(
         self,
         *,
@@ -1938,6 +2301,7 @@ class ElementFinder:
         popup_results: list[WalkResult],
         cursor_at_walk: tuple[int, int],
         cursor_monitor_id: int,
+        is_browser: bool,
     ) -> tuple[list[ElementMatch], Outcome]:
         """Merge owned-popup matches into the focused set and re-decide.
 
@@ -1954,21 +2318,69 @@ class ElementFinder:
         The combined eligible set is then re-decided so a popup menu item can win
         the by-name click. With no popups present this method is never called, so
         the Phase 1 decide() over the focused set alone is unchanged.
+
+        Two passes run over the popup matches before the merge.
+
+        First, on a NATIVE walk, a popup match that cannot be clicked is
+        discarded (wh-winui-menu-click-refused.4.2). The WinUI popup host class
+        draws tooltips and teaching tips as well as menus, so the walk admits
+        them; a role-less query walks with ``query_has_role=False``, which keeps
+        Text alive; and ``decide()`` never requires an Invoke pattern. A visible
+        tooltip's own text therefore competed with the control it describes.
+        The test is the one the overlay already applies to its combined set --
+        an interactive control type OR an Invoke pattern -- so a control driven
+        by Toggle / RangeValue / ExpandCollapse still survives. A Chromium-family
+        walk is EXEMPT: it runs with ``query_has_role=False`` and the
+        DOM-correction hook on purpose, and its folded candidates are behaviour
+        this pass must not change.
+
+        Second, every focused-window match that is the popup's own copy of a
+        control is dropped (wh-winui-menu-click-refused.2). A WinUI 3
+        application exposes its menu items in the application window's
+        accessibility tree as well as in the popup window that draws them, so
+        both walks return the item and decide() sees two identical candidates --
+        the reported failure was exactly that: "click exit" over the Notepad
+        File menu went ambiguous, and the copy the user then picked by badge
+        could not be invoked. Here the rule takes the popup's NAMES as well as
+        its window rectangle, so it only ever removes a duplicate; see
+        :func:`drop_matches_covered_by_popups` for why the by-name path cannot
+        drop on geometry alone.
         """
+        popup_matches = [
+            match
+            for popup_result in popup_results
+            for match in popup_result.matches
+        ]
+        if not is_browser:
+            popup_matches = [
+                match
+                for match in popup_matches
+                if is_interactive_control_type(
+                    match.control_type_id, query_has_role=True
+                )
+                or match.invoke_supported
+            ]
+        popup_names = frozenset(
+            match.name.strip().casefold() for match in popup_matches
+        )
+        focused_scored = drop_matches_covered_by_popups(
+            focused_scored,
+            self._popup_window_rects(popup_matches),
+            duplicate_names=popup_names,
+        )
         merged = list(focused_scored)
         next_number = (
             max((m.display_number for m in focused_scored), default=0) + 1
         )
-        for popup_result in popup_results:
-            for match in popup_result.matches:
-                merged.append(
-                    replace(
-                        match,
-                        display_number=next_number,
-                        item_id=f"{match.source}-{next_number}",
-                    )
+        for match in popup_matches:
+            merged.append(
+                replace(
+                    match,
+                    display_number=next_number,
+                    item_id=f"{match.source}-{next_number}",
                 )
-                next_number += 1
+            )
+            next_number += 1
 
         outcome = decide(
             merged,
@@ -2310,6 +2722,7 @@ class ElementFinder:
                 role=match.role,
                 bounds=match.bounds,
                 monitor_id=match.monitor_id,
+                bounds_outside_menu=match.bounds_outside_menu,
             )
             for match in snapshot.matches
         ]
@@ -2364,6 +2777,7 @@ class ElementFinder:
                     role=item.role,
                     bounds=item.bounds,
                     monitor_id=item.monitor_id,
+                    bounds_outside_menu=item.bounds_outside_menu,
                 )
             )
             next_number += 1

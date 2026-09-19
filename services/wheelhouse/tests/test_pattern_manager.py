@@ -1280,13 +1280,18 @@ class TestBacktrackingProbe:
     def test_probe_runs_against_transformed_pattern(
         self, system_file, user_file,
     ):
-        # The catalog compiles transform_pattern(raw) -- numeric (\d+)
-        # groups become (\w+) -- so the probe must test what the runtime
-        # will actually run. Raw ^(\d+)+$ fails the probe corpus instantly
-        # (digits reject "a..." fast), but the transformed ^(\w+)+$
-        # backtracks catastrophically; probing the raw expression would
-        # let the save through and the runaway pattern into the live
-        # catalog on reload (wh-pattern-editor-r4.1).
+        # The catalog compiles transform_pattern(raw), which widens a
+        # numeric (\d+) group, so the probe must test what the runtime
+        # will actually run: probing the raw expression would let the
+        # save through and the runaway pattern into the live catalog on
+        # reload (wh-pattern-editor-r4.1).
+        #
+        # Which probe does the catching moved with the widened body
+        # (wh-number-words-one-parser). The body used to be (\w+), which
+        # the letter probes made run away; it now accepts digits and
+        # spoken number words only, and rejects a letter run on the
+        # first character. The digit probe in _BACKTRACK_PROBES is what
+        # makes this expression backtrack today.
         pm = PatternManager(system_file, user_file)
         result = pm.create_pattern(
             pattern_type="command",
@@ -1300,13 +1305,28 @@ class TestBacktrackingProbe:
     def test_benign_numeric_expression_still_saves(
         self, system_file, user_file,
     ):
-        # The common numeric shape must keep saving: transformed
-        # ^volume (\w+)$ is linear on the probe corpus.
+        # The common numeric shape must keep saving: the transformed
+        # ^volume (<number phrase>)$ is linear on the probe corpus.
         pm = PatternManager(system_file, user_file)
         result = pm.create_pattern(
             pattern_type="command",
             expression=r"^volume (\d+)$",
             actions=[{"function": "hk", "params": ["ctrl", "u"]}],
+        )
+        assert result["success"] is True, result
+
+    def test_a_spoken_number_command_still_saves(
+        self, system_file, user_file,
+    ):
+        # The widened body itself must stay linear on the probe corpus:
+        # every count pattern in the shipped catalog now carries it, and
+        # a user-authored one goes through this same save-time probe
+        # (wh-number-words-one-parser).
+        pm = PatternManager(system_file, user_file)
+        result = pm.create_pattern(
+            pattern_type="command",
+            expression=r"^repeat that (\d+) times$",
+            actions=[{"function": "hk", "params": ["ctrl", "r"]}],
         )
         assert result["success"] is True, result
 
@@ -1570,34 +1590,61 @@ class TestTolerantHeaderWalks:
         assert "'''^gamma$'''" in content   # target rewritten
         assert "'''^beta$'''" not in content
 
-    def test_header_lookalike_inside_multiline_string_fails_safe(
+    # A regex value spanning lines can contain a line that LOOKS like a
+    # header. The walk asks the parser which of those lines it also sees
+    # as a header -- the text before a real one is a complete document,
+    # the text before this one ends inside a string -- so the count stays
+    # level with the parsed list and the block named is the block deleted
+    # (wh-pattern-override-doc-id.3.7). Until that fix the count ran
+    # ahead, the post-locate check refused, and this rule could not be
+    # deleted at all.
+    LOOKALIKE_FIRST = (
+        '[[pattern]]\n'
+        "pattern = '''\n"
+        '[[pattern]]\n'
+        "xyz$'''\n"
+        'actions = [\n'
+        '    { function = "text", params = ["a"] }\n'
+        ']\n'
+        '\n'
+    )
+    LOOKALIKE_SECOND = (
+        '[[pattern]]\n'
+        "pattern = '''^beta$'''\n"
+        'actions = [\n'
+        '    { function = "text", params = ["b"] }\n'
+        ']\n'
+    )
+
+    def test_header_lookalike_inside_multiline_string_is_not_counted(
         self, system_file, user_file,
     ):
-        # A regex value spanning lines can contain a line that LOOKS like
-        # a header; raw text cannot disambiguate it, so the post-locate
-        # check must refuse rather than touch the wrong block.
-        lookalike = (
-            '[[pattern]]\n'
-            "pattern = '''\n"
-            '[[pattern]]\n'
-            "xyz$'''\n"
-            'actions = [\n'
-            '    { function = "text", params = ["a"] }\n'
-            ']\n'
-            '\n'
-            '[[pattern]]\n'
-            "pattern = '''^beta$'''\n"
-            'actions = [\n'
-            '    { function = "text", params = ["b"] }\n'
-            ']\n'
-        )
+        lookalike = self.LOOKALIKE_FIRST + self.LOOKALIKE_SECOND
         self._write_user(user_file, lookalike)
         pm = PatternManager(system_file, user_file)
         result = pm.delete_pattern(PatternManager.pattern_id("^beta$"))
-        assert result["success"] is False
-        assert "Could not locate" in result["error"]
+        assert result["success"] is True, result
         with open(user_file, encoding="utf-8") as fh:
-            assert fh.read() == lookalike  # file untouched
+            content = fh.read()
+        # The block named is gone and the person's own string, including
+        # its header-looking line, is exactly as they wrote it.
+        assert content == self.LOOKALIKE_FIRST
+
+    def test_the_lookalike_block_is_the_one_a_delete_of_it_removes(
+        self, system_file, user_file,
+    ):
+        """The other half: the decoy block is itself deletable by name."""
+        lookalike = self.LOOKALIKE_FIRST + self.LOOKALIKE_SECOND
+        self._write_user(user_file, lookalike)
+        pm = PatternManager(system_file, user_file)
+        result = pm.delete_pattern(
+            # A ''' string drops the newline right after the delimiter,
+            # so the value starts at the header-looking line.
+            PatternManager.pattern_id("[[pattern]]\nxyz$"),
+        )
+        assert result["success"] is True, result
+        with open(user_file, encoding="utf-8") as fh:
+            assert fh.read() == self.LOOKALIKE_SECOND
 
 
 class TestDeleteBackupDeferred:
@@ -1613,24 +1660,23 @@ class TestDeleteBackupDeferred:
     def test_refused_delete_leaves_existing_bak_untouched(
         self, system_file, user_file,
     ):
-        # Valid TOML whose multi-line pattern string contains a
-        # header-lookalike line: the post-locate check refuses the delete.
-        lookalike = (
+        # A banner comment inside the block: the walk ends a block at one
+        # of those as well as at the next header, so the located range is
+        # the header alone, the post-locate check does not recognise it,
+        # and the delete is refused. (Before
+        # wh-pattern-override-doc-id.3.7 this test used a header-looking
+        # line inside a multi-line string; the walk now counts that
+        # correctly and the delete succeeds, so it no longer refuses
+        # anything. The subject here is the backup, not the walk.)
+        banner_inside = (
             '[[pattern]]\n'
-            "pattern = '''\n"
-            '[[pattern]]\n'
-            "xyz$'''\n"
-            'actions = [\n'
-            '    { function = "text", params = ["a"] }\n'
-            ']\n'
-            '\n'
-            '[[pattern]]\n'
+            '# ===== the rule I changed =====\n'
             "pattern = '''^beta$'''\n"
             'actions = [\n'
             '    { function = "text", params = ["b"] }\n'
             ']\n'
         )
-        self._write_user(user_file, lookalike)
+        self._write_user(user_file, banner_inside)
         sentinel = "# last-good backup from before the hand edit\n"
         with open(user_file + ".bak", "w", encoding="utf-8") as fh:
             fh.write(sentinel)

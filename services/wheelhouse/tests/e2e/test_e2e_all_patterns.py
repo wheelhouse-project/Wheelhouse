@@ -14,13 +14,18 @@ maintained by hand: greedy patterns signal end-of-utterance explicitly
 (wh-greedy-helper-impl), some tests carry strict xfail markers, and unicode
 routing was adjusted in place (wh-wxkp). Do NOT regenerate over this file.
 
-For new patterns, draft tests with:
-    python tests/speech/generate_smoke_tests.py --e2e
-which writes e2e_all_patterns_scaffold.py next to this file (gitignored);
-copy the new tests from there and adjust by hand (wh-smoke-generator-crash).
+For new patterns, write the tests by hand in the shape of the ones already
+here. The generator that used to draft them,
+tests/speech/generate_smoke_tests.py, was deleted with the repo-root
+tests/speech suite (wh-speech-suite-repair-or-retire, David's
+QUESTIONS-2026-09-02 item 38 ruling). Its scaffold output was only a starting
+point in any case: this file has been hand-maintained since, which is why the
+paragraph above says not to regenerate over it.
 """
 
 import asyncio
+from unittest.mock import patch
+
 import pytest
 from services.wheelhouse.tests.e2e.e2e_harness import E2EPipelineHarness
 
@@ -333,20 +338,16 @@ class TestE2ECommandPatterns:
             f"Expected ctrl+v in keystrokes, got {keys}"
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "wh-replace-all-shadowed: ^replace$ EXECUTEs on the first word, "
-            "so ^replace all$ never matches in streamed input; 'all' is "
-            "dictated. This test previously passed only because the dictated "
-            "word's clipboard paste supplied a coincidental ctrl+v keystroke, "
-            "which the Unicode insertion path (wh-wxkp) no longer produces. "
-            "strict=True so a router/pattern fix flips this to xpass and "
-            "forces the marker's removal."
-        ),
-    )
     async def test_e2e_cmd_035_replace_all(self, harness):
-        """Pattern: ^replace all$"""
+        """Pattern: ^replace all$
+
+        This carried a strict xfail for wh-replace-all-shadowed: ^replace$
+        used to EXECUTE on the first word, so ^replace all$ could never
+        match in streamed input and "all" was dictated. Giving ^replace$
+        whole_utterance_only on 2026-08-20 stopped that early execute, so
+        the second word now arrives and the longer pattern wins. The marker
+        was strict exactly so a fix would force its removal.
+        """
         await harness.send_word(harness.hotword, start_of_utterance=True)
         await harness.send_word("replace", delay_before_ms=50)
         await harness.send_word("all", delay_before_ms=50)
@@ -394,6 +395,58 @@ class TestE2ECommandPatterns:
         keys = harness.recording.get_keystroke_keys()
         assert ("shift", "ctrl", "down",) in keys, \
             f"Expected shift+ctrl+down in keystrokes, got {keys}"
+
+    @pytest.mark.asyncio
+    async def test_e2e_cmd_039b_select_phrase(self, harness):
+        """Pattern: ^select (.+)$ (greedy command, wh-spoken-phrase-select).
+
+        The command needs the hotword, the same as "click <name>", because
+        a bare capture after "select" would claim every dictated sentence
+        that opens with that word. The capture is greedy, so the test
+        signals the end of the utterance instead of waiting on the 5000 ms
+        greedy buffer timer.
+
+        The handler itself talks to UI Automation, which the harness does
+        not simulate, so the test replaces the handler method and proves
+        the spoken words reached it whole.
+        """
+        with patch.object(harness.app.handler, "select_phrase") as spy:
+            await harness.send_word(harness.hotword, start_of_utterance=True)
+            await harness.send_word("select", delay_before_ms=50)
+            await harness.send_word("brown", delay_before_ms=50)
+            await harness.send_word("fox", delay_before_ms=50)
+            await harness.send_utterance_end_marker(utterance_id=1)
+            await harness.wait_for_timeout(200)
+            assert spy.called, "select_phrase was never dispatched"
+            assert spy.call_args.kwargs.get("phrase") == "brown fox", \
+                f"Expected phrase 'brown fox', got {spy.call_args}"
+
+    @pytest.mark.asyncio
+    async def test_e2e_cmd_039c_select_all_still_wins(self, harness):
+        """"select all" must keep reaching the fixed pattern, not the capture.
+
+        The catalog walks patterns.toml in order and the first match wins,
+        so the capture entry sits after the four fixed select forms. This
+        test fails if anybody moves it earlier.
+
+        The hotword is required here, and it is the whole point of the
+        test. wh-spoken-phrase-select.6.2: without the hotword the
+        matcher skips every hotword-required pattern whatever its
+        position, so a test that omits the hotword proves nothing about
+        the order. With the hotword active both entries are eligible,
+        and only the order keeps "select all" on ctrl+a.
+        """
+        with patch.object(harness.app.handler, "select_phrase") as spy:
+            await harness.send_word(harness.hotword, start_of_utterance=True)
+            await harness.send_word("select", delay_before_ms=50)
+            await harness.send_word("all", delay_before_ms=50)
+            await harness.send_utterance_end_marker(utterance_id=1)
+            await harness.wait_for_timeout(200)
+            keys = harness.recording.get_keystroke_keys()
+            assert ("ctrl", "a",) in keys, \
+                f"Expected ctrl+a from select all, got {keys}"
+            assert not spy.called, \
+                "select all reached the phrase capture instead of ctrl+a"
 
     @pytest.mark.asyncio
     async def test_e2e_cmd_040_find_test(self, harness):

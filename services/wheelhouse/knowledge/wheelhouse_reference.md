@@ -213,7 +213,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | dollar sign | Types $ inline during dictation |  |
 | percent | Types % inline during dictation |  |
 | caret sign | Types ^ inline during dictation | Also fires if heard as "carrot sign" |
-| ampersand | Types & inline during dictation | "and sign" also works |
+| ampersand | Types & inline during dictation | Say "ampersand"; "and sign" types the words |
 | asterisk | Types * inline during dictation |  |
 | underscore | Types _ inline during dictation |  |
 | plus sign | Types + inline during dictation |  |
@@ -315,10 +315,10 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 |---|---|---|
 | push to talk mode | Switches to press-and-hold listening: Wheelhouse listens only while you hold the floating button | A notification confirms the switch |
 | click to talk mode | Switches back to toggle listening (click to start, click to stop) -- the default |  |
-| help | Opens the Wheelhouse Assistant (the official online help) in your browser. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Uses the gem_url setting under [ai.help]; if blanked, Wheelhouse says out loud that online help is not configured |
+| help | Opens the Wheelhouse Assistant (the official online help) in your browser. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured, but only when the AI service is enabled; the Help menu item shows its notice whether or not the AI service is enabled |
 | patterns | Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "pattern manager" also works; see "Special Commands" |
 | learn my voice | Opens the voice-teaching window, where Wheelhouse learns how you sound so it stops missing short words | "calibrate my voice" also works; only the Distil-Whisper speech engine uses it; See "Teaching Wheelhouse your voice" in the Speech Engines section |
-| x-ray fix | Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version | Requires the AI server to be configured and reachable; Wheelhouse speaks its progress and always preserves your original text on any failure |
+| x-ray fix | Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version | Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure |
 | simplify | Rewrites the selected text in plain language, using shorter sentences and simpler words. Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix"; the selection comes back as plain text, so formatting applied in a word processor is lost |
 | shorten | Rewrites the selected text more briefly, cutting repetition and padding. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix" |
 | x-ray make formal | Rewrites the selected text in a formal register, avoiding contractions and casual wording | Same AI server and same safeguards as "x-ray fix" |
@@ -341,7 +341,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **COMMAND_COMPLETION_WAIT_MS** *(default: `1000`)* -- A short pause, in milliseconds, after a command finishes so a fast follow-up does not collide with it. Raise on a slow machine if back-to-back commands step on each other.
 
-**ENABLE_AUDIO_SUPPRESSION** *(default: `true`)* -- Pause listening while computer audio is playing. Turn off only if you want Wheelhouse listening during playback; expect more misrecognitions, because the microphone picks up the audio.
+**ENABLE_AUDIO_SUPPRESSION** *(default: `"auto"`)* -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone has an echo canceller, and pauses only when Windows reports none or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.
 
 **ENABLE_SONOS_SUPPRESSION** *(default: `true`)* -- Pause listening while Sonos music is playing. Turn off only if you want Wheelhouse listening during playback; expect more misrecognitions, because the microphone picks up the audio.
 
@@ -359,6 +359,14 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **VOLUME_INCREMENT** *(default: `0.5`)* -- The size of each thumb-wheel volume adjustment step. Raise for faster, coarser changes; lower for finer control.
 
+**THUMB_WHEEL_DEAD_ZONE_TICKS** *(default: `3`)* -- How many thumb-wheel ticks a gesture must reach before the brightness or volume zone acts. Ticks below this are held; the batch that reaches it releases them, and every later tick in the same gesture acts at once. Raise if the wheel still reacts to an accidental touch; set to 1 to make every tick act at once.
+
+**THUMB_WHEEL_GESTURE_GAP_MS** *(default: `500`)* -- The pause, in milliseconds, that ends a thumb-wheel gesture. After a longer pause the next touch starts in the dead zone again and any held ticks are forgotten. Raise if a slow, deliberate roll keeps stopping early; lower if a stray tick still adds up with the next touch.
+
+**THUMB_WHEEL_MAX_TICKS_PER_BATCH** *(default: `3`)* -- The most thumb-wheel ticks one 50 ms batch may apply to brightness or volume. Ticks above this in a single batch are discarded, so a fast flick moves at most this many ticks per batch. Raise for larger changes from a fast roll; lower if a flick still jumps too far.
+
+**BRIGHTNESS_STEPS_PER_COMMAND** *(default: `2`)* -- The most native TV brightness steps one thumb-wheel command may carry. The TV answers one command at a time, about 400 ms each for a Samsung, so this is how far brightness moves per round trip while the wheel turns. Ticks beyond it are discarded, so the TV never keeps moving after the wheel stops. Set 1 for the smoothest one-step-at-a-time change; raise it if brightness moves too slowly. A value below 1 counts as 1.
+
 **FLOATING_BUTTON_SIZE** *(default: `50`)* -- Size in pixels of the small on-screen status button. Dragging the button's outer edge, or holding Ctrl and rolling the mouse wheel over it, writes this setting.
 
 **FLOATING_BUTTON_POS** *(default: `[100, 100]`)* -- Screen position of the small on-screen status button, as [x, y] pixels from the top-left of the desktop. Dragging the button writes this setting, and so does resizing it, because the button grows and shrinks around its own centre.
@@ -375,15 +383,9 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [brightness_coordinator]
 
-**software_dimmer** *(default: `"gamma_dimmer"`)* -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens through the graphics card), "overlay" (a translucent overlay window), or "flux" (drives a companion dimming app via hotkeys). Change only if dimming misbehaves with your monitor setup.
+**software_dimmer** *(default: `"gamma_dimmer"`)* -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens through the graphics card), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.
 
 **unwinding_threshold** *(default: `10`)* -- Currently has no effect -- Wheelhouse hands control back to the hardware only once software dimming is fully undone, whatever this is set to.
-
-**flux_transition_percent** *(default: `2`)* -- Percent of brightness per simulated hotkey press when driving a companion dimming app.
-
-**flux_dim_hotkey** *(default: `["alt", "pagedown"]`)* -- The shortcut pressed to drive the companion dimming app's dim action. Change only if you remapped the app's own hotkeys.
-
-**flux_brighten_hotkey** *(default: `["alt", "pageup"]`)* -- The shortcut pressed to drive the companion dimming app's brighten action. Change only if you remapped the app's own hotkeys.
 
 ### [plugins.internal_panel]
 
@@ -477,13 +479,13 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [ui_actions.text_target]
 
-**allow_class_names_extend** *(default: `[]`)* -- Extends the built-in list of window classes allowed to receive dictation. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.
+**allow_class_names_extend** *(default: `[]`)* -- Extends the built-in list of window classes allowed to receive dictation. Add a window here when you want your short phrases typed key by key into it. Wheelhouse pastes your words into a box it does not recognize, and it asks you nothing. In some apps your words are never typed key by key, whatever you add here, and long text is never typed either.
 
-**deny_control_types_extend** *(default: `[]`)* -- Extends the built-in list of control types denied dictation. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.
+**deny_control_types_extend** *(default: `[]`)* -- Extends the built-in list of control types denied dictation. Add a control here when Wheelhouse types into something that is not a text box. Wheelhouse then pastes your words there instead of typing them, so the words still arrive.
 
-**deny_class_names_extend** *(default: `[]`)* -- Extends the built-in list of window classes denied dictation. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.
+**deny_class_names_extend** *(default: `[]`)* -- Extends the built-in list of window classes denied dictation. Add a window here when Wheelhouse types into something that is not a text box. Wheelhouse then pastes your words there instead of typing them, so the words still arrive.
 
-**browser_process_names_extend** *(default: `[]`)* -- Extends the built-in list of browser process names used by the dictation safety check. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.
+**browser_process_names_extend** *(default: `[]`)* -- Extends the built-in list of browser process names used by the dictation safety check. Add a browser here when Wheelhouse types into the page itself, which scrolls the page. Wheelhouse then pastes your words instead of typing them.
 
 ### [speech]
 
@@ -533,7 +535,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [ai.help]
 
-**gem_url** *(default: `"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"`)* -- The web address the wheelhouse-help-online voice command opens in your browser; if you blank it out, the command answers out loud that online help is not configured.
+**gem_url** *(default: `"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"`)* -- The web address the wheelhouse-help-online voice command opens in your browser; if you blank it out, the command shows a notice that online help is not configured, but only when the AI service is enabled.
 
 **max_response_tokens** *(default: `800`)* -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.
 
@@ -579,4 +581,4 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ---
 
-Generated: 2026-07-31 for the v1.0.7 release
+Generated: 2026-09-18 for the v1.0.8 release

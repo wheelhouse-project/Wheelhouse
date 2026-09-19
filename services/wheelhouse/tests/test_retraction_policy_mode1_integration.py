@@ -118,11 +118,6 @@ def make_processor(word_queue: asyncio.Queue, app: OrderedRecordingApp) -> Speec
         text_parser=NoOpTextParser(),
         app=app,
     )
-    processor.context_mirror = MagicMock()
-    processor.context_mirror.read_context.return_value = {
-        "app_name": "test.exe",
-        "window_title": "Test",
-    }
     return processor
 
 

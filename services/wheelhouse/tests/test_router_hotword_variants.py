@@ -35,7 +35,7 @@ def catalog():
 def _decide_fresh_word(router, word):
     """Run one word through the fresh-utterance decision path."""
     ev = WordEvent(word=word, start_of_utterance=True, end_of_utterance=False)
-    return router.decide(ev, ProcessingMode.IDLE, [], {})
+    return router.decide(ev, ProcessingMode.IDLE, [])
 
 
 def _is_hotword_detection(decision):

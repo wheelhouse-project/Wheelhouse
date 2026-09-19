@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 
 from speech.click_parser import ClickCommandParser
-from ui.element_types import ElementQuery
+from ui.element_types import ClickGesture, ElementQuery
 
 
 class TestV5Examples:
@@ -181,3 +181,127 @@ class TestTrailingPunctuation:
         # become name="the": punctuation is stripped before the article drop
         # (wh-9f3t.52.1).
         assert ClickCommandParser.parse(target) is None
+
+
+class TestGestureDefault:
+    """Every pre-existing parse() call keeps today's Invoke gesture."""
+
+    def test_parse_defaults_to_invoke(self):
+        q = ClickCommandParser.parse("cancel")
+        assert q is not None
+        assert q.gesture is ClickGesture.INVOKE
+
+    def test_parse_accepts_an_explicit_gesture(self):
+        q = ClickCommandParser.parse("cancel", gesture=ClickGesture.RIGHT_CLICK)
+        assert q is not None
+        assert q.name == "cancel"
+        assert q.gesture is ClickGesture.RIGHT_CLICK
+
+
+class TestGestureCommandForms:
+    """parse_command reads a whole spoken command, gesture prefix included.
+
+    The grammar entry for a gesture command captures the full utterance
+    ("right click the cancel button"), not just the words after "click", so
+    this entry point owns the gesture-prefix recognition. Spec:
+    docs/superpowers/specs/2026-08-09-mouse-grid-overlay-design.md, "Gestures on
+    named and numbered controls".
+    """
+
+    @pytest.mark.parametrize("utterance,name,role,gesture", [
+        ("click cancel", "cancel", None, ClickGesture.INVOKE),
+        ("click the cancel button", "cancel", "Button", ClickGesture.INVOKE),
+        ("right click cancel", "cancel", None, ClickGesture.RIGHT_CLICK),
+        ("right click the cancel button", "cancel", "Button",
+         ClickGesture.RIGHT_CLICK),
+        ("double click cancel", "cancel", None, ClickGesture.DOUBLE_CLICK),
+        ("double click the report link", "report", "Hyperlink",
+         ClickGesture.DOUBLE_CLICK),
+    ])
+    def test_named_control_forms(self, utterance, name, role, gesture):
+        q = ClickCommandParser.parse_command(utterance)
+        assert q is not None
+        assert q.name == name
+        assert q.role == role
+        assert q.gesture is gesture
+
+    @pytest.mark.parametrize("utterance,gesture", [
+        ("right-click cancel", ClickGesture.RIGHT_CLICK),
+        ("double-click cancel", ClickGesture.DOUBLE_CLICK),
+    ])
+    def test_hyphenated_gesture_word(self, utterance, gesture):
+        # Local STT writes the gesture as one hyphenated word about as often as
+        # two words; both mean the same command.
+        q = ClickCommandParser.parse_command(utterance)
+        assert q is not None
+        assert q.name == "cancel"
+        assert q.gesture is gesture
+
+    def test_case_is_normalized(self):
+        q = ClickCommandParser.parse_command("Right Click Cancel")
+        assert q is not None
+        assert q.name == "cancel"
+        assert q.gesture is ClickGesture.RIGHT_CLICK
+
+    @pytest.mark.parametrize("utterance", [
+        "",
+        "   ",
+        "cancel",            # no click word at all
+        "right click",       # gesture with no target
+        "double click   ",
+        "right click the",   # collapses to an empty name
+        "clicking cancel",   # not the click command
+    ])
+    def test_unusable_input_returns_none(self, utterance):
+        assert ClickCommandParser.parse_command(utterance) is None
+
+    def test_none_returns_none(self):
+        assert ClickCommandParser.parse_command(None) is None
+
+
+class TestGestureOnBareNumbers:
+    """"right click 5" / "double click 5", with an optional "number" filler.
+
+    The number itself stays the query NAME: the overlay routing downstream
+    parses it (speech/number_word_parser.py) and resolves it to a badge. The
+    parser's job is to strip the gesture prefix and the filler word so the name
+    is the number the user said.
+    """
+
+    @pytest.mark.parametrize("utterance,name,gesture", [
+        ("click 5", "5", ClickGesture.INVOKE),
+        ("right click 5", "5", ClickGesture.RIGHT_CLICK),
+        ("double click 5", "5", ClickGesture.DOUBLE_CLICK),
+        ("right click number 5", "5", ClickGesture.RIGHT_CLICK),
+        ("double click number 5", "5", ClickGesture.DOUBLE_CLICK),
+        ("click number 5", "5", ClickGesture.INVOKE),
+        ("click number five", "five", ClickGesture.INVOKE),
+        ("right click number twenty three", "twenty three",
+         ClickGesture.RIGHT_CLICK),
+        ("double click 7.", "7", ClickGesture.DOUBLE_CLICK),
+    ])
+    def test_bare_number_forms(self, utterance, name, gesture):
+        q = ClickCommandParser.parse_command(utterance)
+        assert q is not None
+        assert q.name == name
+        assert q.role is None
+        assert q.gesture is gesture
+
+    @pytest.mark.parametrize("utterance,name", [
+        # "number" is only filler when what follows is actually a number;
+        # otherwise it is an ordinary name word.
+        ("click number pad", "number pad"),
+        ("click the number pad", "number pad"),
+        ("right click number", "number"),
+    ])
+    def test_number_kept_when_not_a_number_filler(self, utterance, name):
+        q = ClickCommandParser.parse_command(utterance)
+        assert q is not None
+        assert q.name == name
+
+    def test_filler_stripped_on_the_target_only_entry_point_too(self):
+        # parse() sees the words after "click" when the grammar captured them;
+        # the filler rule lives there so both entry points agree.
+        q = ClickCommandParser.parse("number 5")
+        assert q is not None
+        assert q.name == "5"

@@ -43,7 +43,7 @@ def router(catalog):
 def _detect_hotword(router, word="x-ray"):
     """Drive the fresh-hotword detection path so the router snapshots it."""
     ev = WordEvent(word=word, start_of_utterance=True, end_of_utterance=False)
-    decision = router.decide(ev, ProcessingMode.IDLE, [], {})
+    decision = router.decide(ev, ProcessingMode.IDLE, [])
     assert decision.action == Action.TRANSITION
     assert decision.target_mode == ProcessingMode.HOTWORD_BUFFERING
     return decision

@@ -472,6 +472,22 @@ def test_wording_execution_failed_sendinput_short():
     )
 
 
+def test_wording_execution_failed_sendinput_nothing_sent():
+    """Zero-event refusal: provably nothing was sent, so the copy says the
+    click was not delivered instead of blaming the control
+    (wh-review-click-numbers.2)."""
+    event = _event(
+        outcome="execution_failed",
+        reason="sendinput_nothing_sent",
+        matched_name="Submit",
+    )
+    assert (
+        compose_click_notice_wording(event)
+        == "Wheelhouse couldn't click 'Submit' -- the mouse click was not "
+        "delivered."
+    )
+
+
 def test_wording_execution_failed_dda_unavailable():
     """wh-dda-notice-wording: the control exposes neither an Invoke pattern
     nor a resolvable default action, so pressing it by voice can never work.
@@ -561,6 +577,36 @@ def test_wording_execution_failed_timeout():
     )
 
 
+def test_wording_execution_failed_verification_timeout():
+    """wh-overlay-slow-uia-stale-badges.6: the pre-click verification budget
+    expired because the application answered COM/Win32 reads too slowly. The
+    copy is DISTINCT from the transport 'timeout' tag -- the request round
+    trip worked; the application was the slow party -- and is name-independent
+    (the refusal fires before the click, with or without a captured name)."""
+    event = _event(
+        outcome="execution_failed",
+        reason="verification_timeout",
+        matched_name=None,
+    )
+    wording = compose_click_notice_wording(event)
+    assert wording == "The application answered too slowly to click safely."
+    assert wording != compose_click_notice_wording(
+        _event(outcome="execution_failed", reason="timeout", matched_name=None)
+    )
+
+
+def test_wording_execution_failed_verification_timeout_ignores_name():
+    event = _event(
+        outcome="execution_failed",
+        reason="verification_timeout",
+        matched_name="Submit",
+    )
+    assert (
+        compose_click_notice_wording(event)
+        == "The application answered too slowly to click safely."
+    )
+
+
 def test_wording_execution_failed_popup_closed_with_name():
     """wh-n29v.71: an owned #32768 / UIA-Menu popup that closed between the
     walk and the click yields execution_failed:popup_closed. The notice tells
@@ -585,6 +631,33 @@ def test_wording_execution_failed_popup_closed_without_name():
     assert (
         compose_click_notice_wording(event)
         == "The menu closed before Wheelhouse could click it."
+    )
+
+
+def test_wording_execution_failed_taskbar_closed_with_name():
+    """wh-overlay-taskbar-numbers.3: a taskbar shell window (or the tray
+    overflow flyout) that vanished between the walk and the click yields
+    execution_failed:taskbar_closed. The notice tells the user the taskbar
+    changed before Wheelhouse could click the named item."""
+    event = _event(
+        outcome="execution_failed", reason="taskbar_closed", matched_name="Start"
+    )
+    assert (
+        compose_click_notice_wording(event)
+        == "The taskbar changed before Wheelhouse could click 'Start'."
+    )
+
+
+def test_wording_execution_failed_taskbar_closed_without_name():
+    """Like popup_closed, the cause (the shell window vanished) is the same
+    whether or not a name was captured, so the name-less form keeps the
+    taskbar-specific copy instead of collapsing to the neutral fallback."""
+    event = _event(
+        outcome="execution_failed", reason="taskbar_closed", matched_name=None
+    )
+    assert (
+        compose_click_notice_wording(event)
+        == "The taskbar changed before Wheelhouse could click it."
     )
 
 
@@ -741,6 +814,8 @@ def test_wording_none_execution_failed_reason_is_neutral():
         "dda_no_side_effect_then_sendinput_failed",
         "dda_unavailable_then_sendinput_failed",
         "dda_no_default_action_then_sendinput_failed",
+        "dda_expand_collapse",
+        "dda_expand_collapse_then_sendinput_failed",
         "click_point_obstructed",
     ],
 )
@@ -876,17 +951,145 @@ def test_wording_execution_failed_dda_no_default_action_then_sendinput_failed():
     )
 
 
+def test_wording_execution_failed_dda_expand_collapse():
+    """wh-treeitem-dda-wrong-action: the control's only default action is
+    Expand or Collapse (which would toggle it, not click it) and the match
+    failed the coordinate eligibility gate, so no voice press exists for it --
+    the same permanent copy as dda_no_default_action."""
+    event = _event(
+        outcome="execution_failed",
+        reason="dda_expand_collapse",
+        matched_name="This PC",
+    )
+    assert compose_click_notice_wording(event) == "'This PC' can't be clicked by voice."
+
+
+def test_wording_execution_failed_dda_expand_collapse_then_sendinput_failed():
+    """wh-treeitem-dda-wrong-action: the coordinate click that replaced the
+    Expand / Collapse default action did not land -- a transient delivery
+    failure, so it shares the invoke_com_error copy."""
+    event = _event(
+        outcome="execution_failed",
+        reason="dda_expand_collapse_then_sendinput_failed",
+        matched_name="This PC",
+    )
+    assert compose_click_notice_wording(event) == (
+        "Wheelhouse couldn't click 'This PC' -- the control did not respond."
+    )
+
+
 def test_wording_execution_failed_click_point_obstructed():
-    """wh-explorer-navpane-click.1.1: the pre-send hit-test found a different
-    top-level window under the click point (an always-on-top occluder), or
-    could not verify the point at all. The copy names the likely cause so a
-    hands-free user knows what to move."""
+    """wh-winui-menu-click-refused.3: the copy must fit all three producers
+    of this reason, not just the occluder one it was written for.
+
+    The pre-send hit test refuses when the window under the point is not
+    the matched control's own window, when the element at the point is a
+    different one inside the same window, or when the check itself could
+    not run. The WinUI menu case is the first of those and reads nothing
+    like an occluder: the menu draws in its own window, so the item the
+    user asked for is right there under the point, and the old copy sent
+    the user hunting for a covering window that did not exist.
+
+    So the copy says what WheelHouse actually established -- that it could
+    not confirm the control sits at that point -- and prescribes nothing,
+    because no single action fixes all three cases.
+    """
     event = _event(
         outcome="execution_failed",
         reason="click_point_obstructed",
         matched_name="Documents (pinned)",
     )
     assert compose_click_notice_wording(event) == (
-        "Wheelhouse couldn't click 'Documents (pinned)' -- another window "
-        "may be covering it."
+        "Wheelhouse couldn't click 'Documents (pinned)' -- it could not "
+        "confirm the control is at that spot on screen."
+    )
+
+
+def test_wording_click_point_obstructed_does_not_blame_another_window():
+    """The exact failure the bead was filed for: a user reading the notice
+    went looking for a window that was not there."""
+    event = _event(
+        outcome="execution_failed",
+        reason="click_point_obstructed",
+        matched_name="Exit",
+    )
+    text = compose_click_notice_wording(event)
+    assert "another window" not in text
+    assert "covering" not in text
+
+
+def test_wording_overlay_click_in_flight_is_exact():
+    """wh-overlay-slow-uia-stale-badges.8 / .16.2: a second badge click
+    arrived while the previous badge click was still awaiting its Input
+    reply. The reason is reachable from BOTH the spoken "click N" path and
+    the mouse badge-click path, so the copy uses the input-agnostic "try",
+    not "say" -- and stays name-independent (the target is a number)."""
+    event = _event(
+        outcome="execution_failed",
+        reason="overlay_click_in_flight",
+        matched_name=None,
+        matched_names=(),
+        spoken_name="17",
+    )
+    assert compose_click_notice_wording(event) == (
+        "Wheelhouse is still finishing the previous click -- try the "
+        "number again in a moment."
+    )
+
+
+def test_wording_stale_overlay_generation_is_exact():
+    """wh-overlay-slow-uia-stale-badges.8 / .16.2: the Input process refused
+    a click whose number came from a list an earlier click already consumed.
+    Also reachable from the mouse badge-click path, so the copy uses the
+    input-agnostic "try", not "say"."""
+    event = _event(
+        outcome="execution_failed",
+        reason="stale_overlay_generation",
+        matched_name=None,
+        matched_names=(),
+        spoken_name="17",
+    )
+    assert compose_click_notice_wording(event) == (
+        "The screen changed after the last click -- wait for the numbers "
+        "to update, then try the number again."
+    )
+
+
+@pytest.mark.parametrize(
+    "reason", ["overlay_click_in_flight", "stale_overlay_generation"]
+)
+def test_shared_reason_wording_has_no_speech_only_verb(reason):
+    """wh-overlay-slow-uia-stale-badges.16.2: both reasons are emitted for
+    mouse badge clicks as well as spoken numbers, so the copy must not
+    instruct the user to SAY anything. Word-boundary match so a future
+    harmless substring (e.g. "essay") cannot false-positive, while "say",
+    "Say", "say.", "speak", and "spoken" are all caught."""
+    import re
+
+    event = _event(
+        outcome="execution_failed",
+        reason=reason,
+        matched_name=None,
+        matched_names=(),
+        spoken_name="17",
+    )
+    wording = compose_click_notice_wording(event)
+    assert re.search(r"\b(say|says|speak|spoken)\b", wording, re.IGNORECASE) is None
+
+
+def test_wording_numbers_updating_is_exact():
+    """wh-overlay-slow-uia-stale-badges.8: numbers_updating previously fell
+    through to the neutral fallback. It is emitted for a number spoken in
+    the post-click settling gap AND for a held click cancelled by a
+    successful badge click; both mean the list is being rebuilt."""
+    event = _event(
+        outcome="execution_failed",
+        reason="numbers_updating",
+        matched_name=None,
+        matched_names=(),
+        spoken_name="17",
+    )
+    assert compose_click_notice_wording(event) == (
+        "The numbers are updating -- say the number again when they "
+        "reappear."
     )

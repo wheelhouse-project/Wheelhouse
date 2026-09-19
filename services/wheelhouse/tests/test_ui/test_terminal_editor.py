@@ -140,9 +140,9 @@ class TestProxySubmitTimeout:
 
     def test_timeout_clears_submit_in_progress(self, proxy):
         p, _ = proxy
-        p.show("text", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        rid = p.show("text", terminal_hwnd=1, geometry=(0, 0, 800, 600))
         p.submit()
-        p._submit_timeout()
+        p._submit_timeout(rid)
         assert not p._submit_in_progress.is_set()
         assert not p.is_active
 
@@ -178,8 +178,9 @@ class TestProxyResetSessionState:
     """Editor-close paths must clear the editor HWND."""
 
     def _seed_session(self, p):
-        p.show("hi", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        rid = p.show("hi", terminal_hwnd=1, geometry=(0, 0, 800, 600))
         p._editor_hwnd = 98765
+        return rid
 
     def test_cancel_resets_session_state(self, proxy):
         p, _ = proxy
@@ -195,9 +196,9 @@ class TestProxyResetSessionState:
 
     def test_submit_timeout_resets_session_state(self, proxy):
         p, _ = proxy
-        self._seed_session(p)
+        rid = self._seed_session(p)
         p.submit()
-        p._submit_timeout()
+        p._submit_timeout(rid)
         assert p.editor_hwnd is None
 
 
@@ -212,10 +213,12 @@ class TestProxySubmitLifecycleAcks:
 
     def test_submit_complete_ack_clears_active_state(self, proxy):
         p, _ = proxy
-        p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        rid = p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
         assert p.is_active is True
 
-        p.on_event_ack("rid-submit", "submit_complete", editor_hwnd=12345)
+        # The GUI stamps the session's show rid on submit acks
+        # (wh-overlay-slow-uia-stale-badges.14.17).
+        p.on_event_ack(rid, "submit_complete", editor_hwnd=12345)
 
         assert p.is_active is False
         assert p._submit_in_progress.is_set() is False
@@ -223,11 +226,11 @@ class TestProxySubmitLifecycleAcks:
 
     def test_submit_failed_ack_clears_active_state(self, proxy):
         p, _ = proxy
-        p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        rid = p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
         assert p.is_active is True
 
         p.on_event_ack(
-            "rid-submit", "submit_failed:foreground_failed", editor_hwnd=0,
+            rid, "submit_failed:foreground_failed", editor_hwnd=0,
         )
 
         assert p.is_active is False
@@ -242,14 +245,14 @@ class TestProxySubmitLifecycleAcks:
         does not strand on the safety timer or skip clipboard restore.
         """
         p, _ = proxy
-        p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        rid = p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
         # Voice "enter" path.
         p.submit()
         assert p._submit_in_progress.is_set() is True
         assert p._submit_timer is not None
 
         # GUI direct-submit completes.
-        p.on_event_ack("rid-submit", "submit_complete", editor_hwnd=12345)
+        p.on_event_ack(rid, "submit_complete", editor_hwnd=12345)
 
         assert p.is_active is False
         assert p._submit_in_progress.is_set() is False
@@ -258,10 +261,10 @@ class TestProxySubmitLifecycleAcks:
     def test_submit_failed_after_voice_enter_clears_state(self, proxy):
         """Same as above but for the failure ack."""
         p, _ = proxy
-        p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        rid = p.show("ls", terminal_hwnd=1, geometry=(0, 0, 800, 600))
         p.submit()
         p.on_event_ack(
-            "rid-submit", "submit_failed:clipboard_verify_failed",
+            rid, "submit_failed:clipboard_verify_failed",
             editor_hwnd=0,
         )
         assert p.is_active is False
@@ -314,3 +317,131 @@ class TestProxySendFailureRollsBackState:
         rid = p.show("hello", terminal_hwnd=1, geometry=(0, 0, 800, 600))
         assert rid is not None and rid
         assert p.is_active is True
+
+
+class TestProxySessionIdentity:
+    """wh-overlay-slow-uia-stale-badges.14.17: a late control message
+    from an older editor session must not reset the current session.
+
+    The proxy stores the request_id that show() minted as the active
+    session identity. on_event_ack consumes submit-lifecycle and show
+    acks only when the ack's rid matches; cancelled_by_gui (the
+    terminal_editor_cancelled IPC path) cleans up only on a match.
+    force_cleanup stays unconditional -- it is the recovery entry.
+    """
+
+    def _open(self, p):
+        rid = p.show("", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        assert rid
+        return rid
+
+    def test_stale_submit_ack_does_not_clear_new_session(self, proxy):
+        p, _ = proxy
+        rid_a = self._open(p)
+        p.cancel()  # session A ends
+        self._open(p)  # session B
+        p.on_event_ack(rid_a, "submit_complete", editor_hwnd=12345)
+        assert p.is_active is True, (
+            "a submit ack from a previous session must not close the "
+            "current session"
+        )
+
+    def test_stale_show_ack_does_not_record_hwnd(self, proxy):
+        p, _ = proxy
+        rid_a = self._open(p)
+        p.cancel()
+        rid_b = self._open(p)
+        p.on_event_ack(rid_a, "show", editor_hwnd=111)
+        assert p.editor_hwnd is None, (
+            "a show ack from a previous session must not overwrite the "
+            "current session's editor HWND"
+        )
+        p.on_event_ack(rid_b, "show", editor_hwnd=222)
+        assert p.editor_hwnd == 222
+
+    def test_matching_submit_ack_clears_state(self, proxy):
+        p, _ = proxy
+        rid = self._open(p)
+        p.submit()
+        p.on_event_ack(rid, "submit_complete", editor_hwnd=333)
+        assert p.is_active is False
+        assert p._submit_in_progress.is_set() is False
+
+    def test_gui_cancel_with_stale_rid_is_ignored(self, proxy):
+        p, _ = proxy
+        rid_a = self._open(p)
+        p.cancel()
+        rid_b = self._open(p)
+        p.cancelled_by_gui(rid_a)
+        assert p.is_active is True, (
+            "a cancellation from a previous session must not clean up "
+            "the current session"
+        )
+        p.cancelled_by_gui(rid_b)
+        assert p.is_active is False
+
+    def test_gui_cancel_with_empty_rid_force_cleans(self, proxy):
+        """An identity-less cancellation is a recovery signal: refuse it
+        and a lost rid anywhere in the chain would wedge the proxy
+        active forever, which is worse than the fence gap."""
+        p, _ = proxy
+        self._open(p)
+        p.cancelled_by_gui("")
+        assert p.is_active is False
+
+    def test_force_cleanup_stays_unconditional(self, proxy):
+        p, _ = proxy
+        self._open(p)
+        p.force_cleanup()
+        assert p.is_active is False
+
+
+class TestSubmitTimerIdentity:
+    """wh-overlay-slow-uia-stale-badges.14.21: the submit safety timer
+    must clear only the session that started it.
+
+    Timer.cancel() cannot stop a callback that has already started, so
+    a session-A timer can fire concurrently with (or after) session B
+    opening. The timer therefore carries the session request_id it was
+    started for, and _submit_timeout no-ops unless that rid still names
+    the active session.
+    """
+
+    def _open(self, p):
+        rid = p.show("", terminal_hwnd=1, geometry=(0, 0, 800, 600))
+        assert rid
+        return rid
+
+    def test_submit_timer_carries_session_rid(self, proxy):
+        p, _ = proxy
+        rid = self._open(p)
+        p.submit()
+        try:
+            assert p._submit_timer.args == (rid,)
+        finally:
+            p._cancel_submit_timer()
+
+    def test_stale_timer_callback_does_not_clear_newer_session(self, proxy):
+        p, _ = proxy
+        rid_a = self._open(p)
+        p.submit()
+        p.on_event_ack(rid_a, "submit_complete", editor_hwnd=1)  # A ends
+        rid_b = self._open(p)
+        p._submit_timeout(rid_a)  # session-A timer fires late
+        assert p.is_active is True, (
+            "a safety timer from a previous session must not close the "
+            "current session"
+        )
+        assert p._session_request_id == rid_b
+
+    def test_matching_timer_callback_clears_session(self, proxy):
+        p, _ = proxy
+        rid = self._open(p)
+        p.submit()
+        try:
+            p._submit_timeout(rid)
+            assert p.is_active is False
+            assert p._submit_in_progress.is_set() is False
+            assert p._session_request_id == ""
+        finally:
+            p._cancel_submit_timer()

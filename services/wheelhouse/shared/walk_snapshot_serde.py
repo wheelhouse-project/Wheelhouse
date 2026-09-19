@@ -63,6 +63,7 @@ def summary_to_dict(
                 "role": item.role,
                 "bounds": tuple(item.bounds),
                 "monitor_id": item.monitor_id,
+                "bounds_outside_menu": item.bounds_outside_menu,
             }
             for item in summary.items
         ],
@@ -178,11 +179,34 @@ def _summary_item_from_dict(
                 f"got {type(value).__name__}"
             )
 
+    # A real walk summary numbers its items 1..N, so anything below 1 on the
+    # wire is corruption or version skew. Rejecting it here also keeps the
+    # paint manager's INTERNAL working-badge number (-1, constructed only
+    # in-process by paint_working_badge) unreachable from the wire, where it
+    # would silently draw the working hourglass (wh-overlay-bubble-badges.2.1).
+    if raw["display_number"] < 1:
+        raise error_class(
+            "snapshot_summary item field 'display_number' must be >= 1, "
+            f"got {raw['display_number']}"
+        )
+
     if "bounds" not in raw:
         raise error_class(
             "snapshot_summary item missing required field 'bounds'"
         )
     bounds = _parse_bounds(raw["bounds"], error_class)
+
+    # Optional (wh-vscode-menu-badge-misplaced): a sender that predates the
+    # field sends no key, which reads as the default, "not suspect". A
+    # present key must be a real bool.
+    bounds_outside_menu = (
+        raw["bounds_outside_menu"] if "bounds_outside_menu" in raw else False
+    )
+    if not isinstance(bounds_outside_menu, bool):
+        raise error_class(
+            "snapshot_summary item field 'bounds_outside_menu' must be a "
+            f"bool, got {type(bounds_outside_menu).__name__}"
+        )
 
     return WalkSnapshotSummaryItem(
         item_id=raw["item_id"],
@@ -191,6 +215,7 @@ def _summary_item_from_dict(
         role=raw["role"],
         bounds=bounds,
         monitor_id=raw["monitor_id"],
+        bounds_outside_menu=bounds_outside_menu,
     )
 
 

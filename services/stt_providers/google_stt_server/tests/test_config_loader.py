@@ -26,7 +26,6 @@ from config_loader import (
     AppConfig,
     DebugConfig,
     LatencyConfig,
-    OverflowDetectionConfig,
     AGCConfig,
 )
 
@@ -53,7 +52,6 @@ def _minimal_toml_dict():
         "diagnostics": {},
         "debug": {},
         "latency": {},
-        "overflow_detection": {},
     }
 
 
@@ -562,34 +560,6 @@ initial_noise_floor = 0.01
         assert config.debug.log_stream_responses is True
         assert config.debug.log_frame_stats is True
 
-    def test_overflow_config_mapping(self):
-        """Overflow detection values are mapped correctly."""
-        with patch("config_loader.argparse.ArgumentParser.parse_args", return_value=MagicMock(
-            list_devices=False, ws_host=None, ws_port=None,
-            wake_word_enabled=False, wake_word_keyword=None,
-            wake_word_sensitivity=None, wake_word_mode=None,
-            wake_word_model_dir=None,
-        )):
-            with patch("config_loader.load_config_or_exit") as mock_load:
-                with patch("config_loader.validate_config_or_exit"):
-                    with patch("config_loader._load_hints", return_value=[]):
-                        data = _minimal_toml_dict()
-                        data["overflow_detection"] = {
-                            "enabled": False,
-                            "overflow_threshold": 10,
-                            "window_seconds": 45.0,
-                            "restart_cooldown_seconds": 120.0,
-                            "max_restart_attempts": 5,
-                            "stable_reset_seconds": 600.0,
-                        }
-                        mock_load.return_value = data
-                        args, config = load_config()
-
-        assert config.overflow_detection.enabled is False
-        assert config.overflow_detection.overflow_threshold == 10
-        assert config.overflow_detection.window_seconds == 45.0
-        assert config.overflow_detection.max_restart_attempts == 5
-
     def test_class_tokens_filtered(self):
         """Class tokens are filtered to valid strings only."""
         with patch("config_loader.argparse.ArgumentParser.parse_args", return_value=MagicMock(
@@ -685,15 +655,6 @@ class TestDataclassDefaults:
         assert dc.log_frame_stats is False
         assert dc.log_overflow_diagnostics is False
 
-    def test_overflow_config_defaults(self):
-        oc = OverflowDetectionConfig()
-        assert oc.enabled is True
-        assert oc.overflow_threshold == 5
-        assert oc.window_seconds == 30.0
-        assert oc.restart_cooldown_seconds == 60.0
-        assert oc.max_restart_attempts == 3
-        assert oc.stable_reset_seconds == 300.0
-
     def test_agc_config_defaults(self):
         ac = AGCConfig()
         assert ac.enabled is True
@@ -709,7 +670,6 @@ class TestDataclassDefaults:
         ac = AppConfig(
             latency=LatencyConfig(stability_commit_threshold=0.89),
             debug=DebugConfig(),
-            overflow_detection=OverflowDetectionConfig(),
             agc=AGCConfig(),
         )
         assert ac.model == "latest_short"
@@ -840,3 +800,115 @@ class TestCredentialsFileArg:
     def test_defaults_to_empty_string(self):
         config = self._load(self._args_mock(), _minimal_toml_dict())
         assert config.credentials_file == ""
+
+
+# ---------------------------------------------------------------------------
+# The [overflow_detection] section, after it was deleted
+# ---------------------------------------------------------------------------
+
+class TestALeftoverOverflowDetectionSection:
+    """The loader no longer reads [overflow_detection].
+
+    David ruled on it (QUESTIONS-2026-09-02 item 55, option 2): delete the
+    section, and let OverflowMonitor keep the threshold of 5 it builds for
+    itself. Every value the section carried was dead -- the capture layer
+    passed its own OverflowConfig and never looked at the loaded one.
+
+    A settings file written before that ruling still carries the section,
+    and this provider refuses to start on any section it does not know.
+    So the section has to be accepted and ignored, not merely unread.
+    """
+
+    def test_a_config_without_the_section_is_accepted(self):
+        """The section is no longer required."""
+        config = _minimal_toml_dict()
+        config.pop("overflow_detection", None)
+        validate_config_or_exit(config)
+
+    def test_a_leftover_section_is_accepted(self):
+        """A settings file written before the ruling still starts."""
+        config = _minimal_toml_dict()
+        config["overflow_detection"] = {
+            "enabled": True,
+            "overflow_threshold": 50,
+            "window_seconds": 30.0,
+        }
+        validate_config_or_exit(config)
+
+    def test_a_leftover_section_says_nothing(self, capsys):
+        """Ignored means silent. The section is not the user's mistake."""
+        config = _minimal_toml_dict()
+        config["overflow_detection"] = {"overflow_threshold": 50}
+        validate_config_or_exit(config)
+        assert capsys.readouterr().out == ""
+
+    def test_the_loader_no_longer_defines_the_dataclass(self):
+        import config_loader
+        assert not hasattr(config_loader, "OverflowDetectionConfig")
+
+    def test_the_loaded_config_carries_no_overflow_field(self):
+        """Nothing later in the flow can read a value the monitor never uses."""
+        with patch("config_loader.argparse.ArgumentParser.parse_args", return_value=MagicMock(
+            list_devices=False, ws_host=None, ws_port=None,
+            wake_word_enabled=False, wake_word_keyword=None,
+            wake_word_sensitivity=None, wake_word_mode=None,
+            wake_word_model_dir=None,
+        )):
+            with patch("config_loader.load_config_or_exit") as mock_load:
+                with patch("config_loader.validate_config_or_exit"):
+                    with patch("config_loader._load_hints", return_value=[]):
+                        data = _minimal_toml_dict()
+                        data["overflow_detection"] = {"overflow_threshold": 50}
+                        mock_load.return_value = data
+                        args, config = load_config()
+
+        assert not hasattr(config, "overflow_detection")
+
+
+# ---------------------------------------------------------------------------
+# debug.log_load_diagnostics wiring (wh-stt-load-metrics.4 G1a)
+# ---------------------------------------------------------------------------
+
+class TestDebugLoadDiagnosticsFlag:
+    """The [debug] log_load_diagnostics flag must be read from config.toml.
+
+    It gates the consumer loop's CaptureLoadReporter, whose periodic
+    "[load-diag] window=" line is what the load test waits for before it
+    starts a run. The Parakeet provider reads the same key
+    (sherpa_offline_parakeet_stt_server/main.py:769-780), so one name
+    turns the measurement on for either provider.
+    """
+
+    def _load_with_debug(self, debug_dict):
+        with patch("config_loader.argparse.ArgumentParser.parse_args", return_value=MagicMock(
+            list_devices=False, ws_host=None, ws_port=None,
+            wake_word_enabled=False, wake_word_keyword=None,
+            wake_word_sensitivity=None, wake_word_mode=None,
+            wake_word_model_dir=None,
+        )):
+            with patch("config_loader.load_config_or_exit") as mock_load:
+                with patch("config_loader.validate_config_or_exit"):
+                    with patch("config_loader._load_hints", return_value=[]):
+                        cfg_dict = _minimal_toml_dict()
+                        cfg_dict["debug"] = debug_dict
+                        mock_load.return_value = cfg_dict
+                        args, config = load_config()
+        return config
+
+    def test_log_load_diagnostics_true_from_config(self):
+        config = self._load_with_debug({"log_load_diagnostics": True})
+        assert config.debug.log_load_diagnostics is True
+
+    def test_log_load_diagnostics_defaults_false(self):
+        """Off by default: the line costs one log every ten seconds for
+        the life of the process, and a run that wants it says so."""
+        config = self._load_with_debug({})
+        assert config.debug.log_load_diagnostics is False
+
+    def test_the_two_diagnostic_flags_are_independent(self):
+        """[overflow-diag] and [load-diag] answer different questions and
+        a run can want either without the other."""
+        config = self._load_with_debug({"log_load_diagnostics": True})
+        assert config.debug.log_overflow_diagnostics is False
+        config = self._load_with_debug({"log_overflow_diagnostics": True})
+        assert config.debug.log_load_diagnostics is False

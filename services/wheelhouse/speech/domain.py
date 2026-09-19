@@ -9,11 +9,13 @@ class ProcessingMode(Enum):
         IDLE: Not buffering, processing words immediately (95% of words)
         COMMAND_BUFFERING: Buffering command pattern (1000ms timeout)
         REPLACEMENT_BUFFERING: Buffering replacement pattern (400ms timeout)
+        MID_REPLACEMENT_BUFFERING: Buffering a speculative mid-utterance replacement
         HOTWORD_BUFFERING: Buffering after hotword detected (1000ms timeout)
     """
     IDLE = auto()
     COMMAND_BUFFERING = auto()
     REPLACEMENT_BUFFERING = auto()
+    MID_REPLACEMENT_BUFFERING = auto()
     HOTWORD_BUFFERING = auto()
 
 class Action(Enum):

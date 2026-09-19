@@ -7,8 +7,8 @@ plyer notification system to provide immediate feedback about speech state chang
 
 import logging
 from typing import Optional
-from plyer import notification
 
+from utils.notice_text import send_notice
 from utils.redact import redact_transcript
 
 logger = logging.getLogger(__name__)
@@ -59,13 +59,7 @@ class SpeechNotifier:
     def _send_notification(self, title: str, message: str):
         """Internal method to send notification."""
         try:
-            if hasattr(notification, 'notify') and callable(notification.notify):
-                notification.notify(
-                    title=title,
-                    message=message,
-                    app_name='Wheelhouse',
-                    timeout=3
-                )
+            if send_notice(title, message, app_name='Wheelhouse', timeout=3):
                 logger.debug(
                     f"Notification sent: {title} - "
                     f"{redact_transcript(message)}"

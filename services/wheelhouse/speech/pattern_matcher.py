@@ -27,6 +27,13 @@ from .pattern_catalog import (
     PatternType,
     _normalize_lookup_word,
 )
+from .pattern_transform import (
+    build_literal_prefix_matchers,
+    extract_full_literal_body,
+    extract_literal_prefix,
+    greedy_tail_probe_source,
+    has_greedy_tail,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +112,36 @@ def _normalize_first_word_in_text(text: str) -> str:
     if normalized == first_word:
         return text
     return normalized + sep + rest
+
+
+def _strip_punct_per_token(text: str) -> Optional[str]:
+    """Strip ``_MATCHER_PUNCT_STRIP`` from both ends of every token of ``text``.
+
+    Shared stripping rule for the two punctuation retries that must agree
+    (wh-review-pattern-fixes.6): the complete-command retry in
+    ``_match_command_with_punct_retry`` and the literal-opening probe in
+    ``_buffer_opens_literal_prefix``. The STT/ITN can attach sentence
+    punctuation to ANY word of a multi-word utterance, so both retries
+    clean every token, not only the first or the last.
+
+    Fail-closed rule: a token that is ENTIRELY punctuation strips to the
+    empty string. Rejoining it would leave a double space that ``\\s*``
+    or ``\\s+`` in a pattern could absorb, turning dictated punctuation
+    into a spurious command (wh-midword-punct-severs-count.1.1). Return
+    ``None`` in that case so the caller does not retry at all.
+
+    The buffer is joined with single spaces, so ``split(" ")`` recovers
+    the exact word tokens.
+
+    Returns:
+        The re-joined per-token-stripped text, or ``None`` when any token
+        strips to the empty string (including an already-empty token from
+        a double space in the input).
+    """
+    stripped_words = [w.strip(_MATCHER_PUNCT_STRIP) for w in text.split(" ")]
+    if "" in stripped_words:
+        return None
+    return " ".join(stripped_words)
 
 
 @dataclass
@@ -427,16 +464,16 @@ class PatternMatcher:
         # ("delete , 3" -> three deletes). A standalone punctuation word
         # means the user dictated punctuation, not a command; bail so it
         # falls through to dictation (wh-midword-punct-severs-count.1.1).
+        # The stripping rule (and the bail-out) lives in
+        # _strip_punct_per_token, shared with the literal-opening probe
+        # in _buffer_opens_literal_prefix (wh-review-pattern-fixes.6).
         interior_tail = text[len(stripped):]
-        words = stripped.split(" ")
-        if len(words) > 1:
-            stripped_words = [w.strip(_MATCHER_PUNCT_STRIP) for w in words]
-            if "" not in stripped_words:
-                normalized = " ".join(stripped_words)
-                if normalized != stripped:
-                    retry = compiled_pattern.fullmatch(normalized)
-                    if retry:
-                        return retry, normalized, interior_tail
+        if " " in stripped:
+            normalized = _strip_punct_per_token(stripped)
+            if normalized is not None and normalized != stripped:
+                retry = compiled_pattern.fullmatch(normalized)
+                if retry:
+                    return retry, normalized, interior_tail
 
         return None, text, ""
 
@@ -592,6 +629,23 @@ class PatternMatcher:
         Used by Router to decide whether to continue buffering.
         Returns True if more words might complete a pattern.
 
+        Three strategies per candidate pattern:
+
+        1. The buffer already fullmatches the pattern.
+        2. The de-anchored pattern matches a prefix of the buffer AND the
+           pattern truncated after its last real greedy tail fullmatches
+           the buffer. This runs ONLY for patterns with a real greedy
+           tail (wh-review-pattern-fixes.17/.18): a greedy capture can
+           still consume the trailing buffer words on a later full match,
+           but for a bounded pattern (or a bounded branch of an
+           alternation) those words are unconsumable forever and the
+           probe would hold dictation back for the command timeout. The
+           probes retry with the same punctuation-normalized texts the
+           other strategies use (wh-review-pattern-fixes.19).
+        3. The buffer is the pattern's literal opening, or a truncation of
+           it (_buffer_opens_literal_prefix), or a single word of a
+           multi-word pattern.
+
         Args:
             buffer: Current buffer contents
             pattern_type: "command" or "replacement"
@@ -649,16 +703,76 @@ class PatternMatcher:
                         continue
                 return True  # Already matches, could also continue
 
-            # Strategy 2: Prefix match - buffer is start of pattern
+            # Strategy 2: Prefix match - buffer is start of pattern.
+            # GREEDY-TAIL PATTERNS ONLY (wh-review-pattern-fixes.17): the
+            # de-anchored prefix probe answers True whenever the pattern
+            # matches a PREFIX of the buffer, ignoring trailing buffer
+            # words. For a greedy pattern that is legitimate -- the tail
+            # can still consume those words on a later full match
+            # (^say (.+) twice$ against "say a twice b" extends to
+            # "say a twice b twice"). For a bounded pattern it is exactly
+            # the false-positive class (^(mark[.!?]?)$ against "mark zzq"),
+            # so the router kept buffering with the command timeout instead
+            # of finalizing as dictation at once. Non-greedy continuation
+            # is owned by Strategy 1 (complete buffer) and Strategy 3
+            # (literal_body_matchers plus the single-word fallback).
+            # Greediness lookup order matches _buffer_opens_literal_prefix:
+            # the catalog's precomputed flag first (stored only when True,
+            # so absent reads as None), then the shared has_greedy_tail
+            # helper for synthetic catalogs whose data predates the flag.
+            #
+            # The prefix probe alone is not enough
+            # (wh-review-pattern-fixes.18): ^(mark|say .+)$ IS greedy on
+            # its 'say' branch, yet the de-anchored probe matches the
+            # bounded 'mark' branch against "mark zzq" and ignores the
+            # unconsumable trailing word. So a candidate must pass BOTH
+            # probes: (a) the de-anchored prefix probe, and (b) a FULLMATCH
+            # of greedy_tail_probe_source -- the pattern truncated after
+            # its last real greedy tail -- proving the trailing words are
+            # consumable by the tail on the matched path. A pattern the
+            # helper answers None for (no real tail, or the truncation
+            # does not compile) skips Strategy 2 entirely: fail closed.
+            #
+            # The probes test three candidate texts, in order
+            # (wh-review-pattern-fixes.19): the raw joined buffer, the
+            # first-word-normalized text Strategy 1 uses, and the per-token
+            # punctuation-stripped text the complete-match retry uses
+            # (skipped when a token strips empty -- the fail-closed rule).
+            # Strategy 2 previously probed only the raw join, so an STT
+            # comma on an opening word ("say," + "go") made the router
+            # finalize a greedy command that match_complete would have
+            # accepted once its final words arrived.
             pattern_str = compiled_pattern.pattern
             if pattern_str.endswith('$'):
-                prefix_pattern_str = pattern_str[:-1].lstrip('^')
-                try:
-                    test_regex = re.compile(f"^{prefix_pattern_str}", re.IGNORECASE)
-                    if test_regex.match(buffer_text):
-                        return True
-                except re.error:
-                    pass
+                is_greedy = data.get('is_greedy') if data else None
+                if is_greedy is None:
+                    is_greedy = has_greedy_tail(pattern_str)
+                if is_greedy:
+                    probe_source = greedy_tail_probe_source(pattern_str)
+                    if probe_source is not None:
+                        prefix_pattern_str = pattern_str[:-1].lstrip('^')
+                        try:
+                            prefix_regex = re.compile(
+                                f"^{prefix_pattern_str}", re.IGNORECASE
+                            )
+                            tail_regex = re.compile(
+                                f"^{probe_source}$", re.IGNORECASE
+                            )
+                        except re.error:
+                            prefix_regex = None
+                            tail_regex = None
+                        if prefix_regex is not None and tail_regex is not None:
+                            candidates = [buffer_text]
+                            if fullmatch_text != buffer_text:
+                                candidates.append(fullmatch_text)
+                            per_token = _strip_punct_per_token(buffer_text)
+                            if (per_token is not None
+                                    and per_token not in candidates):
+                                candidates.append(per_token)
+                            for candidate in candidates:
+                                if (prefix_regex.match(candidate)
+                                        and tail_regex.match(candidate)):
+                                    return True
 
             # Strategy 3: Check if buffer could continue to match with more words
             # Only return True if the buffer is a valid prefix that could continue
@@ -670,8 +784,139 @@ class PatternMatcher:
                 if len(buffer) == 1:
                     # Single word - could potentially continue
                     return True
-                # Multiple words - already checked above, don't assume can continue
+                # Multiple words: the buffer keeps listening only when it IS
+                # the pattern's literal opening, or an N-word truncation of
+                # it (wh-multiword-command-prefix-capture). Before this test
+                # existed, every buffer of two or more words fell through to
+                # False, so a command that needs three spoken words before
+                # its first full match -- any two-word trigger followed by a
+                # space and a capture group, such as ^look up (.+)$ -- was
+                # finalized as dictation at word two and never ran.
+                # Pass the punctuation-normalized text, not the raw join:
+                # the STT/ITN attaches sentence punctuation to the first
+                # token ("look," + "up"), and the anchored matchers below
+                # would reject the raw text and finalize the buffer at word
+                # two (wh-review-pattern-fixes.1, Shape A).
+                if self._buffer_opens_literal_prefix(fullmatch_text,
+                                                     compiled_pattern, data):
+                    return True
 
+        return False
+
+    @staticmethod
+    def _buffer_opens_literal_prefix(
+        buffer_text: str,
+        compiled_pattern: "re.Pattern[str]",
+        data: Optional[Dict[str, Any]],
+    ) -> bool:
+        r"""Return True if ``buffer_text`` is the literal opening of a pattern.
+
+        ``buffer_text`` must be the joined buffer AFTER
+        ``_normalize_first_word_in_text`` -- ``can_continue`` passes its
+        ``fullmatch_text``, not the raw join. The matchers are anchored on
+        both ends, so raw text with STT punctuation on the first token
+        ("look, up") would answer False and finalize a speakable command at
+        word two (wh-review-pattern-fixes.1, Shape A).
+
+        Punctuation on a LATER opening word ("look up,") is out of the
+        first-word normalization's reach, so when the matchers reject the
+        text this probe retries with ``_strip_punct_per_token`` -- the same
+        per-token stripping rule ``_match_command_with_punct_retry`` uses
+        for a completed command (wh-review-pattern-fixes.6). The probe
+        therefore matches the complete-match punctuation retry: any opening
+        that retry would accept stays continuable. The retry fails closed
+        on a token that is entirely punctuation (the helper returns None),
+        so dictated standalone punctuation still finalizes.
+
+        The "literal opening" is the fixed text before a pattern's greedy
+        capture tail -- ``look up`` for ``^look up (.+)$``. The matchers are
+        anchored on both ends (``^look up$``, ``^look$``), so this answers
+        True ONLY for a buffer that equals the whole opening or an exact
+        N-word truncation of it. When the opening contains an optional or
+        alternation group (``look (?:the )?widget``),
+        ``build_literal_prefix_matchers`` expands the group into its concrete
+        word-sequence variants and builds truncations for each, so a buffer
+        that ends inside the group (``look the``) also answers True
+        (wh-review-pattern-fixes.9); shapes that expander documents as
+        unexpandable, such as ``(?:very )+``, keep the raw-text matchers and
+        stay a documented miss like Shape B below. A buffer that has left the
+        opening (``look sideways``) answers False, which is what keeps
+        ordinary dictation from being held back waiting for words that never
+        arrive.
+
+        This is the same machinery, and the same lookup order, that
+        ``SpeechRouter._buffer_is_greedy_prefix`` uses for the greedy timer:
+        the matchers the catalog compiled at load time
+        (wh-greedy-prefix-precompute, wh-lru-cache-hot-paths.1.5), then the
+        stored prefix string, then a runtime extraction for synthetic test
+        catalogs whose pattern data predates both fields. Nothing is cached
+        here, for the reasons recorded on ``build_literal_prefix_matchers``.
+
+        A pattern with NO greedy tail gets the same treatment with its WHOLE
+        anchored body as the "literal opening" (wh-review-pattern-fixes.12):
+        ``^push to talk mode$`` yields the matchers ``^push to talk mode$``,
+        ``^push$``, ``^push to$``, ``^push to talk$``, so a pause after two
+        spoken words of a 3+-word literal command keeps listening instead of
+        finalizing as dictation. ``extract_full_literal_body`` supplies that
+        body (it returns '' for a greedy pattern, or for one bounded at
+        neither end -- the accepted shapes are ``^...$`` and ``\b...\b``
+        -- keeping the two extractors disjoint), and the catalog stores
+        the compiled result under ``literal_body_matchers`` -- a separate
+        key from the greedy
+        ``literal_prefix`` fields, so a non-greedy pattern never becomes
+        eligible for the router's greedy timer. Group expansion, the
+        truncation matchers, and the punctuation retry below apply to both
+        shapes unchanged. One reachable shape stays uncovered:
+        ``extract_literal_prefix`` takes the text before the FIRST greedy
+        tail and discards everything after it, so a pattern whose greedy
+        tail is followed by more literal text -- ``^say (.+) twice$`` --
+        gets only the matcher ``^say$``. The buffer ``["say", "hello"]`` is
+        a genuine prefix of that pattern, but this helper answers False and
+        the command still finalizes as dictation at the pause
+        (wh-review-pattern-fixes.1, Shape B). Covering it needs new matcher
+        machinery that also tests "opening + anything + suffix" prefixes;
+        the current matchers describe only the pre-tail opening.
+        """
+        matchers = data.get("literal_prefix_matchers") if data else None
+        if matchers is None:
+            # wh-review-pattern-fixes.12: non-greedy anchored patterns store
+            # their whole-body matchers under a separate catalog key.
+            matchers = data.get("literal_body_matchers") if data else None
+        if matchers is None:
+            # Runtime extraction fallback for synthetic test catalogs whose
+            # data dicts predate the precomputed fields; compiles on every
+            # call by design (see build_literal_prefix_matchers on why no
+            # cache belongs here).
+            literal_prefix = data.get("literal_prefix") if data else None
+            if literal_prefix is None:
+                literal_prefix = extract_literal_prefix(compiled_pattern.pattern)
+            if not literal_prefix:
+                # No greedy tail: try the whole body of a ``^...$`` or
+                # ``\b...\b`` pattern (wh-review-pattern-fixes.12 and
+                # wh-spaced-punctuation-names-unresolved). Returns '' for
+                # a pattern bounded at neither end, which then answers
+                # False as before.
+                literal_prefix = extract_full_literal_body(
+                    compiled_pattern.pattern
+                )
+            if not literal_prefix:
+                return False
+            matchers = build_literal_prefix_matchers(literal_prefix)
+        if any(matcher.match(buffer_text) for matcher in matchers):
+            return True
+        # Punctuation retry (wh-review-pattern-fixes.6): the first-word
+        # normalization above cannot reach STT punctuation on a LATER
+        # opening word ("look" + "up,"), so the anchored matchers reject
+        # the raw text and the command finalizes as dictation at the
+        # pause -- even though _match_command_with_punct_retry would have
+        # accepted the completed command. Retry with the SAME per-token
+        # stripping rule that retry uses (shared _strip_punct_per_token),
+        # so the probe and the complete-match punctuation retry agree.
+        # The helper returns None when any token is entirely punctuation,
+        # so a dictated standalone "," still fails closed here.
+        normalized = _strip_punct_per_token(buffer_text)
+        if normalized is not None and normalized != buffer_text:
+            return any(matcher.match(normalized) for matcher in matchers)
         return False
 
     def cannot_match(
@@ -731,6 +976,18 @@ class PatternMatcher:
                     if words_to_int(captured_value) is None:
                         logger.debug(f"Numeric validation failed for '{redact_transcript(captured_value)}'")
                         return False
+            else:
+                # The recorded group does not exist in the compiled
+                # pattern. The lexer-based transform records the real
+                # capture number (wh-review-pattern-fixes.27), so this
+                # is a metadata bug, not a normal path -- but stay
+                # permissive so a hand-authored catalog entry with a
+                # stale group number still executes.
+                logger.warning(
+                    "Numeric validation group %s exceeds the pattern's "
+                    "%d capture group(s); skipping validation",
+                    validation_group, len(match.groups()),
+                )
         except (ValueError, IndexError) as e:
             logger.warning(f"Validation group parse error: {e}")
 

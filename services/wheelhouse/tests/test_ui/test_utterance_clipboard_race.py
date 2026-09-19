@@ -9,6 +9,32 @@ the spoken word when:
 The fix ensures `end_utterance` is sent AFTER `intelligent_insert_text` completes,
 so `is_in_utterance()` returns True during paste operations.
 
+wh-spaced-punctuation-names-unresolved.3 (2026-09-05) makes that ordering
+one of two correct orderings rather than the only one. A word that opens a
+multi-word punctuation name -- "new" opens "new line" and "new paragraph" --
+is now held across the utterance end for one release window, so its
+insertion arrives AFTER `end_utterance`. Two tests below were changed for
+this and say so at the point of the change.
+
+The clipboard is still protected on that path, by a different mechanism
+than the ordering:
+  `is_in_utterance()` returns False once `end_utterance` has run
+  (ui/utterance_clipboard_manager.py:418 clears the flag, :430 reads it).
+  Every reader of that answer wraps its not-in-utterance branch in
+  `clipboard_context(restore_delay=0.05)`, which saves and restores the
+  clipboard itself: ui/ui_action_handler.py:1479 (`_do_direct_insert`),
+  :1626 (`intelligent_insert_text`), and :5184 (the retry-click path).
+  The comment already at ui_action_handler.py:5178-5182 states this exact
+  case in the shipped code's own words.
+  The utterance manager's own deferred restore is ownership-aware
+  (`_do_restore` at ui/utterance_clipboard_manager.py:530, which calls
+  `_execute_restore_decision_locked` at :552): it reads the Win32
+  clipboard sequence number and skips the restore when that number
+  advanced after the last paste, so it cannot undo a later insertion's
+  work.
+The same ordering is already shipped for a held bare number, which sends
+`end_utterance` and returns with its words still held.
+
 See: docs/design/clipboard-race-fix-plan.md
 """
 import sys
@@ -93,19 +119,6 @@ class CommandOrderTrackingApp:
         self._order_counter = 0
 
 
-class MockContextMirror:
-    """Mock context mirror that doesn't use shared memory."""
-
-    def __init__(self):
-        self._context = {"app_name": "TestApp", "window_title": "Test Window", "timestamp": 0.0}
-
-    def init_reader(self):
-        pass
-
-    def read_context(self) -> dict:
-        return self._context
-
-
 class ClipboardRaceTestHarness:
     """Test harness specifically for clipboard race condition testing.
 
@@ -144,9 +157,6 @@ class ClipboardRaceTestHarness:
             command_timeout_ms=1000,
             hotword="x-ray"
         )
-
-        # Replace context mirror with mock
-        self.processor.context_mirror = MockContextMirror()
 
         self._utterance_counter = 0
 
@@ -273,8 +283,11 @@ class TestClipboardRaceCondition:
         # Send utterance_end_marker while still buffering
         await running_harness.send_utterance_end_marker(utterance_id)
 
-        # Wait for timeout to expire
-        await running_harness.wait_for_timeout(300)
+        # Wait past BOTH windows. wh-spaced-punctuation-names-unresolved.3:
+        # "new" now waits the buffer window and then one release window,
+        # each replacement_timeout_ms, which the running_harness sets to
+        # 200 ms. 300 ms left no margin over the pair.
+        await running_harness.wait_for_timeout(600)
 
         # Get the command order
         order = running_harness.get_command_order()
@@ -292,10 +305,31 @@ class TestClipboardRaceCondition:
         actions_between = order[start_idx + 1:end_idx]
         print(f"[DEBUG] Actions between start and end: {actions_between}")
 
-        # end_utterance should be LAST (after all other actions for this utterance)
-        assert end_idx == len(order) - 1, (
-            f"end_utterance should be last command. "
-            f"Order: {order}, end_utterance at index {end_idx}"
+        # wh-spaced-punctuation-names-unresolved.3 replaced the assertion
+        # that end_utterance is last. "new" opens "new line" and "new
+        # paragraph", so it is now held across the utterance end and its
+        # insertion arrives after end_utterance. The order is deliberately
+        # NOT pinned in either direction: both orders are correct, and the
+        # clipboard is protected on the later one by clipboard_context and
+        # the ownership-aware restore described in the module docstring.
+        # What still has to be true is that nothing is lost or doubled.
+        inserted = [
+            cmd.params.get('insertion_string')
+            for cmd in running_harness.mock_app.get_commands_by_action(
+                'intelligent_insert_text'
+            )
+        ]
+        assert inserted == ['new'], (
+            f"Expected exactly one insertion of 'new'. "
+            f"Got: {inserted}, order: {order}"
+        )
+        assert order.count('start_utterance') == 1, (
+            f"Expected exactly one start_utterance. Order: {order}, "
+            f"start_utterance at index {start_idx}"
+        )
+        assert order.count('end_utterance') == 1, (
+            f"Expected exactly one end_utterance. Order: {order}, "
+            f"end_utterance at index {end_idx}"
         )
 
     @pytest.mark.asyncio
@@ -348,8 +382,8 @@ class TestClipboardRaceCondition:
         # Utterance ends while buffering (this is the race condition trigger)
         await running_harness.send_utterance_end_marker(utterance_id)
 
-        # Wait for timeout to expire and dictation to happen
-        await running_harness.wait_for_timeout(300)
+        # Wait past BOTH windows, for the reason given in the test above.
+        await running_harness.wait_for_timeout(600)
 
         order = running_harness.get_command_order()
         print(f"\n[DEBUG] Buffered word order: {order}")
@@ -361,15 +395,34 @@ class TestClipboardRaceCondition:
         start_idx = order.index('start_utterance')
         end_idx = order.index('end_utterance')
 
-        # There should be something between start and end (the buffer finalization action)
-        assert end_idx > start_idx + 1, (
-            f"There should be actions between start_utterance and end_utterance. "
-            f"Order: {order}"
+        # wh-spaced-punctuation-names-unresolved.3 replaced both assertions
+        # here, and the first one is a departure from the letter of the
+        # ruling that authorised the change. The ruling names the
+        # "end_utterance is last" assertion; this test fails earlier, on
+        # "there should be actions between start and end", which states the
+        # same premise a different way. Stage B holds "new" across the
+        # utterance end, so the finalization lands after end_utterance and
+        # neither assertion can hold. Both are replaced on the same
+        # grounds, and the module docstring gives the mechanism that keeps
+        # the clipboard safe on the later ordering.
+        # The order is deliberately NOT pinned in either direction.
+        inserted = [
+            cmd.params.get('insertion_string')
+            for cmd in running_harness.mock_app.get_commands_by_action(
+                'intelligent_insert_text'
+            )
+        ]
+        assert inserted == ['new'], (
+            f"Expected exactly one insertion of 'new'. "
+            f"Got: {inserted}, order: {order}"
         )
-
-        # end_utterance should be last
-        assert end_idx == len(order) - 1, (
-            f"end_utterance should be the last command. Order: {order}"
+        assert order.count('start_utterance') == 1, (
+            f"Expected exactly one start_utterance. Order: {order}, "
+            f"start_utterance at index {start_idx}"
+        )
+        assert order.count('end_utterance') == 1, (
+            f"Expected exactly one end_utterance. Order: {order}, "
+            f"end_utterance at index {end_idx}"
         )
 
 

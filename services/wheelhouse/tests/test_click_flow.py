@@ -26,6 +26,7 @@ tests/test_ui/test_click_element_handler.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -98,10 +99,12 @@ def _make_controller(*, enabled=True, response_timeout_ms=3000,
 
     captured = {}
 
-    async def _send_request(action, params=None, timeout_s=None):
+    async def _send_request(action, params=None, timeout_s=None,
+                            on_late_response=None):
         captured["action"] = action
         captured["params"] = params
         captured["timeout_s"] = timeout_s
+        captured["on_late_response"] = on_late_response
         if send_exc is not None:
             raise send_exc
         return send_result
@@ -166,6 +169,33 @@ def test_timeout_emits_execution_failed_timeout():
     assert notice.trace_id == "trace-to"
 
 
+@pytest.mark.parametrize(
+    "send_exc", [asyncio.TimeoutError(), RuntimeError("boom")],
+    ids=["timeout", "send-failure"],
+)
+def test_send_fault_companion_log_is_below_error(send_exc, caplog):
+    """One send_request fault must produce ONE ERROR record, not two.
+
+    WheelHouseApp.send_request already logs every timeout / send failure at
+    ERROR before re-raising, and the error-notification handler turns EVERY
+    ERROR record into its own Windows notification popup. When this awaiter
+    logged its companion line at ERROR too, one fault popped two
+    notifications (observed live 2026-08-08 on a start_overlay_walk timeout;
+    wh-duplicate-error-popup). The companion line keeps its context in the
+    log -- at WARNING.
+    """
+    c = _make_controller(send_exc=send_exc)
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(c.forward_click_element(_query(), "trace-lvl"))
+    companions = [
+        r for r in caplog.records
+        if "no reply within" in r.getMessage()
+        or "send_request failed" in r.getMessage()
+    ]
+    assert companions, "expected the awaiter's companion log line"
+    assert all(r.levelno < logging.ERROR for r in companions)
+
+
 def test_uses_click_response_timeout_ms_not_app_default():
     # Regression: the click round trip must use [click].response_timeout_ms
     # (3000ms -> 3.0s), NOT WheelHouseApp.response_timeout_s (5.0s default).
@@ -180,6 +210,257 @@ def test_custom_response_timeout_ms_is_honoured():
     c = _make_controller(response_timeout_ms=1500, send_exc=asyncio.TimeoutError())
     asyncio.run(c.forward_click_element(_query(), "t"))
     assert c._captured["timeout_s"] == pytest.approx(1.5)
+
+
+# ---------------------------------------------------------------------------
+# Late-answer correction (wh-overlay-slow-uia-stale-badges.6, Option A).
+#
+# The awaiter passes on_late_response to send_request. When the true answer
+# arrives after the timeout (inside app.py's grace window), a NON-OK answer
+# forwards the corrected notice -- the toast singleton replaces the visible
+# "timed out" text -- and an OK answer forwards nothing (INFO log only).
+# ---------------------------------------------------------------------------
+
+
+def _notices(controller):
+    """Return every ClickNoticeEvent forwarded to the GUI, in order."""
+    q = controller.state_manager.state_to_gui_queue.put_nowait
+    events = []
+    for call in q.call_args_list:
+        msg = call[0][0]
+        assert msg["action"] == "show_click_notice"
+        events.append(ClickNoticeEvent.from_dict(
+            {k: v for k, v in msg.items() if k != "action"}
+        ))
+    return events
+
+
+def _late_response(outcome, *, reason=None, matched_name=None,
+                   trace_id="trace-late"):
+    return ClickElementResponse(
+        status="ok" if outcome == "ok" else "error",
+        outcome=outcome,
+        reason=reason,
+        matched_names=(),
+        snapshot_id=None,
+        snapshot_summary=None,
+        matched_name=matched_name,
+        trace_id=trace_id,
+    ).to_dict()
+
+
+def test_awaiter_passes_late_response_callback():
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    assert callable(c._captured["on_late_response"])
+
+
+def test_late_non_ok_response_forwards_corrected_notice():
+    # The incident shape: transport timeout notice first, then the true
+    # refusal arrives late. The late callback must forward the refusal's
+    # reason through the same response-to-notice mapping the on-time path
+    # uses, so the corrected notice replaces the "timed out" toast text.
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    cb = c._captured["on_late_response"]
+    cb(_late_response(
+        "execution_failed", reason="bounds_invalid", matched_name="OK",
+    ))
+    events = _notices(c)
+    assert len(events) == 2
+    assert events[0].reason == "timeout"
+    assert events[1].outcome == "execution_failed"
+    assert events[1].reason == "bounds_invalid"
+    assert events[1].matched_name == "OK"
+    assert events[1].spoken_name == "cancel"
+    assert events[1].trace_id == "trace-late"
+
+
+def test_late_ok_response_forwards_no_notice():
+    # Decided residual: a late OK gets an INFO log only -- no success-notice
+    # mechanism exists, and the user saw the click happen.
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    cb = c._captured["on_late_response"]
+    cb(_late_response("ok", matched_name="OK"))
+    events = _notices(c)
+    assert len(events) == 1
+    assert events[0].reason == "timeout"
+
+
+def test_late_malformed_response_forwards_no_notice():
+    # A malformed late payload must not replace the (accurate) timeout notice
+    # with a less specific one; it logs and leaves the toast alone.
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    cb = c._captured["on_late_response"]
+    cb({"garbage": True})
+    events = _notices(c)
+    assert len(events) == 1
+    assert events[0].reason == "timeout"
+
+
+def test_late_response_with_summary_populates_snapshot_cache():
+    # wh-overlay-slow-uia-stale-badges.20.3(b): a late parsed response
+    # carrying snapshot_id + snapshot_summary must populate the summary cache
+    # exactly like the on-time put, so the badge resolution can read it.
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    cb = c._captured["on_late_response"]
+    late = ClickElementResponse(
+        status="error",
+        outcome="execution_failed",
+        reason="bounds_invalid",
+        matched_names=(),
+        snapshot_id="walk-9",
+        snapshot_summary=_summary("walk-9"),
+        matched_name="OK",
+        trace_id="trace-late",
+    ).to_dict()
+    cb(late)
+    result = c.click_snapshot_summary_cache.resolve("walk-9")
+    assert result.summary is not None
+    assert result.summary.snapshot_id == "walk-9"
+
+
+def test_late_ambiguous_does_not_auto_open_overlay():
+    # DECIDED (wh-overlay-slow-uia-stale-badges.20.3): a late ambiguous reply
+    # does NOT auto-open the numbered overlay -- an overlay appearing seconds
+    # after the command, unprompted, is worse than the corrected notice
+    # alone. Only the corrected ambiguous notice is forwarded.
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    cb = c._captured["on_late_response"]
+    cb(_late_response("ambiguous", trace_id="trace-late"))
+    c._perform_auto_open_ambiguous.assert_not_called()
+    events = _notices(c)
+    assert len(events) == 2
+    assert events[1].outcome == "ambiguous"
+
+
+def test_late_correction_suppressed_when_newer_notice_forwarded(caplog):
+    # wh-overlay-slow-uia-stale-badges.20.4: a newer notice (another click's
+    # feedback) was forwarded between the timeout and the late answer. The
+    # correction must be suppressed with an INFO log naming both trace ids,
+    # not replace the newer, still-accurate notice.
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    cb = c._captured["on_late_response"]
+    # A newer click's notice lands after the timeout notice.
+    c._forward_click_notice(
+        outcome="execution_failed", reason="disabled", matched_name="Cancel",
+        matched_names=(), spoken_name="cancel", snapshot_id=None,
+        trace_id="trace-newer",
+    )
+    with caplog.at_level(logging.INFO):
+        cb(_late_response(
+            "execution_failed", reason="bounds_invalid", trace_id="trace-late",
+        ))
+    events = _notices(c)
+    assert len(events) == 2  # the timeout + the newer notice; no correction
+    assert events[1].trace_id == "trace-newer"
+    suppressed = [
+        r for r in caplog.records
+        if "trace-newer" in r.getMessage() and "trace-late" in r.getMessage()
+    ]
+    assert suppressed, "expected the suppression log naming both trace ids"
+
+
+def test_late_refusal_forwarded_when_timeout_notice_put_failed():
+    # wh-overlay-slow-uia-stale-badges.20.10 (A-fail-nothing-newer): A's
+    # timeout notice never left Logic (the GUI queue put raised Full) and no
+    # newer notice was forwarded. A's late refusal is then the FIRST
+    # feedback for the newest click, not a stale overwrite -- it must be
+    # forwarded. Comparing only the last SUCCESSFUL trace cannot see this.
+    from queue import Full
+
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    q = c.state_manager.state_to_gui_queue.put_nowait
+    q.side_effect = [Full("queue full"), None]
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    assert q.call_count == 1  # the timeout notice attempt failed
+
+    cb = c._captured["on_late_response"]
+    cb(_late_response(
+        "execution_failed", reason="bounds_invalid", trace_id="trace-late",
+    ))
+    assert q.call_count == 2  # the late refusal was retried as feedback
+    forwarded = q.call_args_list[1][0][0]
+    assert forwarded["action"] == "show_click_notice"
+    assert forwarded["reason"] == "bounds_invalid"
+    # The successful late put records the trace like any forwarded notice.
+    assert c._last_click_notice_trace_id == "trace-late"
+
+
+def test_late_refusal_suppressed_when_newer_notice_succeeded_after_failed_attempt(
+    caplog,
+):
+    # wh-overlay-slow-uia-stale-badges.20.10 (A-fail-then-B2-success): A's
+    # timeout notice put failed, but a NEWER click's notice B2 succeeded
+    # afterwards. B2's notice is on the toast; A's late correction must
+    # still be suppressed, with the INFO log naming the ids.
+    from queue import Full
+
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    q = c.state_manager.state_to_gui_queue.put_nowait
+    q.side_effect = [Full("queue full"), None, None]
+    asyncio.run(c.forward_click_element(_query(), "trace-late"))
+    assert q.call_count == 1  # A's timeout notice attempt failed
+    # A newer click's notice succeeds.
+    c._forward_click_notice(
+        outcome="execution_failed", reason="disabled", matched_name="Cancel",
+        matched_names=(), spoken_name="cancel", snapshot_id=None,
+        trace_id="trace-newer",
+    )
+    assert q.call_count == 2
+
+    cb = c._captured["on_late_response"]
+    with caplog.at_level(logging.INFO):
+        cb(_late_response(
+            "execution_failed", reason="bounds_invalid", trace_id="trace-late",
+        ))
+    assert q.call_count == 2  # no third put: the correction was suppressed
+    suppressed = [
+        r for r in caplog.records
+        if "trace-newer" in r.getMessage() and "trace-late" in r.getMessage()
+    ]
+    assert suppressed, "expected the suppression log naming the trace ids"
+
+
+def test_older_late_correction_does_not_erase_a_newer_failed_attempt():
+    # wh-overlay-slow-uia-stale-badges.20.11: click A times out and its
+    # timeout notice reaches the GUI; click B times out later and its own
+    # timeout notice put FAILS (queue full). A's late refusal is then
+    # correctly admitted -- the toast still shows A's timeout wording -- but
+    # forwarding it must NOT move the attempt marker back to A, or B's late
+    # refusal matches neither marker and B never gets any true feedback.
+    from queue import Full
+
+    c = _make_controller(send_exc=asyncio.TimeoutError())
+    q = c.state_manager.state_to_gui_queue.put_nowait
+    q.side_effect = [None, Full("queue full"), None, None]
+
+    asyncio.run(c.forward_click_element(_query(), "trace-a"))
+    cb_a = c._captured["on_late_response"]
+    asyncio.run(c.forward_click_element(_query(), "trace-b"))
+    cb_b = c._captured["on_late_response"]
+    assert q.call_count == 2  # A's notice shown, B's notice dropped
+
+    cb_a(_late_response(
+        "execution_failed", reason="bounds_invalid", trace_id="trace-a",
+    ))
+    assert q.call_count == 3  # A's correction replaces A's timeout wording
+
+    cb_b(_late_response(
+        "execution_failed", reason="disabled", trace_id="trace-b",
+    ))
+    assert q.call_count == 4, (
+        "B's late refusal must still be forwarded: the older correction for "
+        "A must not erase B's failed notice attempt"
+    )
+    forwarded = q.call_args_list[3][0][0]
+    assert forwarded["trace_id"] == "trace-b"
+    assert forwarded["reason"] == "disabled"
 
 
 # ---------------------------------------------------------------------------

@@ -101,8 +101,9 @@ class IdleMonitorPlugin(BasePlugin):
         if self.polling_interval_seconds <= 0:
             raise ValueError("polling_interval_seconds must be positive")
 
-        # Warn if polling is too aggressive
-        if self.polling_interval_seconds < 5:
+        # Warn if polling is too aggressive. The shipped default is 4s
+        # (config.toml, help document), so the threshold sits below it.
+        if self.polling_interval_seconds < 2:
             logger.warning(
                 f"Polling interval {self.polling_interval_seconds}s is aggressive. "
                 "Consider increasing to reduce CPU usage."

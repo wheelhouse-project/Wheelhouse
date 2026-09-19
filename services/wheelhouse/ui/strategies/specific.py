@@ -62,22 +62,13 @@ does not introduce additional concurrent-mutation defences. See
 docs/design/benchmarks/2026-05-02-155250-qpte-uia-fidelity.md
 section Follow-up paragraph 4 for the full analysis.
 """
-import gc
+from dataclasses import replace
 import logging
-import threading
 import time
 from typing import Optional
 import uiautomation as auto
 import win32gui
 
-# wh-trailing-corruption-phase2: psutil is best-effort. If the package
-# is not available in the Input process venv we still log the rest of
-# the cold-state snapshot; only the working-set memory line is skipped.
-try:
-    import psutil
-    _process = psutil.Process()
-except Exception:
-    _process = None
 from .base import InsertionMode, InsertionOptions, InsertionResult, InsertionStrategy
 from ..context import UIContext
 from shared.rejection_category import (
@@ -89,75 +80,16 @@ from ui.hwnd_utils import (
     _FALLBACK_SAME_PROCESS_BROWSER_NAMES,
     hwnds_match_for_foreground_compare,
     normalize_hwnd_for_foreground_compare,
-    process_name_for_hwnd,
+    process_identity_for_hwnd,
+    tag_hwnd_provenance,
+    top_level_hwnd_from_control,
 )
+from ui.clipboard_operations import captured_hwnd_survives_stale_focus
+from ui.target_identity import TargetIdentity
 from utils.win_input_sender import snapshot_modifier_state, type_string_verified
 from utils.redact import redact_transcript
 
 logger = logging.getLogger(__name__)
-
-
-# wh-trailing-corruption-instrument: number of per-strategy-instance
-# dispatches that are logged at INFO before falling through to DEBUG.
-# Keeps the wh-startup-trailing-corruption hypothesis (corruption near
-# process startup) visible in the default log without flooding long
-# dictation sessions with INFO records.
-DISPATCH_INFO_LOG_LIMIT = 5
-
-# wh-trailing-corruption-phase2: cap the expensive post-send UIA
-# readback to the very start of every session. The user reports that
-# the corruption usually shows up in the first ~10 dictated words after
-# WheelHouse starts; the 2026-05-21 reproduction that hit dispatch 33
-# was an unusually long warm-up. Keep the limit small so the slow-
-# dictation cost is bounded to the first sentence or so of each
-# session, after which the readback turns off and dictation speed
-# returns to normal.
-POST_SEND_READBACK_DISPATCH_LIMIT = 10
-
-# wh-trailing-corruption-phase2: module import time as a stand-in for
-# Input process start. The Input process imports this module once at
-# startup, so the elapsed-since-import value tracks process age within
-# a few hundred milliseconds. Logged alongside each dispatch so the
-# corruption ordinal range can be aligned with wall-clock cold time.
-_MODULE_IMPORT_TIME = time.monotonic()
-
-
-def _snapshot_cold_state() -> str:
-    """Return a compact string of cold-path indicators for the dispatch log.
-
-    wh-trailing-corruption-phase2: when the next cold-start reproduction
-    of wh-startup-trailing-corruption lands, each VerifiedUnicodeStrategy
-    dispatch log line carries this snapshot so the broken ordinal range
-    can be correlated with: time since Input process started, current
-    garbage-collector counts (which generations have run), the number of
-    live threads, and the working-set memory. A correlation between any
-    of these and the corrupt-vs-clean boundary narrows the warmup gate
-    candidate set.
-
-    The helper is defensive: every probe is wrapped so a diagnostic log
-    line cannot crash the dispatch path.
-    """
-    elapsed_s = time.monotonic() - _MODULE_IMPORT_TIME
-    try:
-        gc0, gc1, gc2 = gc.get_count()
-        gc_str = f"{gc0}/{gc1}/{gc2}"
-    except Exception:
-        gc_str = "?"
-    try:
-        thread_count = threading.active_count()
-    except Exception:
-        thread_count = -1
-    if _process is not None:
-        try:
-            rss_mb = _process.memory_info().rss / (1024 * 1024)
-            rss_str = f"{rss_mb:.1f}MB"
-        except Exception:
-            rss_str = "?"
-    else:
-        rss_str = "n/a"
-    return (
-        f"age={elapsed_s:.1f}s gc={gc_str} threads={thread_count} rss={rss_str}"
-    )
 
 
 def _resolve_options(options: Optional[InsertionOptions]) -> InsertionOptions:
@@ -186,18 +118,36 @@ def _hwnd_from_control(focused_control) -> Optional[int]:
     ``GetForegroundWindow()`` in the verified_paste post-paste check.
     Without this, Chromium dictation paths classified successful pastes
     as focus drift and skipped retract accounting.
+
+    wh-review-pattern-fixes.45: the read of the handle out of the
+    control moved to ``ui.hwnd_utils.top_level_hwnd_from_control`` so
+    ``ui.ui_action_handler`` resolves a captured selection target
+    through the same code. The normalization stays here, against this
+    module's own name, so the existing tests patch it where they always
+    did.
     """
-    if not focused_control:
-        return None
-    try:
-        top = focused_control.GetTopLevelControl()
-        hwnd = top.NativeWindowHandle if top else None
-    except Exception as e:
-        logger.debug("Could not resolve target HWND from focused_control: %s", e)
-        return None
+    hwnd = top_level_hwnd_from_control(focused_control)
     if not hwnd:
         return None
-    return normalize_hwnd_for_foreground_compare(int(hwnd))
+    return normalize_hwnd_for_foreground_compare(hwnd)
+
+
+def _context_hwnd(context: UIContext) -> Optional[int]:
+    """Reuse the original capture; only legacy contexts resolve at entry."""
+    identity = getattr(context, "target_identity", None)
+    if identity is not None:
+        return identity.root or None
+    return _hwnd_from_control(context.focused_control)
+
+
+def _identity_options(context: UIContext) -> dict:
+    identity = getattr(context, "target_identity", None)
+    return {"target_identity": identity} if identity is not None else {}
+
+
+def _target_is_current(context: UIContext) -> bool:
+    identity = getattr(context, "target_identity", None)
+    return identity is None or identity.is_current()
 
 # ============================================================================
 # HELPER STRATEGIES (Internal use)
@@ -253,7 +203,7 @@ class ShadowBufferStrategy(InsertionStrategy):
             # need a target HWND for the post-paste foreground check, but
             # we skip the buffer sync gate -- the caller already composed
             # the final text and does not need preceding-context for it.
-            target_hwnd = _hwnd_from_control(context.focused_control)
+            target_hwnd = _context_hwnd(context)
             success = self.clipboard.verified_paste(
                 insertion_string,
                 self.window_manager,
@@ -261,6 +211,7 @@ class ShadowBufferStrategy(InsertionStrategy):
                 target_control=context.focused_control,
                 target_hwnd=target_hwnd,
                 target_class_name=context.class_name,
+                **_identity_options(context),
             )
             if success:
                 # Update the shadow buffer if it is valid; otherwise leave
@@ -286,11 +237,10 @@ class ShadowBufferStrategy(InsertionStrategy):
             **buffer_context
         )
 
-        # wh-59i32: capture HWND from the focused control at strategy entry
-        # so the paste targets the field that had focus when capture_context
-        # ran, not whatever has focus now (focus can drift to a popup or
-        # focus-stealing app between capture and paste).
-        target_hwnd = _hwnd_from_control(context.focused_control)
+        # wh-captured-target-window-lost: the context owns this identity.
+        # Unicode fallback and buffer work may have made the UIA element
+        # stale since capture; resolving it again here loses the target.
+        target_hwnd = _context_hwnd(context)
 
         # Paste and update buffer
         # Use context.is_flutter to determine if we need special handling in verified_paste
@@ -301,6 +251,7 @@ class ShadowBufferStrategy(InsertionStrategy):
             target_control=context.focused_control,
             target_hwnd=target_hwnd,
             target_class_name=context.class_name,
+            **_identity_options(context),
         )
 
         if success:
@@ -403,6 +354,8 @@ class ClipboardFallbackStrategy(InsertionStrategy):
 
         Skipped when no predicate is wired (legacy test fixtures).
         """
+        if not _target_is_current(context):
+            return InsertionResult(False, False, "captured_target_lost"), None
         if self.text_target_predicate is None:
             return None, None
         if getattr(context, "is_flutter", False):
@@ -425,7 +378,7 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                 # frame; comparing the raw NativeWindowHandle values
                 # would otherwise misclassify two controls under one
                 # browser window as a cross-window change (wh-ix1z.13).
-                original_hwnd = _hwnd_from_control(context.focused_control)
+                original_hwnd = _context_hwnd(context)
                 current_hwnd = _hwnd_from_control(current)
                 # Either resolution failure means the safety check
                 # cannot be made -- fail closed (wh-ix1z.14). The
@@ -536,7 +489,7 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                 target_hwnd = (
                     validated_hwnd
                     if validated_hwnd is not None
-                    else _hwnd_from_control(context.focused_control)
+                    else _context_hwnd(context)
                 )
                 success = self.clipboard.verified_paste(
                     insertion_string,
@@ -545,6 +498,7 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                     target_control=context.focused_control,
                     target_hwnd=target_hwnd,
                     target_class_name=context.class_name,
+                    **_identity_options(context),
                 )
                 # No restore on failure: this branch never called
                 # clear_selection, so there is nothing call-local to put
@@ -580,13 +534,36 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                     has_selection=uia_context.get('has_selection', False),
                 )
             else:
-                # Slow path: clipboard-based context gathering
-                self.clipboard.clear_selection(
-                    context.focused_control if context.is_flutter else None
-                )
+                # Slow path: clipboard-based context gathering.
+                #
+                # wh-review-pattern-fixes.36: both preparation steps can
+                # now report that their keystrokes were not delivered,
+                # and both reports abort the insertion before any paste.
+                # The old code discarded clear_selection's result and
+                # read gather_context's empty dict as a legitimate
+                # empty context, so a dropped Ctrl+C left the user's
+                # selection live and the paste overwrote it while this
+                # method reported success.
+                if not self.clipboard.clear_selection(
+                    context.focused_control if context.is_flutter else None,
+                    **_identity_options(context),
+                ):
+                    logger.error(
+                        "Clipboard fallback: clear_selection reported "
+                        "failure; aborting before any paste."
+                    )
+                    return self._abort_before_paste()
                 clipboard_context = self.clipboard.gather_context(
-                    context.focused_control if context.is_flutter else None
+                    context.focused_control if context.is_flutter else None,
+                    **_identity_options(context),
                 )
+                if clipboard_context.get('delivery_failed'):
+                    logger.error(
+                        "Clipboard fallback: gather_context reported a "
+                        "failed probe (short chord or clipboard error); "
+                        "aborting before any paste."
+                    )
+                    return self._abort_before_paste()
                 t_context = time.perf_counter()
                 preceding = clipboard_context.get('preceding_chars', '')
                 logger.info(
@@ -610,7 +587,7 @@ class ClipboardFallbackStrategy(InsertionStrategy):
             target_hwnd = (
                 validated_hwnd
                 if validated_hwnd is not None
-                else _hwnd_from_control(context.focused_control)
+                else _context_hwnd(context)
             )
 
             # Paste (same for both paths)
@@ -621,6 +598,7 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                 target_control=context.focused_control,
                 target_hwnd=target_hwnd,
                 target_class_name=context.class_name,
+                **_identity_options(context),
             )
 
             if success:
@@ -636,7 +614,7 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                 # safely raw-paste the saved selection on top of unknown
                 # inserted text. Ctrl+Z is the user's recovery for that
                 # case.
-                if not self.clipboard.last_paste_was_sent:
+                if not self.clipboard.last_paste_was_sent and _target_is_current(context):
                     self.clipboard.restore_cleared_selection(
                         self.window_manager,
                         target_control=context.focused_control,
@@ -654,6 +632,31 @@ class ClipboardFallbackStrategy(InsertionStrategy):
             # selection is lost; Ctrl+Z is the user's manual recovery.
             logger.error("Clipboard fallback strategy failed: %s", e)
             return InsertionResult(success=False, clipboard_dirty=True)
+
+    def _abort_before_paste(self) -> InsertionResult:
+        """Give up on the slow path after a failed key delivery.
+
+        wh-review-pattern-fixes.36. Called when ``clear_selection`` or
+        ``gather_context`` reports that SendInput did not accept a whole
+        chord. wh-review-pattern-fixes.39 added the second trigger:
+        ``gather_context`` also reports ``delivery_failed`` when an
+        exception escaped its probe, which usually happens with a live
+        two-character selection. Two things follow from either report:
+
+        * No paste. The field may still hold the user's selection, or
+          gather_context's arrow sequence may have left one active, and
+          a paste would overwrite it.
+        * No restore, and no saved selection left behind. The caret sits
+          wherever the failed sequence left it, so a raw paste of the
+          saved text would land in the wrong place -- the same reasoning
+          the exception branch below already uses. Dropping the slot
+          stops a later unrelated failure from restoring stale text.
+
+        ``clipboard_dirty`` is True because both preparation steps write
+        sentinel values to the clipboard before their first keystroke.
+        """
+        self.clipboard.last_cleared_selection = None
+        return InsertionResult(success=False, clipboard_dirty=True)
 
     def _update_shadow_buffer_from_context(self, preceding_chars: str, inserted_text: str) -> None:
         try:
@@ -735,7 +738,11 @@ class StandardStrategy(InsertionStrategy):
         # Pre-send failure (copy or verification failed before keystroke).
         # The fallback's clipboard path is the legitimate recovery.
         logger.warning("Shadow buffer failed, using clipboard fallback")
-        return self.clipboard_strategy.insert(insertion_string, context, request_id, options)
+        fallback_result = self.clipboard_strategy.insert(insertion_string, context, request_id, options)
+        if shadow_result.clipboard_dirty and not fallback_result.clipboard_dirty:
+            # A later refusal must retain the earlier clipboard write.
+            return replace(fallback_result, clipboard_dirty=True)
+        return fallback_result
 
 
 class FlutterStrategy(StandardStrategy):
@@ -907,26 +914,166 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
         self._same_process_browser_names: frozenset[str] = frozenset(
             n.lower() for n in names
         )
-        # wh-trailing-corruption-instrument: per-strategy-instance dispatch
-        # ordinal. Incremented in insert() right before the SendInput burst
-        # so the log carries the same ordinal the SendInput call ran at.
-        # The Input process constructs the strategy once at startup, so the
-        # counter is effectively process-lifetime-scoped and tests the
-        # wh-startup-trailing-corruption hypothesis that corruption clusters
-        # near process startup.
+        # Per-strategy dispatch ordinal for correlating SendInput diagnostics.
+        # Incremented in insert() immediately before the SendInput burst.
         self._dispatch_count: int = 0
 
-    def _resolve_target_process_name(self, target_hwnd: Optional[int]) -> Optional[str]:
-        """Look up the captured target's exe name via PID, lowercased.
+    def _resolve_target_process_identity(
+        self, target_hwnd: Optional[int],
+    ) -> Optional[tuple[int, str]]:
+        """Look up the captured target's (pid, lowercase exe name).
 
-        Thin wrapper over ui.hwnd_utils.process_name_for_hwnd so tests
-        can patch it on the strategy module. Returns None on any
+        Thin wrapper over ui.hwnd_utils.process_identity_for_hwnd so
+        tests can patch it on the strategy module. Returns None on any
         failure (no HWND, GetWindowThreadProcessId raises or returns 0,
         psutil raises). Used to decide whether the same-process
         foreground fallback applies (only known Chromium-derived
-        browsers, per wh-ix1z.19).
+        browsers, per wh-ix1z.19); the pid feeds the fallback's
+        ``expected_pid_snapshot``
+        (wh-ensure-focused-same-process-fallback.1.34) so a handle
+        reused by another same-exe process between this resolution and
+        the fallback's own sampling refuses.
         """
-        return process_name_for_hwnd(target_hwnd)
+        return process_identity_for_hwnd(target_hwnd)
+
+    def _foreground_matches_target(
+        self,
+        target_hwnd: Optional[int],
+        observed_hwnd: Optional[int],
+        *,
+        phase: str,
+    ) -> bool:
+        """Compare the captured target HWND against an observed foreground HWND.
+
+        wh-review-pattern-fixes.41: extracted from the post-send check so
+        the pre-send proof and the post-send drift check ask the same
+        question through the same helper. ``phase`` names the caller in
+        the log line ("pre-send" or "post-send").
+
+        wh-3nwy / wh-fc1x: ``hwnds_match_for_foreground_compare`` runs
+        with ``allow_same_process=True`` only when the captured target
+        belongs to a known Chromium-derived browser, so transient
+        Chromium and Electron helper windows (autocomplete popup,
+        autofill suggestions, spellcheck overlay) do not read as a
+        failure. Other apps keep the strict GA_ROOT behavior
+        (wh-ix1z.19). The helper preserves the wh-0juh / wh-oe7u.3
+        fail-closed semantics: any HWND that cannot be root-normalized
+        makes it return False.
+
+        wh-ensure-focused-same-process-fallback.1.28: the same-process
+        tail (``same_process_fallback_matches``) additionally refuses
+        the pair when neither handle is invisible or WS_EX_TOOLWINDOW.
+        Two visible plain frames of one browser process are a genuine
+        second window -- the sibling shape whose credit sent the burst
+        into the wrong window -- not a transient helper.
+        """
+        # wh-ensure-focused-same-process-fallback.1.34: one sample
+        # resolves both the pid and the exe name, and the pid rides
+        # along into the fallback as its snapshot -- a handle reused
+        # by another same-exe process (a second Brave profile) between
+        # this resolution and the fallback's own sampling must refuse.
+        target_identity = self._resolve_target_process_identity(target_hwnd)
+        target_pid, target_process = (
+            target_identity if target_identity is not None else (None, None)
+        )
+        allow_same_process = (
+            target_process is not None
+            and target_process in self._same_process_browser_names
+        )
+        if hwnds_match_for_foreground_compare(
+            target_hwnd, observed_hwnd,
+            allow_same_process=allow_same_process,
+            expected_process_name=target_process if allow_same_process else None,
+            expected_pid_snapshot=target_pid if allow_same_process else None,
+        ):
+            return True
+        logger.warning(
+            "VerifiedUnicodeStrategy: %s foreground check failed: "
+            "expected hwnd=%s (process=%s), observed hwnd=%s "
+            "(allow_same_process=%s).",
+            phase, target_hwnd, target_process or "?",
+            observed_hwnd, allow_same_process,
+        )
+        return False
+
+    def _prove_target_is_foreground(
+        self, target_control, target_hwnd: Optional[int],
+        *, target_identity: Optional[TargetIdentity] = None,
+    ) -> bool:
+        """Focus the captured target and prove it holds the foreground.
+
+        wh-review-pattern-fixes.41: the pre-send condition for the
+        Unicode SendInput burst. ``WindowFocusManager.ensure_focused``
+        returns False when Windows denies the activation, when the
+        foreground still differs after one retry, or when its Win32 work
+        raises, so a False return is a real signal that the keystrokes
+        would go somewhere else.
+
+        Every step fails closed: an ensure_focused failure, a SetFocus
+        exception other than a proven stale-element recovery below, a
+        GetForegroundWindow exception, and a foreground
+        that does not match the captured HWND all return False. The
+        caller must send nothing on False.
+
+        wh-focus-refusal-popup: every refusal here logs at WARNING, not
+        ERROR. ``ErrorNotificationHandler`` (utils/error_notifier.py) is
+        attached at ERROR level, so an ERROR record pops a Windows
+        notification box in front of the user. A refusal here does not
+        deserve one, for two reasons. First, it is recoverable by
+        design: every branch below returns before
+        ``last_paste_was_sent`` is set True, so ``UnicodeFirstStrategy``
+        always hands the insertion to ``StandardStrategy``, whose
+        clipboard path delivers the text. Second, WARNING is already the
+        level every other refusal to send uses -- the three early
+        returns in ``insert`` and the sibling ``_foreground_matches_target``
+        check that this method calls immediately afterwards.
+
+        The common cause is Windows itself. ``SetForegroundWindow``
+        silently refuses when the calling process has not received
+        recent user input, which is ordinary during voice-only
+        dictation. Observed 2026-08-19 while dictating into a Brave text
+        box: the refusal fired, the clipboard path pasted the text, the
+        dispatch finished with status=ok, and the only thing the user
+        saw was the notification box.
+        """
+        try:
+            if not self.window_manager.ensure_focused(target_hwnd):
+                logger.warning(
+                    "VerifiedUnicodeStrategy: ensure_focused(%s) reported "
+                    "failure; refusing to send.", target_hwnd,
+                )
+                return False
+            try:
+                target_control.SetFocus()
+            except Exception as e:
+                if captured_hwnd_survives_stale_focus(e, target_hwnd, target_identity):
+                    logger.debug("VerifiedUnicodeStrategy: stale UIA focus; original HWND remains foreground")
+                    return True
+                logger.warning(
+                    "VerifiedUnicodeStrategy: SetFocus failed before "
+                    "send: %s; refusing to send.", e,
+                )
+                return False
+        except Exception as e:
+            logger.warning(
+                "VerifiedUnicodeStrategy: focus restore outer exception "
+                "(target_hwnd=%s): %s; refusing to send.",
+                target_hwnd, e,
+            )
+            return False
+
+        try:
+            actual_hwnd = win32gui.GetForegroundWindow()
+        except Exception as e:
+            logger.warning(
+                "VerifiedUnicodeStrategy: GetForegroundWindow failed "
+                "before the send: %s; refusing to send (fail-closed).", e,
+            )
+            return False
+
+        return self._foreground_matches_target(
+            target_hwnd, actual_hwnd, phase="pre-send",
+        )
 
     def insert(
         self,
@@ -952,7 +1099,9 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
             return InsertionResult(success=False, clipboard_dirty=False)
 
         target_control = context.focused_control
-        target_hwnd = _hwnd_from_control(target_control)
+        target_hwnd = _context_hwnd(context)
+        if not _target_is_current(context):
+            return InsertionResult(False, False, "captured_target_lost")
         if target_hwnd is None:
             logger.warning(
                 "VerifiedUnicodeStrategy: could not resolve target HWND "
@@ -985,48 +1134,45 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
 
         # Pre-send focus restoration. Parallels the non-flutter branch of
         # verified_paste: ensure the captured top-level HWND is foreground,
-        # then SetFocus on the captured control. ensure_focused failures
-        # are non-fatal -- the post-send foreground check below catches
-        # the case where focus did not actually land on the target.
-        try:
-            self.window_manager.ensure_focused(target_hwnd)
-            try:
-                target_control.SetFocus()
-            except Exception as e:
-                logger.warning(
-                    "VerifiedUnicodeStrategy: SetFocus failed before send: %s", e,
-                )
-        except Exception as e:
-            logger.warning(
-                "VerifiedUnicodeStrategy: focus restore outer exception "
-                "(target_hwnd=%s): %s",
-                target_hwnd, e,
-            )
+        # then SetFocus on the captured control.
+        #
+        # wh-review-pattern-fixes.41: every step is now a pre-send
+        # condition. The old code discarded the ensure_focused result and
+        # only logged a SetFocus failure, so the SendInput burst ran even
+        # when focus never landed on the captured control, and the
+        # post-send foreground check reported the problem only after the
+        # characters had reached another window. The strategy has an
+        # explicit captured target here in every case (the two early
+        # returns above refuse to send without one), so there is always
+        # something to prove.
+        if not self._prove_target_is_foreground(
+            target_control, target_hwnd, **_identity_options(context),
+        ):
+            return InsertionResult(success=False, clipboard_dirty=False)
 
-        # wh-trailing-corruption-instrument: capture the dispatch ordinal,
-        # modifier-key state, and final-string codepoints right before the
-        # SendInput burst so a future reproduction of
-        # wh-startup-trailing-corruption (clean SendInput acceptance, wrong
-        # on-screen text, clustered near process startup) has the cold-
-        # keyboard-state evidence inline. The first DISPATCH_INFO_LOG_LIMIT
-        # dispatches log at INFO; subsequent dispatches drop to DEBUG so a
-        # long dictation session is not flooded.
+        # Capture the ordinal, modifier-key state, and final-string boundaries
+        # at DEBUG immediately before SendInput. These values help diagnose
+        # key translation and sequencing problems without adding routine INFO
+        # noise to successful dictation.
         self._dispatch_count += 1
         ordinal = self._dispatch_count
         mods = snapshot_modifier_state()
         first_cp = ord(final_string[0]) if final_string else 0
         last_cp = ord(final_string[-1]) if final_string else 0
-        log_method = (
-            logger.info if ordinal <= DISPATCH_INFO_LOG_LIMIT else logger.debug
-        )
-        cold_state = _snapshot_cold_state()
-        log_method(
+        logger.debug(
             "VerifiedUnicodeStrategy: dispatch ord=%d class=%s process=%s "
-            "text_len=%d first=0x%04x last=0x%04x %s %s",
+            "text_len=%d first=0x%04x last=0x%04x %s",
             ordinal, getattr(context, "class_name", "?"),
             getattr(context, "process_name", "?"),
-            len(final_string), first_cp, last_cp, mods, cold_state,
+            len(final_string), first_cp, last_cp, mods,
         )
+
+        # The modifier snapshot and logging above can run after the focus
+        # proof. Recheck the original window objects and foreground here,
+        # without another wait or focus change before SendInput.
+        identity = getattr(context, "target_identity", None)
+        if identity is not None and not identity.is_current():
+            return InsertionResult(success=False, clipboard_dirty=False)
 
         # Mark the keystroke as fired before SendInput is issued so the
         # provenance flag reflects "something may have landed" even if
@@ -1060,16 +1206,12 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
         # rest of the utterance cannot retract over uncredited text or
         # compose against stale context.
         #
-        # wh-3nwy / wh-fc1x: use hwnds_match_for_foreground_compare with
-        # allow_same_process=True so transient Chromium / Electron
-        # helper windows (autocomplete popup, autofill suggestions,
-        # spellcheck correction overlay, invisible reCAPTCHA badge)
-        # that briefly own foreground after a paste do not flag the
-        # post-send check as a failure. The OS keyboard focus stays
-        # on the main browser HWND in those cases and the keystrokes
-        # land in the focused renderer correctly. The helper preserves
-        # the wh-0juh / wh-oe7u.3 fail-closed semantics: any HWND that
-        # cannot be root-normalized makes the helper return False.
+        # wh-review-pattern-fixes.41: the comparison runs through
+        # ``_foreground_matches_target``, the same helper the pre-send
+        # proof calls. That helper holds the wh-3nwy / wh-fc1x
+        # same-process relaxation for known Chromium-derived browsers and
+        # the wh-ix1z.19 scoping that keeps every other app on the strict
+        # GA_ROOT contract.
         try:
             actual_hwnd = win32gui.GetForegroundWindow()
         except Exception as e:
@@ -1079,55 +1221,15 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
             )
             self._poison_retract_and_invalidate_buffer()
             return InsertionResult(success=False, clipboard_dirty=False)
-        # wh-ix1z.19: same-process fallback is scoped to known
-        # Chromium-derived browsers only. Other apps (Word dialogs,
-        # Visual Studio popups, etc.) keep the strict GA_ROOT-only
-        # behavior because their multi top-level patterns usually
-        # mean the paste WAS misdirected when foreground shifts.
-        target_process = self._resolve_target_process_name(target_hwnd)
-        allow_same_process = (
-            target_process is not None
-            and target_process in self._same_process_browser_names
-        )
-        if not hwnds_match_for_foreground_compare(
-            target_hwnd, actual_hwnd,
-            allow_same_process=allow_same_process,
-            expected_process_name=target_process if allow_same_process else None,
+        if not self._foreground_matches_target(
+            target_hwnd, actual_hwnd, phase="post-send",
         ):
             logger.warning(
-                "VerifiedUnicodeStrategy: post-send foreground check failed: "
-                "expected hwnd=%s (process=%s), observed hwnd=%s "
-                "(allow_same_process=%s). Skipping shadow update and counter "
-                "increment.",
-                target_hwnd, target_process or "?",
-                actual_hwnd, allow_same_process,
+                "VerifiedUnicodeStrategy: skipping shadow update and "
+                "counter increment after the post-send foreground check.",
             )
             self._poison_retract_and_invalidate_buffer()
             return InsertionResult(success=False, clipboard_dirty=False)
-
-        # wh-trailing-corruption-phase2: post-send UIA TextPattern read.
-        # SendInput accepted every event and the foreground HWND still
-        # matches the target. If the on-screen text in the cold window
-        # is corrupt while this read still shows the EXPECTED tail, the
-        # underlying text buffer is correct and the corruption is paint-
-        # side. If this read shows the corrupt tail, the keys were
-        # mutated in the Windows input pipeline before the control's
-        # buffer. If the read fails / times out repeatedly in the cold
-        # window, UIA itself is cold and slow reads may be interleaving
-        # with the next SendInput.
-        #
-        # The readback costs hundreds of milliseconds per call on a
-        # cold UIA subsystem so we cap it to the first
-        # POST_SEND_READBACK_DISPATCH_LIMIT dispatches per session.
-        # That bounds the slow-dictation cost to the first sentence or
-        # so after WheelHouse starts, after which the readback turns
-        # off and dictation speed returns to normal. The user reports
-        # the corruption usually shows up in those first few words.
-        # If the added latency itself prevents the bug from
-        # reproducing inside this window, that result is still useful
-        # data: it means inter-word timing is part of the bug.
-        if ordinal <= POST_SEND_READBACK_DISPATCH_LIMIT:
-            self._post_send_readback_check(target_control, final_string, ordinal)
 
         # Full success. Update the shadow buffer with the actual delivered
         # string so the next streamed word sees correct preceding context,
@@ -1187,71 +1289,6 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
         self.clipboard.last_paste_was_optimistic = True
         self.buffer_manager.invalidate()
 
-    def _post_send_readback_check(
-        self, target_control, final_string: str, ordinal: int,
-    ) -> None:
-        """Read recent text from the target control and compare to expected.
-
-        wh-trailing-corruption-phase2: diagnostic only. Runs only inside
-        the first POST_SEND_READBACK_DISPATCH_LIMIT dispatches so a long
-        warm session does not pay the UIA cost forever. Logs the read
-        result at INFO when it disagrees with the expected tail (so the
-        next reproduction surfaces in the default log) and at DEBUG when
-        it agrees (so a clean warm run stays quiet).
-
-        Three outcomes worth distinguishing in the wheelhouse.log:
-          * readback_match -- UIA sees the expected tail. If the screen
-            still shows corruption, the underlying buffer is correct;
-            the corruption is paint-side.
-          * readback_mismatch -- UIA sees the corrupt tail. The keys
-            were mutated before the control's buffer received them.
-          * readback_failed -- UIA could not read. If this clusters in
-            the cold ordinal range, UIA itself is the warmup gate.
-
-        The helper swallows every exception. A diagnostic log line must
-        not break the dispatch path on any failure.
-        """
-        try:
-            tail_len = len(final_string)
-            if tail_len <= 0:
-                return
-            # Read a generous window so a single missing char does not
-            # zero the comparison. The compare is on the LAST tail_len
-            # chars of the read.
-            read_chars = max(tail_len * 2, 16)
-            t0 = time.perf_counter()
-            result = read_context_via_text_pattern(
-                target_control, max_chars=read_chars,
-            )
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
-            if result is None:
-                logger.info(
-                    "VerifiedUnicodeStrategy: readback_failed ord=%d "
-                    "expected=%r elapsed_ms=%.1f",
-                    ordinal, redact_transcript(final_string), elapsed_ms,
-                )
-                return
-            preceding = result.get("preceding_chars") or ""
-            observed_tail = preceding[-tail_len:]
-            if observed_tail == final_string:
-                logger.debug(
-                    "VerifiedUnicodeStrategy: readback_match ord=%d "
-                    "expected=%r elapsed_ms=%.1f",
-                    ordinal, redact_transcript(final_string), elapsed_ms,
-                )
-            else:
-                logger.info(
-                    "VerifiedUnicodeStrategy: readback_mismatch ord=%d "
-                    "expected=%r observed_tail=%r elapsed_ms=%.1f",
-                    ordinal, redact_transcript(final_string),
-                    redact_transcript(observed_tail), elapsed_ms,
-                )
-        except Exception as e:
-            logger.debug(
-                "VerifiedUnicodeStrategy: readback exception ord=%d: %s",
-                ordinal, e,
-            )
-
 
 class SimplePasteStrategy(InsertionStrategy):
     """Last-resort fallback for when no focusable control is found."""
@@ -1274,6 +1311,17 @@ class SimplePasteStrategy(InsertionStrategy):
         callers (selection-wrap, transform_selection paste-back) already
         composed the final string and any extra whitespace would corrupt
         the result.
+
+        wh-review-pattern-fixes.45: this strategy has no control of its
+        own -- the router picks it when the fresh capture found no
+        focusable control -- so it used to call ``verified_paste`` with
+        no target at all. That is the branch wh-review-pattern-fixes.41
+        deliberately left sending, because ordinary dictation has no
+        captured intent to compare against. A selection-derived caller
+        DOES have one, and it arrives in ``options``. Forward it so
+        ``verified_paste`` runs its pre-send proof against the control
+        the selection came from, immediately before Ctrl+V. Ordinary
+        dictation still passes None and keeps the old behavior.
         """
         opts = _resolve_options(options)
         verbatim = opts.mode is InsertionMode.VERBATIM
@@ -1283,7 +1331,10 @@ class SimplePasteStrategy(InsertionStrategy):
             text_to_paste,
             self.window_manager,
             None,
+            target_control=opts.captured_target_control,
+            target_hwnd=opts.captured_target_hwnd,
             target_class_name=context.class_name,
+            **_identity_options(context),
         )
         # verified_paste writes the clipboard before sending Ctrl+V, so
         # clipboard_dirty=True regardless of success.
@@ -1306,13 +1357,27 @@ class ClipboardOnlyStrategy(InsertionStrategy):
     apps that surface this shape: Zed, Sublime Text, GPU-rendered
     editors that draw their own caret and ship no UIA TextPattern.
 
-    Before wh-soft-allow-verdict-tier the router routed
-    default_reject_paste_capable_class straight here, which silently
-    pasted on first hit and never surfaced the rejection toast. That
-    branch is gone; unknown soft rejects now route to
-    RejectedInsertionStrategy (rejection toast + Try-it-anyway button),
-    and ClipboardOnly handles only the user-approved-accept tier plus
-    the explicit retry override.
+    Since wh-paste-when-unverified.2 the router also routes EVERY
+    text-target reject here -- default_reject, the denylist hits,
+    not_focusable, stale_com, no_focused_control and the soft reject
+    default_reject_paste_capable_class -- so the dictated words are
+    pasted with Ctrl+V instead of being dropped. The rejection toast
+    and its Try-it-anyway button are no longer part of that path.
+    (Between wh-soft-allow-verdict-tier and that bead those rejects
+    went to RejectedInsertionStrategy instead, and this docstring said
+    so; the router now does the opposite.) The elevated-window refusal
+    is NOT a predicate reject: it has its own branch above the
+    predicate and still returns RejectedInsertionStrategy.
+
+    One reject does not arrive here: the one whose captured target
+    identity is the empty ``TargetIdentity()``. The router sends it to
+    RejectedInsertionStrategy as a silent drop, because an all-zero
+    identity fails ``is_current()`` on its first line, so the
+    verified_paste below would refuse the send every time and log that
+    refusal at ERROR -- and an ERROR record is a Windows notification.
+    An identity captured properly that then went stale still arrives
+    here and still meets that refusal, which is intended: a genuinely
+    stale target is a real failure worth reporting.
 
     Behaviour intentionally distinct from StandardStrategy and
     SimplePasteStrategy:
@@ -1405,7 +1470,17 @@ class ClipboardOnlyStrategy(InsertionStrategy):
         context: UIContext,
         request_id: Optional[str] = None,
         options: Optional[InsertionOptions] = None,
+        retry_identity: Optional[tuple[int, int]] = None,
     ) -> InsertionResult:
+        # retry_identity (wh-ensure-focused-same-process-fallback.1.18,
+        # codex round 11): the retry handler's ``(tagged_hwnd, tag)``
+        # pair, forwarded to verified_paste as expected_provenance so
+        # the marker is re-read immediately before the Ctrl+V. This
+        # strategy re-resolves its paste target from the captured
+        # control below, and the clipboard verify loop runs before the
+        # send -- every handler-level provenance probe has already
+        # finished by then. Only the retry path has a rejection-time
+        # marker; the router and fresh soft-allow pastes pass None.
         opts = _resolve_options(options)
         verbatim = opts.mode is InsertionMode.VERBATIM
 
@@ -1435,7 +1510,7 @@ class ClipboardOnlyStrategy(InsertionStrategy):
                 has_selection=False,
             )
 
-        target_hwnd = _hwnd_from_control(context.focused_control)
+        target_hwnd = _context_hwnd(context)
 
         # Snapshot the retract accounting fields before the paste call.
         # ClipboardOperations.verified_paste advances them through
@@ -1470,6 +1545,8 @@ class ClipboardOnlyStrategy(InsertionStrategy):
                 None,  # not Flutter; the soft-reject path is non-Flutter only
                 target_control=context.focused_control,
                 target_hwnd=target_hwnd,
+                expected_provenance=retry_identity,
+                **_identity_options(context),
             )
             keystroke_fired = bool(self.clipboard.last_paste_was_sent)
             was_optimistic = bool(self.clipboard.last_paste_was_optimistic)
@@ -1716,14 +1793,19 @@ class RejectedInsertionStrategy(InsertionStrategy):
         for key in dead_keys:
             del self._aggregation_buckets[key]
 
-    def _resolve_target_identity(self, context) -> tuple[int, int]:
-        """Resolve the rejected target's top-level HWND and owning PID.
+    def _resolve_target_identity(self, context) -> tuple[int, int, int, int]:
+        """Resolve the rejected target's HWND, PID, root, and provenance tag.
 
-        Returns ``(target_hwnd, target_process_id)``. Either or both
-        may be 0 if the lookup fails (stale COM, no top-level, no
-        focused control). The retry handler treats 0 as 'no refocus
-        needed' so callers can store 0 without breaking the win32
-        layer.
+        Production contexts return the original capture below without another
+        UIA lookup. The historical resolution path described here remains for
+        manually constructed contexts whose target_identity is None.
+
+        Returns ``(target_hwnd, target_process_id, target_root,
+        target_tag)``. Any of the four may be 0 if its lookup fails
+        (stale COM, no top-level, no focused control, GetAncestor
+        failure, SetProp failure). The retry handler refuses entries
+        whose hwnd, root, or tag is 0 when the entry claims a target
+        (fail closed); a 0 PID skips only the PID check.
 
         wh-override-multiword-retry.2.1 (deepseek finding): the append
         path uses this to upgrade an aggregated entry whose first
@@ -1731,7 +1813,46 @@ class RejectedInsertionStrategy(InsertionStrategy):
         to a non-zero HWND when a later fragment's lookup succeeds.
         The fresh-token path uses this to populate the cache entry on
         the first emission.
+
+        wh-ensure-focused-same-process-fallback.1.7: ``target_root``
+        is the GetAncestor(GA_ROOT) normalization of ``target_hwnd``
+        taken now, at rejection time. The retry handler compares the
+        live root of the cached HWND against this snapshot to detect
+        a SAME-process handle recycle -- a destroyed Brave helper
+        HWND reborn as a child of another Brave top-level keeps the
+        cached PID, so the PID guard alone cannot refuse it.
+
+        wh-ensure-focused-same-process-fallback.1.12: ``target_tag``
+        is the SetProp provenance marker written onto the window
+        OBJECT now, at rejection time. Every other identity signal
+        compares numeric handle values, which a handle recycled as a
+        NEW same-PID own-root top-level window aliases; the property
+        dies with the window object, so the retry-time re-read is the
+        one probe a SAME-RUN recycle cannot alias (cross-run, equal
+        43-bit salts collide at about 2**-43 per pair of runs -- the
+        accepted residual documented at _RUN_SALT).
+
+        wh-ensure-focused-same-process-fallback.1.17: the marker is
+        written before the root sample and re-acquired after it; a
+        changed marker means the window object died mid-resolve, and
+        the identity is stored with tag 0 so it can never replay.
+
+        wh-ensure-focused-same-process-fallback.1.26: after every
+        other probe, the top-level is re-derived from the control; a
+        recycle BEFORE the first tag leaves a stable marker on the
+        wrong window, and only the control -- which goes stale with
+        its window -- can testify the tagged handle still belongs to
+        the window the words were dictated at. Any answer other than
+        the tagged handle stores tag 0.
         """
+
+        # Production contexts pin this before any strategy can wait. Keep
+        # the original identity even if UIA has since gone stale; existing
+        # retry guards refuse a dead/recycled object. An empty capture stays
+        # empty rather than being rebound to a later foreground window.
+        identity = getattr(context, "target_identity", None)
+        if identity is not None:
+            return identity.hwnd, identity.process_id, identity.root, identity.tag
 
         focused_control = getattr(context, "focused_control", None)
         target_hwnd = 0
@@ -1750,7 +1871,70 @@ class RejectedInsertionStrategy(InsertionStrategy):
                 )
                 target_hwnd = 0
         target_process_id = int(getattr(context, "process_id", 0) or 0)
-        return target_hwnd, target_process_id
+        # wh-ensure-focused-same-process-fallback.1.17 (codex round
+        # 11): write the provenance marker BEFORE sampling the root,
+        # then re-acquire it AFTER. Windows can destroy the target and
+        # recycle the numeric handle between any two calls here; with
+        # the old root-first order the marker landed on the recycled
+        # window and the cache stored an identity every retry-time
+        # probe then confirmed against the wrong window. The marker
+        # dies with the window object and tag_hwnd_provenance returns
+        # the existing marker for a live object but a NEW unique one
+        # for a recycled object (and 0 on SetProp failure), so
+        # inequality across the root sample proves the object died
+        # mid-resolve. Store tag 0 then: the retry handler refuses
+        # tag-0 entries outright, so the entry can never replay. The
+        # root snapshot may belong to the recycled window in that
+        # case -- harmless, nothing replays a tag-0 entry.
+        target_tag = 0
+        if target_hwnd:
+            target_tag = tag_hwnd_provenance(target_hwnd)
+        target_root = 0
+        if target_hwnd:
+            target_root = (
+                normalize_hwnd_for_foreground_compare(target_hwnd) or 0
+            )
+        if target_hwnd and target_tag:
+            final_tag = tag_hwnd_provenance(target_hwnd)
+            if final_tag != target_tag:
+                logger.debug(
+                    "RejectedInsertionStrategy: provenance marker "
+                    "changed during identity resolve (%d -> %d); the "
+                    "window object was recycled mid-capture; storing "
+                    "an unreplayable identity",
+                    target_tag, final_tag,
+                )
+                target_tag = 0
+        # wh-ensure-focused-same-process-fallback.1.26 (codex round
+        # 17): the .1.17 recheck only proves the window object stayed
+        # alive from the FIRST tag onward. If the target died and its
+        # handle was recycled BETWEEN the NativeWindowHandle read
+        # above and that first tag, the marker landed on the recycled
+        # window and stays perfectly stable -- the .1.17 re-tag, the
+        # root sample, and every retry-time probe then prove the
+        # WRONG window consistently. Close the earlier interval by
+        # re-deriving the top-level from the control AFTER tagging: a
+        # control whose window died is stale, so the re-derive raises
+        # or answers differently, and anything but the tagged handle
+        # stores tag 0 (unreplayable, fail closed). Residual: a
+        # top-level-focused control's stale element can in principle
+        # re-bind to the recycled window through its handle-derived
+        # RuntimeId and re-report the same handle inside this
+        # microseconds window; no user-mode probe distinguishes that
+        # case, same accepted shape as the round-9/.1.18 residuals.
+        if target_hwnd and target_tag:
+            live_hwnd = top_level_hwnd_from_control(focused_control)
+            if live_hwnd != target_hwnd:
+                logger.debug(
+                    "RejectedInsertionStrategy: control no longer "
+                    "resolves to the tagged window after identity "
+                    "capture (tagged=%s live=%s); the target was "
+                    "recycled before the first tag; storing an "
+                    "unreplayable identity",
+                    target_hwnd, live_hwnd,
+                )
+                target_tag = 0
+        return target_hwnd, target_process_id, target_root, target_tag
 
     def insert(
         self,
@@ -1891,6 +2075,66 @@ class RejectedInsertionStrategy(InsertionStrategy):
                 existing_token = None
                 existing_result = None
 
+        # wh-ensure-focused-same-process-fallback.1.15 (codex round
+        # 10): resolve THIS fragment's identity up front, for both
+        # branches. The aggregation key is (process, class,
+        # control_type, reason) -- two windows of the same app share
+        # it, so key equality says nothing about WHICH window the
+        # fragment was dictated at. Appending on key alone mixed text
+        # across a focus switch between same-key windows, and the
+        # retry then pasted one window's words into the other. For
+        # same-window fragments tag_hwnd_provenance returns the
+        # existing marker (it never overwrites a live one), so the
+        # resolve is idempotent per window.
+        (
+            fragment_hwnd,
+            fragment_pid,
+            fragment_root,
+            fragment_tag,
+        ) = self._resolve_target_identity(context)
+
+        if existing_token is not None and existing_result is not None:
+            # Append only when the fragment provably belongs with the
+            # entry. Two shapes qualify:
+            #   * proven same window -- both markers nonzero and
+            #     equal. Marker values are unique per tagged window
+            #     (a per-run-salted index, .1.21/.1.23: fresh values
+            #     equal markers surviving from a previous
+            #     Input-process run only when the two runs drew the
+            #     same 43-bit salt, about 2**-43 per pair of runs, an
+            #     accepted residual) and die with the window object,
+            #     so equality is the one probe a handle recycle, a
+            #     same-key sibling window, or a process restart
+            #     cannot realistically alias.
+            #   * both unprovable -- neither side carries a marker.
+            #     The merged entry can never paste (the retry handler
+            #     refuses tag=0 outright), so no wrong-window replay
+            #     is possible, and merging keeps the one-toast-
+            #     one-token behaviour for transient SetProp failures.
+            # Everything else -- markers proving DIFFERENT windows,
+            # or exactly one side resolved -- splits: the fragment
+            # starts its own entry via the fresh-token branch below,
+            # which also rebinds the bucket, and the old entry stays
+            # exactly as it was. The pre-.1.15 upgrade path (graft a
+            # later fragment's complete identity onto an incomplete
+            # entry) is gone: it re-bound earlier text to a window
+            # nothing proved that text was dictated at.
+            cached_tag = existing_result.target_tag
+            proven_same_window = (
+                cached_tag != 0 and fragment_tag == cached_tag
+            )
+            both_unprovable = cached_tag == 0 and fragment_tag == 0
+            if not (proven_same_window or both_unprovable):
+                logger.debug(
+                    "RejectedInsertionStrategy: fragment does not "
+                    "share a proven window with the aggregated entry "
+                    "(cached_tag=%d fragment_tag=%d); starting a "
+                    "separate entry",
+                    cached_tag, fragment_tag,
+                )
+                existing_token = None
+                existing_result = None
+
         if existing_token is not None and existing_result is not None:
             existing_text = existing_result.text or ""
             # wh-override-multiword-retry.1.1: compose the new fragment
@@ -1924,28 +2168,34 @@ class RejectedInsertionStrategy(InsertionStrategy):
             else:
                 combined_text = existing_text + " " + insertion_string
             # wh-override-multiword-retry.2.1 (deepseek finding): the
-            # first fragment's HWND/PID is the source of truth so a
+            # first fragment's identity is the source of truth so a
             # transient stale-COM on a later fragment does not poison
-            # a valid earlier HWND. The exception is HWND=0: any
-            # non-zero HWND from a later fragment is strictly better
-            # information, since the retry handler treats HWND=0 as
-            # "no refocus needed" and pastes into whatever holds
-            # foreground (usually the rejection notice's own button
-            # the user just clicked). Try to upgrade.
+            # a valid earlier HWND. wh-ensure-focused-same-process-
+            # fallback.1.15: with the same-window proof above, the one
+            # remaining upgrade is filling in fields the first
+            # fragment failed to resolve -- the marker equality proves
+            # the fragments name the same window object, so adopting
+            # its root snapshot (.1.13's transient-normalization case)
+            # or PID cannot re-bind the text to a different window.
+            # Nonzero cached fields are never overwritten; a root that
+            # genuinely drifted mid-utterance is the retry handler's
+            # live-root comparison's problem, not the aggregator's.
             cached_hwnd = existing_result.target_hwnd
             cached_pid = existing_result.target_process_id
-            if cached_hwnd == 0:
-                upgrade_hwnd, upgrade_pid = self._resolve_target_identity(
-                    context,
-                )
-                if upgrade_hwnd != 0:
-                    cached_hwnd = upgrade_hwnd
-                    cached_pid = upgrade_pid
+            cached_root = existing_result.target_root
+            cached_tag = existing_result.target_tag
+            if cached_tag != 0:
+                if cached_root == 0 and fragment_root != 0:
+                    cached_root = fragment_root
+                if cached_pid == 0 and fragment_pid != 0:
+                    cached_pid = fragment_pid
             try:
                 self._text_cache.put(
                     existing_token, combined_text,
                     target_hwnd=cached_hwnd,
                     target_process_id=cached_pid,
+                    target_root=cached_root,
+                    target_tag=cached_tag,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1970,18 +2220,25 @@ class RejectedInsertionStrategy(InsertionStrategy):
             # passes this value to WindowFocusManager.ensure_focused ->
             # SetForegroundWindow, which wants the raw top-level handle.
             # Stale-COM or missing-top-level produces target_hwnd=0; the
-            # retry handler treats 0 as 'no refocus needed' so the win32
-            # layer is not touched with a zero handle. wh-override-
+            # retry handler refuses such an entry outright with
+            # token_expired (wh-ensure-focused-same-process-
+            # fallback.1.11 -- a zero hwnd carries no target identity,
+            # so no later probe can prove where the paste would land).
+            # wh-override-
             # paste-focus-drift.1.2: cache the rejection-time process_id
-            # so the retry handler can detect HWND reuse.
-            target_hwnd, target_process_id = self._resolve_target_identity(
-                context,
-            )
+            # so the retry handler can detect HWND reuse. wh-ensure-
+            # focused-same-process-fallback.1.7: also cache the GA_ROOT
+            # snapshot so the retry handler can detect a SAME-process
+            # handle recycle, which the PID alone cannot see. The
+            # identity itself was resolved once, above the branch
+            # (.1.15).
             try:
                 self._text_cache.put(
                     token, insertion_string,
-                    target_hwnd=target_hwnd,
-                    target_process_id=target_process_id,
+                    target_hwnd=fragment_hwnd,
+                    target_process_id=fragment_pid,
+                    target_root=fragment_root,
+                    target_tag=fragment_tag,
                 )
             except Exception as exc:
                 logger.warning(

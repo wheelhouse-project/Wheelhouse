@@ -1,14 +1,20 @@
 """wh-distil-hint-handler-parity: port the parakeet review fixes to the
-distil add-hint and hard-restart handlers.
+distil add-hint handler.
 
 The parakeet hotwords review chain (wh-q33mj.1 through .4) fixed five
-defects in these handler shapes. distil had the same shapes without the
-fixes, and one worse: _handle_hard_restart_service stopped the service
-even when the restart-flag write failed, and exit 0 with no flag reads
-as a clean shutdown to the launcher (should_restart) -- STT dies
-permanently from a voice command. The parakeet tests
-(sherpa_offline_parakeet_stt_server tests/test_hotwords.py) are the
-template for this file.
+defects in these handler shapes, and distil had the same shapes without
+the fixes. The worst of them was in the websocket hard-restart handler,
+which stopped the service even when the restart-flag write failed: exit
+0 with no flag reads as a clean shutdown to the launcher
+(should_restart), so STT died permanently from a voice command.
+
+That handler is gone. wh-remove-restart-credentials-items deleted the
+hard_restart_service command and every receiver of it, so the class that
+tested it went with the handler. _write_restart_flag itself survives,
+because the hint and hotword paths still call it, and TestHandleAddHint
+below still covers both its success arm and its failure arm. The
+parakeet tests (sherpa_offline_parakeet_stt_server
+tests/test_hotwords.py) are the template for this file.
 """
 from __future__ import annotations
 
@@ -207,44 +213,6 @@ class TestHandleAddHint:
         notification = server.forwarder.send_notification.call_args[0]
         assert "already exists" not in notification[1].lower()
         assert "could not save" in notification[1].lower()
-
-
-class TestHardRestartService:
-    """wh-q33mj.1.3 parity: a failed restart-flag write must NOT stop
-    the service -- exit 0 with no flag means the launcher never brings
-    it back, permanently killing STT from a voice command."""
-
-    @pytest.fixture
-    def bare_server(self):
-        s = DistilMediumServer.__new__(DistilMediumServer)
-        s.forwarder = MagicMock()
-        s.stop = MagicMock()
-        return s
-
-    def test_flag_written_then_stops(self, bare_server, tmp_path, monkeypatch):
-        import shared_stt.launcher as launcher_mod
-
-        flag = tmp_path / "restart.flag"
-        monkeypatch.setattr(
-            launcher_mod, "get_restart_flag_path", lambda name: flag
-        )
-        bare_server._handle_hard_restart_service()
-        assert flag.read_text() == "restart"
-        bare_server.stop.assert_called_once()
-
-    def test_flag_write_failure_keeps_service_running(
-        self, bare_server, monkeypatch
-    ):
-        import shared_stt.launcher as launcher_mod
-
-        def boom(name):
-            raise OSError("AppData unwritable")
-
-        monkeypatch.setattr(launcher_mod, "get_restart_flag_path", boom)
-        bare_server._handle_hard_restart_service()
-        bare_server.stop.assert_not_called()
-        notification = bare_server.forwarder.send_notification.call_args[0]
-        assert "restart failed" in notification[1].lower()
 
 
 class TestSoftRestartService:

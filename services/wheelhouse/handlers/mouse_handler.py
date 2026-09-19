@@ -45,12 +45,31 @@ from pynput import mouse
 
 from handlers.audio_monitor import AudioMonitor
 from .hid_listener import HIDListener
+from .thumb_wheel_filter import (
+    DEFAULT_DEAD_ZONE_TICKS,
+    DEFAULT_GESTURE_GAP_MS,
+    DEFAULT_MAX_TICKS_PER_BATCH,
+    ThumbWheelFilter,
+)
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..config_service import ConfigService
 
 logger = logging.getLogger(__name__)
+
+# One native step of the TV backlight on the 0-100 scale the brightness
+# plugins take. The Samsung and Bravia TVs expose a 0-50 range, so a step is
+# 2. The brightness zone waits for this much before it sends a command
+# (wh-brightness-wheel-one-step).
+BRIGHTNESS_STEP = 2
+# The most native steps one command may move the TV when the config key
+# BRIGHTNESS_STEPS_PER_COMMAND is absent. One step per command was too
+# slow for David (a Samsung round trip is about 400 ms, so one step per
+# command is two to three steps per second); he chose two on 2026-09-14
+# and then asked for the number to be configurable
+# (wh-brightness-wheel-two-steps).
+DEFAULT_BRIGHTNESS_STEPS_PER_COMMAND = 2
 
 class MouseHandler:
     """Handles mouse movements, clicks, and thumb wheel events."""
@@ -80,7 +99,29 @@ class MouseHandler:
         self.brightness_increment = config_service.get("BRIGHTNESS_INCREMENT", 0.25)
         self.volume_increment = config_service.get("VOLUME_INCREMENT", 0.5)
         self.side_offset = config_service.get("SIDE_OFFSET", 10)
-        
+        # Native TV steps per brightness command, on the 0-100 scale the
+        # plugins take. A value below 1 would clamp every command to nothing
+        # and silently disable the brightness zone, so it is floored at 1.
+        steps_per_command = max(1, int(config_service.get(
+            "BRIGHTNESS_STEPS_PER_COMMAND", DEFAULT_BRIGHTNESS_STEPS_PER_COMMAND
+        )))
+        self.brightness_max_per_command = steps_per_command * BRIGHTNESS_STEP
+        # wh-mouse-wheel-sensitivity: every drained batch passes through this
+        # filter before a zone sees it (dead zone, gesture gap, per-batch
+        # cap; see handlers/thumb_wheel_filter.py). Read at init for the same
+        # fail-fast reason as the three values above.
+        self.thumb_wheel_filter = ThumbWheelFilter(
+            dead_zone_ticks=config_service.get(
+                "THUMB_WHEEL_DEAD_ZONE_TICKS", DEFAULT_DEAD_ZONE_TICKS
+            ),
+            gesture_gap_ms=config_service.get(
+                "THUMB_WHEEL_GESTURE_GAP_MS", DEFAULT_GESTURE_GAP_MS
+            ),
+            max_ticks_per_batch=config_service.get(
+                "THUMB_WHEEL_MAX_TICKS_PER_BATCH", DEFAULT_MAX_TICKS_PER_BATCH
+            ),
+        )
+
         logger.debug("MouseHandler initialized for event-based brightness and volume control.")
 
     async def process_hid_events(self):
@@ -93,7 +134,7 @@ class MouseHandler:
         :description: Routes pre-batched thumb wheel events to brightness or volume handlers
         :data_in: Pre-batched event dictionaries from hid_event_queue
         :data_out: Calls to _handle_brightness_zone_event or _handle_volume_zone_event
-        :notes: Long-running asyncio task consuming hid_event_queue from step 2. Each event contains aggregated delta over 50ms window, ready for immediate processing. Routing logic: if mouse_x < side_offset (left side of screen), routes to brightness handler (step 4A). Otherwise routes to volume handler (step 4B). Mouse position tracked by on_move() listener. Uses asyncio queue.get() for non-blocking event reception.
+        :notes: Long-running asyncio task consuming hid_event_queue from step 2. Each event contains aggregated delta over 50ms window plus its arrival time ("at", time.monotonic()), ready for immediate processing. Each drained batch first passes through ThumbWheelFilter on its own, in arrival order (step 3.5, wh-mouse-wheel-sensitivity): ticks below the dead zone are held, a pause longer than the gesture gap between arrival times forgets them, and one batch passes at most the cap. The zone acts on the sum of what passed; a drain the filter reduces to zero reaches no zone. Batches are filtered one by one, not as their sum, because the zone handlers await their plugins and later batches queue behind that wait (wh-mouse-wheel-sensitivity.1.1). Routing logic: if mouse_x < side_offset (left side of screen), routes to brightness handler (step 4A). Otherwise routes to volume handler (step 4B). Mouse position tracked by on_move() listener. Uses asyncio queue.get() for non-blocking event reception.
         """
         logger.debug("Starting HID event processor for pre-batched events.")
         
@@ -110,19 +151,40 @@ class MouseHandler:
                     except asyncio.QueueEmpty:
                         break
                 
-                # Aggregate deltas from all drained events
+                # Filter each drained batch on its own, in arrival order, and
+                # act on the sum of what passed. Batches queue up here while a
+                # zone awaits its plugin, and each one is 50 ms of real
+                # movement with its own cap (wh-mouse-wheel-sensitivity.1.1).
                 total_delta = 0
+                ticks = 0
                 for e in events:
                     if e and e.get("type") == "thumb_wheel":
-                        total_delta += e.get("delta", 0)
+                        delta = e.get("delta", 0)
+                        total_delta += delta
+                        if delta != 0:
+                            ticks += self.thumb_wheel_filter.filter_batch(
+                                delta, at=e.get("at")
+                            )
                     self.hid_event_queue.task_done()
-                
-                if total_delta != 0:
-                    logger.debug(f"Processed batch of {len(events)} events, total_delta={total_delta}")
-                    if self.mouse_x < self.side_offset:
-                        await self._handle_brightness_zone_event(total_delta)
-                    else:
-                        await self._handle_volume_zone_event(total_delta)
+
+                if total_delta != 0 or ticks != 0:
+                    logger.debug(
+                        f"Processed batch of {len(events)} events, "
+                        f"total_delta={total_delta}, ticks_passed={ticks}"
+                    )
+                # The routing decision reads what PASSED, never the raw sum:
+                # per-batch capping and dead-zone release are not linear, so
+                # raw deltas can cancel (+4, -2, -2) while the passed ticks do
+                # not (3, -2, -2 = -1), and the reverse
+                # (wh-mouse-wheel-sensitivity.1.2).
+                if ticks == 0:
+                    # Held below the dead zone, cancelled, or no wheel
+                    # movement at all; nothing for a zone to do.
+                    continue
+                if self.mouse_x < self.side_offset:
+                    await self._handle_brightness_zone_event(ticks)
+                else:
+                    await self._handle_volume_zone_event(ticks)
                     
             except asyncio.CancelledError:
                 logger.debug("HID event processor task cancelled.")
@@ -172,7 +234,7 @@ class MouseHandler:
         :description: Branch A: Publishes BrightnessAdjustCommand to EventBus for coordinated brightness control
         :data_in: brightness_change_step integer from thumb wheel delta
         :data_out: BrightnessAdjustCommand event on EventBus
-        :notes: Brightness routing branch when mouse in left screen zone (x < side_offset). Publishes BrightnessAdjustCommand(delta=brightness_change_step) to EventBus. BrightnessCoordinator (subscriber) handles all staging logic: hardware-first (TV/monitor via plugins), cascade to software dimmers (f.lux, overlay) on overflow. MouseHandler remains pure input router with no brightness implementation knowledge. This decoupling allows adding new brightness methods without modifying input handling.
+        :notes: Brightness routing branch when mouse in left screen zone (x < side_offset). Publishes BrightnessAdjustCommand(delta=brightness_change_step) to EventBus. BrightnessCoordinator (subscriber) handles all staging logic: hardware-first (TV/monitor via plugins), cascade to software dimmers (overlay, gamma dimmer) on overflow. MouseHandler remains pure input router with no brightness implementation knowledge. This decoupling allows adding new brightness methods without modifying input handling.
         """
         try:
             from ..events import BrightnessAdjustCommand
@@ -189,7 +251,7 @@ class MouseHandler:
         :description: Branch A: Processes brightness zone thumb wheel events
         :data_in: delta integer from thumb wheel
         :data_out: Calls _adjust_brightness_staged if threshold met
-        :notes: Brightness routing branch when mouse in left screen zone. Accumulates fractional changes to support high-resolution wheels. Triggers actual adjustment (step 5) only when accumulated change exceeds threshold (±2.0).
+        :notes: Brightness routing branch when mouse in left screen zone. Accumulates fractional changes to support high-resolution wheels. Triggers actual adjustment (step 5) only when the accumulated change reaches one native TV step (BRIGHTNESS_STEP, 2 on the 0-100 scale), and sends at most BRIGHTNESS_STEPS_PER_COMMAND native steps per command (default 2; self.brightness_max_per_command on the 0-100 scale), discarding the excess, so the batches that queue behind a 450 ms TV round trip cannot move the TV several steps at once (wh-brightness-wheel-one-step).
         """
         """Handles HID events when the mouse is in the brightness control zone."""
         # Apply sensitivity scaling from config
@@ -198,12 +260,25 @@ class MouseHandler:
 
         logger.debug(f"BRIGHTNESS zone: Delta={delta}, ScaledChange={scaled_change:.2f}, Accumulator={self.brightness_accumulator:.2f}")
 
-        # Check if the accumulator has reached the minimum Bravia step (±2.0)
-        # Bravia hardware uses 0-50 range, so minimum meaningful change on 0-100 scale is 2
-        if abs(self.brightness_accumulator) >= 2.0:
+        # Check if the accumulator has reached one native TV step. The Samsung
+        # and Bravia TVs use a 0-50 range, so one native step is 2 on the
+        # 0-100 scale the plugins take.
+        if abs(self.brightness_accumulator) >= BRIGHTNESS_STEP:
             # Get the integer part for the action and keep the fractional part in the accumulator
             steps_to_take = int(self.brightness_accumulator)
             self.brightness_accumulator -= steps_to_take
+
+            # At most self.brightness_max_per_command per command, and the
+            # excess is DISCARDED, not carried. A TV round trip takes about 450 ms (read, write, read
+            # back), so the batches that queue behind it can sum to 14 ticks;
+            # sent as one command, the Samsung plugin moved the TV seven
+            # native steps at once (wh-brightness-wheel-one-step). Carrying
+            # the excess instead would keep the TV moving after the wheel
+            # stopped. The result: brightness moves at most that many steps per
+            # round trip while the wheel turns, whatever the speed of the roll.
+            if abs(steps_to_take) > self.brightness_max_per_command:
+                steps_to_take = (self.brightness_max_per_command if steps_to_take > 0
+                                 else -self.brightness_max_per_command)
 
             if steps_to_take != 0:
                 logger.debug(f"  -> Triggering brightness change of {steps_to_take} steps. Accumulator is now {self.brightness_accumulator:.2f}.")

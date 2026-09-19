@@ -31,6 +31,15 @@ class WordEvent:
             calling SpeechProcessor._execute_decision directly so the
             processing loop is the only writer for normal words, retractions,
             utterance_end markers, and timeout finalizations.
+        utterance_start_generation: The app's start_utterance count just
+            after this utterance's start_utterance command was enqueued
+            (wh-spaced-punctuation-names-unresolved.3.1.5). Only the
+            first word of an utterance carries it. The processor
+            compares it with the count it read at its own last delivery
+            to tell text typed BEFORE that command from text typed
+            after it; the Input side resets its paste counter on the
+            command, so only the earlier text has left the retractable
+            span.
         timeout_token: Generation token captured when the sentinel was created.
             The processing loop ignores the sentinel unless this matches the
             processor's current ``timeout_token``; cancelled timeouts bump the
@@ -69,6 +78,13 @@ class WordEvent:
     # utterance_id so the WheelHouse SpeechProcessor draws phrase 1 to a
     # close before phrase 2 begins. See wh-2t1f3 design notes.
     is_lifecycle_reset_marker: bool = False
+    # wh-spaced-punctuation-names-unresolved.3.1.5: the value of
+    # WheelHouseApp.utterance_start_generation just after this
+    # utterance's start_utterance command was enqueued. Set only on the
+    # FIRST word of an utterance, by the producer that sent that
+    # command. ``None`` means no producer stamped it, which the
+    # processor treats as "no start seen".
+    utterance_start_generation: Optional[int] = None
 
     @classmethod
     def timeout_finalize(

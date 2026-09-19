@@ -39,9 +39,11 @@ goal-appropriate wording/placeholders, and focus in the first empty field.
 Edit/Duplicate/Customize (entry passed) never see the page, and it never
 reappears once a goal is chosen -- it is a starting point, not a wizard.
 """
+import math
 import re
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QSignalBlocker
+from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -63,9 +65,108 @@ from PySide6.QtWidgets import (
 )
 
 from pattern_help_dialog import REGEX_CHECKER_URL
-from speech.action_catalog import ACTION_CATALOG, CATALOG_BY_NAME
+from speech.action_catalog import (
+    CATALOG_BY_NAME,
+    RESULT_PRODUCING_ACTIONS,
+    picker_sections,
+)
 from speech.key_names import VALID_KEY_NAMES
+from speech.pattern_identity import DOC_ID_KEY, is_valid_doc_id
 from speech.phrase_expression import generate_expression, validate_phrases
+from speech.pattern_expression_budget import MAX_EXPRESSION_LENGTH, EXPRESSION_LENGTH_ERROR
+
+
+class _ExpressionLengthValidator(QValidator):
+    def validate(self, text, position):
+        field = self.parent()
+        within_budget = len(text) <= field.maxLength()
+        shortening = len(text) < len(field._accepted_text)
+        # Undo has already moved Qt's history cursor when validation runs.
+        # New insertions discard redo history, so this only permits restoring
+        # a previously accepted value (which may be an oversized legacy value).
+        restoring_history = field.isRedoAvailable()
+        state = (
+            QValidator.State.Invalid if not (
+                field._loading_text or within_budget or shortening or restoring_history)
+            else QValidator.State.Acceptable
+        )
+        return state, text, position
+
+
+class _ExpressionEdit(QLineEdit):
+    """A code-point-limited field, matching the backend's Python len budget.
+
+    The public maxLength API counts characters. Native Qt storage counts UTF-16
+    units. Reserve an extra character so even a native setter's truncated value
+    remains over budget. Qt rolls back interactive rejection itself; native
+    programmatic setters require restoration in the textChanged handler.
+    """
+
+    budgetChanged = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.length_rejected = False
+        self._accepted_text = ""
+        self._loading_text = False
+        self.setMaxLength(MAX_EXPRESSION_LENGTH)
+        self.setValidator(_ExpressionLengthValidator(self))
+        # Connect before the dialog: its observers must see the restored value.
+        self.inputRejected.connect(self._reject_input)
+        self.textEdited.connect(self._accept_edit)
+        self.textChanged.connect(self._accept_text)
+
+    def maxLength(self):
+        return self._character_limit
+
+    def setMaxLength(self, length):
+        self._character_limit = length
+        self._set_storage_capacity(length)
+
+    def _set_storage_capacity(self, length):
+        super().setMaxLength(2 * (length + 1))
+
+    def _reject_input(self):
+        # Qt has not yet rolled back interactive input here. Calling setText
+        # would erase undo history and relocate the cursor/selection.
+        self.length_rejected = True
+        self.budgetChanged.emit()
+
+    def _accept_edit(self, text):
+        # Qt emits this before textChanged for accepted interactive edits,
+        # including undo restoring an oversized value loaded for repair.
+        self._accepted_text = text
+        self.length_rejected = False
+
+    def _accept_text(self, text):
+        if (text != self._accepted_text and not self._loading_text and len(text) > self.maxLength()
+                and len(text) >= len(self._accepted_text)):
+            with QSignalBlocker(self):
+                super().setText(self._accepted_text)
+            self._reject_input()
+            return
+        self._accepted_text = text
+        self.length_rejected = False
+
+    def setText(self, text):
+        self.length_rejected = False
+        super().setText(text)
+        # Also clears a prior rejection when replacing with the same value.
+        self.budgetChanged.emit()
+
+    def load_text(self, text):
+        """Display an existing/generated value intact so it can be shortened.
+
+        Save validation still rejects values above the logical budget. Only
+        this explicit load path permits one; subsequent input must fit the
+        budget or reduce the loaded value's length.
+        """
+        self._loading_text = True
+        try:
+            self._set_storage_capacity(max(self.maxLength(), len(text)))
+            self.setText(text)
+        finally:
+            self._loading_text = False
 
 # Debounce for the try-it line: restart on every keystroke, send when the
 # user pauses (QTimer single-shot restart pattern).
@@ -88,9 +189,27 @@ _BASIC_FUNCTIONS = {
     "activate": "activate",
 }
 
-_ERROR_STYLE = "color: #dc2626; font-size: 11px;"
-_OK_STYLE = "color: #15803d; font-size: 11px;"
-_MUTED_STYLE = "color: gray; font-size: 11px;"
+# Leading spaces on a picker group sub-heading, so it reads as part of the
+# audience heading above it (wh-action-picker-ordering).
+_GROUP_HEADING_INDENT = "    "
+
+# The action a brand-new step row starts on.
+_DEFAULT_STEP_FUNCTION = "hk"
+
+# Colour only, no font-size (wh-pattern-manager-improve.1.2). The Pattern
+# Manager applies its Ctrl+=/-/0 zoom size to this dialog with
+# ``setFont`` just before ``exec()``; a font-size in these rules would
+# beat that font and hold every status line at 11px however far the rest
+# of the editor was zoomed. Size arrives through _apply_inherited_font()
+# instead, which showEvent runs once the manager's font is in place.
+_ERROR_STYLE = "color: #dc2626;"
+_OK_STYLE = "color: #15803d;"
+_MUTED_STYLE = "color: gray;"
+_STATUS_STYLES = (_ERROR_STYLE, _OK_STYLE, _MUTED_STYLE)
+
+# The goal page's heading sits this many points above the body text, so
+# it still reads as a heading at any zoom level.
+_HEADING_FONT_SIZE_OFFSET = 3
 
 # A trailing hk param that is a stored int, a digit string, or a capture
 # reference is the optional repeat count (mirrors the runtime peel in
@@ -98,6 +217,24 @@ _MUTED_STYLE = "color: gray; font-size: 11px;"
 # digit references (g10+) are legal whenever the expression has that many
 # groups -- same rule as _validate_group_refs (wh-pattern-editor-r5.1).
 _HK_REPEAT_RE = re.compile(r"g[1-9][0-9]*")
+
+# A result name is a lookup key in the run context, so it must read like a
+# name: a letter or underscore, then letters, digits, or underscores. The
+# engine matches a parameter against context keys exactly, so a name with a
+# space or punctuation could never be referenced by a later step
+# (wh-editor-step-result-name).
+_RESULT_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# g1, g2, ... are the capture-group keys the engine seeds into the same
+# context, so a result name of that shape overwrites a capture group.
+_CAPTURE_NAME_RE = re.compile(r"g[0-9]+")
+
+# Hover text for the result-name field (wh-editor-step-result-name).
+_RESULT_NAME_HELP = (
+    "Optional. Name the value this step produces, then use that name as a "
+    "parameter in a later step. Leave it empty to skip the name; the "
+    "value is also stored under the action's own name."
+)
 
 # Hover text for group_ref parameter fields (spec section 8).
 _GROUP_REF_HELP = (
@@ -427,6 +564,194 @@ def _group_ref_error(steps, group_count: int):
     return None
 
 
+def _result_name_error(
+    steps, preserved_indices=frozenset(), verbatim_indices=frozenset(),
+    fieldless_indices=frozenset(),
+):
+    """First unusable ``result`` name across the serialized steps, rendered
+    as the field error, or None (wh-editor-step-result-name).
+
+    The engine writes a step's value into the run context under this name
+    and resolves a later step's parameter by an exact context lookup
+    (command_engine.py lines 342-347). Three names would change what the
+    pattern does with nothing on screen to show it, so the editor refuses
+    them:
+
+    * a capture-group name (g1, g2, ...), which overwrites the words that
+      group captured;
+    * a name a later step also claims, which leaves only the last value;
+    * another step's function name, when that function is in
+      RESULT_PRODUCING_ACTIONS: the engine stores context[func_name]
+      only for a str return (command_engine.py lines 342-343), so only
+      those functions have a stored value the name could hide. The name
+      of a dict-returning action (press, hk, ...) never becomes a
+      context key and stays usable (wh-review-pattern-fixes.20). A step
+      that reuses its OWN function name is allowed regardless: it
+      writes the same value under the same key.
+
+    The editor also refuses a name that does not read like a name. The
+    lookup is exact, so a name with a space or punctuation could never be
+    reached from a later step's parameter.
+
+    The engine also has a second, unanchored path: a parameter that is
+    not an exact context key goes through a replacement loop that
+    substitutes every stored key anywhere inside the text
+    (command_engine.py lines 252-260). A name such as 'an' would corrupt
+    a later step's literal text 'answer the question'. The editor
+    refuses a name that appears inside a later step's text parameter
+    (wh-review-pattern-fixes.2). Only later steps are checked: the
+    engine stores the value after the defining step runs (lines
+    342-347). The engine's auto-stored FUNCTION names (line 343) carry
+    the same pre-existing hazard for literal text; this editor rule does
+    not cover that case.
+
+    ``preserved_indices`` names the steps that came from preserved
+    (read-only) rows. Their names are never the subject of an error: the
+    row has no field, so the user could not fix it, and Save would
+    dead-end (wh-review-pattern-fixes.3). The sibling checks
+    (invalid_key_name, invalid_repeat_value,
+    invalid_run_capture_timeout) skip preserved rows the same way. A
+    preserved name still counts as claimed, so an EDITABLE row that
+    takes the same name flags -- that collision is fixable in its field.
+
+    Every check reasons over the LITERAL stored strings, never trimmed
+    copies: the engine's context keys are the literal strings, so the
+    preserved raw ' a' and an editable 'a' are two different run-time
+    keys, not a duplicate (wh-review-pattern-fixes.10).
+    ``verbatim_indices`` names the editable steps whose serialized name
+    is the UNEDITED loaded raw string. Such a name is exempt from the
+    format check -- it is pre-existing saved data, and flagging it would
+    dead-end Save the same way wh-review-pattern-fixes.3 described --
+    but it still takes part literally in the duplicate and embedded
+    checks, which report real run-time hazards the field can fix.
+
+    ``fieldless_indices`` names the editable steps that serialize a
+    loaded ``result`` the row offers no field for: the function is not
+    in RESULT_PRODUCING_ACTIONS, yet the stored step carried the key
+    and the extras round-trip it. The name is on no screen and in no
+    field, so it gets the same subject exemption as a preserved name --
+    an error about it would dead-end Save -- while it still counts as
+    claimed, so an editable sibling that takes the same literal name
+    flags (wh-review-pattern-fixes.14).
+    """
+    preserved_indices = set(preserved_indices)
+    verbatim_indices = set(verbatim_indices)
+    fieldless_indices = set(fieldless_indices)
+    functions = [step.get("function") for step in steps]
+    result_indices = {}
+    claimed = {}
+    for i, step in enumerate(steps):
+        stored = step.get("result")
+        if isinstance(stored, str) and stored:
+            result_indices.setdefault(stored, i)
+            if i in preserved_indices or i in fieldless_indices:
+                claimed.setdefault(stored, i)
+    for index, step in enumerate(steps):
+        if index in preserved_indices or index in fieldless_indices:
+            continue
+        name = step.get("result")
+        if not isinstance(name, str) or not name:
+            continue
+        if index not in verbatim_indices:
+            # A typed name is already stripped by the row; strip again
+            # for callers that hand in raw steps, and skip a
+            # whitespace-only value the same way _with_result drops it.
+            name = name.strip()
+            if not name:
+                continue
+        function = step.get("function")
+        if _CAPTURE_NAME_RE.fullmatch(name):
+            return (
+                f"Step '{function}': the result name '{name}' is a capture "
+                f"group name; those already hold what the expression "
+                f"captured, so choose another name"
+            )
+        if (
+            index not in verbatim_indices
+            and not _RESULT_NAME_RE.fullmatch(name)
+        ):
+            return (
+                f"Step '{function}': the result name '{name}' must start "
+                f"with a letter and use only letters, numbers, and "
+                f"underscores"
+            )
+        if name in claimed:
+            return (
+                f"Two steps name their result '{name}'; a later step "
+                f"would see only the second value"
+            )
+        for other, other_function in enumerate(functions):
+            if (
+                other != index
+                and other_function == name
+                and other_function in RESULT_PRODUCING_ACTIONS
+            ):
+                return (
+                    f"Step '{function}': the result name '{name}' is the "
+                    f"name of another step's action, whose value it would "
+                    f"hide; choose another name"
+                )
+        embedded = _embedded_name_error(steps, index, name, result_indices)
+        if embedded is not None:
+            return embedded
+        claimed[name] = index
+    return None
+
+
+def _embedded_name_error(steps, index, name, result_indices):
+    """Error when ``name`` sits inside a later step's text parameter.
+
+    Mirrors the engine's replacement loop: a string parameter that is
+    not an exact context key has every stored key replaced anywhere it
+    appears in the text. A parameter escapes that loop when it is an
+    exact key at run time: the name itself, a capture group g1..g9, an
+    earlier step's result name, or the name of an earlier step's
+    function that is modeled as string-returning. The modeled set is
+    the catalog's RESULT_PRODUCING_ACTIONS: the engine stores
+    context[func_name] only when the function's return value is a str
+    (command_engine.py), so the name of an action that returns a
+    UI-action dict (press, hk, ...) never becomes a context key, and
+    an exact parameter equal to it still falls into the replacement
+    loop (wh-review-pattern-fixes.7).
+    """
+    for later_index in range(index + 1, len(steps)):
+        later = steps[later_index]
+        for param in later.get("params", []):
+            if not isinstance(param, str) or name not in param:
+                continue
+            if param == name:
+                continue
+            if re.fullmatch(r"g[1-9]", param):
+                continue
+            if result_indices.get(param, len(steps)) < later_index:
+                continue
+            if param in _functions_before(steps, later_index):
+                continue
+            return (
+                f"Step '{steps[index].get('function')}': the result "
+                f"name '{name}' appears inside the text '{param}' of "
+                f"the later '{later.get('function')}' step; the stored "
+                f"value would replace it there, so choose a more "
+                f"distinctive name"
+            )
+    return None
+
+
+def _functions_before(steps, index):
+    """Names of earlier steps' functions that become context keys.
+
+    Only functions in RESULT_PRODUCING_ACTIONS count: the engine stores
+    context[func_name] only when the function's return value is a str,
+    and that catalog set is the modeled list of string-returning
+    actions (wh-review-pattern-fixes.7).
+    """
+    return {
+        step.get("function")
+        for step in steps[:index]
+        if step.get("function") in RESULT_PRODUCING_ACTIONS
+    }
+
+
 def _trailing_digit_key(keys_text: str):
     """The final '+'-separated segment of a keys field when it is all
     digits, else None. The runtime peels the last hk argument as a repeat
@@ -459,16 +784,67 @@ def _split_hk_params(params):
     return keys, repeat
 
 
+def _parse_run_capture_timeout(text: str) -> int | float | None:
+    """Return a finite TOML-number representation of an editor timeout."""
+    if text.isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            pass
+    try:
+        value = float(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _split_run_capture_params(params):
+    """Split stored ``run_capture`` argv into editor fields, or None when
+    a value cannot be represented without changing its meaning."""
+    if any(
+        not isinstance(value, (str, int, float)) or isinstance(value, bool)
+        for value in params
+    ):
+        return None
+    if not params:
+        return "", "", []
+
+    remaining = list(params)
+    timeout = ""
+    first = remaining[0]
+    if isinstance(first, int):
+        timeout = first
+        remaining.pop(0)
+    elif isinstance(first, float) and math.isfinite(first):
+        timeout = first
+        remaining.pop(0)
+
+    if not remaining:
+        return None
+    return timeout, remaining[0], remaining[1:]
+
+
 class ActionStepRow(QWidget):
     """One ordered action step: function picker + generated param fields.
 
     The picker offers every catalog entry whose audience is basic or
-    advanced (basic first, then a separator; internal functions are never
-    listed). Parameter fields are generated from the catalog entry's
+    advanced (internal functions are never listed), in the order
+    ``action_catalog.picker_sections`` gives: the basic entries A-Z under
+    "Basic actions", then the advanced entries under "Advanced actions",
+    split into A-Z group sub-headings with the entries inside each group
+    A-Z (wh-action-picker-ordering).
+
+    Parameter fields are generated from the catalog entry's
     ``params`` specs: ``choice`` renders a fixed combo, ``group_ref`` an
     editable combo offering g1..gN from the current expression's group
     count, everything else a line edit; each field carries the param
     summary as hover help.
+
+    An action that hands a value to the steps after it (the catalog's
+    RESULT_PRODUCING_ACTIONS) also gets a result-name field. A typed name
+    is saved as the step's ``result`` key, which is how a later step can
+    take the value as a parameter; an empty field saves no such key
+    (wh-editor-step-result-name).
 
     A stored step the fields cannot represent -- an internal or unknown
     function, more params than the catalog declares, or non-string hk keys
@@ -485,7 +861,15 @@ class ActionStepRow(QWidget):
         self._preserved_params = None  # non-None => verbatim round-trip
         self._preserved_display = None
         self._param_widgets = []       # list of (param_spec, widget)
+        self._run_capture_argument_rows = []
+        self._run_capture_argument_buttons = []
+        self._run_capture_add_button = None
+        self._result_edit = None       # only on value-producing actions
         self._loaded_function = None   # function the stored step carried
+        self._loaded_result_name = None  # stored result name, if any
+        # True once the USER typed in the result field; loads clear it
+        # (wh-review-pattern-fixes.15).
+        self._result_user_edited = False
         self._step_extras = {}         # step keys beyond function/params
 
         layout = QVBoxLayout(self)
@@ -534,16 +918,117 @@ class ActionStepRow(QWidget):
     #  Public API
     # -------------------------------------------------------------- #
 
+    def apply_resolved_status_font(self):
+        """Re-apply this row's resolved font to its summary label.
+
+        Applying a style sheet resolves and pins the widget's font, and
+        the summary label is styled in ``__init__`` -- while the row is
+        still parentless, so the size pinned there is the application
+        default rather than whatever size the editor is showing at. The
+        list editor calls this immediately after adding the row to its
+        layout, which is the first moment ``self.font()`` resolves
+        through the dialog (wh-pattern-manager-improve.1.2).
+        """
+        size = self.font().pointSize()
+        if size <= 0:
+            return
+        summary_font = self._summary_label.font()
+        summary_font.setPointSize(size)
+        self._summary_label.setFont(summary_font)
+
     def function_name(self) -> str:
         data = self._function_combo.currentData()
         return data if isinstance(data, str) else ""
+
+    def is_preserved(self) -> bool:
+        """True while the row shows its stored params read-only."""
+        return self._preserved_params is not None
+
+    def result_name(self) -> str:
+        """The result name the row serializes, or '' without a field.
+
+        A field that still holds the loaded step's raw ``result`` string
+        returns it VERBATIM, untrimmed. The engine stores the value under
+        the literal string and resolves a later parameter by an exact
+        context lookup (command_engine.py lines 346-347 and 171), and the
+        save layer keeps a string result unchanged
+        (PatternManager._validate_raw_actions), so trimming here would
+        silently rename the run-time key (wh-review-pattern-fixes.10).
+        A TYPED name is stripped as before; _RESULT_NAME_RE refuses
+        whitespace inside a new name anyway.
+
+        "Still holds" means the user never typed in the field, not mere
+        text equality: once the user edits, typed handling applies for
+        good, even when the keystrokes reproduce the loaded raw string
+        (wh-review-pattern-fixes.15). A retyped ' ' therefore strips to
+        '' and drops the key instead of reviving the whitespace-only
+        one.
+        """
+        if self._result_edit is None:
+            return ""
+        text = self._result_edit.text()
+        if not self._result_user_edited and text == self._loaded_result_name:
+            return text
+        return text.strip()
+
+    def result_is_loaded_verbatim(self) -> bool:
+        """True when the field still equals the loaded raw ``result``
+        string, so step() round-trips it verbatim. Validation exempts
+        such a name from the format check -- it is pre-existing data
+        with no on-screen change -- while it still takes part literally
+        in the duplicate and embedded checks
+        (wh-review-pattern-fixes.10). A field the user has typed in is
+        never verbatim, even when the text matches: a retyped spelling
+        is a fresh choice and gets typed handling
+        (wh-review-pattern-fixes.15)."""
+        if self._result_edit is None or self._loaded_result_name is None:
+            return False
+        if self._result_user_edited:
+            return False
+        return self._result_edit.text() == self._loaded_result_name
+
+    def result_is_hidden_extra(self) -> bool:
+        """True when step() serializes a loaded ``result`` the row has no
+        field for: the function is not value-producing, so no field was
+        built, yet the stored step carried a string result that
+        _with_extras still round-trips. Validation gives such a name the
+        preserved-style subject exemption -- there is no control to fix
+        it with -- while it still claims its literal key
+        (wh-review-pattern-fixes.14). A function switch drops the
+        extras, so the predicate holds only while the loaded function is
+        selected."""
+        if self._result_edit is not None:
+            return False
+        stored = self._step_extras.get("result")
+        if not isinstance(stored, str) or not stored:
+            return False
+        return self.function_name() == self._loaded_function
+
+    def set_result_name(self, text: str):
+        """Write the result-name field (no-op without one)."""
+        if self._result_edit is not None:
+            self._result_edit.setText(text)
 
     def step(self) -> dict:
         """Serialize this row back to a raw ``{function, params}`` step."""
         name = self.function_name()
         if self._preserved_params is not None:
-            return self._with_extras(
+            return self._with_result(self._with_extras(
                 {"function": name, "params": list(self._preserved_params)}
+            ))
+        if name == "run_capture":
+            timeout = self.param_value(0).strip()
+            params = []
+            if timeout:
+                timeout_value = _parse_run_capture_timeout(timeout)
+                params.append(timeout if timeout_value is None else timeout_value)
+            params.append(self.param_value(1))
+            params.extend(
+                self.param_value(index)
+                for index in range(2, len(self._param_widgets))
+            )
+            return self._with_result(
+                self._with_extras({"function": name, "params": params})
             )
         params = []
         for i, (spec, _widget) in enumerate(self._param_widgets):
@@ -562,7 +1047,36 @@ class ActionStepRow(QWidget):
                 # An empty number field is an omitted optional param.
             else:
                 params.append(text)
-        return self._with_extras({"function": name, "params": params})
+        return self._with_result(
+            self._with_extras({"function": name, "params": params})
+        )
+
+    def _with_result(self, step: dict) -> dict:
+        """Apply the result-name field to the serialized step.
+
+        The field is the only source of the ``result`` key on a row that
+        has one: a typed name writes the key and an empty field writes no
+        key at all (wh-editor-step-result-name). An empty field therefore
+        also drops a hand-edited non-string result carried in the extras,
+        which is what the save path does with such a value anyway
+        (PatternManager._validate_raw_actions keeps only a string).
+
+        An UNEDITED loaded name is written verbatim, untrimmed -- even a
+        whitespace-only one, which the engine treats as a real context
+        key (``if res_key:`` is true for ' '). A TYPED whitespace-only
+        value still strips to '' and means "no result key"
+        (wh-review-pattern-fixes.10). UNEDITED is tracked by the
+        user-edit flag, not text equality, so a cleared-and-retyped ' '
+        also drops the key (wh-review-pattern-fixes.15).
+        """
+        if self._result_edit is None:
+            return step
+        name = self.result_name()
+        if name:
+            step["result"] = name
+        else:
+            step.pop("result", None)
+        return step
 
     def _with_extras(self, step: dict) -> dict:
         """Re-attach the stored step's extra keys (awaits_done, ...) so an
@@ -582,6 +1096,7 @@ class ActionStepRow(QWidget):
             name = step.get("function")
             name = name if isinstance(name, str) else ""
             self._loaded_function = name
+            self._loaded_result_name = None
             self._step_extras = {
                 k: v for k, v in step.items()
                 if k not in ("function", "params")
@@ -608,6 +1123,20 @@ class ActionStepRow(QWidget):
                     1, "" if repeat is None else str(repeat),
                 )
                 return
+            if name == "run_capture":
+                split = _split_run_capture_params(params)
+                if split is None:
+                    self._enter_preserved_mode(name, params)
+                    return
+                timeout, program, arguments = split
+                self._rebuild_params()
+                self.set_param_value(0, str(timeout))
+                self.set_param_value(1, str(program))
+                for argument in arguments:
+                    self._add_run_capture_argument(
+                        str(argument), emit_change=False,
+                    )
+                return
             specs = entry["params"]
             representable = len(params) <= len(specs) and all(
                 isinstance(p, (str, int, float)) and not isinstance(p, bool)
@@ -620,8 +1149,33 @@ class ActionStepRow(QWidget):
             for i, param in enumerate(params):
                 self.set_param_value(i, str(param))
         finally:
+            # Every editable branch above returns early, so the stored
+            # result name is loaded here, once, for all of them. A
+            # preserved row has no field and keeps the name in its extras.
+            self._load_result_extra()
             self._loading = False
         self.changed.emit()
+
+    def _load_result_extra(self):
+        """Move a stored string ``result`` out of the extras and into the
+        field, so the row shows the name and owns it from then on. The
+        name is also kept in ``_loaded_result_name``: a function switch
+        destroys the field, so a switch back to the loaded function
+        rebuilds the field from this copy (wh-review-pattern-fixes.4).
+        Both copies keep the RAW string, untrimmed: while the field text
+        still equals it, result_name() serializes it verbatim, matching
+        the engine's exact-key contract (wh-review-pattern-fixes.10)."""
+        if self._result_edit is None:
+            return
+        stored = self._step_extras.get("result")
+        if isinstance(stored, str):
+            self._result_edit.setText(stored)
+            self._loaded_result_name = stored
+            self._step_extras.pop("result", None)
+            # A load starts the field clean: setText never fires
+            # textEdited, but reset explicitly so every load path
+            # states the rule (wh-review-pattern-fixes.15).
+            self._result_user_edited = False
 
     def param_value(self, index: int) -> str:
         _spec, widget = self._param_widgets[index]
@@ -678,6 +1232,15 @@ class ActionStepRow(QWidget):
             return None
         return value
 
+    def invalid_run_capture_timeout(self):
+        """Invalid editable run_capture timeout text, or None."""
+        if self._preserved_params is not None or self.function_name() != "run_capture":
+            return None
+        timeout = self.param_value(0).strip()
+        if timeout and _parse_run_capture_timeout(timeout) is None:
+            return timeout
+        return None
+
     def trailing_repeat_key(self):
         """Digit segment ending this row's hk keys field while the repeat
         field is empty, or None. With no repeat set, the digit serializes
@@ -732,6 +1295,11 @@ class ActionStepRow(QWidget):
             self.remove_btn,
         ]
         out.extend(widget for _spec, widget in self._param_widgets)
+        out.extend(self._run_capture_argument_buttons)
+        if self._run_capture_add_button is not None:
+            out.append(self._run_capture_add_button)
+        if self._result_edit is not None:
+            out.append(self._result_edit)
         if self._preserved_display is not None:
             out.append(self._preserved_display)
         return out
@@ -751,17 +1319,30 @@ class ActionStepRow(QWidget):
             ("basic", "Basic actions"),
             ("advanced", "Advanced actions"),
         ):
+            sections = picker_sections(audience)
+            if not sections:
+                continue
             combo.addItem(heading)
             model.item(combo.count() - 1).setEnabled(False)
-            for entry in ACTION_CATALOG:
-                if entry["audience"] != audience:
-                    continue
-                combo.addItem(entry["label"], entry["name"])
-                combo.setItemData(
-                    combo.count() - 1, entry["summary"],
-                    Qt.ItemDataRole.ToolTipRole,
-                )
-        combo.setCurrentIndex(1)  # first real entry after the heading
+            for group, entries in sections:
+                if group is not None:
+                    # Indented so the sub-heading reads as part of the
+                    # audience heading above it; disabled like that
+                    # heading, so it can never be chosen as a step
+                    # (wh-action-picker-ordering).
+                    combo.addItem(f"{_GROUP_HEADING_INDENT}{group}")
+                    model.item(combo.count() - 1).setEnabled(False)
+                for entry in entries:
+                    combo.addItem(entry["label"], entry["name"])
+                    combo.setItemData(
+                        combo.count() - 1, entry["summary"],
+                        Qt.ItemDataRole.ToolTipRole,
+                    )
+        # A fresh step opens on the hotkey action, as the editor has
+        # always done. Sorting the list must not silently change which
+        # action a new step starts on, so select it by name.
+        default_index = combo.findData(_DEFAULT_STEP_FUNCTION)
+        combo.setCurrentIndex(default_index if default_index >= 0 else 1)
 
     def _select_function(self, name: str, add_if_missing: bool):
         combo = self._function_combo
@@ -784,6 +1365,13 @@ class ActionStepRow(QWidget):
         while self._params_form.rowCount():
             self._params_form.removeRow(0)
         self._param_widgets = []
+        self._run_capture_argument_rows = []
+        self._run_capture_argument_buttons = []
+        self._run_capture_add_button = None
+        self._result_edit = None
+        # A rebuild destroys the field, so any user edit dies with it;
+        # the rebuilt field starts clean (wh-review-pattern-fixes.15).
+        self._result_user_edited = False
         self._preserved_params = None
         self._preserved_display = None
 
@@ -794,13 +1382,138 @@ class ActionStepRow(QWidget):
             self._summary_label.setText("")
             return
         self._summary_label.setText(entry["summary"])
-        for spec in entry["params"]:
+        if entry["name"] == "run_capture":
+            self._rebuild_run_capture_params(entry)
+        else:
+            for spec in entry["params"]:
+                widget = self._create_param_widget(spec)
+                label = QLabel(f"{spec['name']}:")
+                label.setToolTip(spec.get("summary", ""))
+                label.setBuddy(widget)
+                self._params_form.addRow(label, widget)
+                self._param_widgets.append((spec, widget))
+        self._build_result_field(entry)
+
+    def _build_result_field(self, entry):
+        """Add the result-name field to a step that produces a value.
+
+        Only these actions hand anything to the steps after them, so only
+        they get the field; on every other action the field would name
+        nothing (wh-editor-step-result-name).
+        """
+        if entry["name"] not in RESULT_PRODUCING_ACTIONS:
+            return
+        widget = QLineEdit()
+        widget.setPlaceholderText("optional, e.g. answer")
+        widget.setAccessibleName("Result name")
+        widget.setAccessibleDescription(_RESULT_NAME_HELP)
+        widget.setToolTip(_RESULT_NAME_HELP)
+        # A switch back to the loaded function restores the stored name;
+        # the switch away destroyed the previous field
+        # (wh-review-pattern-fixes.4). A fresh typed name does not come
+        # back -- that matches how the param fields behave.
+        if (
+            self._loaded_result_name is not None
+            and entry["name"] == self._loaded_function
+        ):
+            widget.setText(self._loaded_result_name)
+        widget.textChanged.connect(lambda _t: self.changed.emit())
+        # textEdited fires only for USER edits, never for setText, so
+        # the loads above and below leave the flag clean while any
+        # keystroke -- even one that retypes the loaded spelling --
+        # switches the field to typed handling for good
+        # (wh-review-pattern-fixes.15).
+        widget.textEdited.connect(self._on_result_user_edit)
+        label = QLabel("result name:")
+        label.setToolTip(_RESULT_NAME_HELP)
+        label.setBuddy(widget)
+        self._params_form.addRow(label, widget)
+        self._result_edit = widget
+
+    def _on_result_user_edit(self, _text):
+        """Mark the result field as user-edited (QLineEdit.textEdited);
+        result_name() then applies typed handling permanently for this
+        load (wh-review-pattern-fixes.15)."""
+        self._result_user_edited = True
+
+    def _rebuild_run_capture_params(self, entry):
+        """Build the fixed timeout/program fields and a repeatable argv list."""
+        for spec in entry["params"][:2]:
             widget = self._create_param_widget(spec)
             label = QLabel(f"{spec['name']}:")
             label.setToolTip(spec.get("summary", ""))
             label.setBuddy(widget)
             self._params_form.addRow(label, widget)
             self._param_widgets.append((spec, widget))
+
+        add_button = QPushButton("Add argument")
+        add_button.setAutoDefault(False)
+        add_button.setAccessibleName("Add run_capture argument")
+        add_button.setAccessibleDescription(
+            "Adds one separate program argument without shell parsing"
+        )
+        add_button.setToolTip("Add another program argument")
+        add_button.clicked.connect(lambda: self._add_run_capture_argument())
+        self._params_form.addRow("", add_button)
+        self._run_capture_add_button = add_button
+
+    def _add_run_capture_argument(self, value: str = "", emit_change: bool = True):
+        """Add one editable argv element before the add-argument control."""
+        entry = CATALOG_BY_NAME["run_capture"]
+        spec = entry["params"][2]
+        widget = self._create_param_widget(spec)
+        widget.setText(value)
+
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.addWidget(widget, stretch=1)
+        remove_button = QPushButton("Remove argument")
+        remove_button.setAutoDefault(False)
+        remove_button.setAccessibleDescription(
+            "Removes this program argument"
+        )
+        row_layout.addWidget(remove_button)
+
+        label = QLabel("argument:")
+        label.setToolTip(spec.get("summary", ""))
+        label.setBuddy(widget)
+        # Directly above the add-argument button. Its row is found by
+        # widget, not by counting from the end: the result-name field sits
+        # below it (wh-editor-step-result-name).
+        insert_at = self._params_form.rowCount() - 1
+        if self._run_capture_add_button is not None:
+            position = self._params_form.getWidgetPosition(
+                self._run_capture_add_button
+            )
+            if position[0] >= 0:
+                insert_at = position[0]
+        self._params_form.insertRow(insert_at, label, row_widget)
+        self._param_widgets.append((spec, widget))
+        self._run_capture_argument_rows.append((row_widget, widget))
+        self._run_capture_argument_buttons.append(remove_button)
+        remove_button.clicked.connect(
+            lambda _checked=False, target=widget:
+            self._remove_run_capture_argument(target)
+        )
+        if emit_change:
+            self.changed.emit()
+
+    def _remove_run_capture_argument(self, target):
+        for row_widget, widget in self._run_capture_argument_rows:
+            if widget is not target:
+                continue
+            self._params_form.removeRow(row_widget)
+            self._run_capture_argument_rows.remove((row_widget, widget))
+            self._param_widgets = [
+                item for item in self._param_widgets if item[1] is not widget
+            ]
+            for button in list(self._run_capture_argument_buttons):
+                if button.parentWidget() is row_widget:
+                    self._run_capture_argument_buttons.remove(button)
+                    break
+            self.changed.emit()
+            return
 
     def _group_ref_items(self):
         return [""] + [f"g{i}" for i in range(1, self._group_count + 1)]
@@ -974,6 +1687,42 @@ class ActionStepListEditor(QWidget):
                 return bad
         return None
 
+    def first_invalid_run_capture_timeout(self):
+        """First invalid editable run_capture timeout, or None."""
+        for row in self._rows:
+            bad = row.invalid_run_capture_timeout()
+            if bad is not None:
+                return bad
+        return None
+
+    def result_name_error(self):
+        """Field error for the first unusable result name across the
+        steps, or None (wh-editor-step-result-name). Preserved rows'
+        names are exempt -- they have no field to fix
+        (wh-review-pattern-fixes.3). A row whose field still holds the
+        loaded raw name serializes it verbatim, so its format is also
+        exempt while the literal duplicate and embedded checks still
+        apply (wh-review-pattern-fixes.10). An editable row that
+        round-trips a loaded result WITHOUT a field gets the same
+        subject exemption as a preserved row -- the name is invisible
+        and unfixable -- while it still claims its literal key
+        (wh-review-pattern-fixes.14)."""
+        preserved = {
+            index for index, row in enumerate(self._rows)
+            if row.is_preserved()
+        }
+        verbatim = {
+            index for index, row in enumerate(self._rows)
+            if row.result_is_loaded_verbatim()
+        }
+        fieldless = {
+            index for index, row in enumerate(self._rows)
+            if not row.is_preserved() and row.result_is_hidden_extra()
+        }
+        return _result_name_error(
+            self.steps(), preserved, verbatim, fieldless,
+        )
+
     def focus_widgets(self) -> list:
         """Every focusable control in visual order (tab-order chaining)."""
         out = []
@@ -990,6 +1739,10 @@ class ActionStepListEditor(QWidget):
         row = ActionStepRow(group_count=self._group_count)
         self._rows.append(row)
         self._rows_layout.addWidget(row)
+        # Only now does the row have a parent to resolve a font through,
+        # and its summary label pinned one before that
+        # (wh-pattern-manager-improve.1.2).
+        row.apply_resolved_status_font()
         row.changed.connect(self.changed.emit)
         row.remove_btn.clicked.connect(
             lambda _checked=False, r=row: self._on_remove_clicked(r)
@@ -1193,7 +1946,8 @@ class CreatePatternDialog(QDialog):
     pattern_action = Signal(dict)
 
     def __init__(self, hotword: str = "x-ray", parent=None,
-                 entry: dict = None, pattern_id: str = None):
+                 entry: dict = None, pattern_id: str = None,
+                 keep_identity: bool = False):
         super().__init__(parent)
         self._hotword = hotword
         self._entry = dict(entry) if entry else None
@@ -1211,6 +1965,31 @@ class CreatePatternDialog(QDialog):
         # an eager command (wh-int8-punctuation-mishears.1.1).
         self._entry_whole_utterance = (
             (entry or {}).get("whole_utterance_only") is True
+        )
+        # The built-in's durable name, carried by a Customize and by an
+        # edit in place -- never by a Duplicate, which opens this dialog
+        # with the same entry and must not claim the built-in the original
+        # already claims (wh-pattern-override-doc-id A2). A malformed
+        # hand-edited id is dropped: the merge falls back to the pattern
+        # text for it, so carrying it would name an identity nothing keys
+        # on.
+        #
+        # An edit carries it for the PREVIEW, not for the save.
+        # update_pattern never reads this key: it takes the doc_id from the
+        # block on disk (speech/pattern_manager.py, update_pattern), which
+        # is what stops an edit moving a rule onto a different built-in.
+        # The try-it draft has no such disk to read, so without the id here
+        # the preview placed the draft by its expression while the save
+        # places it by the id -- and an edit whose new phrases generate the
+        # expression a shipped entry already carries was shown replacing
+        # THAT entry, then saved into its own built-in's slot behind it,
+        # where the shipped entry answers first and the previewed rule
+        # never runs (wh-pattern-override-doc-id.2.2).
+        stored_doc_id = (entry or {}).get(DOC_ID_KEY)
+        self._entry_doc_id = (
+            stored_doc_id
+            if (keep_identity or self._edit_mode)
+            and is_valid_doc_id(stored_doc_id) else None
         )
         self.setWindowTitle("Edit Pattern" if self._edit_mode else "New Pattern")
         self.setMinimumWidth(480)
@@ -1820,19 +2599,20 @@ class CreatePatternDialog(QDialog):
 
         # --- Expression field ---
         expr_label = QLabel("Regular expression:")
-        self._expression_edit = QLineEdit()
+        self._expression_edit = _ExpressionEdit()
         self._expression_edit.setAccessibleName("Regular expression")
         self._expression_edit.setAccessibleDescription(
             "The pattern matched against what you say, as a Python "
-            "regular expression"
+            "regular expression, up to 500 characters"
         )
         self._expression_edit.setToolTip(
             "A Python regular expression matched against what you say.\n"
             "Start with ^ for a command; leave unanchored for a "
-            "replacement."
+            "replacement. Maximum 500 characters. Oversized input is rejected."
         )
         expr_label.setBuddy(self._expression_edit)
         self._expression_edit.textChanged.connect(self._on_expression_changed)
+        self._expression_edit.budgetChanged.connect(self._validate)
 
         self._expression_error_label = QLabel()
         self._expression_error_label.setStyleSheet(_ERROR_STYLE)
@@ -1944,10 +2724,10 @@ class CreatePatternDialog(QDialog):
         self._goal_heading = heading
         # Headings use QFont (like the manager's title label) so they
         # scale with the user's base font, not a hardcoded pixel size.
-        heading_font = heading.font()
-        heading_font.setPointSize(heading_font.pointSize() + 3)
-        heading_font.setBold(True)
-        heading.setFont(heading_font)
+        # This build-time size comes from the app default; an explicit
+        # font also blocks the cascade, so _apply_inherited_font()
+        # re-derives it once the manager's zoom size has arrived.
+        self._apply_heading_font()
         heading.setWordWrap(True)
 
         self._goal_list = _GoalList()
@@ -1992,8 +2772,50 @@ class CreatePatternDialog(QDialog):
         layout.addLayout(btn_row)
         return page
 
+    def _apply_heading_font(self):
+        """Size the goal-page heading from the dialog's current font."""
+        size = self.font().pointSize()
+        heading_font = self._goal_heading.font()
+        if size > 0:
+            heading_font.setPointSize(size + _HEADING_FONT_SIZE_OFFSET)
+        heading_font.setBold(True)
+        self._goal_heading.setFont(heading_font)
+
+    def _apply_inherited_font(self):
+        """Carry the dialog's font to the widgets Qt's cascade skips
+        (wh-pattern-manager-improve.1.2).
+
+        Two kinds escape it. A styled label had its font resolved and
+        pinned when its style sheet was applied, so the manager's later
+        ``setFont`` never reaches it; the labels are found by their style
+        rather than listed, because several are held only as locals and
+        the step rows create more of them as the user adds steps. The
+        goal heading escapes for the other reason -- it carries an
+        explicit ``QFont`` -- so it is re-derived from the new size.
+
+        Called from ``showEvent``: ``_open_editor`` applies the manager's
+        zoom size with ``setFont`` and then calls ``exec()``, so show time
+        is the first moment that size is knowable. Once is enough --
+        ``exec()`` is application-modal, so the manager cannot receive a
+        zoom shortcut while this dialog is up. A step row added after
+        this runs is NOT covered here: its label is styled before the row
+        is parented, so it pins the application default; the list editor
+        calls ``ActionStepRow.apply_resolved_status_font`` for that case.
+        """
+        size = self.font().pointSize()
+        if size <= 0:
+            return
+        for label in self.findChildren(QLabel):
+            if label.styleSheet() not in _STATUS_STYLES:
+                continue
+            label_font = label.font()
+            label_font.setPointSize(size)
+            label.setFont(label_font)
+        self._apply_heading_font()
+
     def showEvent(self, event):
         super().showEvent(event)
+        self._apply_inherited_font()
         if self._goal_page_pending:
             self._goal_page_pending = False
             self._root_stack.setCurrentWidget(self._goal_page)
@@ -2231,7 +3053,7 @@ class CreatePatternDialog(QDialog):
         user edit for expression_touched)."""
         self._loading_expression = True
         try:
-            self._expression_edit.setText(text)
+            self._expression_edit.load_text(text)
         finally:
             self._loading_expression = False
 
@@ -2292,8 +3114,11 @@ class CreatePatternDialog(QDialog):
             self._try_timer.start()
 
     def _advanced_group_count(self) -> int:
+        expression = self._expression_edit.text()
+        if len(expression) > MAX_EXPRESSION_LENGTH:
+            return 0
         try:
-            return re.compile(self._expression_edit.text()).groups
+            return re.compile(expression).groups
         except re.error:
             return 0
 
@@ -2410,6 +3235,18 @@ class CreatePatternDialog(QDialog):
                         f"Repeat must be a number or a group reference "
                         f"like g1, not '{bad_repeat}'"
                     )
+            if steps_error is None:
+                # A result name that shadows a capture group or another
+                # step's stored value changes what the pattern does
+                # without any visible sign (wh-editor-step-result-name).
+                steps_error = self._steps_editor.result_name_error()
+            if steps_error is None:
+                bad_timeout = self._steps_editor.first_invalid_run_capture_timeout()
+                if bad_timeout is not None:
+                    steps_error = (
+                        "Run-capture timeout must be a number (a finite TOML "
+                        f"number), not '{bad_timeout}'"
+                    )
             if steps_error is None and expr_error is None:
                 # Group-ref range check only once the expression compiles;
                 # with a broken expression the count would read 0 and this
@@ -2430,6 +3267,8 @@ class CreatePatternDialog(QDialog):
     def _advanced_expression_error(self):
         """Local live compile check (same Python engine as the runtime)."""
         text = self._expression_edit.text()
+        if self._expression_edit.length_rejected or len(text) > MAX_EXPRESSION_LENGTH:
+            return EXPRESSION_LENGTH_ERROR
         if not text.strip():
             return "Enter a regular expression"
         try:
@@ -2691,6 +3530,8 @@ class CreatePatternDialog(QDialog):
                 data["position"] = self._entry_position
             if self._entry_whole_utterance:
                 data["whole_utterance_only"] = True
+            if self._entry_doc_id is not None:
+                data[DOC_ID_KEY] = self._entry_doc_id
             return data
 
         if self._hotkey_radio.isChecked():
@@ -2727,4 +3568,6 @@ class CreatePatternDialog(QDialog):
             data["position"] = self._entry_position
         if self._entry_whole_utterance:
             data["whole_utterance_only"] = True
+        if self._entry_doc_id is not None:
+            data[DOC_ID_KEY] = self._entry_doc_id
         return data

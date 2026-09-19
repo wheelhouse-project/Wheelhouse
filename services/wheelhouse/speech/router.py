@@ -1,12 +1,15 @@
 import logging
-import re
 from typing import Optional, List, Sequence, Tuple
 
 from .domain import ProcessingMode, Action, Decision
 from .word_event import WordEvent
 from .pattern_catalog import PatternCatalog, PatternType
 from .pattern_matcher import PatternMatcher
-from .pattern_transform import extract_literal_prefix
+from .pattern_transform import (
+    build_literal_prefix_matchers,
+    extract_literal_prefix,
+)
+from .number_word_parser import number_phrase_can_extend
 
 logger = logging.getLogger(__name__)
 
@@ -59,28 +62,35 @@ class SpeechRouter:
         word_event: WordEvent,
         mode: ProcessingMode,
         buffer: List[str],
-        context: dict,
         hotword_active: bool = False,
         command_timeout_ms: int = 1000,
         replacement_timeout_ms: int = 400,
-        greedy_timeout_ms: int = 5000
+        greedy_timeout_ms: int = 5000,
+        utterance_words: Optional[List[str]] = None,
     ) -> Decision:
         """Make a routing decision for a word event.
 
         :flow: Speech Processing
         :step: 3.2
         :description: Evaluates word against truth table and current buffer state.
-        :data_in: WordEvent, current mode, buffer, context.
+        :data_in: WordEvent, current mode, buffer.
         :data_out: Decision object specifying Action and payload.
 
         Args:
             word_event: The word event to route (required, cannot be None)
             mode: Current processing mode
             buffer: Current buffer contents (defaults to empty list if None)
-            context: Additional context dictionary
             hotword_active: Whether hotword is currently active
             command_timeout_ms: Timeout for command buffering
             replacement_timeout_ms: Timeout for replacement buffering
+            utterance_words: Complete word list of the current
+                utterance, including this event's word (see
+                ``decide_timeout``). Only the end_of_utterance
+                finalization path reads it -- the in-process STT
+                bridge flags the utterance's last real word, and that
+                finalization needs the same whole_utterance_only span
+                check the marker/timeout path applies
+                (wh-whole-utterance-command-matching.3.1.1).
 
         Returns:
             Decision object specifying action and payload
@@ -93,8 +103,6 @@ class SpeechRouter:
             raise ValueError("word_event cannot be None")
         if buffer is None:
             buffer = []
-        if context is None:
-            context = {}
 
         # 1. Check for Utterance End
         if word_event.is_utterance_end_marker:
@@ -124,7 +132,7 @@ class SpeechRouter:
             )
 
         # 4. BUFFERING Mode Routing
-        return self._decide_buffering(word_event, mode, buffer, hotword_active, command_timeout_ms, replacement_timeout_ms, greedy_timeout_ms)
+        return self._decide_buffering(word_event, mode, buffer, hotword_active, command_timeout_ms, replacement_timeout_ms, greedy_timeout_ms, utterance_words)
 
     def _greedy_timeout_for_buffer(
         self,
@@ -216,18 +224,32 @@ class SpeechRouter:
                 continue
             if data.get("requires_hotword", False) and not hotword_active:
                 continue
-            # Prefer the prefix pre-computed at catalog load time
-            # (wh-greedy-prefix-precompute); fall back to runtime
-            # extraction only for data dicts that predate the field
-            # (synthetic test catalogs).
-            literal_prefix = data.get("literal_prefix")
-            if literal_prefix is None:
-                literal_prefix = self._extract_literal_prefix(
-                    compiled_pattern.pattern
-                )
-            if not literal_prefix:
-                continue
-            if self._buffer_matches_literal_prefix(buffer_text, literal_prefix):
+            # Prefer the matchers compiled at catalog load time
+            # (wh-greedy-prefix-precompute, extended by
+            # wh-lru-cache-hot-paths.1.5). They live on the pattern data, so
+            # WheelHouse's reference to them dies with the pattern:
+            # PatternCatalog.reload() rebuilds these dicts, and the catalog
+            # then holds nothing for a user rule the pattern editor deletes.
+            # A cache on this class could not be reached from reload() and
+            # retained them instead. CPython's own regex cache keeps the
+            # compiled pattern until eviction either way; see
+            # build_literal_prefix_matchers (wh-lru-cache-hot-paths.1.6).
+            matchers = data.get("literal_prefix_matchers")
+            if matchers is None:
+                # Fall back to runtime extraction and compilation only for
+                # data dicts that predate the fields (synthetic test
+                # catalogs). This path compiles on every call by design: no
+                # cache here, because the prefix is not guaranteed to come
+                # from a bounded set.
+                literal_prefix = data.get("literal_prefix")
+                if literal_prefix is None:
+                    literal_prefix = self._extract_literal_prefix(
+                        compiled_pattern.pattern
+                    )
+                if not literal_prefix:
+                    continue
+                matchers = build_literal_prefix_matchers(literal_prefix)
+            if any(matcher.match(buffer_text) for matcher in matchers):
                 return True
         return False
 
@@ -248,7 +270,19 @@ class SpeechRouter:
         """Return True if ``buffer_text`` matches the start of ``literal_prefix``.
 
         ``literal_prefix`` is a regex fragment (e.g. ``angle brackets`` or
-        ``activates?``). We try two strategies:
+        ``activates?``) and may carry ``\\s+`` / ``\\s*`` whitespace escapes
+        as word separators: ``extract_literal_prefix`` keeps a trailing
+        ``\\s+`` (the shipped click command's prefix is ``click\\s+``), and a
+        source pattern may join its literal words with ``\\s+`` instead of a
+        real space. Those escapes are normalized to single spaces (with the
+        result stripped, so a trailing separator vanishes) before matching --
+        otherwise strategy 1 demands trailing whitespace the buffer never
+        contains, and ``str.split()`` sees the escape as part of one long
+        token, so a one-word buffer like ``"click"`` never matched its own
+        prefix and fell to the short command timer instead of the greedy one
+        (wh-click-number-dictation).
+
+        Two strategies against the normalized prefix:
 
         1. fullmatch the whole literal prefix -- the buffer already completes
            the literal portion of the greedy pattern (e.g. ``"parentheses"``
@@ -257,25 +291,26 @@ class SpeechRouter:
            the buffer is a prefix of the multi-word literal (e.g.
            ``"angle"`` fullmatching just ``angle``, the first word of
            ``angle brackets``).
+
+        This helper compiles on every call and is used only where no
+        pre-computed matchers are available: synthetic test catalogs whose
+        pattern data predates the ``literal_prefix_matchers`` field. The
+        production path in ``_buffer_is_greedy_prefix`` reads the matchers the
+        catalog built at load time instead.
+
+        Nothing here is cached, and neither is ``build_literal_prefix_matchers``.
+        Read that function's docstring for the two review findings that
+        established where the compiled matchers belong
+        (wh-lru-cache-hot-paths.1.2 and .1.5). The short version: this function
+        takes ``buffer_text``, which is whatever the user said, so a cache here
+        retains the spoken text; and a cache keyed on ``literal_prefix`` alone
+        still grows without bound, because a user rule can supply any prefix
+        and ``PatternCatalog.reload()`` cannot reach a cache on this class.
         """
-        try:
-            literal_re = re.compile("^" + literal_prefix + "$", re.IGNORECASE)
-        except re.error:
-            return False
-        if literal_re.match(buffer_text):
-            return True
-        words = literal_prefix.split()
-        if not words:
-            return False
-        for n in range(1, len(words)):
-            partial = " ".join(words[:n])
-            try:
-                partial_re = re.compile("^" + partial + "$", re.IGNORECASE)
-            except re.error:
-                continue
-            if partial_re.match(buffer_text):
-                return True
-        return False
+        return any(
+            matcher.match(buffer_text)
+            for matcher in build_literal_prefix_matchers(literal_prefix)
+        )
 
     def _decide_idle(
         self,
@@ -316,6 +351,21 @@ class SpeechRouter:
                 # when the hotword is active the word stays a live candidate and
                 # this guard does not fire.
                 if self._cannot_match([word], "command", hotword_active):
+                    if self._replacement_patterns_for_first_word([word]):
+                        greedy = self._greedy_timeout_for_buffer(
+                            [word], ("replacement",), hotword_active, greedy_timeout_ms
+                        )
+                        return Decision(
+                            Action.BUFFER,
+                            payload=word,
+                            target_mode=ProcessingMode.REPLACEMENT_BUFFERING,
+                            timeout_ms=(
+                                greedy
+                                if greedy is not None
+                                else replacement_timeout_ms
+                            ),
+                            reason="Fresh replacement buffering after impossible command",
+                        )
                     return Decision(
                         Action.DICTATE,
                         payload=word,
@@ -369,6 +419,19 @@ class SpeechRouter:
 
             # MID_COMMAND_PASSTHROUGH
             case (False, PatternType.COMMAND):
+                if self._replacement_patterns_for_first_word([word]):
+                    greedy = self._greedy_timeout_for_buffer(
+                        [word], ("replacement",), hotword_active, greedy_timeout_ms
+                    )
+                    return Decision(
+                        Action.BUFFER,
+                        payload=word,
+                        target_mode=ProcessingMode.MID_REPLACEMENT_BUFFERING,
+                        timeout_ms=(
+                            greedy if greedy is not None else replacement_timeout_ms
+                        ),
+                        reason="Mid-utterance replacement buffering after command collision",
+                    )
                 return Decision(Action.DICTATE, payload=word, reason="Mid-utterance command passthrough")
 
             # MID_REPLACEMENT_BUFFER
@@ -404,7 +467,8 @@ class SpeechRouter:
         hotword_active: bool,
         command_timeout_ms: int,
         replacement_timeout_ms: int,
-        greedy_timeout_ms: int = 5000
+        greedy_timeout_ms: int = 5000,
+        utterance_words: Optional[List[str]] = None,
     ) -> Decision:
         """Handle routing when in BUFFERING mode."""
         word = word_event.word
@@ -439,7 +503,12 @@ class SpeechRouter:
             # But "Finalize" tries Command -> Replacement -> Dictate.
             # The Router should do this logic.
             
-            return self._resolve_finalization(new_buffer, hotword_active)
+            return self._resolve_finalization(
+                new_buffer,
+                hotword_active,
+                allow_commands=mode is not ProcessingMode.MID_REPLACEMENT_BUFFERING,
+                utterance_words=utterance_words,
+            )
 
         # 2. Check for Complete Pattern
         result = self.matcher.match_for_routing(new_buffer, target_type, hotword_active)
@@ -458,14 +527,74 @@ class SpeechRouter:
                     reason="Whole-utterance-only pattern matched; awaiting utterance end",
                 )
 
-            # Check for unfilled optional numeric group: if the pattern has a
-            # validation_group but the captured value is None, the optional count
-            # hasn't been spoken yet. Continue buffering so it can arrive.
-            # Example: "back space" matches but "back space three" is better.
-            # Timeout will finalize if no number comes.
-            if result.validation_group and self._has_unfilled_numeric_group(result):
-                timeout = command_timeout_ms if mode in (ProcessingMode.COMMAND_BUFFERING, ProcessingMode.HOTWORD_BUFFERING) else replacement_timeout_ms
-                return Decision(Action.BUFFER, payload=word, timeout_ms=timeout, reason="Pattern matches but optional count unfilled, continue buffering")
+            # An optional count keeps the buffer open in two shapes, and
+            # both mean the same thing: the number may not be finished.
+            #
+            # UNFILLED -- the count has not been spoken at all. "back
+            # space" matches, but "back space three" is the better match,
+            # so wait for a number to arrive.
+            #
+            # GROWABLE -- the count is filled with a phrase that another
+            # number word could still extend. "twenty" is a complete count
+            # and "twenty three" is a different one, so executing the
+            # moment "twenty" arrived pressed backspace twenty times and
+            # then dictated "three" (wh-whole-utterance-command-matching.4).
+            # number_phrase_can_extend answers this against the parser's
+            # own grammar, so "23", "ninety nine" and "ten" still execute
+            # at once; only a phrase a word could really extend waits.
+            #
+            # Either way the wait ends at the end of the utterance: the
+            # end marker finalizes the buffer at step 1, and the timeout
+            # finalizes a buffer no end marker reaches. A next word that
+            # cannot extend the count does NOT end the wait where it
+            # arrives. It makes the buffer impossible, and step 3 defers
+            # an impossible buffer to the utterance end
+            # (wh-whole-utterance-command-matching.3), so the prefix loop
+            # still produces "backspace three hello" -> three presses
+            # then "hello", but at the end marker rather than at "hello".
+            # Measured, not assumed (wh-whole-utterance-command-matching
+            # .4.1.3): "hello" and "question" reach that same branch at
+            # the same moment, so releasing the command at "hello" would
+            # also release it at "question" and split "question mark",
+            # which is the word-speed split that deferral removed.
+            # crewcut: both checks below read ONE count -- the first
+            # numeric capture -- and only the growable check asks whether
+            # that capture is still at the open end of the text. Two
+            # limits follow, both accepted on this branch
+            # (wh-whole-utterance-command-matching.4.1.2 and .4.1.4).
+            # A pattern with two counts gets the wait for the first one
+            # and nothing for the second, because
+            # pattern_transform.py:3175 publishes validation_group as the
+            # first widened capture alone. And an UNFILLED count waits
+            # even when its position is already closed, so a pattern that
+            # puts a required literal after an optional count, or that
+            # leaves the first capture empty because a different
+            # alternation branch matched, waits for a count that can
+            # never arrive. To remove both: publish every widened capture
+            # number, then ask the match which count position is still
+            # open instead of using the first validation_group as a proxy
+            # -- and audit the other _has_unfilled_numeric_group caller
+            # in the finalization prefix path plus every validate_numeric
+            # caller, which read the same metadata. Neither limit is
+            # reachable through a shipped pattern: backspace is the one
+            # shipped pattern that reaches these checks, it has a single
+            # count, and that count sits at the open end. A pattern
+            # written in the Advanced editor can reach both.
+            if result.validation_group:
+                unfilled = self._has_unfilled_numeric_group(result)
+                growable = not unfilled and self._count_can_still_grow(result)
+                if unfilled or growable:
+                    timeout = command_timeout_ms if mode in (ProcessingMode.COMMAND_BUFFERING, ProcessingMode.HOTWORD_BUFFERING) else replacement_timeout_ms
+                    return Decision(
+                        Action.BUFFER,
+                        payload=word,
+                        timeout_ms=timeout,
+                        reason=(
+                            "Pattern matches but optional count could still grow, continue buffering"
+                            if growable
+                            else "Pattern matches but optional count unfilled, continue buffering"
+                        ),
+                    )
 
             # If the match is mid-buffer (either side has leftover text),
             # keep the leftovers on the Decision so the Processor can
@@ -514,8 +643,41 @@ class SpeechRouter:
                             ),
                         )
 
+                # wh-whole-utterance-command-matching.3: an impossible
+                # utterance-start buffer DEFERS to the utterance end
+                # instead of finalizing at word speed. The buffer keeps
+                # accumulating the utterance's words with the mode's
+                # fixed timeout as the no-end-marker fallback; the end
+                # marker (step 1), the timeout (decide_timeout), the
+                # new-utterance auto-finalize, or the lifecycle close
+                # then matches the COMPLETE word list. This is what lets
+                # "backspace question mark" fire backspace and type "?"
+                # instead of splitting at word speed. Mid-utterance
+                # speculative buffers (MID_REPLACEMENT_BUFFERING) keep
+                # the immediate finalization: their word-speed release
+                # is the Stage-4 passthrough behavior, out of scope
+                # here.
+                if mode is not ProcessingMode.MID_REPLACEMENT_BUFFERING:
+                    timeout = (
+                        command_timeout_ms
+                        if mode is ProcessingMode.COMMAND_BUFFERING
+                        else replacement_timeout_ms
+                    )
+                    return Decision(
+                        Action.BUFFER,
+                        payload=word,
+                        timeout_ms=timeout,
+                        reason=(
+                            "Impossible buffer deferred to utterance end"
+                        ),
+                    )
+
                 # Impossible -> Finalize
-                return self._resolve_finalization(new_buffer, hotword_active)
+                return self._resolve_finalization(
+                    new_buffer,
+                    hotword_active,
+                    allow_commands=False,
+                )
 
         # 4. Continue Buffering
         # wh-greedy-buffer-race / wh-greedy-hotword-replacement-gap: when the
@@ -544,21 +706,50 @@ class SpeechRouter:
         timeout = command_timeout_ms if mode in (ProcessingMode.COMMAND_BUFFERING, ProcessingMode.HOTWORD_BUFFERING) else replacement_timeout_ms
         return Decision(Action.BUFFER, payload=word, timeout_ms=timeout, reason="Continue buffering")
 
-    def decide_timeout(self, buffer: List[str], hotword_active: bool) -> Decision:
+    def decide_timeout(
+        self,
+        buffer: List[str],
+        hotword_active: bool,
+        mode: Optional[ProcessingMode] = None,
+        utterance_words: Optional[List[str]] = None,
+    ) -> Decision:
         """Make a decision when timeout expires.
-        
+
         :flow: Speech Processing
         :step: 3.3
         :description: Resolves buffer state when timeout occurs.
         :data_in: Current buffer contents and hotword state.
         :data_out: Decision to EXECUTE (if matched) or DICTATE (fallback).
-        """
-        return self._resolve_finalization(buffer, hotword_active)
 
-    def _resolve_finalization(self, buffer: List[str], hotword_active: bool) -> Decision:
+        utterance_words is the complete word list of the utterance the
+        buffer belongs to (wh-whole-utterance-command-matching.3). When
+        provided, a whole-buffer match on a whole_utterance_only
+        pattern fires only when the buffer really spans that utterance.
+        None keeps the legacy fire-on-buffer-match behavior for callers
+        that have no utterance context.
+        """
+        return self._resolve_finalization(
+            buffer,
+            hotword_active,
+            allow_commands=mode is not ProcessingMode.MID_REPLACEMENT_BUFFERING,
+            utterance_words=utterance_words,
+        )
+
+    def _resolve_finalization(
+        self,
+        buffer: List[str],
+        hotword_active: bool,
+        *,
+        allow_commands: bool = True,
+        utterance_words: Optional[List[str]] = None,
+    ) -> Decision:
         """Resolve finalization logic: Command -> Replacement -> Dictate.
 
         Uses PatternMatcher for consolidated matching logic.
+
+        utterance_words: see ``decide_timeout``. None means no
+        utterance context (legacy callers); the whole_utterance_only
+        span check is skipped.
         """
         if not buffer:
             return Decision(Action.IGNORE, reason="Empty buffer, nothing to finalize")
@@ -577,9 +768,34 @@ class SpeechRouter:
         # re-match is the load-bearing step for the count surviving on
         # this whole-buffer path; test_interior_comma_whole_buffer_command
         # pins it (wh-midword-punct-severs-count.1.3).
-        result = self.matcher.match_for_routing(buffer, "command", hotword_active)
+        result = (
+            self.matcher.match_for_routing(buffer, "command", hotword_active)
+            if allow_commands
+            else None
+        )
         if result and result.matched:
-            return Decision(Action.EXECUTE, payload=buffer_text, reason="Finalized as command")
+            # wh-whole-utterance-command-matching.3: a
+            # whole_utterance_only pattern means the ENTIRE utterance
+            # (patterns.toml doc block), and under the end-marker
+            # deferral a buffer no longer always equals the utterance.
+            # With utterance context available, fire the alias only
+            # when the buffer spans the utterance; otherwise fall
+            # through (the prefix loop already skips these, so the
+            # buffer resolves as replacement or dictation).
+            if (
+                utterance_words is not None
+                and result.pattern_data.get("whole_utterance_only")
+                and not self._buffer_spans_utterance(
+                    buffer, utterance_words, hotword_active
+                )
+            ):
+                pass
+            else:
+                return Decision(
+                    Action.EXECUTE,
+                    payload=buffer_text,
+                    reason="Finalized as command",
+                )
 
         # 1b. Try a command PREFIX of the buffer (wh-cmd-prefix-not-split).
         # Commands are ^...$-anchored, so step 1 only matches the whole
@@ -599,7 +815,7 @@ class SpeechRouter:
         # get_matching_patterns normalizes its lookup key (wh-9f51.1),
         # so an STT punctuation tail on the first token cannot cause a
         # wrong skip.
-        first_word_has_command = any(
+        first_word_has_command = allow_commands and any(
             ptype == "command"
             for _, ptype, _ in self.catalog.get_matching_patterns(buffer[0])
         )
@@ -692,6 +908,42 @@ class SpeechRouter:
 
     def _is_single_word_complete(self, word: str, target_type: str, hotword_active: bool = False) -> bool:
         return self._is_pattern_complete([word], target_type, hotword_active)
+
+    def _buffer_spans_utterance(
+        self,
+        buffer: List[str],
+        utterance_words: List[str],
+        hotword_active: bool,
+    ) -> bool:
+        """True when the buffer covers the utterance's complete word list.
+
+        wh-whole-utterance-command-matching.3: the buffer spans the
+        utterance when the utterance's words ARE the buffer, or when
+        the only word in front of the buffer is the active wake word --
+        the TRANSITION that activates the hotword clears it from the
+        buffer, so "x-ray save" with the hotword active is still "save"
+        as the whole utterance. Any other head word means earlier
+        speech streamed past this buffer, so a whole-utterance-only
+        pattern must not fire.
+        """
+        head_len = len(utterance_words) - len(buffer)
+        if head_len < 0 or utterance_words[head_len:] != buffer:
+            return False
+        head = utterance_words[:head_len]
+        if not head:
+            return True
+        if hotword_active and len(head) == 1:
+            # Judge the head with the same hyphen-insensitive equality
+            # that detected it (step 2 of decide), against the same
+            # snapshot the dictation fallback reconstructs from -- an
+            # exact-string compare here rejects a fused "xray" that
+            # detection accepted (wh-whole-utterance-command-matching
+            # .3.1.2), and the live catalog value can differ from the
+            # wake word this buffer actually started with
+            # (bulletproof.5.2).
+            if _word_matches_hotword(head[0], self._active_hotword):
+                return True
+        return False
 
     def _matches_whole_utterance_only(
         self, buffer: List[str], target_type: str, hotword_active: bool = False
@@ -800,6 +1052,148 @@ class SpeechRouter:
         except (ValueError, IndexError):
             return False
 
+    def _count_can_still_grow(self, result) -> bool:
+        """Check whether a FILLED count could be extended by another word.
+
+        The sibling of ``_has_unfilled_numeric_group``: that one asks
+        whether a count has arrived, this one asks whether the count that
+        arrived is finished. A spoken number reaches the router one word
+        at a time, so a group holding "twenty" is a complete count AND a
+        prefix of "twenty three"; acting on it cut the number short
+        (wh-whole-utterance-command-matching.4).
+
+        The answer comes from speech/number_word_parser.py, the one
+        word-to-integer implementation, so there is no second copy of the
+        vocabulary here and no list to keep in step. The aliases and zero
+        options match speech/actions.py:words_to_int, which is what
+        actually parses this count when the command runs -- passing a
+        different pair would make this answer disagree with the value the
+        command engine derives.
+
+        The count must also END the matched text, because that is the
+        only place a later word could join it. A pattern may put literal
+        text after its capture -- "^tab (\\d+) times$" -- and then the
+        word after the count has already been spoken by the time the
+        pattern matches, so the count is final and waiting protects
+        nothing; it only delays the command to the end marker or the
+        command timeout (wh-whole-utterance-command-matching.4.1.1). No
+        shipped pattern has that shape (backspace is the one shipped
+        pattern that reaches this check at all, and its count ends the
+        match), but the Advanced pattern editor lets a user write one
+        and records no whole_utterance_only flag for a new entry, so a
+        user pattern does reach here. The subject string is the joined
+        buffer text (pattern_matcher.py:588), so its end is the position
+        the next spoken word would land after.
+
+        Args:
+            result: MatchResult from PatternMatcher.
+
+        Returns:
+            True only for a filled count that ends the matched text and
+            that some number word extends. False for an unfilled count
+            (that is the other helper's question), for a count spoken as
+            digits, for a count the pattern already bounds, and for a
+            phrase nothing can extend.
+        """
+        # The first-capture limit this shares with
+        # _has_unfilled_numeric_group is recorded as one crewcut: comment
+        # at their shared call site in _decide_buffering.
+        if not result.validation_group or not result.match_object:
+            return False
+        try:
+            group_num = int(result.validation_group[1:])  # "g1" -> 1
+            captured = result.match_object.group(group_num)
+            group_end = result.match_object.end(group_num)
+        except (ValueError, IndexError):
+            return False
+        if captured is None:
+            return False
+        if group_end != len(result.match_object.string):
+            return False
+        return number_phrase_can_extend(captured, aliases=True, zero=True)
+
+    def _replacement_patterns_for_first_word(self, buffer: List[str]):
+        """Return replacement candidates indexed under ``buffer``'s first word.
+
+        This is the shared first-word lookup for replacement routing. A
+        first-word candidate is enough to begin replacement buffering, while
+        ``_can_match_replacement`` below additionally tests the complete
+        buffered text before switching an existing command buffer.
+        """
+        if not buffer:
+            return []
+
+        return [
+            compiled_pattern
+            for compiled_pattern, pattern_type, _data
+            in self.catalog.get_matching_patterns(buffer[0])
+            if pattern_type == "replacement"
+        ]
+
+    def is_incomplete_replacement_prefix(self, word: str) -> bool:
+        """True when ``word`` alone could still grow into a replacement.
+
+        wh-okay-prefix-splits-replacement. SpeechProcessor asks this about the
+        LAST word of text it is about to dictate. A True answer means the word
+        is a viable replacement prefix that has not matched yet, so a word
+        arriving next could still complete the pair -- "question" before
+        "mark", "full" before "stop".
+
+        This is deliberately a single-word question, unlike
+        ``_can_match_replacement`` above, which tests the whole buffer against
+        patterns indexed under its FIRST word. That first-word limitation is
+        the reason "okay question" never reaches replacement buffering: the
+        pair is indexed under "question", not under "okay".
+
+        Measured on 2026-08-28 against the shipped catalog: 47 of the 200
+        indexed first words answer True. All 47 already open a buffer from
+        IDLE today, so this does not add a class of delayed words.
+        """
+        if not word:
+            return False
+        if self.matcher.is_pattern_complete([word], "replacement", False):
+            return False
+        return not self.matcher.cannot_match([word], "replacement", False)
+
+    def is_incomplete_replacement_name(self, words: List[str]) -> bool:
+        """True when ``words`` TOGETHER are an unfinished replacement name.
+
+        wh-spaced-punctuation-names-unresolved.3. The multi-word sibling
+        of ``is_incomplete_replacement_prefix`` above, and the same two
+        questions in the same order: the words do not spell a complete
+        replacement yet, and they can still grow into one. The only
+        difference is that the whole word list is asked, not just its
+        last word.
+
+        The single-word method cannot answer for a paused name whose
+        words arrive one utterance apart. "open" alone is a viable first
+        word, but "open single" -- the state after the second utterance
+        of "open single quote" -- has "single" as its last word, and
+        ``is_incomplete_replacement_prefix("single")`` says nothing about
+        whether the pair opens a real name. Asking the whole list does:
+        ``PatternMatcher.can_continue`` reaches
+        ``_buffer_opens_literal_prefix``, which tests the buffer against
+        the anchored matchers the catalog compiled for each pattern
+        (``literal_prefix_matchers`` for a greedy pattern,
+        ``literal_body_matchers`` for the ``^...$`` / ``\\b...\\b``
+        punctuation names Stage A gave bodies to). Those matchers answer
+        True only for the pattern's whole literal opening or an exact
+        N-word truncation of it, so ["open", "single"] answers True and
+        ["open", "the"] answers False.
+
+        Measured against the shipped catalog on 2026-09-05: True for
+        ["open"], ["open", "single"], ["question"], ["greater"],
+        ["greater", "than"], ["pound", "sterling"]; False for
+        ["open", "the"], ["open", "single", "quote"] (already complete),
+        ["question", "mark"] (already complete), ["hold", "it", "open"],
+        ["hello"], ["the"].
+        """
+        if not words:
+            return False
+        if self.matcher.is_pattern_complete(words, "replacement", False):
+            return False
+        return not self.matcher.cannot_match(words, "replacement", False)
+
     def _can_match_replacement(self, buffer: List[str]) -> bool:
         """Check if buffer could match a replacement pattern.
 
@@ -813,12 +1207,9 @@ class SpeechRouter:
         if not buffer:
             return False
 
-        first_word = buffer[0]
-        patterns = self.catalog.get_matching_patterns(first_word)
         buffer_text = " ".join(buffer)
 
-        for compiled_pattern, pattern_type, data in patterns:
-            if pattern_type == "replacement":
-                if compiled_pattern.search(buffer_text):
-                    return True
-        return False
+        return any(
+            compiled_pattern.search(buffer_text)
+            for compiled_pattern in self._replacement_patterns_for_first_word(buffer)
+        )

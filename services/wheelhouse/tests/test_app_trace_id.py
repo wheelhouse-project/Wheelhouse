@@ -47,6 +47,7 @@ def app(mock_shm, mock_command_ready_event, mock_ui_ready_event, mock_response_q
         app.ui_ready_event = mock_ui_ready_event
         app.response_queue = mock_response_queue
         app.response_futures = {}
+        app._request_trace_meta = {}
         app.response_timeout_s = 5.0
         app._outbound_q = asyncio.Queue()
         app.demuxer_task = None

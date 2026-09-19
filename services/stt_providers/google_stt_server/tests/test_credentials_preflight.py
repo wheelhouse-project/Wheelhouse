@@ -757,20 +757,17 @@ class TestCooldownContaminatedSpeech:
 
     def test_drop_count_reads_through_the_public_provider_interface(self):
         """The loop's mic object is the AudioProvider adapter from
-        get_audio_provider(), whose public method is get_stats() --
-        get_stats_snapshot() exists only on the private stream inside
-        the sounddevice adapter. Reading drops through anything but the
-        public interface crashes the provider at startup on every
-        backend (review finding wh-google-creds-file-picker.1.28).
-        Both real adapter classes construct without hardware access, so
-        this drives the exact objects main() uses.
+        get_audio_provider(), whose public method is get_stats().
+        get_stats_snapshot() existed only on the private stream inside
+        the deleted PortAudio adapter. Reading drops through anything
+        but the public interface crashes the provider at startup
+        (review finding wh-google-creds-file-picker.1.28). This test
+        drove both adapter classes until wh-portaudio-capture-removal
+        deleted the PortAudio one; the real adapter constructs without
+        hardware access, so this drives the exact object main() uses.
         """
-        from shared_audio.capture.sounddevice_capture import (
-            SounddeviceAudioCapture,
-        )
         from shared_audio.capture.winrt_capture import WinRTAudioCapture
 
-        assert server_main.read_drop_count(SounddeviceAudioCapture()) == 0
         assert server_main.read_drop_count(WinRTAudioCapture()) == 0
 
     def test_drop_count_defaults_to_zero_on_a_statless_provider(self):

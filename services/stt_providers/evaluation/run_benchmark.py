@@ -4,16 +4,22 @@ Feeds Phase 1 corpus WAV files into a candidate STT model via an adapter,
 compares output against manifest ground truth, and reports accuracy metrics.
 
 Usage:
+    Write the directory that holds the model files in place of <model-dir>
+    below. The path is absolute on most installations, because model
+    weights usually live outside the repository. The name below is the
+    shipped full-precision model; a directory holding an int8 build works
+    too, because the adapter reads either naming.
+
     cd services/stt_providers/shared
     uv run python ../evaluation/run_benchmark.py \
-        --model sherpa-zipformer \
-        --model-path "../sherpa_streaming_zipformer_stt_server" \
+        --model parakeet \
+        --model-path "<model-dir>/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3" \
         --provider cpu
 
     # Quick litmus check:
     uv run python ../evaluation/run_benchmark.py \
-        --model sherpa-zipformer \
-        --model-path "../sherpa_streaming_zipformer_stt_server" \
+        --model parakeet \
+        --model-path "<model-dir>/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3" \
         --category litmus
 
 Reference: docs/design/benchmark_harness_design.md
@@ -34,6 +40,7 @@ from pathlib import Path
 
 import jiwer
 import numpy as np
+from shared_stt.transcript_rules import apply_itn
 
 from adapters.base import ModelAdapter, TranscriptionResult
 
@@ -126,13 +133,34 @@ def _normalize_small_numbers(text: str) -> str:
 def _loose_normalize(text: str) -> str:
     """Strip a trailing terminal punctuation character and digit-normalize.
 
+    Two number normalizers run, in this order:
+
+    1. apply_itn(), the shipped inverse text normalizer from
+       shared_stt.transcript_rules. Above-ten cardinals, money, AM/PM
+       clock times, decimals, and spoken digit sequences.
+    2. _normalize_small_numbers(), the harness's own zero-through-ten
+       table, which predates the module and covers the lone number words
+       apply_itn deliberately refuses.
+
+    The order is load-bearing. apply_itn() reads number WORDS, so
+    "eight thousand" must reach it before _normalize_small_numbers()
+    rewrites it as "8 thousand", a form apply_itn() leaves alone.
+
+    The identical treatment runs on the manifest's canonical text and on
+    the model output (loose_match, and the WER pass), so no model is
+    scored down for choosing one written form over the other. Phrases
+    apply_itn() refuses on command-safety grounds -- a lone number word,
+    "twenty three fifty", "four ten" -- stay refused on both sides, so
+    they still compare equal to themselves. The harness does not relax a
+    module rule to suit itself.
+
     Mid-string casing and mid-string punctuation stay untouched here.
     The case-sensitivity decision happens later in loose_match().
     """
     text = text.strip()
     if text and text[-1] in TERMINAL_PUNCT:
         text = text[:-1].rstrip()
-    return _normalize_small_numbers(text)
+    return _normalize_small_numbers(apply_itn(text))
 
 
 def loose_match(expected: str, actual: str) -> bool:
@@ -141,9 +169,15 @@ def loose_match(expected: str, actual: str) -> bool:
     Comparison rules:
       - A single trailing terminal punctuation character (. ? !) is
         stripped from each side.
-      - Cardinal words zero through ten are replaced with their digit
-        equivalents on each side, mirroring WheelHouse's word-or-digit
-        acceptance for command parameters in that range.
+      - The shipped inverse text normalizer apply_itn() runs on each
+        side, so a spoken "eight thousand" and a written "8000" compare
+        equal, as do "five dollars" and "$5", "eleven fifteen PM" and
+        "11:15 PM", and "three point five" and "3.5".
+      - Cardinal words zero through ten are then replaced with their
+        digit equivalents on each side, mirroring WheelHouse's
+        word-or-digit acceptance for command parameters in that range.
+        apply_itn() refuses a lone number word on command-safety
+        grounds; this table is what still converts it.
       - If the (normalized) expected contains a proper-noun-shaped word,
         the comparison is strict: mid-string casing must match. So
         "Bill Smith" and "Boston" need their capitals.
@@ -256,7 +290,7 @@ def read_wav(path: Path) -> tuple[np.ndarray, int]:
 
 
 ADAPTER_REGISTRY = {
-    "sherpa-zipformer": "adapters.sherpa_adapter.SherpaAdapter",
+    "sherpa-streaming": "adapters.sherpa_adapter.SherpaAdapter",
     "sherpa-lstm": "adapters.sherpa_adapter.SherpaAdapter",
     "google": "adapters.google_adapter.GoogleSTTAdapter",
     "faster-whisper": "adapters.faster_whisper_adapter.FasterWhisperAdapter",
@@ -665,7 +699,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model", required=True,
-        help="Adapter name: sherpa-zipformer, sherpa-lstm, google, faster-whisper",
+        help="Adapter name: sherpa-streaming, sherpa-lstm, google, faster-whisper",
     )
     parser.add_argument(
         "--model-path", default="",

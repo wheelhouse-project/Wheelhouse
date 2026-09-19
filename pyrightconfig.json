@@ -1,5 +1,13 @@
 {
-  "extraPaths": [".", "services"],
+  "extraPaths": [
+    ".",
+    "services",
+    "services/wheelhouse",
+    "services/stt_providers/shared",
+    "services/stt_providers/evaluation",
+    "services/stt_providers/shared/tests",
+    "scripts/release"
+  ],
   "pythonVersion": "3.12",
   "reportMissingImports": "warning"
 }

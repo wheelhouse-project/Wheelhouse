@@ -499,6 +499,120 @@ class TestSynchronize:
         assert buf._selection_len == 0
 
 
+def _mock_prompt(mock_auto, doc_text, cursor_text, enclosing_class=None,
+                 enclosing_error=None):
+    """Mock a focused TextPattern control without TextPattern2.
+
+    ``cursor_text`` is the text before the caret that the slow
+    MoveEndpointByRange fallback reads. ``enclosing_class`` is the class
+    name of the element that encloses the caret; ``enclosing_error``
+    makes that read raise instead.
+    """
+    mock_auto.UIAutomationInitializerInThread.return_value.__enter__ = MagicMock()
+    mock_auto.UIAutomationInitializerInThread.return_value.__exit__ = MagicMock(return_value=False)
+    mock_auto.TextPatternRangeEndpoint.End = "End"
+    mock_auto.TextPatternRangeEndpoint.Start = "Start"
+
+    focused = MagicMock()
+    text_pattern = MagicMock()
+    # The Claude Code prompt exposes TextPattern but not TextPattern2
+    # (live probe on wh-pzt, 2026-09-14).
+    focused.GetPattern.side_effect = (
+        lambda pid: text_pattern if pid is mock_auto.PatternId.TextPattern else None
+    )
+
+    doc_range = MagicMock()
+    doc_range.GetText.return_value = doc_text
+    text_pattern.DocumentRange = doc_range
+
+    sel_range = MagicMock()
+    sel_range.GetText.return_value = ""
+    if enclosing_error is not None:
+        sel_range.GetEnclosingControl.side_effect = enclosing_error
+    else:
+        sel_range.GetEnclosingControl.return_value = MagicMock(ClassName=enclosing_class)
+    text_pattern.GetSelection.return_value = [sel_range]
+
+    cursor_range = MagicMock()
+    cursor_range.GetText.return_value = cursor_text
+    doc_range.Clone.return_value = cursor_range
+
+    mock_auto.GetFocusedControl.return_value = focused
+
+
+class TestEditorEmptyPlaceholder:
+    """wh-pzt: an empty tiptap prompt reports its placeholder as text.
+
+    The live probe on the empty Claude Code desktop prompt read the
+    document text 'Type / for commands\\n' with the caret after it, so
+    get_context returned 'ds' and TextPerfector put a space before the
+    first dictated word. The caret's enclosing element carries the class
+    'is-editor-empty' only in that placeholder state.
+    """
+
+    @patch(f"{_MOD}.auto")
+    def test_editor_empty_placeholder_reads_as_line_start(self, mock_auto):
+        _mock_prompt(
+            mock_auto,
+            doc_text="Type / for commands\n",
+            cursor_text="Type / for commands",
+            enclosing_class="is-empty is-editor-empty",
+        )
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._buffer == ""
+        assert buf._cursor_pos == 0
+        assert buf._selection_len == 0
+        assert buf.get_context()["preceding_chars"] == ""
+
+    @patch(f"{_MOD}.auto")
+    def test_empty_paragraph_in_non_empty_editor_keeps_text(self, mock_auto):
+        """'is-empty' alone marks an empty paragraph, not an empty editor."""
+        _mock_prompt(
+            mock_auto,
+            doc_text="ab\n",
+            cursor_text="ab\n",
+            enclosing_class="is-empty",
+        )
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._buffer == "ab\n"
+        assert buf._cursor_pos == 3
+
+    @patch(f"{_MOD}.auto")
+    def test_non_empty_editor_keeps_text(self, mock_auto):
+        _mock_prompt(
+            mock_auto,
+            doc_text="ab",
+            cursor_text="ab",
+            enclosing_class="tiptap ProseMirror ProseMirror-focused",
+        )
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._buffer == "ab"
+        assert buf._cursor_pos == 2
+        assert buf.get_context()["preceding_chars"] == "ab"
+
+    @patch(f"{_MOD}.auto")
+    def test_enclosing_control_error_keeps_today_path(self, mock_auto):
+        import _ctypes as real_ctypes
+
+        _mock_prompt(
+            mock_auto,
+            doc_text="ab",
+            cursor_text="ab",
+            enclosing_error=real_ctypes.COMError(-2147418113, "operation failed", None),
+        )
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._buffer == "ab"
+        assert buf._cursor_pos == 2
+
+
 # ===========================================================================
 # Adversarial / Edge Cases
 # ===========================================================================

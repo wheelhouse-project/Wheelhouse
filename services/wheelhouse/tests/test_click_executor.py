@@ -24,6 +24,8 @@ import logging
 import weakref
 from typing import Any, Optional
 
+import pytest
+
 from ui.click_executor import (
     ClickExecutor,
     ClickResult,
@@ -112,6 +114,7 @@ def make_match(
     role: str = "button",
     is_enabled: bool = True,
     bounds: tuple[int, int, int, int] = (100, 100, 40, 30),
+    source_window_is_shell: bool = False,
 ) -> ElementMatch:
     return ElementMatch(
         item_id="item-1",
@@ -126,6 +129,7 @@ def make_match(
         invoke_supported=True,
         is_enabled=is_enabled,
         control_ref=control,
+        source_window_is_shell=source_window_is_shell,
     )
 
 
@@ -676,6 +680,44 @@ def test_coordinate_click_short_send_is_sendinput_short():
     control = FakeControl(invoke_raises=FakeComError(UIA_E_NOTSUPPORTED))
     # events_sent 1 < expected 2 -> sendinput_short.
     ex = make_executor(coordinate_click=lambda _x, _y: (True, 1))
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "sendinput_short"
+
+
+def test_coordinate_click_zero_event_send_is_sendinput_nothing_sent():
+    # events_sent 0 = the seam refused before any button event went out --
+    # provably nothing fired, distinct from a half-fired partial send whose
+    # button may be stuck DOWN. With no no_input_fallback installed the
+    # refusal keeps its own tag instead of collapsing onto sendinput_short
+    # (wh-review-click-numbers.2 part A).
+    control = FakeControl(invoke_raises=FakeComError(UIA_E_NOTSUPPORTED))
+    ex = make_executor(coordinate_click=lambda _x, _y: (False, 0))
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "sendinput_nothing_sent"
+
+
+def test_coordinate_click_release_failed_is_button_release_failed():
+    # wh-mouse-grid.1.5: the production seam reports (False, 1,
+    # "release_failed") when a partial batch left the button DOWN and the
+    # compensating release was refused too. The executor must surface that
+    # distinct state instead of collapsing it onto sendinput_short -- the
+    # user has to be told the button may still be held.
+    control = FakeControl(invoke_raises=FakeComError(UIA_E_NOTSUPPORTED))
+    ex = make_executor(
+        coordinate_click=lambda _x, _y: (False, 1, "release_failed")
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "button_release_failed"
+
+
+def test_coordinate_click_three_tuple_without_reason_stays_short_send():
+    # The widened seam contract is (succeeded, events_sent[, reason]); a
+    # 3-tuple whose reason is None classifies exactly like the legacy shape.
+    control = FakeControl(invoke_raises=FakeComError(UIA_E_NOTSUPPORTED))
+    ex = make_executor(coordinate_click=lambda _x, _y: (True, 1, None))
     result = ex.click(make_match(control, name="cancel"), snap(), QUERY)
     assert result.outcome == "execution_failed"
     assert result.reason == "sendinput_short"
@@ -2028,3 +2070,1029 @@ def test_uia_hit_check_runs_only_after_root_check_passes():
     assert result.outcome == "execution_failed"
     assert result.reason == "click_point_obstructed"
     assert uia_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Badge coordinate-first (wh-electron-dda-noop).
+#
+# A numbered-badge pick is literally "click the thing at that spot", and MSAA
+# accDoDefaultAction can return success without firing anything (live case:
+# the Claude Desktop Electron sidebar button 'More options for Shared beads
+# server' -- dda_ok reported, no menu opened). So for badge picks ONLY
+# (click(..., badge_pick=True)), when InvokePattern is structurally
+# unavailable the executor attempts the guarded coordinate click BEFORE
+# DoDefaultAction. Both hit-test layers and the full re-verification stay.
+# DoDefaultAction remains the fallback -- but ONLY when the coordinate
+# attempt provably sent no input on a still-verified target (hit-test
+# refusal or SendInput reporting zero events). A re-verification FAILURE
+# surfaces its own reason with no DDA press (wh-review-click-numbers.3: the
+# world moved, so DDA would press the stale control_ref verification just
+# rejected); after a partial or ambiguous send a DDA press could
+# double-fire, so those fail closed exactly as before.
+# By-name clicks (badge_pick absent/False) keep the DDA-first order.
+# ---------------------------------------------------------------------------
+
+
+def _badge_executor(
+    *,
+    dda_calls: list,
+    coordinate_click=None,
+    window_at_point=None,
+    on_screen=always_on_screen,
+) -> ClickExecutor:
+    """Executor with a SUCCEEDING DoDefaultAction seam that records calls.
+
+    Models the Electron lie: if DDA runs, it reports success (returns
+    normally) while firing nothing -- so any test asserting the click went
+    through the coordinate path proves DDA was never consulted.
+    """
+
+    def dda(ref: Any) -> None:
+        dda_calls.append(ref)
+        return None  # "success" -- the lie
+
+    if coordinate_click is None:
+        coordinate_click = lambda _x, _y: (True, 2)
+    if window_at_point is None:
+        window_at_point = lambda _x, _y: 1000
+    return ClickExecutor(
+        coordinate_click_fn=coordinate_click,
+        foreground_probe=probe_fn(matching_probe()),
+        on_screen_fn=on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=_raise_invoke_unavailable,
+        do_default_action_fn=dda,
+        window_at_point_fn=window_at_point,
+        point_hits_winner_fn=lambda _w, _x, _y: True,
+    )
+
+
+def test_badge_pick_coordinate_clicks_before_dda():
+    # THE wh-electron-dda-noop pin: Invoke structurally unavailable on a badge
+    # pick -> the guarded coordinate click runs INSTEAD of DoDefaultAction.
+    # Without badge-first ordering, the lying DDA seam would return "ok" via
+    # invoke and the coordinate seam would never fire.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    coord_calls: list[tuple[int, int]] = []
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                      badge_pick=True)
+    assert result.outcome == "ok"
+    assert result.clicked_via == "coordinate"
+    assert coord_calls == [(120, 115)]
+    assert dda_calls == []
+
+
+def test_by_name_click_keeps_dda_first_order():
+    # badge_pick defaults to False: the by-name path is untouched -- DDA runs
+    # first and its success is trusted, the coordinate seam never fires.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    coord_calls: list[tuple[int, int]] = []
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY)
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert len(dda_calls) == 1
+    assert coord_calls == []
+
+
+def test_badge_pick_invoke_success_never_reaches_fallbacks():
+    # A badge pick with a working InvokePattern is the plain happy path.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    coord_calls: list[tuple[int, int]] = []
+
+    def dda(ref: Any) -> None:
+        dda_calls.append(ref)
+
+    ex = ClickExecutor(
+        coordinate_click_fn=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+        foreground_probe=probe_fn(matching_probe()),
+        on_screen_fn=always_on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=lambda ref: ref.Invoke(),
+        do_default_action_fn=dda,
+        window_at_point_fn=lambda _x, _y: 1000,
+        point_hits_winner_fn=lambda _w, _x, _y: True,
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                      badge_pick=True)
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert dda_calls == []
+    assert coord_calls == []
+
+
+def test_badge_pick_obstructed_point_falls_back_to_dda():
+    # Hit-test refusal (root-window mismatch) happens BEFORE any input is
+    # sent, so falling back to DoDefaultAction cannot double-fire. The DDA
+    # seam succeeds -> ok via invoke, coordinate seam never sent anything.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    coord_calls: list[tuple[int, int]] = []
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+        window_at_point=lambda _x, _y: 4242,  # occluder root at the point
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                      badge_pick=True)
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert len(dda_calls) == 1
+    assert coord_calls == []
+
+
+def test_badge_pick_reverify_failure_fails_with_its_reason():
+    # wh-review-click-numbers.3: a re-verification failure means the WORLD
+    # MOVED between the Invoke attempt and the fallback -- the winner may be
+    # disabled, offscreen, or under a different foreground. Pressing the
+    # stale control_ref via DDA would act on a target verification just
+    # rejected, so the refusal must surface the verification reason and
+    # never divert to the DDA fallback.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    coord_calls: list[tuple[int, int]] = []
+    seen: list[tuple[int, int]] = []
+
+    def on_screen_once(x: int, y: int) -> bool:
+        seen.append((x, y))
+        return len(seen) == 1  # first verify passes, re-verify fails
+
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+        on_screen=on_screen_once,
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                      badge_pick=True)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "target_moved_offscreen"
+    assert dda_calls == []
+    assert coord_calls == []
+
+
+def test_badge_pick_zero_event_send_failure_falls_back_to_dda():
+    # The production seam returns (False, 0) when the cursor landed wrong
+    # BEFORE any button event was synthesised -- provably nothing fired, so
+    # the DDA fallback is safe.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda _x, _y: (False, 0),
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                      badge_pick=True)
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert len(dda_calls) == 1
+
+
+def test_badge_pick_zero_event_fallback_reason_is_nothing_sent(caplog):
+    # The no_input_fallback hook receives the specific zero-event refusal
+    # tag, not the generic badge_coord_first_sendinput_failed fail_reason --
+    # that string would falsely log that a send was attempted when the seam
+    # provably injected nothing (wh-review-click-numbers.2 part B).
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda _x, _y: (False, 0),
+    )
+    with caplog.at_level(logging.INFO):
+        result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                          badge_pick=True)
+    assert result.outcome == "ok"
+    assert "(sendinput_nothing_sent)" in caplog.text
+    assert "(badge_coord_first_sendinput_failed)" not in caplog.text
+
+
+def test_badge_pick_partial_send_fails_closed_without_dda():
+    # One of the two button events went out: the click may have half-fired.
+    # A DDA press on top could double-fire -> fail closed under the existing
+    # sendinput_short reason, DDA never consulted.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda _x, _y: (False, 1),
+    )
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                      badge_pick=True)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "sendinput_short"
+    assert dda_calls == []
+
+
+def test_badge_pick_coord_seam_raise_fails_closed_without_dda():
+    # A raising coordinate seam is ambiguous -- input may or may not have
+    # gone out mid-call -- so it can never fall back to a DDA press.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+
+    def broken_coord(_x: int, _y: int) -> tuple[bool, int]:
+        raise RuntimeError("SendInput blew up")
+
+    ex = _badge_executor(dda_calls=dda_calls, coordinate_click=broken_coord)
+    result = ex.click(make_match(control, name="cancel"), snap(), QUERY,
+                      badge_pick=True)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "badge_coord_first_sendinput_failed"
+    assert dda_calls == []
+
+
+def test_badge_pick_ineligible_match_goes_straight_to_dda():
+    # A match failing the stronger coordinate eligibility gate (bare
+    # substring name, role mismatch) never coordinate-clicks; the badge path
+    # then behaves exactly like today: DDA first.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    coord_calls: list[tuple[int, int]] = []
+    ex = _badge_executor(
+        dda_calls=dda_calls,
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+    result = ex.click(
+        make_match(control, name="Please cancel now", role="text"),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert len(dda_calls) == 1
+    assert coord_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Shell-owned badge coordinate-first (wh-tray-invoke-noop).
+#
+# The Win11 taskbar tray accepts a UIA Invoke on a tray icon, RETURNS
+# SUCCESS, and only moves keyboard focus -- the tray app never sees a click
+# (live case: the Hot Virtual Keyboard icon drew a focus rectangle and never
+# opened). Structurally the Invoke pattern is present, so the
+# InvokePatternUnavailable reorder above never engages. For badge picks whose
+# winner is shell-owned (ElementMatch.source_window_is_shell,
+# wh-overlay-taskbar-numbers) the executor therefore goes coordinate-first
+# even though Invoke exists: guarded coordinate click, with the normal
+# Invoke path as the fallback ONLY when the coordinate attempt provably sent
+# no input. Non-shell badge picks and all by-name clicks keep Invoke-first.
+# ---------------------------------------------------------------------------
+
+
+def _shell_executor(
+    *,
+    coordinate_click=None,
+    window_at_point=None,
+    invoke_fn=None,
+    on_screen=always_on_screen,
+) -> ClickExecutor:
+    """Executor whose (fake) Invoke succeeds, for shell badge-first tests."""
+    if coordinate_click is None:
+        coordinate_click = lambda _x, _y: (True, 2)
+    if window_at_point is None:
+        window_at_point = lambda _x, _y: 1000
+    if invoke_fn is None:
+        invoke_fn = lambda ref: ref.Invoke()
+    return ClickExecutor(
+        coordinate_click_fn=coordinate_click,
+        foreground_probe=probe_fn(matching_probe()),
+        on_screen_fn=on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=invoke_fn,
+        window_at_point_fn=window_at_point,
+        point_hits_winner_fn=lambda _w, _x, _y: True,
+    )
+
+
+def test_shell_badge_pick_coordinate_clicks_before_invoke():
+    # THE wh-tray-invoke-noop pin: a shell-owned badge pick coordinate-clicks
+    # FIRST -- the control's working Invoke pattern (which would lie) is
+    # never consulted.
+    control = FakeControl()
+    coord_calls: list[tuple[int, int]] = []
+    ex = _shell_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+    result = ex.click(
+        make_match(control, name="cancel", source_window_is_shell=True),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "coordinate"
+    assert coord_calls == [(120, 115)]
+    assert control.invoke_calls == 0
+
+
+def test_nonshell_badge_pick_keeps_invoke_first():
+    # Option 2 (coordinate-first everywhere) was declined: a badge pick on an
+    # ordinary in-window control still trusts its working Invoke pattern.
+    control = FakeControl()
+    coord_calls: list[tuple[int, int]] = []
+    ex = _shell_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+    result = ex.click(
+        make_match(control, name="cancel"), snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert coord_calls == []
+
+
+def test_shell_by_name_click_keeps_invoke_first():
+    # A by-name click (badge_pick False) on a shell-owned control is
+    # untouched: Invoke first, coordinate seam never fires.
+    control = FakeControl()
+    coord_calls: list[tuple[int, int]] = []
+    ex = _shell_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+    result = ex.click(
+        make_match(control, name="cancel", source_window_is_shell=True),
+        snap(), QUERY,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert coord_calls == []
+
+
+def test_shell_badge_pick_obstructed_falls_back_to_invoke():
+    # A hit-test refusal sends no input, so falling back to the normal
+    # Invoke path is safe -- and Invoke succeeds as today.
+    control = FakeControl()
+    coord_calls: list[tuple[int, int]] = []
+    ex = _shell_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+        window_at_point=lambda _x, _y: 4242,  # occluder root at the point
+    )
+    result = ex.click(
+        make_match(control, name="cancel", source_window_is_shell=True),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert coord_calls == []
+
+
+def test_shell_badge_pick_reverify_failure_fails_with_its_reason():
+    # wh-review-click-numbers.3, shell twin: a re-verification failure inside
+    # the coordinate-first attempt means the world moved -- the Invoke
+    # fallback must NOT press the stale control_ref; the verification reason
+    # surfaces instead.
+    control = FakeControl()
+    coord_calls: list[tuple[int, int]] = []
+    seen: list[tuple[int, int]] = []
+
+    def on_screen_once(x: int, y: int) -> bool:
+        seen.append((x, y))
+        return len(seen) == 1  # first verify passes, re-verify fails
+
+    ex = _shell_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+        on_screen=on_screen_once,
+    )
+    result = ex.click(
+        make_match(control, name="cancel", source_window_is_shell=True),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "execution_failed"
+    assert result.reason == "target_moved_offscreen"
+    assert control.invoke_calls == 0
+    assert coord_calls == []
+
+
+def test_shell_badge_pick_zero_event_send_falls_back_to_invoke():
+    # (False, 0) from the seam = the cursor landed wrong before any button
+    # event went out -- provably nothing fired, Invoke fallback is safe.
+    control = FakeControl()
+    ex = _shell_executor(coordinate_click=lambda _x, _y: (False, 0))
+    result = ex.click(
+        make_match(control, name="cancel", source_window_is_shell=True),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+
+
+def test_shell_badge_pick_zero_event_fallback_reason_is_nothing_sent(caplog):
+    # Shell sibling of the badge_coord_first case: the Invoke fallback's log
+    # line names the specific zero-event refusal, not the generic send-failure
+    # fail_reason (wh-review-click-numbers.2 part B).
+    control = FakeControl()
+    ex = _shell_executor(coordinate_click=lambda _x, _y: (False, 0))
+    with caplog.at_level(logging.INFO):
+        result = ex.click(
+            make_match(control, name="cancel", source_window_is_shell=True),
+            snap(), QUERY, badge_pick=True,
+        )
+    assert result.outcome == "ok"
+    assert "(sendinput_nothing_sent)" in caplog.text
+    assert "(badge_coord_first_sendinput_failed)" not in caplog.text
+
+
+def test_shell_badge_pick_partial_send_fails_closed_without_invoke():
+    # One button event out of two went out: the click may have half-fired.
+    # An Invoke press on top could double-fire -> fail closed, Invoke never
+    # consulted.
+    control = FakeControl()
+    ex = _shell_executor(coordinate_click=lambda _x, _y: (False, 1))
+    result = ex.click(
+        make_match(control, name="cancel", source_window_is_shell=True),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "execution_failed"
+    assert result.reason == "sendinput_short"
+    assert control.invoke_calls == 0
+
+
+def test_shell_badge_pick_ineligible_goes_straight_to_invoke():
+    # An eligibility-gate failure routes to the normal Invoke path exactly
+    # as today, with no coordinate attempt.
+    control = FakeControl()
+    coord_calls: list[tuple[int, int]] = []
+    ex = _shell_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+    result = ex.click(
+        make_match(control, name="Please cancel now", role="text",
+                   source_window_is_shell=True),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert coord_calls == []
+
+
+def test_shell_badge_pick_refusal_then_invoke_unavailable_reaches_dda():
+    # Chain: coordinate refused with no input -> Invoke path -> Invoke
+    # structurally unavailable -> DDA. The fallback deliberately does NOT
+    # re-enter the badge coordinate-first reorder (the coordinate attempt
+    # was just refused), so the hit-test runs exactly once.
+    control = FakeControl()
+    dda_calls: list[Any] = []
+    hit_test_calls: list[tuple[int, int]] = []
+
+    def dda(ref: Any) -> None:
+        dda_calls.append(ref)
+
+    def window_at_point(x: int, y: int) -> int:
+        hit_test_calls.append((x, y))
+        return 4242  # occluder root -> refusal, nothing sent
+
+    ex = ClickExecutor(
+        coordinate_click_fn=lambda _x, _y: (True, 2),
+        foreground_probe=probe_fn(matching_probe()),
+        on_screen_fn=always_on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=_raise_invoke_unavailable,
+        do_default_action_fn=dda,
+        window_at_point_fn=window_at_point,
+        point_hits_winner_fn=lambda _w, _x, _y: True,
+    )
+    result = ex.click(
+        make_match(control, name="cancel", source_window_is_shell=True),
+        snap(), QUERY, badge_pick=True,
+    )
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert len(dda_calls) == 1
+    assert len(hit_test_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Pre-click verification budget (wh-overlay-slow-uia-stale-badges.6).
+#
+# The observed defect: _verify blocked 7810 ms on COM/Win32 reads with no time
+# limit, so Logic's 3000 ms awaiter gave up first and the true refusal was
+# discarded. The executor now captures a monotonic deadline at click() entry
+# and checks it BETWEEN verification steps; an expired budget refuses with
+# ``verification_timeout`` and starts no further COM read and sends no input.
+# The budget is cumulative per click() call: the _verify re-run inside
+# _coordinate_fallback shares the deadline captured at click() entry.
+# ---------------------------------------------------------------------------
+
+
+class FakeClock:
+    """A controllable monotonic clock for the budget seams."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TimedControl:
+    """A fake control_ref whose IsEnabled read can consume budget time.
+
+    ``enabled_advance_s`` moves the fake clock forward when
+    ``CurrentIsEnabled`` is read, modelling the incident's slow COM property
+    reads. ``bounds_reads`` counts ``CurrentBoundingRectangle`` accesses so a
+    test can prove no NEW COM read starts after the budget expires.
+    """
+
+    def __init__(self, clock: FakeClock, *, enabled_advance_s: float = 0.0) -> None:
+        self._clock = clock
+        self._enabled_advance_s = enabled_advance_s
+        self.invoke_calls = 0
+        self.bounds_reads = 0
+
+    @property
+    def CurrentIsEnabled(self) -> bool:
+        self._clock.advance(self._enabled_advance_s)
+        return True
+
+    @property
+    def CurrentBoundingRectangle(self) -> FakeRect:
+        self.bounds_reads += 1
+        return FakeRect(100, 100, 140, 130)
+
+    def Invoke(self) -> None:
+        self.invoke_calls += 1
+
+
+def _budget_executor(
+    clock: FakeClock,
+    *,
+    verification_budget_ms: int = 2000,
+    foreground_probe=None,
+    gesture_click=None,
+    coordinate_click=None,
+    on_screen=None,
+    window_at_point=None,
+    point_hits=None,
+):
+    """Build a ClickExecutor wired to the fake clock (budget test surface)."""
+    if foreground_probe is None:
+        foreground_probe = probe_fn(matching_probe())
+    if coordinate_click is None:
+        coordinate_click = lambda _x, _y: (True, 2)
+    if on_screen is None:
+        on_screen = always_on_screen
+    if window_at_point is None:
+        window_at_point = lambda _x, _y: 1000
+    if point_hits is None:
+        point_hits = lambda _w, _x, _y: True
+    kwargs: dict[str, Any] = {}
+    if gesture_click is not None:
+        kwargs["gesture_click_fn"] = gesture_click
+    return ClickExecutor(
+        coordinate_click_fn=coordinate_click,
+        foreground_probe=foreground_probe,
+        on_screen_fn=on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=lambda ref: ref.Invoke(),
+        window_at_point_fn=window_at_point,
+        point_hits_winner_fn=point_hits,
+        verification_budget_ms=verification_budget_ms,
+        monotonic_fn=clock,
+        **kwargs,
+    )
+
+
+def test_budget_expiry_between_steps_refuses_and_starts_no_new_read():
+    # The incident seam: the budget expires during the IsEnabled read (step 4),
+    # so the check BEFORE the BoundingRectangle read (step 5) must refuse with
+    # verification_timeout. The bounds read must never start, and no input of
+    # any kind may be sent.
+    clock = FakeClock()
+    control = TimedControl(clock, enabled_advance_s=2.5)
+    coord_calls: list[tuple[int, int]] = []
+
+    def coord(x: int, y: int) -> tuple[bool, int]:
+        coord_calls.append((x, y))
+        return (True, 2)
+
+    ex = _budget_executor(clock, coordinate_click=coord)
+    result = ex.click(make_match(control), snap(), QUERY)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "verification_timeout"
+    assert result.matched_name == "Cancel"
+    assert control.bounds_reads == 0
+    assert control.invoke_calls == 0
+    assert coord_calls == []
+
+
+def test_budget_is_cumulative_across_coordinate_fallback_reverify():
+    # The _verify re-run inside _coordinate_fallback must NOT reset the
+    # deadline captured at click() entry. The gesture path runs _verify twice
+    # (once in click(), once in the fallback); each foreground probe consumes
+    # 1.5 s of the 2 s budget, so the FIRST run passes and the SECOND must
+    # refuse with verification_timeout before any input is sent.
+    clock = FakeClock()
+    control = TimedControl(clock)
+    base_probe = matching_probe()
+
+    def advancing_probe() -> ForegroundProbe:
+        clock.advance(1.5)
+        return base_probe
+
+    gesture_calls: list[tuple[int, int, str, int]] = []
+
+    def gesture_click(x: int, y: int, button: str, count: int) -> tuple[bool, int]:
+        gesture_calls.append((x, y, button, count))
+        return (True, 2)
+
+    from ui.element_types import ClickGesture
+
+    query = ElementQuery(
+        name="cancel", role="button", ordinal=None, spatial=None,
+        raw_utterance="right click cancel", gesture=ClickGesture.RIGHT_CLICK,
+    )
+    ex = _budget_executor(
+        clock, foreground_probe=advancing_probe, gesture_click=gesture_click,
+    )
+    result = ex.click(make_match(control), snap(), query)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "verification_timeout"
+    assert gesture_calls == []
+    assert control.invoke_calls == 0
+
+
+def test_click_well_inside_budget_is_unaffected():
+    # A verification that never nears the deadline behaves exactly as before:
+    # the click goes through Invoke and reports ok.
+    clock = FakeClock()
+    control = TimedControl(clock)
+    ex = _budget_executor(clock)
+    result = ex.click(make_match(control), snap(), QUERY)
+    assert result.outcome == "ok"
+    assert result.reason is None
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+
+
+class ArmedClock(FakeClock):
+    """A FakeClock that applies a pending advance AFTER the next read.
+
+    ``arm(seconds)`` schedules the advance; the NEXT ``__call__`` returns the
+    current time and THEN moves the clock forward. Models time passing in the
+    pure-Python tail after a budget check has already read the clock
+    (wh-overlay-slow-uia-stale-badges.20.2).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pending = 0.0
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += self._pending
+        self._pending = 0.0
+        return value
+
+    def arm(self, seconds: float) -> None:
+        self._pending = seconds
+
+
+def test_budget_expiry_during_hit_tests_sends_no_input():
+    # wh-overlay-slow-uia-stale-badges.20.2: the deadline expires DURING the
+    # coordinate tail's hit-tests (layer 2, point_hits_winner_fn, is a
+    # cross-process COM call to the same slow provider the budget bounds).
+    # The check between the hit-test layers and the input seam must refuse
+    # with verification_timeout: the seam must never run, and the refusal
+    # must NOT divert to any fallback press.
+    clock = FakeClock()
+    control = TimedControl(clock)
+    gesture_calls: list[tuple[int, int, str, int]] = []
+
+    def gesture_click(x: int, y: int, button: str, count: int) -> tuple[bool, int]:
+        gesture_calls.append((x, y, button, count))
+        return (True, 2)
+
+    def slow_point_hits(_w: Any, _x: int, _y: int) -> bool:
+        clock.advance(2.5)  # the COM call blocks past the 2000 ms budget
+        return True
+
+    from ui.element_types import ClickGesture
+
+    query = ElementQuery(
+        name="cancel", role="button", ordinal=None, spatial=None,
+        raw_utterance="right click cancel", gesture=ClickGesture.RIGHT_CLICK,
+    )
+    ex = _budget_executor(
+        clock, gesture_click=gesture_click, point_hits=slow_point_hits,
+    )
+    result = ex.click(make_match(control), snap(), query)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "verification_timeout"
+    assert gesture_calls == []
+    assert control.invoke_calls == 0
+
+
+def test_budget_expiry_at_reverify_return_stops_hit_tests():
+    # wh-overlay-slow-uia-stale-badges.20.2, companion check: the budget
+    # expires in the pure-Python tail of the fallback's _verify re-run (after
+    # its last intra-step seam check). The check right after the re-verify
+    # returns None must refuse BEFORE the hit-test layers start -- layer 2 is
+    # a COM call that must not be given to an expired click.
+    clock = ArmedClock()
+    control = TimedControl(clock)
+    on_screen_calls = [0]
+
+    def counting_on_screen(_x: int, _y: int) -> bool:
+        on_screen_calls[0] += 1
+        if on_screen_calls[0] == 2:  # the fallback's re-verify run
+            # Expire AFTER the on-screen seam check reads the clock, i.e. in
+            # the pure-Python tail of _verify.
+            clock.arm(2.5)
+        return True
+
+    window_calls: list[tuple[int, int]] = []
+
+    def window_at_point(x: int, y: int) -> int:
+        window_calls.append((x, y))
+        return 1000
+
+    hits_calls: list[int] = []
+
+    def point_hits(_w: Any, _x: int, _y: int) -> bool:
+        hits_calls.append(1)
+        return True
+
+    gesture_calls: list[tuple[int, int, str, int]] = []
+
+    def gesture_click(x: int, y: int, button: str, count: int) -> tuple[bool, int]:
+        gesture_calls.append((x, y, button, count))
+        return (True, 2)
+
+    from ui.element_types import ClickGesture
+
+    query = ElementQuery(
+        name="cancel", role="button", ordinal=None, spatial=None,
+        raw_utterance="right click cancel", gesture=ClickGesture.RIGHT_CLICK,
+    )
+    ex = _budget_executor(
+        clock, gesture_click=gesture_click, on_screen=counting_on_screen,
+        window_at_point=window_at_point, point_hits=point_hits,
+    )
+    result = ex.click(make_match(control), snap(), query)
+    assert result.outcome == "execution_failed"
+    assert result.reason == "verification_timeout"
+    assert window_calls == []
+    assert hits_calls == []
+    assert gesture_calls == []
+    assert control.invoke_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Expand / Collapse default action (wh-treeitem-dda-wrong-action).
+#
+# Explorer's navigation-pane tree items ("This PC", "Desktop", the drives)
+# expose no UIA Invoke pattern and an MSAA default action of "Expand" or
+# "Collapse". Firing that default action toggles the node, while a mouse
+# click navigates. So an Expand / Collapse default action must never be
+# pressed: the executor takes the guarded coordinate click instead (the
+# _coord_eligible gate, the full re-verification, and both click-point
+# hit-test layers). A genuine default action (Press, Open, ...) still fires.
+#
+# These tests drive the REAL press (do_default_action_via_legacy_pattern, the
+# constructor default) against a control that exposes the Legacy pattern the
+# way a real element does: GetCurrentPattern -> QueryInterface -> the typed
+# pattern with CurrentDefaultAction and DoDefaultAction.
+# ---------------------------------------------------------------------------
+
+
+class _FakeLegacyPattern:
+    """The typed LegacyIAccessible pattern: a default action and a press."""
+
+    def __init__(self, default_action: str) -> None:
+        self.CurrentDefaultAction = default_action
+        self.do_default_action_calls = 0
+
+    def DoDefaultAction(self) -> None:
+        self.do_default_action_calls += 1
+
+
+class _FakeRawLegacyPattern:
+    def __init__(self, typed: _FakeLegacyPattern) -> None:
+        self._typed = typed
+
+    def QueryInterface(self, _iface: Any) -> _FakeLegacyPattern:
+        return self._typed
+
+
+class _LegacyActionControl(FakeControl):
+    """A control with no Invoke pattern whose Legacy pattern carries a
+    default action (a nav-pane TreeItem when the action is Expand)."""
+
+    def __init__(self, default_action: str) -> None:
+        super().__init__()
+        self.legacy = _FakeLegacyPattern(default_action)
+
+    def GetCurrentPattern(self, _pattern_id: Any) -> _FakeRawLegacyPattern:
+        return _FakeRawLegacyPattern(self.legacy)
+
+
+UIA_TREEITEM_CONTROL_TYPE_ID = 50024
+
+THIS_PC_QUERY = ElementQuery(
+    name="this pc", role=None, ordinal=None, spatial=None,
+    raw_utterance="click this pc",
+)
+
+
+def _tree_item_match(control: Any, *, name: str = "This PC") -> ElementMatch:
+    import dataclasses
+
+    return dataclasses.replace(
+        make_match(control, name=name, role="tree item"),
+        invoke_supported=False,
+        control_type_id=UIA_TREEITEM_CONTROL_TYPE_ID,
+    )
+
+
+def _real_dda_executor(
+    *,
+    coordinate_click=None,
+    window_at_point=None,
+    point_hits_winner=None,
+    foreground_probe=None,
+) -> ClickExecutor:
+    """An executor whose DoDefaultAction seam is the real production press."""
+    if coordinate_click is None:
+        coordinate_click = lambda _x, _y: (True, 2)
+    if window_at_point is None:
+        window_at_point = lambda _x, _y: 1000
+    if point_hits_winner is None:
+        point_hits_winner = lambda _w, _x, _y: True
+    if foreground_probe is None:
+        foreground_probe = probe_fn(matching_probe())
+    return ClickExecutor(
+        coordinate_click_fn=coordinate_click,
+        foreground_probe=foreground_probe,
+        on_screen_fn=always_on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=_raise_invoke_unavailable,
+        window_at_point_fn=window_at_point,
+        point_hits_winner_fn=point_hits_winner,
+    )
+
+
+@pytest.fixture
+def _legacy_interface_resolves(monkeypatch):
+    """Let the real press QueryInterface the fake raw pattern without needing
+    the generated comtypes module."""
+    from ui import uia_walker
+
+    monkeypatch.setattr(uia_walker, "_legacy_pattern_class", lambda: object())
+
+
+@pytest.mark.parametrize("default_action", ["Expand", "Collapse"])
+def test_tree_item_expand_collapse_takes_coordinate_path_not_dda(
+    _legacy_interface_resolves, caplog, default_action
+):
+    # THE wh-treeitem-dda-wrong-action pin: "click this pc" on an Explorer
+    # nav-pane TreeItem whose only default action is Expand / Collapse must
+    # click the node (navigate), not fire the default action (toggle).
+    control = _LegacyActionControl(default_action)
+    coord_calls: list[tuple[int, int]] = []
+    ex = _real_dda_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+
+    with caplog.at_level(logging.INFO, logger="ui.click_executor"):
+        result = ex.click(_tree_item_match(control), snap(), THIS_PC_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "coordinate"
+    assert coord_calls == [(120, 115)]
+    assert control.legacy.do_default_action_calls == 0
+    assert "dda_expand_collapse_then_coord" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "default_action",
+    [
+        pytest.param("Press", id="press"),
+        pytest.param("Open", id="open"),
+        pytest.param("Double Click", id="double-click"),
+    ],
+)
+def test_genuine_default_action_still_fires_dda(
+    _legacy_interface_resolves, default_action
+):
+    # C2: a control whose default action is a genuine press keeps firing
+    # DoDefaultAction unchanged; the coordinate seam never fires.
+    control = _LegacyActionControl(default_action)
+    coord_calls: list[tuple[int, int]] = []
+    ex = _real_dda_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+
+    result = ex.click(_tree_item_match(control), snap(), THIS_PC_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.legacy.do_default_action_calls == 1
+    assert coord_calls == []
+
+
+def test_expand_collapse_ineligible_match_refuses_without_pressing(
+    _legacy_interface_resolves,
+):
+    # The match fails the coordinate eligibility gate (the spoken name is
+    # only a substring of the label and the query names no role): refuse
+    # under dda_expand_collapse. Neither the default action nor a
+    # coordinate click may fire.
+    control = _LegacyActionControl("Expand")
+    coord_calls: list[tuple[int, int]] = []
+    ex = _real_dda_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+    )
+
+    result = ex.click(
+        _tree_item_match(control, name="Open This PC folder"), snap(),
+        THIS_PC_QUERY,
+    )
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "dda_expand_collapse"
+    assert coord_calls == []
+    assert control.legacy.do_default_action_calls == 0
+
+
+def test_expand_collapse_coordinate_click_not_landing_reports_chain_reason(
+    _legacy_interface_resolves,
+):
+    control = _LegacyActionControl("Expand")
+    ex = _real_dda_executor(coordinate_click=lambda _x, _y: (False, 2))
+
+    result = ex.click(_tree_item_match(control), snap(), THIS_PC_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "dda_expand_collapse_then_sendinput_failed"
+    assert control.legacy.do_default_action_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("window_at_point", "point_hits_winner"),
+    [
+        (lambda _x, _y: 4242, lambda _w, _x, _y: True),  # other root window
+        (lambda _x, _y: 1000, lambda _w, _x, _y: False),  # same-root occluder
+    ],
+    ids=["root_window_mismatch", "element_at_point_not_winner"],
+)
+def test_expand_collapse_click_point_check_refuses_without_input(
+    _legacy_interface_resolves, window_at_point, point_hits_winner
+):
+    # Both click-point layers stand in front of the Expand / Collapse
+    # coordinate click. A refusal sends nothing and does not fall back to the
+    # toggling default action.
+    control = _LegacyActionControl("Collapse")
+    coord_calls: list[tuple[int, int]] = []
+    ex = _real_dda_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+        window_at_point=window_at_point,
+        point_hits_winner=point_hits_winner,
+    )
+
+    result = ex.click(_tree_item_match(control), snap(), THIS_PC_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "click_point_obstructed"
+    assert coord_calls == []
+    assert control.legacy.do_default_action_calls == 0
+
+
+def test_expand_collapse_reverification_failure_refuses_without_input(
+    _legacy_interface_resolves,
+):
+    # The foreground matches at the first verification and has changed by the
+    # coordinate fallback's re-verification: refuse with the verification
+    # reason, send nothing, and never press the default action.
+    control = _LegacyActionControl("Expand")
+    probes = [matching_probe(), matching_probe(window=2000)]
+
+    def changing_probe() -> ForegroundProbe:
+        return probes.pop(0) if len(probes) > 1 else probes[0]
+
+    coord_calls: list[tuple[int, int]] = []
+    ex = _real_dda_executor(
+        coordinate_click=lambda x, y: (coord_calls.append((x, y)) or (True, 2)),
+        foreground_probe=changing_probe,
+    )
+
+    result = ex.click(_tree_item_match(control), snap(), THIS_PC_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "foreground_changed"
+    assert coord_calls == []
+    assert control.legacy.do_default_action_calls == 0

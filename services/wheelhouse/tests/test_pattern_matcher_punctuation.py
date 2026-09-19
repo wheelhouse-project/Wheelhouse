@@ -23,6 +23,7 @@ import pytest
 
 from speech.pattern_catalog import PatternCatalog
 from speech.pattern_matcher import PatternMatcher
+from speech.router import SpeechRouter
 
 
 _HEADER = 'COMMAND_HOTWORD = "x-ray"\n\n'
@@ -209,3 +210,68 @@ class TestMidWordPunctuation:
                 f"{text!r} contains a standalone punctuation word and must "
                 f"not fire a command; got a match instead."
             )
+
+
+class TestTheMultiWordReplacementNameProbe:
+    """``SpeechRouter.is_incomplete_replacement_name``.
+
+    wh-spaced-punctuation-names-unresolved.3. The multi-word sibling of
+    ``is_incomplete_replacement_prefix``: it answers whether a whole word
+    list is an unfinished opening of a replacement name, which is what
+    lets a punctuation name survive a pause between its words. It reads
+    the same anchored matchers ``_buffer_opens_literal_prefix`` uses, so
+    only a real opening -- or an exact N-word truncation of one --
+    answers True.
+    """
+
+    @pytest.fixture
+    def production_router(self, production_catalog):
+        return SpeechRouter(production_catalog)
+
+    def test_a_names_first_word_is_an_opening(self, production_router):
+        assert production_router.is_incomplete_replacement_name(
+            ["open"]
+        ) is True
+
+    def test_two_words_of_a_three_word_name_are_an_opening(
+        self, production_router
+    ):
+        """"open single" is the state a paused "open single quote"
+        reaches after its second utterance."""
+        assert production_router.is_incomplete_replacement_name(
+            ["open", "single"]
+        ) is True
+
+    def test_a_sentence_that_leaves_the_opening_is_not(
+        self, production_router
+    ):
+        """"open the" begins no name; holding it would delay dictation
+        for words that never arrive."""
+        assert production_router.is_incomplete_replacement_name(
+            ["open", "the"]
+        ) is False
+
+    def test_an_ordinary_sentence_tail_is_not_an_opening(
+        self, production_router
+    ):
+        """A word that merely begins an ordinary sentence tail answers
+        False -- it indexes no replacement pattern at all."""
+        assert production_router.is_incomplete_replacement_name(
+            ["hello"]
+        ) is False
+        assert production_router.is_incomplete_replacement_name(
+            ["hold", "it", "open"]
+        ) is False
+
+    def test_a_finished_name_is_not_incomplete(self, production_router):
+        """The "incomplete" half of the question: a name that already
+        spells its mark is done, not an opening."""
+        assert production_router.is_incomplete_replacement_name(
+            ["open", "single", "quote"]
+        ) is False
+        assert production_router.is_incomplete_replacement_name(
+            ["question", "mark"]
+        ) is False
+
+    def test_no_words_is_not_an_opening(self, production_router):
+        assert production_router.is_incomplete_replacement_name([]) is False

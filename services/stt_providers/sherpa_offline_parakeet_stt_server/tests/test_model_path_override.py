@@ -122,6 +122,27 @@ class TestCodedDefault:
         assert resolved["model"]["model_path"] == expected
 
 
+class TestTheCodedDefaultNamesTheShippedModel:
+    """wh-parakeet-fp32-shipped-model: the coded default is the last-resort
+    location, so it has to name the directory the installer actually
+    creates. David ruled on 2026-09-07 that the int8 model is not
+    acceptable and the shipped model is Parakeet TDT 0.6b v3 at full
+    precision, so the name must not carry the -int8 suffix any more. The
+    installer's own $ModelDirName is checked against this constant by
+    scripts/release/tests/test_installer.py; this test pins the value on
+    the provider side, where a wrong name sends a machine with no override
+    file to a directory that will never exist."""
+
+    def test_the_default_dirname_is_the_full_precision_model(self):
+        assert (
+            parakeet_main.DEFAULT_MODEL_DIRNAME
+            == "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3"
+        )
+
+    def test_the_default_dirname_does_not_name_a_quantized_build(self):
+        assert "int8" not in parakeet_main.DEFAULT_MODEL_DIRNAME
+
+
 class TestFailureHonesty:
     def test_malformed_override_file_keeps_config_value(self, local_app_data, caplog):
         """A half-edited override file must not take the provider down."""

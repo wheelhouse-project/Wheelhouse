@@ -24,7 +24,6 @@ def _make_processor(hotword="x-ray"):
         command_timeout_ms=1000,
         hotword=hotword,
     )
-    processor.context_mirror = MagicMock()
     return processor
 
 

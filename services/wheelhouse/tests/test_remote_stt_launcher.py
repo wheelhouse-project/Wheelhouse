@@ -836,8 +836,8 @@ launcher = "launcher.py"
 
         working_calls = []
         launcher.set_working_callback(
-            show=lambda msg: working_calls.append(("show", msg)),
-            hide=lambda: working_calls.append(("hide",)),
+            show=lambda msg, generation: working_calls.append(("show", msg)),
+            hide=lambda generation: working_calls.append(("hide",)),
         )
 
         with patch("subprocess.Popen") as mock_popen:
@@ -862,8 +862,8 @@ launcher = "launcher.py"
 
         working_calls = []
         launcher.set_working_callback(
-            show=lambda msg: working_calls.append(("show", msg)),
-            hide=lambda: working_calls.append(("hide",)),
+            show=lambda msg, generation: working_calls.append(("show", msg)),
+            hide=lambda generation: working_calls.append(("hide",)),
         )
 
         # start_provider establishes the starting state before spawning
@@ -888,8 +888,8 @@ launcher = "launcher.py"
 
         working_calls = []
         launcher.set_working_callback(
-            show=lambda msg: working_calls.append(("show", msg)),
-            hide=lambda: working_calls.append(("hide",)),
+            show=lambda msg, generation: working_calls.append(("show", msg)),
+            hide=lambda generation: working_calls.append(("hide",)),
         )
 
         with patch("subprocess.Popen", side_effect=OSError("fail")):
@@ -948,8 +948,8 @@ startup_timeout_seconds = 180
         working_calls = []
         launcher.set_notify_callback(lambda title, msg: notifications.append((title, msg)))
         launcher.set_working_callback(
-            show=lambda msg: working_calls.append(("show", msg)),
-            hide=lambda: working_calls.append(("hide",)),
+            show=lambda msg, generation: working_calls.append(("show", msg)),
+            hide=lambda generation: working_calls.append(("hide",)),
         )
 
         # Register a fake "alive" subprocess for the provider. poll() returning None
@@ -1361,7 +1361,7 @@ launcher = "launcher.py"
         )
         hidden = []
         launcher.set_working_callback(
-            lambda msg: None, lambda: hidden.append(True)
+            lambda msg, generation: None, lambda generation: hidden.append(True)
         )
 
         # start_provider establishes the starting state before spawning
@@ -1401,7 +1401,7 @@ launcher = "launcher.py"
 
         hidden = []
         launcher.set_working_callback(
-            lambda msg: None, lambda: hidden.append(True)
+            lambda msg, generation: None, lambda generation: hidden.append(True)
         )
 
         # The next start_provider resets the starting state ...
@@ -1492,7 +1492,7 @@ launcher = "launcher.py"
         )
         hidden = []
         launcher.set_working_callback(
-            lambda msg: None, lambda: hidden.append(True)
+            lambda msg, generation: None, lambda generation: hidden.append(True)
         )
 
         # start_provider reset the state synchronously ...

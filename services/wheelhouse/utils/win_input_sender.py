@@ -33,16 +33,22 @@ Input Event Types:
 
 Typical Usage:
   from utils.win_input_sender import press_keys, type_string
-  
-  # Send hotkey combination
-  press_keys("ctrl+c")  # Copy hotkey
-  press_keys("alt+tab") # Alt-Tab window switching
-  
+
+  # Send a hotkey. One key name per argument.
+  press_keys("ctrl", "c")    # Copy
+  press_keys("alt", "tab")   # Switch window
+
   # Type text directly
   type_string("Hello world!")
-  
-  # Complex combinations
-  press_keys("ctrl+shift+n")  # New window/incognito
+
+  # More modifiers, same shape
+  press_keys("ctrl", "shift", "n")  # New window or incognito window
+
+  A COMBINED STRING DOES NOT WORK. press_keys("ctrl+c") passes one argument,
+  "ctrl+c", which is not a key name in VK_CODE_MAP. press_keys logs
+  "One or more keys ... are not valid. Aborting." and returns without
+  sending anything, and the caller is told nothing. Every call site in this
+  repository uses one key name per argument.
 """
 # utils/win_input_sender.py
 import ctypes
@@ -85,16 +91,100 @@ class Input(ctypes.Structure):
 
 # Constants
 INPUT_KEYBOARD = 1
+KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
+
+# Virtual key codes that Windows treats as EXTENDED keys
+# (wh-arrow-keys-missing-extended-flag).
+#
+# The original IBM keyboard had one set of scan codes. The extended keyboard
+# added a second navigation cluster, a second control key, a second alt key
+# and the numpad divide, and gave each of them the same scan code as its
+# older twin with an 0xE0 prefix in front. KEYEVENTF_EXTENDEDKEY is how
+# SendInput asks for that prefix. Without it, SendInput derives the plain
+# scan code from the virtual key code, which for the navigation cluster is
+# the NUMPAD scan code.
+#
+# An application that reads the virtual key code cannot tell the difference.
+# Anything that reads the scan code sees a numpad key. Measured 2026-08-15
+# with NVDA 2026.1.1: NVDA named the four arrow keys numpad2, numpad8,
+# numpad4 and numpad6, matched them against its own review cursor commands,
+# and consumed all four, so the arrow key never reached the application.
+# About 150 filed Voice Access parity commands send these keys.
+#
+# The set holds virtual key codes rather than key names for two reasons.
+# First, 'delete' and 'del' both mean 0x2E, and one entry covers both.
+# Second, four of these codes have no name in VK_CODE_MAP yet, and
+# wh-voice-access-parity.2.17 will add the numpad names. Keying on the code
+# means the numpad divide is already right on the day its name arrives, and
+# the numpad digits, which are NOT extended keys, stay right as well.
+#
+# That second reason covers only the codes this set already holds. It is NOT
+# a promise about every extended key. The menu key VK_APPS 0x5D and the
+# media and browser keys 0xA6 through 0xB1 are extended keys that are absent
+# here, so adding a name for any of them without adding its code would send
+# it without the prefix. Whoever adds such a name adds the code too.
+#
+# crewcut: the numpad enter cannot be expressed at all. Windows gives it the
+# same virtual key code as the main enter, 0x0D, and separates the two only
+# by this flag. A future 'numpadenter' name therefore needs a decision that
+# reads the NAME, because the code alone cannot answer it. Adding 0x0D to
+# this set would wrongly extend every main enter.
+EXTENDED_VK_CODES = frozenset({
+    0x21,  # VK_PRIOR, page up
+    0x22,  # VK_NEXT, page down
+    0x23,  # VK_END
+    0x24,  # VK_HOME
+    0x25,  # VK_LEFT
+    0x26,  # VK_UP
+    0x27,  # VK_RIGHT
+    0x28,  # VK_DOWN
+    0x2C,  # VK_SNAPSHOT, print screen
+    0x2D,  # VK_INSERT
+    0x2E,  # VK_DELETE
+    0x6F,  # VK_DIVIDE, the numpad slash
+    0x90,  # VK_NUMLOCK
+    0xA3,  # VK_RCONTROL, the right control key
+    0xA5,  # VK_RMENU, the right alt key
+})
+
+
+def _extended_flag(vk_code: int) -> int:
+    """Return KEYEVENTF_EXTENDEDKEY for an extended key, otherwise 0.
+
+    Every key-up must carry the same flag as its key-down. A key-up that
+    drops the flag does not match the key-down that carried it, and a
+    reader of scan codes can then hold the key down for ever.
+    """
+    return KEYEVENTF_EXTENDEDKEY if vk_code in EXTENDED_VK_CODES else 0
 
 # Mouse SendInput constants (wh-l4h.1 coordinate-click fallback seam).
 INPUT_MOUSE = 0
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_VIRTUALDESK = 0x4000
+# Mouse wheel (wh-voice-access-parity.2.3). MOUSEEVENTF_WHEEL turns the
+# vertical wheel, MOUSEEVENTF_HWHEEL the horizontal one. Neither carries its
+# distance in dx/dy: the distance goes in mouseData, and dx/dy are ignored.
+MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_HWHEEL = 0x01000
+
+# One wheel notch, the unit every wheel-aware application is written against.
+# Windows defines WHEEL_DELTA as 120 so a finer wheel can report fractions of
+# a notch; Wheelhouse sends whole notches only.
+WHEEL_DELTA = 120
+
+# Upper bound on the notches one spoken scroll command may send. The Input
+# process command loop is single-threaded, so an unbounded count from a
+# malformed message would hold up every other input action while it drains.
+# Fifty notches is far past any useful single command and matches the repeat
+# cap the hotkey action already applies.
+MAX_SCROLL_CLICKS = 50
 
 # GetSystemMetrics indices for the bounding box of the VIRTUAL desktop (the
 # union of all monitors). SendInput's ABSOLUTE+VIRTUALDESK coordinates are
@@ -168,6 +258,55 @@ VK_CODE_MAP = {
     'f6': 0x75, 'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79,
     'f11': 0x7A, 'f12': 0x7B,
 }
+
+# Virtual key codes that a chord HOLDS DOWN while it presses the other keys
+# (wh-arrow-keys-missing-extended-flag, the second gap).
+#
+# _build_press_keys_events used to test four names inline. Any key outside
+# those four was tapped instead of held, so press_keys('insert', 't') sent
+# insert down, insert up, t down, t up. That is a sequence, not a chord, and
+# NVDA reported it as plain t. NVDA accepts Insert or Caps Lock as its own
+# modifier, so no NVDA chord could be expressed at all.
+#
+# The set holds codes rather than names because 'win' and 'lwin' are both
+# 0x5B, and one entry covers both.
+#
+# A key is in this set only when an application reads it as a modifier.
+# Holding every key except the last would be simpler and wrong: it would
+# turn press_keys('a', 'b') into a chord and stop it typing 'ab'.
+# Measured against the 63 unique key lists in speech/config/patterns.toml:
+# every one of them is modifiers plus a single final key, and none holds
+# insert or capslock, so no shipped command changes shape.
+#
+# HAZARD FOR WHOEVER WRITES THE NEXT CAPS LOCK OR INSERT COMMAND. Both keys
+# are toggles, and the toggle fires on the key-DOWN. An injected Caps Lock
+# key-down flips the operating system caps state and the keyboard light. An
+# injected Insert key-down flips overwrite mode in an edit control that
+# honours it, and overwrite mode is per control, so nothing can read it back.
+# Neither key-up undoes its key-down. A chord holding either key therefore
+# fires its toggle once per command, and after the command the machine is in
+# a different state than it started in.
+#
+# A screen reader that claims the key as its own modifier consumes the event
+# and hides both toggles, which is why the 2026-08-15 NVDA session measured
+# no Caps Lock flip. Nothing here checks that such a consumer exists. With no
+# screen reader running, a caps lock command leaves caps on, and an insert
+# command leaves the focused editor overwriting the text already in it.
+#
+# This is not new. Before these keys joined the set they were tapped, which
+# is the same single key-down, so the toggle fired just as often. What
+# changed is that the chord now works, so writing one is now worth doing.
+# Whether Wheelhouse should refuse these chords, or restore the caps state
+# around them, is an open question for the project owner and is not settled
+# here.
+HELD_MODIFIER_VK_CODES = frozenset({
+    VK_CODE_MAP['ctrl'],
+    VK_CODE_MAP['shift'],
+    VK_CODE_MAP['alt'],
+    VK_CODE_MAP['win'],
+    VK_CODE_MAP['insert'],    # the NVDA modifier, desktop layout
+    VK_CODE_MAP['capslock'],  # the NVDA modifier, laptop layout
+})
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -274,7 +413,9 @@ class _InvalidKeyError(Exception):
     """Raised by :func:`_build_press_keys_events` when a key is not mapped."""
 
 
-def _build_press_keys_events(keys: tuple[str, ...]) -> tuple[list, int]:
+def _build_press_keys_events(
+    keys: tuple[str, ...], *, refusal_level: int = logging.ERROR
+) -> tuple[list, int]:
     """Build the INPUT event sequence for a press_keys chord.
 
     Shared between :func:`press_keys` (fire-and-forget) and
@@ -286,6 +427,15 @@ def _build_press_keys_events(keys: tuple[str, ...]) -> tuple[list, int]:
         contains only modifiers that are also non-modifiers (impossible
         in practice but cheap to guard).
 
+    Args:
+        refusal_level: the level the unmapped-key record is written at.
+            ERROR by default, which is what :func:`press_keys` keeps.
+            :func:`verified_press_keys` lowers it to WARNING when its
+            caller passes ``caller_notifies`` (wh-keyboard-refusal-notice):
+            an ERROR record shows the generic ``[ERROR]`` box beside the
+            caller's own notice, and two boxes for one refusal is the
+            duplicate this bead removes.
+
     Raises:
         _InvalidKeyError: when any element of ``keys`` is not in
         :data:`VK_CODE_MAP`. Callers translate this to the fire-and-forget
@@ -293,25 +443,33 @@ def _build_press_keys_events(keys: tuple[str, ...]) -> tuple[list, int]:
     """
     vk_codes = [VK_CODE_MAP.get(key.lower()) for key in keys]
     if None in vk_codes:
-        logger.error(f"One or more keys in {keys} are not valid. Aborting.")
+        logger.log(
+            refusal_level,
+            f"One or more keys in {keys} are not valid. Aborting.",
+        )
         raise _InvalidKeyError(keys)
 
     events: list = []
     modifiers_down: list = []
     for vk_code in vk_codes:
-        if vk_code in (VK_CODE_MAP['ctrl'], VK_CODE_MAP['shift'], VK_CODE_MAP['alt'], VK_CODE_MAP['win']):
-            events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=0))))
+        if vk_code in HELD_MODIFIER_VK_CODES:
+            extended = _extended_flag(vk_code)
+            events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=extended))))
             modifiers_down.append(vk_code)
     for vk_code in vk_codes:
         if vk_code not in modifiers_down:
-            events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=0))))
-            events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=KEYEVENTF_KEYUP))))
+            extended = _extended_flag(vk_code)
+            events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=extended))))
+            events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=extended | KEYEVENTF_KEYUP))))
     for vk_code in reversed(modifiers_down):
-        events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=KEYEVENTF_KEYUP))))
+        extended = _extended_flag(vk_code)
+        events.append(Input(type=INPUT_KEYBOARD, ii=Input_I(ki=KeyBdInput(wVk=vk_code, dwFlags=extended | KEYEVENTF_KEYUP))))
     return events, len(events)
 
 
-def verified_press_keys(*keys: str) -> tuple[bool, int, int]:
+def verified_press_keys(
+    *keys: str, caller_notifies: bool = False
+) -> tuple[bool, int, int]:
     """Send a key chord and report whether SendInput accepted every event.
 
     Added for wh-eolas.1.2: the GUI terminal-paste helper cannot rely on
@@ -333,11 +491,24 @@ def verified_press_keys(*keys: str) -> tuple[bool, int, int]:
           key (the function returns early before building events). This
           lets the caller distinguish "no work requested" from "tried
           to send N, only M landed".
+
+    Args:
+        caller_notifies: pass True when the caller shows the user its own
+            notice for a refusal. Every refusal record below then logs at
+            WARNING instead of ERROR, so the refusal keeps its full detail
+            in the log while ``ErrorNotificationHandler`` stops showing the
+            generic ``[ERROR]`` box beside that notice
+            (wh-keyboard-refusal-notice, following wh-wheel-refusal-notice.1.7).
+            Default False leaves every existing call site exactly as it was.
+            :func:`press_keys` is not affected either way.
     """
+    refusal_level = logging.WARNING if caller_notifies else logging.ERROR
     if not keys:
         return True, 0, 0
     try:
-        events, num_events = _build_press_keys_events(keys)
+        events, num_events = _build_press_keys_events(
+            keys, refusal_level=refusal_level
+        )
     except _InvalidKeyError:
         return False, 0, 0
     if num_events == 0:
@@ -347,7 +518,8 @@ def verified_press_keys(*keys: str) -> tuple[bool, int, int]:
         input_array = (Input * num_events)(*events)
         events_sent = user32.SendInput(num_events, ctypes.byref(input_array), ctypes.sizeof(Input))
     except Exception as exc:
-        logger.error(
+        logger.log(
+            refusal_level,
             "verified_press_keys: SendInput raised for keys=%s: %s",
             keys, exc, exc_info=True,
         )
@@ -355,7 +527,8 @@ def verified_press_keys(*keys: str) -> tuple[bool, int, int]:
 
     accepted = int(events_sent or 0)
     if accepted != num_events:
-        logger.error(
+        logger.log(
+            refusal_level,
             "verified_press_keys: short SendInput for keys=%s: "
             "sent %d/%d events; Win32 error %s",
             keys, accepted, num_events, kernel32.GetLastError(),
@@ -401,7 +574,10 @@ def _send_modifier_keyups(keys: tuple[str, ...]) -> None:
             Input(
                 type=INPUT_KEYBOARD,
                 ii=Input_I(
-                    ki=KeyBdInput(wVk=vk_code, dwFlags=KEYEVENTF_KEYUP),
+                    ki=KeyBdInput(
+                        wVk=vk_code,
+                        dwFlags=_extended_flag(vk_code) | KEYEVENTF_KEYUP,
+                    ),
                 ),
             )
         )
@@ -498,7 +674,7 @@ def _build_unicode_event_groups(text: str) -> list[list]:
 
 
 def type_string_verified(
-    text: str, chunk_delay: float = 0.001
+    text: str, chunk_delay: float = 0.001, *, caller_notifies: bool = False
 ) -> tuple[bool, int, str | None]:
     """Send Unicode text via SendInput with verified delivery semantics.
 
@@ -522,7 +698,14 @@ def type_string_verified(
             error -- None on full success; a short string identifying
                 the failure mode otherwise (``partial: ...``,
                 ``win32 error <code>``, or ``sendinput exception ...``).
+
+    Args:
+        caller_notifies: same meaning as in :func:`verified_press_keys`.
+            True lowers both refusal records below to WARNING because the
+            caller shows the user its own notice, and an ERROR record would
+            add a second box (wh-keyboard-refusal-notice).
     """
+    refusal_level = logging.WARNING if caller_notifies else logging.ERROR
     if not text:
         return True, 0, None
 
@@ -571,7 +754,8 @@ def type_string_verified(
             send_elapsed_us = (time.perf_counter() - send_start) * 1_000_000
             chars_sent = _chars_completed(total_events_sent)
             error = f"sendinput exception {type(exc).__name__}: {exc}"
-            logger.error(
+            logger.log(
+                refusal_level,
                 "type_string_verified: %s; chars_sent=%d/%d send_us=%.1f",
                 error, chars_sent, len(text), send_elapsed_us, exc_info=True,
             )
@@ -592,7 +776,8 @@ def type_string_verified(
                 )
                 if err_code != 0:
                     error += f"; win32 error {err_code}"
-            logger.error(
+            logger.log(
+                refusal_level,
                 "type_string_verified: %s; chars_sent=%d/%d",
                 error, chars_sent, len(text),
             )
@@ -694,8 +879,23 @@ def _normalize_to_virtual_desktop(x: int, y: int) -> tuple[int, int]:
     return _norm(x, vx, vw), _norm(y, vy, vh)
 
 
-def click_at(x: int, y: int) -> tuple[bool, int]:
-    """Left-click at physical screen pixel ``(x, y)`` via SendInput, verified.
+# Spoken-gesture button name -> (down flag, up flag). The gesture parameter
+# (wh-click-gesture-param) needs the right button as well as the left; a name
+# outside this map fails closed in :func:`click_at` with no input sent.
+_MOUSE_BUTTON_FLAGS = {
+    "left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+    "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+}
+
+
+def click_at(
+    x: int,
+    y: int,
+    *,
+    button: str = "left",
+    click_count: int = 1,
+) -> tuple[bool, int, str | None]:
+    """Click at physical screen pixel ``(x, y)`` via SendInput, verified.
 
     The SendInput-backed coordinate-click seam injected into ``ClickExecutor``
     by the Input process (wh-l4h.1). A click at the wrong coordinate is the
@@ -722,25 +922,46 @@ def click_at(x: int, y: int) -> tuple[bool, int]:
          event -- a wrong landing must never produce a click. A ``GetCursorPos``
          API failure is treated the same way (abandon the attempt and retry), so
          a single transient read failure does not consume the whole click.
-      3. Only after the cursor verified, send a SEPARATE batch of exactly two
-         events (LEFTDOWN, LEFTUP) at the same ABSOLUTE coordinates, while
-         physical input is still blocked. If that batch is only partly accepted
-         (just the LEFTDOWN went through), send a compensating LEFTUP so a
-         partial click never leaves the button held down.
+      3. Only after the cursor verified, send a SEPARATE batch of exactly
+         ``2 * click_count`` events (down, up per click) at the same ABSOLUTE
+         coordinates, while physical input is still blocked. If that batch is
+         only partly accepted and the accepted count leaves a down unpaired,
+         send a compensating up so a partial click never leaves the button held
+         down.
 
-    Returns ``(success, events_sent)``:
+    ``button`` / ``click_count`` (wh-click-gesture-param) carry the spoken
+    gesture: the defaults are one left click, exactly what every caller before
+    the gesture parameter sent. ``button="right"`` presses the right button;
+    ``click_count=2`` sends two down/up pairs in ONE SendInput batch, so
+    nothing can slip between them and break the double-click interval. An
+    unknown button name or a non-positive count fails CLOSED -- ``(False, 0)``
+    with no input sent -- rather than guessing a gesture.
 
-    * ``events_sent`` counts ONLY the LEFTDOWN/LEFTUP batch (the executor
-      expects 2 and maps ``events_sent < 2`` to ``sendinput_short``). The MOVE
+    Returns ``(success, events_sent, reason)``:
+
+    * ``events_sent`` counts ONLY the button batch (the executor expects two
+      events per click and maps a shortfall to ``sendinput_short``). The MOVE
       event is deliberately excluded so a short click is not masked. It is 0
       when the cursor did not verify (no click batch was issued).
     * ``success`` is True only when the cursor verified AND the click batch
-      accepted both events.
+      accepted every event.
+    * ``reason`` is ``"release_failed"`` when a partial click batch left a
+      button DOWN and the compensating release was refused too, so the
+      button may still be held (wh-mouse-grid.1.5); ``None`` otherwise.
+      Every other failure guarantees no button is left pressed.
 
-    Any internal exception fails soft to ``(False, 0)`` -- a ctypes / Win32
-    error never propagates out of the seam.
+    Any internal exception fails soft to ``(False, 0, None)`` -- a ctypes /
+    Win32 error never propagates out of the seam.
     """
     try:
+        button_flags = _MOUSE_BUTTON_FLAGS.get(button)
+        if button_flags is None or click_count < 1:
+            logger.error(
+                "click_at: unsupported gesture (button=%r click_count=%r); "
+                "failing closed with no input sent", button, click_count,
+            )
+            return (False, 0, None)
+
         nx, ny = _normalize_to_virtual_desktop(x, y)
 
         move_flags = (
@@ -752,8 +973,9 @@ def click_at(x: int, y: int) -> tuple[bool, int]:
         )
         move_array = (Input * 1)(move)
 
-        click_flags_down = MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
-        click_flags_up = MOUSEEVENTF_LEFTUP | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+        down_flag, up_flag = button_flags
+        click_flags_down = down_flag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+        click_flags_up = up_flag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
         down = Input(
             type=INPUT_MOUSE,
             ii=Input_I(mi=MouseInput(dx=nx, dy=ny, mouseData=0, dwFlags=click_flags_down)),
@@ -762,9 +984,15 @@ def click_at(x: int, y: int) -> tuple[bool, int]:
             type=INPUT_MOUSE,
             ii=Input_I(mi=MouseInput(dx=nx, dy=ny, mouseData=0, dwFlags=click_flags_up)),
         )
-        click_array = (Input * 2)(down, up)
-        # A standalone LEFTUP, used to release the button if a partial click
-        # batch left it held down (wh-review-click-overlay-codex.1).
+        # One down/up pair per requested click, all in a single batch (a double
+        # click is two pairs; the default single click is the one pair every
+        # pre-gesture caller sent).
+        expected_click_events = 2 * click_count
+        click_array = (Input * expected_click_events)(
+            *([down, up] * click_count)
+        )
+        # A standalone button release, used if a partial click batch left the
+        # button held down (wh-review-click-overlay-codex.1).
         up_array = (Input * 1)(up)
 
         # Suppress physical mouse/keyboard for the brief move+verify+click so a
@@ -828,44 +1056,63 @@ def click_at(x: int, y: int) -> tuple[bool, int]:
                 if landed:
                     events_sent = int(
                         user32.SendInput(
-                            2, ctypes.byref(click_array), ctypes.sizeof(Input)
+                            expected_click_events,
+                            ctypes.byref(click_array),
+                            ctypes.sizeof(Input),
                         ) or 0
                     )
-                    if events_sent != 2:
+                    if events_sent != expected_click_events:
                         logger.error(
                             "click_at: short SendInput for click batch: sent "
-                            "%d/2; Win32 error %s",
-                            events_sent, kernel32.GetLastError(),
+                            "%d/%d; Win32 error %s",
+                            events_sent, expected_click_events,
+                            kernel32.GetLastError(),
                         )
-                        # If only the LEFTDOWN was accepted (events_sent == 1),
-                        # the logical left button is now held down; send a
-                        # best-effort LEFTUP so a partial batch cannot leave the
-                        # button stuck (a drag/selection hazard). This runs while
-                        # physical input is still blocked, so nothing can
-                        # interfere; the finally then releases BlockInput.
-                        # events_sent == 0 means nothing was injected, so the
-                        # button was never pressed and no release is needed.
-                        if events_sent == 1:
-                            comp_sent = int(
-                                user32.SendInput(
-                                    1, ctypes.byref(up_array),
-                                    ctypes.sizeof(Input),
-                                ) or 0
-                            )
+                        # An ODD accepted count means the last button-down was
+                        # accepted without its up, so the logical button is now
+                        # held down; send a best-effort release so a partial
+                        # batch cannot leave the button stuck (a drag/selection
+                        # hazard). This runs while physical input is still
+                        # blocked, so nothing can interfere; the finally then
+                        # releases BlockInput. An even count (including 0)
+                        # leaves every press already paired with its release.
+                        if events_sent % 2 == 1:
+                            # A raise from the compensating send must be
+                            # handled HERE, not by the outer except: that
+                            # handler returns (False, 0, None), which both
+                            # discards the accepted DOWN count and suppresses
+                            # the stuck-button reason (wh-mouse-grid.1.8).
+                            try:
+                                comp_sent = int(
+                                    user32.SendInput(
+                                        1, ctypes.byref(up_array),
+                                        ctypes.sizeof(Input),
+                                    ) or 0
+                                )
+                            except Exception as comp_exc:  # noqa: BLE001 -- a real SendInput seam can raise
+                                logger.error(
+                                    "click_at: compensating %s release "
+                                    "raised (%s) -- button may be stuck "
+                                    "down", button, comp_exc, exc_info=True,
+                                )
+                                comp_sent = 0
                             # The compensating release is best-effort, but if it
-                            # ALSO short-delivers the left button is left held
-                            # down. Log it so the stuck-button state is
-                            # diagnosable rather than silent
-                            # (wh-review-click-overlay-glm52.1).
+                            # ALSO short-delivers the button is left held
+                            # down. Log it AND report it as a distinct reason
+                            # so the stuck-button state reaches the user
+                            # instead of collapsing onto sendinput_short
+                            # (wh-review-click-overlay-glm52.1,
+                            # wh-mouse-grid.1.5).
                             if comp_sent != 1:
                                 logger.error(
-                                    "click_at: compensating LEFTUP also failed: "
-                                    "sent %d/1; Win32 error %s -- left button "
-                                    "may be stuck down",
-                                    comp_sent, kernel32.GetLastError(),
+                                    "click_at: compensating %s release also "
+                                    "failed: sent %d/1; Win32 error %s -- "
+                                    "button may be stuck down",
+                                    button, comp_sent, kernel32.GetLastError(),
                                 )
-                        return (False, events_sent)
-                    return (True, events_sent)
+                                return (False, events_sent, "release_failed")
+                        return (False, events_sent, None)
+                    return (True, events_sent, None)
             finally:
                 if input_blocked:
                     user32.BlockInput(0)
@@ -883,10 +1130,684 @@ def click_at(x: int, y: int) -> tuple[bool, int]:
             _CLICK_MOVE_ATTEMPTS, _CLICK_CURSOR_VERIFY_ATTEMPTS,
             x, y, observed[0], observed[1],
         )
-        return (False, 0)
+        return (False, 0, None)
     except Exception as exc:  # noqa: BLE001 -- a real SendInput/Win32 seam can raise
         logger.error("click_at: unexpected error: %s", exc, exc_info=True)
-        return (False, 0)
+        return (False, 0, None)
+
+# ---------------------------------------------------------------------------
+# Mouse-grid pointer primitives (wh-input-mouse-primitives).
+#
+# The three operations the mouse-grid overlay needs from the Input process --
+# click at a point, park the pointer at a point, and perform a drag between
+# two points. Design doc:
+# docs/superpowers/specs/2026-08-09-mouse-grid-overlay-design.md, the
+# "Input process -- the only place that touches the mouse" section.
+#
+# These deliberately do NOT run UI Automation verification or the occlusion
+# hit-test that ``click_at`` (the by-name coordinate fallback) relies on: the
+# user picked the point visually off a painted grid, so the by-name
+# protections -- which exist to stop a click on a control the user cannot see
+# -- have nothing to protect against here. See the spec's "Verification
+# difference" section.
+#
+# What they DO keep is the physical-cursor landing check: the pointer is moved
+# with a normalized absolute MOVE and ``GetCursorPos`` must confirm it landed
+# before any button event is synthesised. A hands-free click at the wrong
+# coordinate is the hazard, and it is independent of how the point was chosen.
+#
+# 64-bit note: every INPUT struct here is the shared ``Input`` / ``Input_I`` /
+# ``MouseInput`` definition at the top of this module. ``dwExtraInfo`` is a
+# ctypes pointer type (8 bytes on x64, matching ULONG_PTR), and dx/dy are
+# ``wintypes.LONG``, so ``ctypes.sizeof(Input)`` matches what the 64-bit
+# SendInput expects. Do not substitute a hand-rolled struct.
+# ---------------------------------------------------------------------------
+
+# Button name -> (down flag, up flag). The grid ships left and right only;
+# "middle" has no spoken command and would need its own notice wording.
+_MOUSE_BUTTON_FLAGS: dict[str, tuple[int, int]] = {
+    "left": (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+    "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+}
+
+# The grid's spoken gestures are a single click and a double click; a triple
+# click has no command, and an unbounded count would let one malformed IPC
+# message flood the input queue.
+_MAX_CLICK_COUNT = 2
+
+# Drag shaping. Many applications ignore a drag whose pointer teleports --
+# they never see the intermediate movement that starts their drag operation --
+# so the movement is interpolated. One step per ~16 ms is roughly one per
+# display frame at 60 Hz, which is smooth enough for every drag target tested
+# without flooding the input queue. The step count is clamped so a 0 ms drag
+# still moves gradually and a long drag does not send hundreds of events.
+_DRAG_STEP_TARGET_MS = 16.0
+_DRAG_MIN_STEPS = 8
+_DRAG_MAX_STEPS = 60
+
+# Accepted range for a requested drag duration, in milliseconds. The spec's
+# default is 250. The upper bound is a sanity limit: the Input process command
+# loop is single-threaded, so a drag blocks every other input action for its
+# whole duration.
+_DRAG_MAX_DURATION_MS = 60_000
+
+
+def _is_plain_int(value) -> bool:
+    """True for a real int. ``bool`` is an int subclass and is rejected."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _absolute_mouse_event(nx: int, ny: int, flags: int):
+    """Build one INPUT struct carrying normalized absolute coordinates."""
+    return Input(
+        type=INPUT_MOUSE,
+        ii=Input_I(
+            mi=MouseInput(dx=nx, dy=ny, mouseData=0, dwFlags=flags)
+        ),
+    )
+
+
+def _send_mouse_events(events: list) -> int:
+    """Send a batch of mouse INPUT structs; return the accepted count.
+
+    Raises whatever the ctypes call raises -- each caller decides how to fail.
+    """
+    count = len(events)
+    if count == 0:
+        return 0
+    array = (Input * count)(*events)
+    return int(
+        user32.SendInput(count, ctypes.byref(array), ctypes.sizeof(Input)) or 0
+    )
+
+
+def _move_cursor_and_verify(x: int, y: int) -> bool:
+    """Send one absolute MOVE to physical ``(x, y)`` and confirm it landed.
+
+    SendInput posts the MOVE into the system input queue asynchronously, so
+    the first ``GetCursorPos`` can read the stale pre-move position; poll up to
+    ``_CLICK_CURSOR_VERIFY_ATTEMPTS`` times and accept the first read within
+    ``_CLICK_CURSOR_TOLERANCE_PX`` on each axis. Returns False when no read
+    landed (including a ``GetCursorPos`` API failure), leaving the caller to
+    fail closed or retry.
+    """
+    nx, ny = _normalize_to_virtual_desktop(x, y)
+    move_flags = (
+        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    )
+    _send_mouse_events([_absolute_mouse_event(nx, ny, move_flags)])
+
+    for _ in range(_CLICK_CURSOR_VERIFY_ATTEMPTS):
+        point = wintypes.POINT()
+        if not user32.GetCursorPos(ctypes.byref(point)):
+            logger.error(
+                "mouse primitive: GetCursorPos failed while verifying a move "
+                "to (%d,%d); Win32 error %s",
+                x, y, kernel32.GetLastError(),
+            )
+            return False
+        if (
+            abs(int(point.x) - x) <= _CLICK_CURSOR_TOLERANCE_PX
+            and abs(int(point.y) - y) <= _CLICK_CURSOR_TOLERANCE_PX
+        ):
+            return True
+        time.sleep(_CLICK_CURSOR_VERIFY_DELAY_S)
+    return False
+
+
+def _move_cursor_with_retry(x: int, y: int) -> bool:
+    """Retry :func:`_move_cursor_and_verify` a bounded number of times.
+
+    A physical mouse being moved by hand overrides the injected absolute MOVE
+    for the whole verify window (wh-click-mouse-contention), so one miss is
+    not proof the coordinate is wrong. Retrying the whole move rides out a
+    transient miss without weakening the landing check.
+    """
+    for attempt in range(_CLICK_MOVE_ATTEMPTS):
+        if _move_cursor_and_verify(x, y):
+            return True
+        if attempt < _CLICK_MOVE_ATTEMPTS - 1:
+            time.sleep(_CLICK_MOVE_RETRY_DELAY_S)
+    return False
+
+
+def _release_button_in_place(up_flag: int) -> tuple[bool, str | None]:
+    """Release a held mouse button wherever the pointer currently is.
+
+    No ``MOUSEEVENTF_ABSOLUTE`` and no ``MOUSEEVENTF_MOVE``: dx/dy are ignored
+    and the release happens at the current cursor position. That is the right
+    semantic for the drag's guaranteed release -- when the movement failed
+    partway, dragging the pointer to the requested end point just to release
+    it there would drop the item somewhere the user never saw it travel to.
+
+    Never raises. Returns ``(released, reason)``; ``reason`` is
+    ``"release_failed"`` when the button may still be held.
+    """
+    try:
+        accepted = _send_mouse_events([
+            Input(
+                type=INPUT_MOUSE,
+                ii=Input_I(
+                    mi=MouseInput(dx=0, dy=0, mouseData=0, dwFlags=up_flag)
+                ),
+            )
+        ])
+    except Exception as exc:  # noqa: BLE001 -- a real SendInput seam can raise
+        logger.error(
+            "mouse primitive: the button release raised (%s) -- the button "
+            "may be stuck down", exc, exc_info=True,
+        )
+        return (False, "release_failed")
+    if accepted != 1:
+        logger.error(
+            "mouse primitive: the button release was refused (sent %d/1; "
+            "Win32 error %s) -- the button may be stuck down",
+            accepted, kernel32.GetLastError(),
+        )
+        return (False, "release_failed")
+    return (True, None)
+
+
+def click_point(
+    x: int, y: int, button: str = "left", click_count: int = 1,
+) -> tuple[bool, str | None]:
+    """Click at physical screen pixel ``(x, y)`` with a button and a count.
+
+    The mouse-grid click primitive. Physical input is suppressed with
+    ``BlockInput`` for the brief move-and-click so a hand resting on the mouse
+    cannot override the injected absolute MOVE, and the block is released on
+    every Python control-flow path via ``finally``.
+
+    Args:
+        x, y: physical screen pixels. Negative values are normal -- a monitor
+            left of or above the primary has negative coordinates, and the
+            virtual-desktop normalization handles the offset.
+        button: ``"left"`` or ``"right"``.
+        click_count: 1 or 2. A count of 2 sends both down/up pairs in one
+            SendInput batch, which Windows reads as a double click.
+
+    Returns ``(succeeded, reason)``. ``reason`` is ``None`` on success and
+    otherwise one of ``"invalid_point"``, ``"invalid_button"``,
+    ``"invalid_click_count"``, ``"cursor_did_not_land"``,
+    ``"sendinput_short"``, ``"sendinput_error"``, ``"release_failed"``.
+    Never raises. ``"release_failed"`` means a partial click batch left a
+    button DOWN and the compensating release was refused too, so the button
+    may still be held; every other failure guarantees it is not.
+    """
+    if not (_is_plain_int(x) and _is_plain_int(y)):
+        logger.error("click_point: non-integer point (%r,%r)", x, y)
+        return (False, "invalid_point")
+    if not isinstance(button, str) or button not in _MOUSE_BUTTON_FLAGS:
+        logger.error("click_point: unsupported button %r", button)
+        return (False, "invalid_button")
+    if not _is_plain_int(click_count) or not 1 <= click_count <= _MAX_CLICK_COUNT:
+        logger.error("click_point: unsupported click count %r", click_count)
+        return (False, "invalid_click_count")
+
+    down_flag, up_flag = _MOUSE_BUTTON_FLAGS[button]
+    absolute = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+
+    input_blocked = False
+    try:
+        input_blocked = bool(user32.BlockInput(1))
+
+        if not _move_cursor_with_retry(x, y):
+            logger.error(
+                "click_point: the cursor did not land at (%d,%d) after %d "
+                "attempts; sending no button event",
+                x, y, _CLICK_MOVE_ATTEMPTS,
+            )
+            return (False, "cursor_did_not_land")
+
+        nx, ny = _normalize_to_virtual_desktop(x, y)
+        events = []
+        for _ in range(click_count):
+            events.append(
+                _absolute_mouse_event(nx, ny, down_flag | absolute)
+            )
+            events.append(_absolute_mouse_event(nx, ny, up_flag | absolute))
+
+        accepted = _send_mouse_events(events)
+        if accepted != len(events):
+            logger.error(
+                "click_point: short SendInput for the %s click batch: sent "
+                "%d/%d; Win32 error %s",
+                button, accepted, len(events), kernel32.GetLastError(),
+            )
+            # An odd accepted count means the last accepted event was a DOWN,
+            # so the button is held; release it. An even count (including 0)
+            # left no button pressed, and a spurious release could register as
+            # a real one with nothing down. A refused compensating release
+            # outranks the short send (wh-mouse-grid.1.5): release_failed is
+            # the one reason that tells the caller the button may still be
+            # held, and sendinput_short would hide it.
+            if accepted % 2 == 1:
+                released, release_reason = _release_button_in_place(up_flag)
+                if not released:
+                    return (False, release_reason)
+            return (False, "sendinput_short")
+        return (True, None)
+    except Exception as exc:  # noqa: BLE001 -- a real SendInput seam can raise
+        logger.error("click_point: unexpected error: %s", exc, exc_info=True)
+        return (False, "sendinput_error")
+    finally:
+        if input_blocked:
+            user32.BlockInput(0)
+
+
+def move_pointer_to(x: int, y: int) -> tuple[bool, str | None]:
+    """Park the pointer at physical screen pixel ``(x, y)``, pressing nothing.
+
+    The mouse-grid "move here" primitive, for hover-revealed menus in the
+    applications with poor accessibility trees that motivate the grid. No
+    ``BlockInput``: a hover is harmless if the user's own hand wins, and
+    suppressing physical input for a no-button operation would be a worse
+    trade than the miss it prevents. The move itself still retries like the
+    button primitives, because a single verify pass can lose the plain
+    SendInput/GetCursorPos race even with nobody touching the mouse.
+
+    Returns ``(succeeded, reason)`` with ``reason`` one of ``None``,
+    ``"invalid_point"``, ``"cursor_did_not_land"``, ``"sendinput_error"``.
+    Never raises.
+    """
+    if not (_is_plain_int(x) and _is_plain_int(y)):
+        logger.error("move_pointer_to: non-integer point (%r,%r)", x, y)
+        return (False, "invalid_point")
+
+    try:
+        if not _move_cursor_with_retry(x, y):
+            logger.error(
+                "move_pointer_to: the cursor did not land at (%d,%d) after "
+                "%d attempts", x, y, _CLICK_MOVE_ATTEMPTS,
+            )
+            return (False, "cursor_did_not_land")
+        return (True, None)
+    except Exception as exc:  # noqa: BLE001 -- a real SendInput seam can raise
+        logger.error(
+            "move_pointer_to: unexpected error: %s", exc, exc_info=True,
+        )
+        return (False, "sendinput_error")
+
+
+# Spoken direction -> (wheel flag, sign of one notch). Positive vertical
+# scrolls the content up (the wheel turns away from the user); positive
+# horizontal scrolls to the right. Both signs are what the Win32
+# documentation specifies for mouseData.
+_SCROLL_DIRECTIONS: dict[str, tuple[int, int]] = {
+    "up": (MOUSEEVENTF_WHEEL, 1),
+    "down": (MOUSEEVENTF_WHEEL, -1),
+    "right": (MOUSEEVENTF_HWHEEL, 1),
+    "left": (MOUSEEVENTF_HWHEEL, -1),
+}
+
+# wh-wheel-refusal-notice: the :func:`scroll_wheel` refusal reasons that keep
+# a ``logger.error`` record here. ErrorNotificationHandler is attached to the
+# root logger and turns every ERROR record into a generic notice box with no
+# opt-out, so a reason listed here reports itself and a caller that adds its
+# own notice would give the user two boxes.
+#
+# IT IS EMPTY, AND THAT IS THE POINT. DO NOT DELETE IT AS DEAD CODE.
+# Empty asserts the uniform rule this bead arrived at: NO wheel refusal
+# logs an ERROR, and every wheel refusal is reported by its caller's own
+# written notice. The two validation refusals were the last holdouts, and
+# wh-wheel-refusal-notice.1.7 removed them, REVERSING the earlier
+# in-bead decision to treat an ERROR record as proof the user was told.
+# What felled it: ErrorNotificationHandler.emit keys on (logger name, level,
+# message) and returns without submitting anything when the same key
+# repeats inside rate_limit_seconds, which utils/logging_setup.py sets to
+# 10. A malformed wheel action repeated inside ten seconds produced the
+# same key, so the box never appeared -- and the caller stayed quiet
+# because this tuple said the reason had reported itself. ZERO notices.
+# An ERROR record is not proof of delivery, so nothing may rely on one.
+#
+# A refusal reason added later must log BELOW ERROR and stay out of
+# this tuple. Adding a reason here again re-adopts the rate limiter as
+# part of the delivery path; do not do it without reading .1.7 first.
+# ui.ui_action_handler reads this tuple rather than repeating it, so the
+# choice and the list stay in one file.
+# tests/test_win_mouse_scroll.py walks every reason and checks the two halves
+# against each other.
+WHEEL_REFUSALS_THAT_LOG_ERROR: tuple[str, ...] = ()
+
+
+def scroll_wheel(direction, clicks: int = 1) -> tuple[bool, str | None]:
+    """Turn the mouse wheel ``clicks`` notches in ``direction``.
+
+    The primitive behind the spoken scroll commands. It sends wheel events at
+    whatever position the pointer already holds: a wheel event carries its
+    distance in ``mouseData`` and Windows ignores dx/dy, so nothing here moves
+    the pointer and neither ``MOUSEEVENTF_MOVE`` nor ``MOUSEEVENTF_ABSOLUTE``
+    is set.
+
+    No ``BlockInput``, unlike :func:`click_point` and :func:`drag_pointer`.
+    Those suppress physical input so a hand on the mouse cannot drag the
+    pointer away from the absolute point they just moved it to. A wheel event
+    has no coordinate to defend, so suppressing the user's own input would
+    cost more than it protects.
+
+    All ``clicks`` notches travel in ONE ``SendInput`` call, so an application
+    that coalesces a burst of wheel messages sees them as one gesture.
+
+    Args:
+        direction: ``"up"``, ``"down"``, ``"left"`` or ``"right"``.
+        clicks: whole wheel notches, 1 to :data:`MAX_SCROLL_CLICKS`. ``bool``
+            is rejected even though it is an ``int`` subclass.
+
+    Returns ``(succeeded, reason)``. ``reason`` is ``None`` on success and
+    otherwise one of ``"invalid_direction"``, ``"invalid_clicks"``,
+    ``"sendinput_short"``, ``"sendinput_error"``. Never raises. A refused
+    call sends nothing at all.
+
+    Every refusal here logs BELOW ERROR and the caller writes the
+    user's notice: read :data:`WHEEL_REFUSALS_THAT_LOG_ERROR` above before
+    you write the record.
+    """
+    if not isinstance(direction, str) or direction not in _SCROLL_DIRECTIONS:
+        # WARNING, not ERROR (wh-wheel-refusal-notice.1.7). A malformed
+        # direction is still a code fault worth the full detail in the log,
+        # but the ERROR record's generic box cannot be relied on to reach
+        # the user: the rate limiter drops a repeat of the same message
+        # inside ten seconds. The caller's own notice is the report.
+        logger.warning("scroll_wheel: unsupported direction %r", direction)
+        return (False, "invalid_direction")
+    if not _is_plain_int(clicks) or not 1 <= clicks <= MAX_SCROLL_CLICKS:
+        # WARNING for the same reason as the direction check above.
+        logger.warning("scroll_wheel: unsupported notch count %r", clicks)
+        return (False, "invalid_clicks")
+
+    flag, sign = _SCROLL_DIRECTIONS[direction]
+    # mouseData is a DWORD, which is unsigned, and a scroll down or left needs
+    # a negative distance. ctypes itself wraps a negative int into the field
+    # (measured: -120 reads back as 4294967176), so the mask below changes
+    # nothing about what Windows receives. It is written out so the two's
+    # complement value is visible at the point it is chosen rather than left
+    # to a ctypes conversion a reader has to know about.
+    delta = (sign * WHEEL_DELTA) & 0xFFFFFFFF
+
+    try:
+        events = [
+            Input(
+                type=INPUT_MOUSE,
+                ii=Input_I(
+                    mi=MouseInput(dx=0, dy=0, mouseData=delta, dwFlags=flag)
+                ),
+            )
+            for _ in range(clicks)
+        ]
+        accepted = _send_mouse_events(events)
+        if accepted != len(events):
+            # WARNING, not ERROR: both wheel callers write their own notice
+            # -- the continuous scroll's WHEEL_FAILED_MESSAGE and the discrete
+            # scroll's SCROLL_REFUSED_MESSAGE -- and an ERROR record would add
+            # a second, generic box through ErrorNotificationHandler, which is
+            # attached to the root logger and has no opt-out
+            # (wh-wheel-refusal-notice). The line keeps its accepted count and
+            # Win32 error, so the diagnosis survives the level change. This
+            # cannot be a per-caller decision: both callers reach this one
+            # call, so nothing set here can tell them apart.
+            logger.warning(
+                "scroll_wheel: short SendInput for %d %s notches: sent %d/%d; "
+                "Win32 error %s",
+                clicks, direction, accepted, len(events),
+                kernel32.GetLastError(),
+            )
+            # Nothing to undo. A wheel event is complete on its own, so a
+            # partly accepted batch has simply scrolled less far than asked,
+            # unlike a half-sent click that leaves a button held down.
+            return (False, "sendinput_short")
+        return (True, None)
+    except Exception as exc:  # noqa: BLE001 -- a real SendInput seam can raise
+        # WARNING for the same reason as the short send above: the caller's
+        # own notice is the user's report (wh-wheel-refusal-notice).
+        logger.warning(
+            "scroll_wheel: unexpected error: %s", exc, exc_info=True,
+        )
+        return (False, "sendinput_error")
+
+
+def _drag_step_count(duration_ms: int) -> int:
+    """How many interpolation steps a drag of ``duration_ms`` gets.
+
+    Duration 0 is the documented no-interpolation choice
+    (``click_config.py``: "a single move then release"), so it gets exactly
+    one step -- the final MOVE+UP pair -- rather than the minimum gradual
+    count with zero delays (wh-mouse-grid.1.10).
+    """
+    if duration_ms == 0:
+        return 1
+    steps = int(round(duration_ms / _DRAG_STEP_TARGET_MS))
+    return max(_DRAG_MIN_STEPS, min(_DRAG_MAX_STEPS, steps))
+
+
+def _interpolate_drag_points(
+    start_x: int, start_y: int, end_x: int, end_y: int, steps: int,
+) -> list[tuple[int, int]]:
+    """The ``steps`` points a drag passes through, ending exactly on the end.
+
+    The start point is NOT included (the pointer is already there and its
+    landing was verified). The last entry is the end point verbatim rather
+    than a rounded interpolation, so a drag always finishes exactly where it
+    was asked to.
+    """
+    points: list[tuple[int, int]] = []
+    for i in range(1, steps + 1):
+        if i == steps:
+            points.append((end_x, end_y))
+            continue
+        fraction = i / steps
+        points.append(
+            (
+                start_x + int(round((end_x - start_x) * fraction)),
+                start_y + int(round((end_y - start_y) * fraction)),
+            )
+        )
+    return points
+
+
+def _run_drag_movement(
+    points: list[tuple[int, int]], step_delay_s: float, up_flag: int,
+) -> tuple[bool, str | None]:
+    """Move through ``points`` with the button held, then always release it.
+
+    Called with the button already DOWN. The final MOVE and the UP travel in
+    ONE SendInput batch: the interpolated movement runs with physical input
+    unblocked, and SendInput injects a batch contiguously, so pairing them is
+    what stops a physical mouse movement from slipping in between the last
+    injected MOVE and the release and relocating the drop
+    (wh-mouse-grid.1.4). The UP carries the end coordinates itself.
+
+    The in-place release remains the guarantee for every other exit -- an
+    earlier step failing, a raise from the movement, or the final pair only
+    half-delivering -- because a drag that leaves the button pressed hands
+    the user a desktop where every later pointer movement drags something.
+
+    A raise from the movement is captured, the release runs, and only THEN is
+    the raise re-raised to the caller -- and only if the release succeeded. A
+    stuck button outranks the movement error (wh-mouse-grid.1.9): when the
+    cleanup release also fails, this returns ``(False, "release_failed")``
+    instead of re-raising, so the caller cannot collapse the held-button
+    state into a generic ``sendinput_error``.
+    """
+    absolute = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    move_flags = MOUSEEVENTF_MOVE | absolute
+    reason: str | None = None
+    released = False
+    release_reason: str | None = None
+    primary_exc: Exception | None = None
+    try:
+        for px, py in points[:-1]:
+            if step_delay_s > 0:
+                time.sleep(step_delay_s)
+            nx, ny = _normalize_to_virtual_desktop(px, py)
+            accepted = _send_mouse_events([
+                _absolute_mouse_event(nx, ny, move_flags)
+            ])
+            if accepted != 1:
+                logger.error(
+                    "drag_pointer: a movement step to (%d,%d) was refused "
+                    "(sent %d/1; Win32 error %s); releasing the button",
+                    px, py, accepted, kernel32.GetLastError(),
+                )
+                reason = "sendinput_short"
+                break
+        else:
+            end_x, end_y = points[-1]
+            if step_delay_s > 0:
+                time.sleep(step_delay_s)
+            nex, ney = _normalize_to_virtual_desktop(end_x, end_y)
+            accepted = _send_mouse_events([
+                _absolute_mouse_event(nex, ney, move_flags),
+                _absolute_mouse_event(nex, ney, up_flag | absolute),
+            ])
+            if accepted == 2:
+                released = True
+            else:
+                # accepted == 1 means the MOVE landed but the UP was refused
+                # (button still held, at the end point); 0 means neither went
+                # out (button still held at the previous point). Either way
+                # the finally's in-place release is the recovery.
+                logger.error(
+                    "drag_pointer: the final move-and-release pair at "
+                    "(%d,%d) was refused (sent %d/2; Win32 error %s); "
+                    "releasing the button in place",
+                    end_x, end_y, accepted, kernel32.GetLastError(),
+                )
+                reason = "sendinput_short"
+    except Exception as exc:  # noqa: BLE001 -- a real SendInput seam can raise
+        primary_exc = exc
+    finally:
+        if not released:
+            released, release_reason = _release_button_in_place(up_flag)
+
+    if not released:
+        # A stuck button outranks whatever else went wrong -- it is the state
+        # the user has to live with.
+        return (False, release_reason)
+    if primary_exc is not None:
+        # The button is confirmed released; let the caller map the movement
+        # raise to sendinput_error as before.
+        raise primary_exc
+    if reason is not None:
+        return (False, reason)
+    return (True, None)
+
+
+def drag_pointer(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    duration_ms: int = 250,
+) -> tuple[bool, str | None]:
+    """Drag from one physical point to another as ONE operation.
+
+    Left button down at the start point, interpolated movement across
+    ``duration_ms``, button up at the end. The whole gesture runs inside this
+    call because a drag split across IPC messages could lose its release
+    message and strand the button pressed.
+
+    The movement is gradual on purpose: many applications ignore a drag whose
+    pointer teleports, because they never see the intermediate movement that
+    makes them begin the drag operation.
+
+    Physical input is suppressed with ``BlockInput`` for the initial
+    move-and-press only (matching :func:`click_point`), released via
+    ``finally`` on every path before the interpolated movement begins.
+
+    Returns ``(succeeded, reason)`` with ``reason`` one of ``None``,
+    ``"invalid_point"``, ``"invalid_duration"``, ``"cursor_did_not_land"``,
+    ``"sendinput_short"``, ``"sendinput_error"``, ``"release_failed"``.
+    Never raises. ``"release_failed"`` is the one outcome that means the
+    button may still be held; every other failure guarantees it is not.
+    """
+    if not all(
+        _is_plain_int(v) for v in (start_x, start_y, end_x, end_y)
+    ):
+        logger.error(
+            "drag_pointer: non-integer point in (%r,%r)->(%r,%r)",
+            start_x, start_y, end_x, end_y,
+        )
+        return (False, "invalid_point")
+    if (
+        not _is_plain_int(duration_ms)
+        or not 0 <= duration_ms <= _DRAG_MAX_DURATION_MS
+    ):
+        logger.error("drag_pointer: unsupported duration %r", duration_ms)
+        return (False, "invalid_duration")
+
+    down_flag, up_flag = _MOUSE_BUTTON_FLAGS["left"]
+    absolute = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+
+    try:
+        # Physical input is suppressed for the move-and-press only, matching
+        # click_point: a hand resting on the mouse would otherwise win every
+        # verify poll and abort the drag as cursor_did_not_land. The block is
+        # released before the interpolated movement -- a drag can take
+        # hundreds of milliseconds, and each step re-asserts absolute
+        # coordinates, so contention mid-drag cannot change where it ends.
+        input_blocked = False
+        try:
+            input_blocked = bool(user32.BlockInput(1))
+
+            if not _move_cursor_with_retry(start_x, start_y):
+                logger.error(
+                    "drag_pointer: the cursor did not land on the start point "
+                    "(%d,%d); pressing nothing", start_x, start_y,
+                )
+                return (False, "cursor_did_not_land")
+
+            nsx, nsy = _normalize_to_virtual_desktop(start_x, start_y)
+            accepted = _send_mouse_events([
+                _absolute_mouse_event(nsx, nsy, down_flag | absolute)
+            ])
+            if accepted != 1:
+                # Nothing was pressed, so there is nothing to release.
+                logger.error(
+                    "drag_pointer: the button press was refused (sent %d/1; "
+                    "Win32 error %s)", accepted, kernel32.GetLastError(),
+                )
+                return (False, "sendinput_short")
+        finally:
+            if input_blocked:
+                user32.BlockInput(0)
+
+        # From here the button is DOWN and _run_drag_movement owns releasing
+        # it on every path, including a raise that lands in the except below.
+        steps = _drag_step_count(duration_ms)
+        points = _interpolate_drag_points(
+            start_x, start_y, end_x, end_y, steps,
+        )
+        return _run_drag_movement(points, duration_ms / steps / 1000.0, up_flag)
+    except Exception as exc:  # noqa: BLE001 -- a real SendInput seam can raise
+        logger.error("drag_pointer: unexpected error: %s", exc, exc_info=True)
+        return (False, "sendinput_error")
+
+
+# wh-number-badge-problems: the hit test's 64-bit-safe signatures live on a
+# PRIVATE user32 binding, never on ``ctypes.windll.user32``. ``ctypes.windll``
+# holds one WinDLL object per library for the whole process and caches one
+# function object per name, so a signature assigned there reaches every other
+# caller of that function. uiautomation, the UIA library behind every
+# focused-control read in the Input process, calls
+# ``ctypes.windll.user32.GetAncestor(c_void_p(handle), c_int(flag))`` from
+# ``Control.GetTopLevelControl``; on Windows ``c_int`` is ``c_long``, and
+# against ``argtypes=[c_void_p, c_uint]`` ctypes raises ``ArgumentError:
+# argument 2: TypeError: 'c_long' object cannot be interpreted as an integer``.
+# When these signatures sat on the shared object, the first coordinate click
+# after "show numbers" broke every later ``GetTopLevelControl`` in the process,
+# so no text-insertion strategy could resolve its target window until
+# WheelHouse was restarted (trace T-17881312777). ``input_proc.py``'s
+# user-click check, which passes a ``wintypes.POINT`` to the shared
+# ``WindowFromPoint``, broke the same way. A separate ``ctypes.WinDLL``
+# instance has its own function cache, so these signatures are invisible to
+# everyone else -- the pattern ``ui/hwnd_utils.py`` uses for SetPropW/GetPropW.
+_HIT_TEST_USER32 = ctypes.WinDLL("user32", use_last_error=True)
+_HIT_TEST_USER32.WindowFromPoint.argtypes = [wintypes.POINT]
+_HIT_TEST_USER32.WindowFromPoint.restype = ctypes.c_void_p  # HWND, 64-bit safe
+_HIT_TEST_USER32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_HIT_TEST_USER32.GetAncestor.restype = ctypes.c_void_p
+_GA_ROOT = 2
+
 
 def root_window_at_point(x: int, y: int) -> int:
     """Return the ROOT top-level window handle at physical screen ``(x, y)``.
@@ -903,24 +1824,16 @@ def root_window_at_point(x: int, y: int) -> int:
     real click would land. ``GetAncestor(GA_ROOT)`` normalises a child
     control handle to its top-level root so the executor compares roots.
 
+    Both calls go through ``_HIT_TEST_USER32``, the module's private user32
+    binding, so their signatures never touch the process-shared
+    ``ctypes.windll.user32`` (see the comment above the binding).
+
     Returns 0 when no window is at the point (the executor treats 0 as a
     mismatch and refuses). Raises are allowed to propagate: the executor maps
     any seam raise to the same fail-closed refusal.
     """
-    GA_ROOT = 2
-
-    class _POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-    window_from_point = user32.WindowFromPoint
-    window_from_point.argtypes = [_POINT]
-    window_from_point.restype = ctypes.c_void_p  # HWND, 64-bit safe
-    get_ancestor = user32.GetAncestor
-    get_ancestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-    get_ancestor.restype = ctypes.c_void_p
-
-    hwnd = window_from_point(_POINT(x, y))
+    hwnd = _HIT_TEST_USER32.WindowFromPoint(wintypes.POINT(x, y))
     if not hwnd:
         return 0
-    root = get_ancestor(hwnd, GA_ROOT)
+    root = _HIT_TEST_USER32.GetAncestor(hwnd, _GA_ROOT)
     return int(root or hwnd or 0)

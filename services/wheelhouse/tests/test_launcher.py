@@ -19,6 +19,7 @@ or calls launcher.main(). No logic-mirroring.
 import contextlib
 import logging
 import os
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, MagicMock, patch, call
 
@@ -71,6 +72,25 @@ def hermetic_transcript_env(monkeypatch):
     teardown restores it no matter what the launcher wrote in between.
     """
     monkeypatch.setenv("WHEELHOUSE_LOG_TRANSCRIPTS", "0")
+
+
+@pytest.fixture(autouse=True)
+def hermetic_ptt_volume_restore(monkeypatch):
+    """Keep every launcher.main() call in this module away from the speaker
+    level (wh-ptt-mute-orphaned-on-process-loss).
+
+    The launcher restores a push-to-talk speaker level at start and after
+    each cycle. The real restore reads a record under the app-data path and
+    can write the level through Core Audio. Every launcher.main() call here
+    already patches get_app_data_path to a temporary directory, which holds
+    no record; this stub is a second guard, so a test that forgets that
+    patch still cannot change the speaker level of the machine that runs
+    the tests. Tests that check the restore patch the function again.
+    """
+    monkeypatch.setattr(
+        "services.wheelhouse.utils.ptt_volume_record.restore_orphaned_volume",
+        Mock(name="restore_orphaned_volume stub", return_value="no_record"),
+    )
 
 
 def _fake_time_ns(time_values):
@@ -205,12 +225,352 @@ class TestLauncherConstants:
 
 
 # ---------------------------------------------------------------------------
+# Second-copy protection (wh-launcher-single-instance)
+# ---------------------------------------------------------------------------
+
+
+class TestLauncherInstanceRecord:
+    """The launcher records its own PID plus its creation time.
+
+    The creation time is what makes the record safe to act on. Windows
+    reuses PIDs, so a bare PID would let a recycled PID point at an
+    unrelated process, and the stop path would kill that process and its
+    whole child tree.
+    """
+
+    def test_record_round_trips(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=4321, create_time=1234.5)
+        assert launcher.read_instance_record(path) == (4321, "1234.500000")
+
+    def test_missing_file_reads_as_none(self, tmp_path):
+        assert launcher.read_instance_record(str(tmp_path / "absent.pid")) is None
+
+    def test_malformed_file_reads_as_none(self, tmp_path):
+        path = tmp_path / "wheelhouse.pid"
+        path.write_text("not-a-record")
+        assert launcher.read_instance_record(str(path)) is None
+
+    def test_bare_legacy_pid_reads_as_none(self, tmp_path):
+        # Older builds wrote the Logic process PID alone. Such a record
+        # carries no creation time, so it must never authorise a kill.
+        path = tmp_path / "wheelhouse.pid"
+        path.write_text("12345")
+        assert launcher.read_instance_record(str(path)) is None
+
+
+# Logic, Input and GUI are started with multiprocessing, so they run the
+# same interpreter as the launcher. That shared executable is what marks a
+# descendant as ours.
+_OWNED_EXE = r"C:\WheelHouse\services\wheelhouse\.venv\Scripts\python.exe"
+
+
+class TestStopPreviousInstance:
+    """stop_previous_instance() must kill the previous launcher tree, and
+    must refuse to kill anything it cannot positively identify."""
+
+    def _proc(self, pid, create_time, children=(), exe=_OWNED_EXE):
+        proc = Mock()
+        proc.pid = pid
+        proc.create_time.return_value = create_time
+        proc.children.return_value = list(children)
+        proc.exe.return_value = exe
+        return proc
+
+    def test_no_record_is_noop(self, tmp_path):
+        assert launcher.stop_previous_instance(
+            str(tmp_path / "absent.pid"), _psutil=Mock()
+        ) is False
+
+    def test_kills_parent_before_children(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        child = self._proc(1000, 101.0)
+        parent = self._proc(999, 100.0, children=[child])
+        order = []
+        parent.terminate.side_effect = lambda: order.append("parent")
+        child.terminate.side_effect = lambda: order.append("child")
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        # Parent first: the old supervisor restarts its children when they
+        # die, so killing a child first can make it respawn.
+        assert order == ["parent", "child"]
+        assert not os.path.exists(path)
+
+    def test_recycled_pid_is_not_killed(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        # Same PID, different creation time: an unrelated process now owns
+        # this PID. Killing it would take down whatever the user is running.
+        impostor = self._proc(999, 555.0)
+        ps = Mock()
+        ps.Process.return_value = impostor
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is False
+        impostor.terminate.assert_not_called()
+        assert not os.path.exists(path)
+
+    def test_dead_process_removes_record(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+
+        class NoSuchProcess(Exception):
+            pass
+
+        ps = Mock()
+        ps.NoSuchProcess = NoSuchProcess
+        ps.Process.side_effect = NoSuchProcess()
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is False
+        assert not os.path.exists(path)
+
+    def test_survivor_is_killed_after_timeout(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        parent = self._proc(999, 100.0)
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [parent])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        parent.kill.assert_called_once()
+
+    def test_own_pid_is_never_killed(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(
+            path, pid=os.getpid(), create_time=100.0
+        )
+        ps = Mock()
+        ps.NoSuchProcess = Exception
+        assert launcher.stop_previous_instance(path, _psutil=ps) is False
+        ps.Process.assert_not_called()
+
+    # -- One psutil failure must not abandon the rest of the stop ----------
+    #
+    # Every step below can fail on a real machine: the old copy runs
+    # elevated and this one does not, or the old copy exits between two
+    # calls. When a step fails, the steps after it still have work to do.
+    # Losing them leaves the old copy (or its children) alive while this
+    # launcher starts anyway, which is the second-copy bug this module
+    # exists to prevent (wh-launcher-single-instance.1.1).
+
+    def test_children_lookup_failure_still_terminates_the_parent(
+        self, tmp_path
+    ):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        parent = self._proc(999, 100.0)
+        parent.children.side_effect = RuntimeError("access denied")
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        parent.terminate.assert_called_once()
+
+    def test_parent_terminate_failure_still_terminates_children(
+        self, tmp_path
+    ):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        child = self._proc(1000, 101.0)
+        parent = self._proc(999, 100.0, children=[child])
+        parent.terminate.side_effect = RuntimeError("access denied")
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        # The parent survives, so no previous instance was stopped.
+        assert launcher.stop_previous_instance(path, _psutil=ps) is False
+        # Its children must still go: they hold the microphone and the
+        # hotkey hooks that the new copy is about to claim.
+        child.terminate.assert_called_once()
+
+    def test_wait_failure_does_not_abandon_the_stop(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        parent = self._proc(999, 100.0)
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.side_effect = RuntimeError("wait failed")
+        ps.NoSuchProcess = Exception
+
+        # terminate() already ran, so the stop happened. Only the survivor
+        # check was lost.
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        parent.terminate.assert_called_once()
+
+    def test_child_terminate_failure_does_not_skip_the_next_child(
+        self, tmp_path
+    ):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        first = self._proc(1000, 101.0)
+        second = self._proc(1001, 102.0)
+        first.terminate.side_effect = RuntimeError("access denied")
+        parent = self._proc(999, 100.0, children=[first, second])
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        second.terminate.assert_called_once()
+
+    def test_surviving_child_is_killed(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        child = self._proc(1000, 101.0)
+        parent = self._proc(999, 100.0, children=[child])
+        ps = Mock()
+        ps.Process.return_value = parent
+        # The parent exited on terminate; the child did not.
+        ps.wait_procs.return_value = ([parent], [child])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        child.kill.assert_called_once()
+        parent.kill.assert_not_called()
+
+    def test_create_time_failure_does_not_kill(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+
+        class NoSuchProcess(Exception):
+            pass
+
+        proc = Mock()
+        proc.pid = 999
+        # The process exits between the lookup and the identity check.
+        proc.create_time.side_effect = NoSuchProcess()
+        ps = Mock()
+        ps.NoSuchProcess = NoSuchProcess
+        ps.Process.return_value = proc
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is False
+        proc.terminate.assert_not_called()
+        assert not os.path.exists(path)
+
+    def test_unidentifiable_process_is_left_alone(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+
+        class NoSuchProcess(Exception):
+            pass
+
+        proc = Mock()
+        proc.pid = 999
+        # Windows denies access to the process object. It cannot be
+        # identified, so it must not be killed.
+        proc.create_time.side_effect = RuntimeError("access denied")
+        ps = Mock()
+        ps.NoSuchProcess = NoSuchProcess
+        ps.Process.return_value = proc
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is False
+        proc.terminate.assert_not_called()
+
+    # -- Only WheelHouse's own processes may be killed --------------------
+    #
+    # The `run` voice action starts an arbitrary user program through a
+    # shell, so that program is a grandchild of the launcher and appears in
+    # children(recursive=True). Killing it would lose the user's unsaved
+    # work (wh-launcher-single-instance.2.1).
+
+    def test_foreign_descendant_is_not_terminated(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        # A document the user opened by voice.
+        user_app = self._proc(1001, 102.0, exe=r"C:\Windows\notepad.exe")
+        service = self._proc(1000, 101.0)
+        parent = self._proc(999, 100.0, children=[service, user_app])
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        service.terminate.assert_called_once()
+        user_app.terminate.assert_not_called()
+        user_app.kill.assert_not_called()
+
+    def test_foreign_descendant_is_left_out_of_the_wait(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        user_app = self._proc(1001, 102.0, exe=r"C:\Windows\notepad.exe")
+        parent = self._proc(999, 100.0, children=[user_app])
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        user_app.kill.assert_not_called()
+        # The wait covers the launcher and the processes it owns, nothing
+        # else, so a foreign process can never reach the survivor kill.
+        assert ps.wait_procs.call_args[0][0] == [parent]
+
+    def test_unreadable_descendant_exe_is_not_terminated(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        opaque = self._proc(1001, 102.0)
+        opaque.exe.side_effect = RuntimeError("access denied")
+        parent = self._proc(999, 100.0, children=[opaque])
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        # An unreadable answer must never authorise a kill.
+        opaque.terminate.assert_not_called()
+
+    def test_unreadable_owner_exe_stops_only_the_launcher(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        child = self._proc(1000, 101.0)
+        parent = self._proc(999, 100.0, children=[child])
+        parent.exe.side_effect = RuntimeError("access denied")
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        parent.terminate.assert_called_once()
+        child.terminate.assert_not_called()
+
+    def test_owned_descendant_matches_case_insensitively(self, tmp_path):
+        path = str(tmp_path / "wheelhouse.pid")
+        launcher.write_instance_record(path, pid=999, create_time=100.0)
+        # Windows paths differ in case between APIs.
+        child = self._proc(1000, 101.0, exe=_OWNED_EXE.upper())
+        parent = self._proc(999, 100.0, children=[child])
+        ps = Mock()
+        ps.Process.return_value = parent
+        ps.wait_procs.return_value = ([], [])
+        ps.NoSuchProcess = Exception
+
+        assert launcher.stop_previous_instance(path, _psutil=ps) is True
+        child.terminate.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Console QuickEdit hardening (wh-console-quickedit-freeze)
 # ---------------------------------------------------------------------------
 
 
 _QUICK_EDIT = 0x0040
 _EXTENDED_FLAGS = 0x0080
+_MOUSE_INPUT = 0x0010
 
 
 class TestDisableConsoleQuickEdit:
@@ -247,10 +607,21 @@ class TestDisableConsoleQuickEdit:
         (_handle, new_mode), _ = k.SetConsoleMode.call_args
         assert new_mode & _QUICK_EDIT == 0
         assert new_mode & _EXTENDED_FLAGS == _EXTENDED_FLAGS
-        # Every bit other than QuickEdit/Extended must be preserved.
-        preserved = ~(_QUICK_EDIT | _EXTENDED_FLAGS)
+        # Every bit other than QuickEdit/Extended/MouseInput must be preserved.
+        preserved = ~(_QUICK_EDIT | _EXTENDED_FLAGS | _MOUSE_INPUT)
         assert new_mode & preserved == 0x01F7 & preserved
         k.CloseHandle.assert_called_once()
+
+    def test_clears_mouse_input_so_the_wheel_scrolls(self):
+        # 0x01F7 includes ENABLE_MOUSE_INPUT (0x10). With QuickEdit off but
+        # mouse input still on, conhost delivers wheel/click events to the
+        # console input buffer -- which no WheelHouse process ever reads --
+        # instead of scrolling the viewport (wh-log-console-freeze). Both
+        # bits must be cleared in the same SetConsoleMode call.
+        k = self._kernel32(mode=0x01F7)
+        assert launcher.disable_console_quick_edit(_kernel32=k) is True
+        (_handle, new_mode), _ = k.SetConsoleMode.call_args
+        assert new_mode & _MOUSE_INPUT == 0
 
     def test_no_console_window_is_noop(self):
         k = self._kernel32(console_window=0)
@@ -349,12 +720,12 @@ class TestStaleResourceCleanup:
         assert not pid_file.exists()
 
     def test_cleanup_handles_corrupt_pid_file(self, tmp_path):
-        """Corrupt (non-numeric) PID file: ValueError is caught gracefully.
+        """A corrupt PID file is removed, not left on disk.
 
-        When the PID file contains non-numeric text, int() raises ValueError.
-        The except clause catches it, but os.remove (line 68) is inside the
-        try block AFTER the with statement, so it gets skipped. The file
-        remains on disk. This is the actual behavior of the code.
+        Nothing can be identified from a file that does not parse, so it
+        is deleted rather than left for a later start to misread. Before
+        wh-launcher-single-instance the removal was skipped on this path
+        and the corrupt file stayed on disk forever.
         """
         pid_file = tmp_path / "wheelhouse.pid"
         pid_file.write_text("not_a_number")
@@ -362,11 +733,15 @@ class TestStaleResourceCleanup:
         with patch.object(launcher, "PID_FILE_PATH", str(pid_file)):
             launcher.cleanup_stale_resources()
 
-        # File remains because ValueError skips os.remove
-        assert pid_file.exists()
+        assert not pid_file.exists()
 
     def test_cleanup_handles_io_error(self, tmp_path):
-        """IOError during PID file read is handled gracefully."""
+        """A PID file that cannot be read is removed, not left on disk.
+
+        An unreadable record identifies nothing, so it is treated the same
+        way as a corrupt one. ``os.remove`` is reached because it sits
+        outside the block that reads the file.
+        """
         pid_file = tmp_path / "wheelhouse.pid"
         pid_file.write_text("12345")
 
@@ -374,8 +749,7 @@ class TestStaleResourceCleanup:
              patch("builtins.open", side_effect=IOError("disk error")):
             launcher.cleanup_stale_resources()
 
-        # File still exists because open() failed and os.remove was skipped
-        assert pid_file.exists()
+        assert not pid_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1372,336 @@ class TestSharedMemoryCleanup:
 
 
 # ---------------------------------------------------------------------------
+# Speaker level left lowered by a lost push-to-talk hold
+# (wh-ptt-mute-orphaned-on-process-loss)
+# ---------------------------------------------------------------------------
+
+
+class TestTheLauncherRestoresTheLevelOfALostHold:
+    """A Logic process lost during a push-to-talk hold leaves the speakers at
+    the lowered level, and the launcher is the only process left to put the
+    level back. It restores at the two points where no Logic process runs:
+    at launcher start before any child starts, and after every child of a
+    cycle has exited, before the restart decision.
+
+    The restore function is patched, so no test here reads the record or
+    calls Core Audio.
+    """
+
+    NAMES = ("LogicProcess", "InputProcess", "GuiProcess")
+
+    @staticmethod
+    def _tracked_process(events, name, pid, exits_on="join"):
+        """A process mock that records start, join and terminate in events.
+
+        exits_on="join": the process exits during its first join.
+        exits_on="terminate": a join exits it only after terminate() was
+        called, because terminate() only asks Windows to end the process.
+        exits_on="never": the process stays alive.
+        """
+        state = {"alive": False, "terminated": False}
+        proc = Mock()
+        proc.name = name
+        proc.pid = pid
+        proc.exitcode = None
+
+        def start():
+            events.append(("start", name))
+            state["alive"] = True
+
+        def join(timeout=None):
+            events.append(("join", name))
+            if exits_on == "join" or (exits_on == "terminate" and state["terminated"]):
+                state["alive"] = False
+
+        def terminate():
+            events.append(("terminate", name))
+            state["terminated"] = True
+
+        proc.start.side_effect = start
+        proc.join.side_effect = join
+        proc.terminate.side_effect = terminate
+        proc.is_alive.side_effect = lambda: state["alive"]
+        return proc
+
+    @staticmethod
+    def _run_launcher(launcher_env, events, process_mocks, restore, inside=None):
+        """Run launcher.main() for len(process_mocks) // 3 cycles. Returns the SHM mocks.
+
+        inside: an optional context manager entered after every patch here,
+        for a change that would stop those patches from resolving their
+        targets.
+        """
+        app_data = launcher_env["app_data"]
+        cycles = len(process_mocks) // 3
+        # The monitor loop ends at once, so each cycle goes straight to its
+        # cleanup phase.
+        shutdown_event = Mock()
+        shutdown_event.is_set.return_value = True
+        # Four time.time() calls per cycle: start, two SHM names, uptime.
+        time_values = []
+        for cycle in range(cycles):
+            base = 100.0 * (cycle + 1)
+            time_values += [base, base + 0.1, base + 0.2, base + 30.0]
+        shm_mocks = [MagicMock(name=f"shm_{i}") for i in range(2 * cycles)]
+
+        with patch("services.wheelhouse.utils.system.get_app_data_path",
+                   return_value=str(app_data)), \
+             patch.object(launcher, "cleanup_stale_resources",
+                          side_effect=lambda: events.append(("cleanup_stale",))), \
+             patch.object(launcher, "disable_console_quick_edit",
+                          Mock(return_value=True)), \
+             patch("services.wheelhouse.utils.ptt_volume_record.restore_orphaned_volume",
+                   restore), \
+             patch("launcher.shared_memory.SharedMemory", side_effect=shm_mocks), \
+             patch("launcher.multiprocessing.Queue", return_value=Mock()), \
+             patch("launcher.multiprocessing.Event", return_value=shutdown_event), \
+             patch("launcher.multiprocessing.Process", side_effect=process_mocks), \
+             patch.dict("sys.modules", launcher_env["sys_modules"]), \
+             patch.object(launcher, "time", _fake_time_ns(time_values)), \
+             (inside if inside is not None else contextlib.nullcontext()):
+
+            launcher.main()
+
+        return shm_mocks
+
+    def test_the_start_restore_runs_after_the_stale_cleanup_and_the_instance_record_and_before_the_first_child_starts(
+        self, launcher_env
+    ):
+        """A hold that a previous run lost is restored before a new Logic
+        process can start a hold of its own. The stale cleanup comes first
+        because it stops a previous launcher whose Logic process could still
+        hold the speakers down. The instance record comes before the restore,
+        so a later start can find and stop this launcher while the restore
+        runs."""
+        events = []
+        processes = [
+            self._tracked_process(events, name, 42 + i) for i, name in enumerate(self.NAMES)
+        ]
+        restore = Mock(side_effect=lambda cancel=None: events.append(("restore",)))
+
+        with patch.object(
+            launcher, "write_instance_record",
+            side_effect=lambda *args, **kwargs: events.append(("instance record written",)),
+        ):
+            self._run_launcher(launcher_env, events, processes, restore)
+
+        first_start = events.index(("start", "LogicProcess"))
+        assert events[:first_start] == [
+            ("cleanup_stale",), ("instance record written",), ("restore",)
+        ], (
+            f"expected the stale cleanup, the instance record and then the restore before "
+            f"the first child starts, got {events[:first_start]}"
+        )
+
+    def test_a_start_restore_that_does_not_return_is_left_behind_at_the_time_limit(
+        self, launcher_env, caplog, monkeypatch
+    ):
+        """A Core Audio call can fail to return. The launcher waits for the
+        restore at most SHUTDOWN_GRACE_PERIOD_S, then sets the cancel flag,
+        logs a warning that names the limit, and starts its children.
+
+        The blocked restore waits on an Event with its own 2 s timeout, and
+        the test sets that Event after the launcher returns. A launcher that
+        waits without a limit therefore fails an assertion after 2 s and
+        does not hang."""
+        monkeypatch.setattr(launcher, "SHUTDOWN_GRACE_PERIOD_S", 0.2)
+        events = []
+        processes = [
+            self._tracked_process(events, name, 42 + i) for i, name in enumerate(self.NAMES)
+        ]
+        unblock = threading.Event()
+        returned = threading.Event()
+        flags = []
+        threads = []
+
+        def restore(cancel=None):
+            flags.append(cancel)
+            threads.append(threading.current_thread())
+            if len(flags) == 1:
+                unblock.wait(timeout=2)
+                events.append(("start restore returned",))
+                returned.set()
+
+        try:
+            with caplog.at_level(logging.WARNING, logger="launcher"):
+                self._run_launcher(launcher_env, events, processes, Mock(side_effect=restore))
+        finally:
+            unblock.set()
+            returned.wait(timeout=5)
+
+        first_start = events.index(("start", "LogicProcess"))
+        assert ("start restore returned",) not in events[:first_start], (
+            "the launcher waited past the time limit for the start restore"
+        )
+        # A thread that is not a daemon keeps the launcher process alive at
+        # exit for as long as its Core Audio call does not return.
+        assert threads[0].daemon, "the start restore did not run in a daemon thread"
+        assert flags[0] is not None, "the launcher gave the start restore no cancel flag"
+        assert flags[0].is_set(), (
+            "the launcher did not set the cancel flag of the start restore at the time limit"
+        )
+        assert "did not finish within 0.2 s" in caplog.text, "no warning named the time limit"
+
+    def test_a_cleanup_restore_that_does_not_return_is_left_behind_and_the_restart_decision_still_runs(
+        self, launcher_env, monkeypatch
+    ):
+        """The restore after the children exit has the same time limit, so a
+        Core Audio call that does not return cannot stop the restart decision.
+        The restart flag makes a second cycle; the blocked restore is the one
+        of the first cycle. The blocked restore has its own 2 s timeout, as in
+        the start test."""
+        monkeypatch.setattr(launcher, "SHUTDOWN_GRACE_PERIOD_S", 0.2)
+        events = []
+        restart_flag = launcher_env["app_data"] / "wheelhouse.restart"
+        restart_flag.write_text("")
+        processes = [
+            self._tracked_process(events, name, 42 + i)
+            for i, name in enumerate(self.NAMES * 2)
+        ]
+        unblock = threading.Event()
+        returned = threading.Event()
+        flags = []
+
+        def restore(cancel=None):
+            flags.append(cancel)
+            if len(flags) == 2:
+                unblock.wait(timeout=2)
+                events.append(("cleanup restore returned",))
+                returned.set()
+
+        try:
+            self._run_launcher(launcher_env, events, processes, Mock(side_effect=restore))
+        finally:
+            unblock.set()
+            returned.wait(timeout=5)
+
+        starts = [i for i, event in enumerate(events) if event == ("start", "LogicProcess")]
+        assert len(starts) == 2, f"the restart decision did not start a second cycle: {events}"
+        assert ("cleanup restore returned",) not in events[:starts[1]], (
+            "the launcher waited past the time limit for the cleanup restore"
+        )
+        assert not restart_flag.exists(), "the restart decision did not remove the restart flag"
+
+    def test_the_restore_runs_after_every_child_has_exited_and_before_the_restart_decision(
+        self, launcher_env
+    ):
+        """The restart flag is still on disk when the restore runs, which puts
+        the restore before the restart decision that removes the flag. The
+        second cycle shows the restore runs in every cycle."""
+        events = []
+        restart_flag = launcher_env["app_data"] / "wheelhouse.restart"
+        restart_flag.write_text("")
+        processes = [
+            self._tracked_process(events, name, 42 + i)
+            for i, name in enumerate(self.NAMES * 2)
+        ]
+
+        def restore(cancel=None):
+            running = tuple(p.name for p in processes if p.is_alive())
+            events.append(("restore", "restart flag on disk" if restart_flag.exists() else "no restart flag", running))
+
+        self._run_launcher(launcher_env, events, processes, Mock(side_effect=restore))
+
+        starts = [("start", name) for name in self.NAMES]
+        joins = [("join", name) for name in self.NAMES]
+        after_first_start = events[events.index(("start", "LogicProcess")):]
+        assert after_first_start == (
+            starts + joins + [("restore", "restart flag on disk", ())]
+            + starts + joins + [("restore", "no restart flag", ())]
+        ), f"got {after_first_start}"
+
+    def test_a_child_that_needed_terminate_is_joined_again_before_the_restore(
+        self, launcher_env
+    ):
+        """terminate() only asks Windows to end the process. Without a join
+        after it, the restore could run while the Logic process still holds
+        the speakers down."""
+        events = []
+        logic = self._tracked_process(events, "LogicProcess", 42, exits_on="terminate")
+        inp = self._tracked_process(events, "InputProcess", 43)
+        gui = self._tracked_process(events, "GuiProcess", 44)
+
+        def restore(cancel=None):
+            events.append(("restore", tuple(p.name for p in (logic, inp, gui) if p.is_alive())))
+
+        self._run_launcher(launcher_env, events, [logic, inp, gui], Mock(side_effect=restore))
+
+        after_starts = events[events.index(("start", "GuiProcess")) + 1:]
+        assert after_starts == [
+            ("join", "LogicProcess"), ("join", "InputProcess"), ("join", "GuiProcess"),
+            ("terminate", "LogicProcess"), ("join", "LogicProcess"),
+            ("restore", ()),
+        ], f"got {after_starts}"
+        logic.join.assert_called_with(timeout=launcher.SHUTDOWN_GRACE_PERIOD_S)
+
+    def test_the_restore_is_skipped_while_a_child_is_still_running(self, launcher_env, caplog):
+        events = []
+        logic = self._tracked_process(events, "LogicProcess", 42, exits_on="never")
+        inp = self._tracked_process(events, "InputProcess", 43)
+        gui = self._tracked_process(events, "GuiProcess", 44)
+        restore = Mock(side_effect=lambda cancel=None: events.append(("restore",)))
+
+        with caplog.at_level(logging.WARNING, logger="launcher"):
+            self._run_launcher(launcher_env, events, [logic, inp, gui], restore)
+
+        assert "speaker restore skipped" in caplog.text and "LogicProcess (42)" in caplog.text, (
+            "no warning named the child that kept the restore from running"
+        )
+        after_starts = events[events.index(("start", "GuiProcess")) + 1:]
+        assert ("restore",) not in after_starts, (
+            "the restore ran while LogicProcess was still running"
+        )
+
+    # The mutation restore-wrapper-exception-propagates removes the try/except
+    # around the restore thread's body, so the exception escapes the thread and
+    # pytest's threadexception plugin would fail this test on the warning before
+    # it reaches its own assertion. The unmutated code raises no such warning,
+    # so the marker changes nothing about what this test proves.
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+    def test_a_restore_that_raises_is_logged_and_the_launcher_goes_on(
+        self, launcher_env, caplog
+    ):
+        events = []
+        processes = [
+            self._tracked_process(events, name, 42 + i) for i, name in enumerate(self.NAMES)
+        ]
+        restore = Mock(side_effect=RuntimeError("the audio service is not running"))
+
+        with caplog.at_level(logging.ERROR, logger="launcher"):
+            shm_mocks = self._run_launcher(launcher_env, events, processes, restore)
+
+        assert "Could not restore the push-to-talk speaker level" in caplog.text
+        assert restore.call_count == 2, "the launcher did not reach both restore points"
+        assert [e for e in events if e[0] == "start"] == [("start", n) for n in self.NAMES]
+        for shm in shm_mocks:
+            shm.close.assert_called_once()
+            shm.unlink.assert_called_once()
+
+    def test_a_restore_that_cannot_be_imported_is_logged_and_the_launcher_goes_on(
+        self, launcher_env, caplog
+    ):
+        """The launcher itself imports the restore before it starts the
+        restore thread. A failed import is logged at both restore points and
+        the children still start."""
+        events = []
+        processes = [
+            self._tracked_process(events, name, 42 + i) for i, name in enumerate(self.NAMES)
+        ]
+
+        with caplog.at_level(logging.ERROR, logger="launcher"):
+            self._run_launcher(
+                launcher_env, events, processes, Mock(name="restore that is never imported"),
+                inside=patch.dict("sys.modules", {"services.wheelhouse.utils.ptt_volume_record": None}),
+            )
+
+        assert caplog.text.count("Could not restore the push-to-talk speaker level") == 2, (
+            "the failed import was not logged at both restore points"
+        )
+        assert [e for e in events if e[0] == "start"] == [("start", n) for n in self.NAMES]
+
+
+# ---------------------------------------------------------------------------
 # One-shot --reset-first-use-hints CLI shortcut (wh-r3xy1)
 # ---------------------------------------------------------------------------
 #
@@ -1304,3 +2008,632 @@ class TestLauncherLoggingResilience:
             "launcher.main() under pytest must not touch the root "
             "logger (and must not open the production wheelhouse.log)"
         )
+
+
+# ---------------------------------------------------------------------------
+# What a restart cycle rebuilds (wh-overlay-slow-uia-stale-badges.11)
+# ---------------------------------------------------------------------------
+
+
+class TestRestartCycleRebuildsEverything:
+    """Why this class exists, and what it deliberately does NOT prove.
+
+    The containment in this bead lives INSIDE the Input command loop --
+    stale-command expiry and the dispatch watchdog -- rather than in a
+    supervisor that restarts a hung Input process. These tests are the
+    structural reason for that choice: the launcher owns no path that
+    restarts the Input process by itself. Recovery is a whole cycle, and a
+    whole cycle discards every object the three processes shared, so a
+    command in flight cannot survive it.
+
+    WHAT THEY DO NOT PROVE. No real process starts here; the launcher's
+    supervisor loop runs against mocks. They say what the launcher
+    CONSTRUCTS, not how a real crash interleaves with a real scheduler, and
+    they cannot show what a half-written frame looks like at the moment a
+    process dies. The cross-process journey belongs to
+    wh-overlay-slow-uia-stale-badges.12, which another session owns.
+    """
+
+    def _run_two_cycles(self, launcher_env, first_cycle_alive=(False, False, False)):
+        """Drive launcher.main() through two supervisor cycles.
+
+        Returns (process_calls, shm_names, events, positional_calls),
+        where process_calls holds the kwargs of each
+        multiprocessing.Process construction in order, shm_names holds
+        each requested segment name in order, events holds every
+        multiprocessing.Event object handed out, and positional_calls
+        holds the positional-argument tuple of each construction, in the
+        same order as process_calls.
+
+        positional_calls is kept deliberately, and it stays index-aligned
+        with process_calls past the sixth construction as well as within
+        it. It is empty on every call while the launcher names all three
+        of its arguments, and
+        test_each_cycle_hands_every_process_the_exact_arguments_it_needs
+        reads it so a construction that stopped naming them is named by
+        an assertion instead of reaching this class as a KeyError from
+        whichever test read a missing key first (codex round 10, finding
+        .11.2.18).
+
+        first_cycle_alive says whether Logic, Input and GUI report
+        themselves alive during the FIRST cycle. The default is all three
+        dead, which reaches the supervisor's crash branch through the
+        Logic check and never creates the state where Input alone has
+        died. A caller that wants that state passes (True, False, True)
+        (codex round 5, finding .11.2.11). The second cycle is always all
+        three dead, so the run ends there.
+        """
+        app_data = launcher_env["app_data"]
+        make_proc = launcher_env["make_process"]
+
+        # A restart flag is what makes the supervisor take a second cycle.
+        (app_data / "wheelhouse.restart").write_text("")
+
+        time_values = [
+            100.0, 100.1, 100.2, 100.3, 100.4, 130.0,
+            200.0, 200.1, 200.2, 200.3, 200.4, 230.0,
+        ] + [300.0] * 6
+
+        alive_by_position = list(first_cycle_alive) + [False, False, False]
+        process_mocks = [
+            make_proc(alive=alive_by_position[i], exitcode=0,
+                      name=["LogicProcess", "InputProcess", "GuiProcess"][i % 3],
+                      pid=42 + i)
+            for i in range(6)
+        ]
+        process_calls = []
+
+        positional_calls = []
+
+        def make_process(*args, **kwargs):
+            process_calls.append(kwargs)
+            # Kept, not discarded. The launcher names every argument today,
+            # so this is empty on every call; a construction that stopped
+            # naming them used to reach the tests as a KeyError from
+            # whichever assertion read a key first, which named no cause
+            # (codex round 10, finding .11.2.18).
+            positional_calls.append(args)
+            index = len(process_calls) - 1
+            if index < len(process_mocks):
+                return process_mocks[index]
+            # A construction beyond the six a two-cycle run makes is the
+            # thing these tests exist to catch, so the harness must survive
+            # it and let the assertion below name it. Running off the end of
+            # a fixed list instead raised IndexError inside launcher.main,
+            # which its own except caught and turned into a CRITICAL log --
+            # the tests then failed on the wreckage rather than on the extra
+            # construction (codex round 5, finding .11.2.11).
+            return make_proc(alive=False, exitcode=0,
+                             name=kwargs.get("name", "UnexpectedProcess"),
+                             pid=42 + index)
+
+        shm_names = []
+
+        def make_shm(*args, **kwargs):
+            shm_names.append(kwargs["name"])
+            m = MagicMock()
+            # Assigned after construction: MagicMock(name=...) sets the
+            # mock's repr, not an attribute the launcher can read.
+            m.name = kwargs["name"]
+            return m
+
+        def make_queue(*_args, **_kwargs):
+            # A FRESH object per call. return_value=Mock() handed the same
+            # object to every queue slot in both cycles, so which queue
+            # reached which process could not be seen: the Input process
+            # could be given the commands-to-Logic queue where its response
+            # queue belongs and every test in this file stayed green (codex
+            # round 8, finding .11.2.16).
+            return Mock()
+
+        events = []
+
+        def make_event():
+            # is_set must answer False or the supervisor loop exits before
+            # it ever looks at the processes.
+            event = Mock()
+            event.is_set.return_value = False
+            events.append(event)
+            return event
+
+        # disable_console_quick_edit is patched for the same reason run_main
+        # patches it: launcher.main calls it unconditionally, and the real
+        # function opens CONIN$ and clears QuickEdit and mouse input on the
+        # attached console. It never raises, so these tests would pass while
+        # mutating the console of whoever ran the suite.
+        #
+        # Once per launcher.main() call, which is once per test in this
+        # class -- NOT once per supervisor cycle. The call sits above the
+        # "while should_restart" loop in launcher._run_supervisor, which
+        # launcher.main calls once, so a run that takes two cycles still
+        # makes one console call. An earlier version of this comment said
+        # "six times per class", counting it per cycle (codex round 5,
+        # finding .11.2.12); the correction then put the loop in
+        # launcher.main, which is where main calls _run_supervisor rather
+        # than where the loop is.
+        quick_edit_mock = Mock(return_value=True)
+
+        with patch("services.wheelhouse.utils.system.get_app_data_path",
+                   return_value=str(app_data)), \
+             patch.object(launcher, "cleanup_stale_resources"), \
+             patch.object(launcher, "disable_console_quick_edit",
+                          quick_edit_mock), \
+             patch("launcher.shared_memory.SharedMemory", side_effect=make_shm), \
+             patch("launcher.multiprocessing.Queue", side_effect=make_queue), \
+             patch("launcher.multiprocessing.Event", side_effect=make_event), \
+             patch("launcher.multiprocessing.Process", side_effect=make_process), \
+             patch.dict("sys.modules", launcher_env["sys_modules"]), \
+             patch.object(launcher, "time", _fake_time_ns(time_values)):
+
+            launcher.main()
+
+        # The patch is load-bearing, so it is asserted rather than trusted: if
+        # a later edit drops it, the real function runs again and this fails
+        # instead of silently touching the console.
+        assert quick_edit_mock.called, (
+            "launcher.main did not go through the patched "
+            "disable_console_quick_edit; the real one would have run"
+        )
+
+        # A LOWER bound, deliberately. Too few constructions means the run
+        # never took its second cycle and every caller's assertions would be
+        # reading a half-finished run. Too MANY is a real finding rather than
+        # a broken harness, and it belongs to the caller's own assertion,
+        # which can say what the extra construction was.
+        #
+        # THAT DUTY IS REAL AND EVERY CALLER MUST DISCHARGE IT. The two
+        # tests that read whole name sequences do it by comparing against
+        # the exact six. The two that read fixed positions do it with an
+        # explicit "== 6" of their own, because a construction after the
+        # second cycle leaves the positions they read untouched and would
+        # otherwise pass unnoticed (codex round 6, finding .11.2.13).
+        assert len(process_calls) >= 6, (
+            f"expected two cycles of three processes, got {len(process_calls)}"
+        )
+        return process_calls, shm_names, events, positional_calls
+
+    def test_the_input_process_is_never_rebuilt_on_its_own(self, launcher_env):
+        """Every cycle constructs all three processes or none.
+
+        This is the structural reason the stale-command containment had to
+        go inside the command loop. If the launcher could restart a hung
+        Input process by itself, a supervisor would be a candidate answer
+        to a wedged loop. It cannot: there is one construction site, it
+        builds Logic, Input and GUI together, and a death in any one of
+        them takes the whole cycle down.
+        """
+        process_calls, _shm_names, _events, _positional = \
+            self._run_two_cycles(launcher_env)
+
+        names = [c["name"] for c in process_calls]
+        assert names == [
+            "LogicProcess", "InputProcess", "GuiProcess",
+            "LogicProcess", "InputProcess", "GuiProcess",
+        ], f"the cycle did not rebuild all three processes together: {names}"
+
+    def test_each_cycle_wires_every_process_to_its_own_entrypoint(
+        self, launcher_env,
+    ):
+        """Each process runs the entrypoint its name promises.
+
+        The rest of this class reads names, construction counts and
+        argument positions. None of them looked at the target, so the
+        launcher could build a process called InputProcess that runs the
+        LOGIC entrypoint and every test in this file stayed green. Observed
+        before this test existed: with target=start_logic_process on the
+        Input construction, name and args untouched, tests/test_launcher.py
+        reported 75 passed while no Input command reader started at all
+        (codex round 7, finding .11.2.14).
+
+        That matters more here than a missing assertion usually would. The
+        whole bead argues the containment must live inside the Input
+        command loop because nothing restarts that process on its own. A
+        launcher that never starts the right process at all is the same
+        harm arriving sooner, and this class is where it would be seen.
+        """
+        process_calls, _shm_names, _events, _positional = \
+            self._run_two_cycles(launcher_env)
+
+        assert len(process_calls) == 6, (
+            "the run built processes outside the two cycles this test reads: "
+            f"{[c['name'] for c in process_calls]}"
+        )
+
+        modules = launcher_env["sys_modules"]
+        expected = [
+            ("LogicProcess", modules["main"].start_logic_process),
+            ("InputProcess", modules["input_proc"].input_process_main),
+            ("GuiProcess", modules["gui"].gui_process_target),
+        ] * 2
+
+        mismatches = [
+            f"construction {index} named {name} ran {target!r}, "
+            f"expected {wanted!r}"
+            for index, ((name, target), (_, wanted)) in enumerate(
+                zip([(c["name"], c["target"]) for c in process_calls], expected)
+            )
+            if name != expected[index][0] or target is not wanted
+        ]
+        assert not mismatches, (
+            "a process was constructed with an entrypoint its name does not "
+            "promise: " + "; ".join(mismatches)
+        )
+
+    def test_each_cycle_gives_the_processes_the_queues_they_must_share(
+        self, launcher_env,
+    ):
+        """The three queues of a cycle reach the processes that need them.
+
+        _run_supervisor builds three separate queues per cycle and hands
+        each one to a specific pair of processes: Logic and Input share the
+        response queue, Logic and GUI share the commands-to-Logic queue,
+        and Logic and GUI share the state-to-GUI queue. Nothing read any of
+        those slots, and the harness handed out one shared mock for all of
+        them, so the relationships could not be seen even in principle.
+        Observed before this test existed: with the Input process given
+        commands_to_logic_queue where response_queue belongs,
+        tests/test_launcher.py reported 76 passed (codex round 8, finding
+        .11.2.16).
+
+        The Input process answers a command on the response queue. A
+        response sent on the wrong queue is a command that never gets an
+        answer, which is the same silence this bead's stale-command expiry
+        exists to prevent.
+        """
+        process_calls, _shm_names, _events, _positional = \
+            self._run_two_cycles(launcher_env)
+
+        assert len(process_calls) == 6, (
+            "the run built processes outside the two cycles this test reads: "
+            f"{[c['name'] for c in process_calls]}"
+        )
+
+        # Positions come from the three args tuples the launcher builds:
+        # logic_args[3] and input_args[3] are the response queue,
+        # logic_args[6] and gui_args[1] the commands-to-Logic queue, and
+        # logic_args[7] and gui_args[2] the state-to-GUI queue.
+        seen_in_earlier_cycles = []
+        for cycle in (0, 1):
+            logic, inp, gui = process_calls[cycle * 3:cycle * 3 + 3]
+
+            assert inp["args"][3] is logic["args"][3], (
+                f"cycle {cycle}: the Input process would answer on a queue "
+                "the Logic process is not reading"
+            )
+            assert gui["args"][1] is logic["args"][6], (
+                f"cycle {cycle}: the GUI process would send commands on a "
+                "queue the Logic process is not reading"
+            )
+            assert gui["args"][2] is logic["args"][7], (
+                f"cycle {cycle}: the Logic process would send state on a "
+                "queue the GUI process is not reading"
+            )
+
+            # Three separate queues, not one object in three slots. Without
+            # this, every identity check above is satisfied by a harness
+            # that hands out a single mock, which is exactly the state the
+            # finding describes.
+            queues = [logic["args"][3], logic["args"][6], logic["args"][7]]
+            assert len({id(queue) for queue in queues}) == 3, (
+                f"cycle {cycle}: the three queues are not three distinct "
+                "objects, so the links asserted above prove nothing"
+            )
+
+            reused = [q for q in queues if any(q is old for old in seen_in_earlier_cycles)]
+            assert not reused, (
+                f"cycle {cycle} reused a queue from an earlier cycle; a "
+                "restart is supposed to share nothing with the cycle it "
+                "replaces"
+            )
+            seen_in_earlier_cycles.extend(queues)
+
+    def test_each_cycle_hands_every_process_the_exact_arguments_it_needs(
+        self, launcher_env,
+    ):
+        """Every element of the three argument tuples, checked by name.
+
+        Four consecutive review rounds found the same shape in this class:
+        a property of the process construction that no test in this file
+        read. Each round added one assertion and the next round found the
+        next unread property. This test closes the whole class instead of
+        taking one more instance of it. It walks every element of
+        logic_args, input_args and gui_args, and it asserts the three
+        tuple lengths first, so a newly added element cannot slip past the
+        rows below without failing here (codex round 9, finding .11.2.17).
+
+        Observed before this test existed, each mutation run against the
+        whole file: the Input process given its two readiness events in
+        the wrong order -- 77 passed; the Logic process given the GUI
+        segment name as its command segment -- 77 passed; the Logic
+        process told half the real buffer size -- 77 passed; the Logic
+        process given the command segment name where the GUI segment name
+        belongs -- 77 passed.
+
+        The event swap is the one that matters most in production. The
+        Logic process would signal the real command-ready event while the
+        Input process waits on the real input-ready event, and the Input
+        process would set the real command-ready event when it means to
+        announce that it is ready. A spoken command then never reaches the
+        Input loop, which is the same silence this bead exists to prevent.
+        """
+        process_calls, shm_names, _events, positional_calls = \
+            self._run_two_cycles(launcher_env)
+
+        assert len(process_calls) == 6, (
+            "the run built processes outside the two cycles this test reads: "
+            f"{[c['name'] for c in process_calls]}"
+        )
+        # Two segments per cycle: the command segment, then the GUI segment.
+        assert len(shm_names) == 4, shm_names
+
+        # THE SHAPE OF THE CALL, before any of its values are read.
+        #
+        # This assertion PINS the launcher's constructor call shape on
+        # purpose. multiprocessing.Process accepts more keywords than the
+        # launcher uses -- daemon= is the obvious one, and it changes
+        # process lifecycle semantics. Every row below reads a value under a
+        # known key, so an added key is simply not read: with daemon=True on
+        # the Input construction and nothing else touched, this file
+        # reported 78 passed (codex round 10, finding .11.2.18).
+        #
+        # If a future lifecycle keyword is intended, that is a decision, not
+        # an accident, and it must update this assertion AND its expected
+        # value in the same change. That is the point of pinning the shape:
+        # the constructor contract widens deliberately and visibly, or not
+        # at all.
+        #
+        # The positional half exists for a different reason. The launcher
+        # names every argument today, so positional_calls is empty on every
+        # call. A construction that stopped naming them used to reach the
+        # tests as a KeyError from whichever assertion read a key first,
+        # which named no cause; measured, that failed 7 of the 7 tests in
+        # this class and every failure was a KeyError. Reading the recorded
+        # positional arguments here turns that into one named failure.
+        for index, call in enumerate(process_calls):
+            assert positional_calls[index] == (), (
+                f"construction {index} passed values positionally: "
+                f"{positional_calls[index]!r}; every assertion in this class "
+                "reads arguments by keyword and cannot see them"
+            )
+            assert set(call) == {"target", "args", "name"}, (
+                f"construction {index} named {call.get('name')!r} was built "
+                f"with the keywords {sorted(call)}, not the three this class "
+                "enumerates; see the comment above before widening this"
+            )
+
+        seen_in_earlier_cycles = []
+        for cycle in (0, 1):
+            logic, inp, gui = process_calls[cycle * 3:cycle * 3 + 3]
+            logic_args = logic["args"]
+            input_args = inp["args"]
+            gui_args = gui["args"]
+            command_segment, gui_segment = shm_names[cycle * 2:cycle * 2 + 2]
+
+            assert (len(logic_args), len(input_args), len(gui_args)) == (9, 5, 4), (
+                f"cycle {cycle}: the launcher passes a different number of "
+                "arguments than the rows below enumerate, so at least one "
+                "of them is unread: "
+                f"{(len(logic_args), len(input_args), len(gui_args))}"
+            )
+
+            # The two shared-memory names are strings. Equality, not
+            # identity: an `is` check on a string can hold because CPython
+            # interned it rather than because the launcher passed the same
+            # value, so it proves less than it appears to.
+            assert logic_args[0] == command_segment, (
+                f"cycle {cycle}: the Logic process was given a command "
+                "segment name the launcher did not create"
+            )
+            assert input_args[0] == command_segment, (
+                f"cycle {cycle}: the Input process would open a different "
+                "command segment from the one the Logic process writes"
+            )
+            assert logic_args[8] == gui_segment, (
+                f"cycle {cycle}: the Logic process was given a GUI segment "
+                "name the launcher did not create"
+            )
+            assert gui_args[3] == gui_segment, (
+                f"cycle {cycle}: the GUI process would open a different "
+                "overlay segment from the one the Logic process writes"
+            )
+            assert command_segment != gui_segment, (
+                f"cycle {cycle}: the two segment names are the same string, "
+                "so the four equality checks above prove nothing"
+            )
+
+            # Everything else is an object the launcher builds once per
+            # cycle and hands to a specific pair, so identity is the
+            # assertion that means anything.
+            assert input_args[1] is logic_args[1], (
+                f"cycle {cycle}: the Input process would wait on a "
+                "command-ready event the Logic process never signals"
+            )
+            assert input_args[2] is logic_args[2], (
+                f"cycle {cycle}: the Input process would announce readiness "
+                "on an event the Logic process never reads"
+            )
+            assert input_args[3] is logic_args[3], (
+                f"cycle {cycle}: the Input process would answer on a queue "
+                "the Logic process is not reading"
+            )
+            assert input_args[4] is logic_args[5], (
+                f"cycle {cycle}: the Input process would watch a shutdown "
+                "event the launcher never sets for this cycle"
+            )
+            assert gui_args[0] is logic_args[5], (
+                f"cycle {cycle}: the GUI process would watch a shutdown "
+                "event the launcher never sets for this cycle"
+            )
+            assert gui_args[1] is logic_args[6], (
+                f"cycle {cycle}: the GUI process would send commands on a "
+                "queue the Logic process is not reading"
+            )
+            assert gui_args[2] is logic_args[7], (
+                f"cycle {cycle}: the Logic process would send state on a "
+                "queue the GUI process is not reading"
+            )
+
+            # logic_args[4] is the only element in any of the three tuples
+            # that is shared with nothing. It is a module constant, not a
+            # per-cycle object, so it has no identity row and its absence
+            # from the pairs above is not a gap.
+            assert logic_args[4] == launcher.SHARED_MEM_SIZE, (
+                f"cycle {cycle}: the Logic process was told the command "
+                f"buffer is {logic_args[4]} bytes, but the launcher created "
+                f"{launcher.SHARED_MEM_SIZE}"
+            )
+
+            # Six distinct objects, not one object in six slots. Without
+            # this, every identity check above is satisfied by a harness
+            # that hands out a single mock -- the exact state that made the
+            # queue links invisible in round 8.
+            shared_objects = [
+                logic_args[1], logic_args[2], logic_args[3],
+                logic_args[5], logic_args[6], logic_args[7],
+            ]
+            assert len({id(obj) for obj in shared_objects}) == 6, (
+                f"cycle {cycle}: the two events, three queues and shutdown "
+                "event are not six distinct objects, so the links asserted "
+                "above prove nothing"
+            )
+
+            reused = [
+                obj for obj in shared_objects
+                if any(obj is old for old in seen_in_earlier_cycles)
+            ]
+            assert not reused, (
+                f"cycle {cycle} reused an event or queue from an earlier "
+                "cycle; a restart is supposed to share nothing with the "
+                "cycle it replaces"
+            )
+            seen_in_earlier_cycles.extend(shared_objects)
+
+    def test_an_input_only_death_still_takes_the_whole_cycle_down(
+        self, launcher_env, caplog,
+    ):
+        """The one death that matters here: Input alone, Logic and GUI fine.
+
+        This is the state the containment argument rests on, and until
+        codex round 5 (finding .11.2.11) no test in this class created it.
+        Every process mock was dead on arrival, so the supervisor always
+        reached its crash branch through the Logic check, and a regression
+        that added an Input-only respawn -- "not input_alive and
+        logic_alive and gui_alive" -- would never have run in this harness.
+        The other three tests would have stayed green while the Input
+        process gained exactly the restart path this bead argues it does
+        not have.
+
+        The first assertion below is about the harness rather than the
+        launcher, and it is there on purpose: a scenario that fails to
+        create the state it claims to test proves nothing, which is the
+        mistake this class already made once.
+        """
+        with caplog.at_level(logging.ERROR, logger=launcher.logger.name):
+            process_calls, _shm_names, _events, _positional = self._run_two_cycles(
+                launcher_env, first_cycle_alive=(True, False, True),
+            )
+
+        deaths = [
+            record.getMessage() for record in caplog.records
+            if "terminated unexpectedly" in record.getMessage()
+        ]
+        assert deaths, (
+            "the supervisor never reported a death, so the first cycle did "
+            "not reach its crash branch and this test proved nothing"
+        )
+        assert "Input(" in deaths[0], deaths[0]
+        assert "Logic(" not in deaths[0] and "GUI(" not in deaths[0], (
+            "the first cycle was supposed to lose ONLY the Input process; "
+            f"the supervisor saw more than that: {deaths[0]}"
+        )
+
+        names = [c["name"] for c in process_calls]
+        assert names == [
+            "LogicProcess", "InputProcess", "GuiProcess",
+            "LogicProcess", "InputProcess", "GuiProcess",
+        ], (
+            "losing the Input process alone produced a construction "
+            f"sequence other than two whole cycles: {names}"
+        )
+
+        # Positions come from the args tuples the launcher builds:
+        # logic_args[5] is the cycle's shutdown event.
+        first_cycle_shutdown = process_calls[0]["args"][5]
+        second_cycle_shutdown = process_calls[3]["args"][5]
+        assert first_cycle_shutdown is not second_cycle_shutdown, (
+            "the Input process came back inside the first cycle, sharing "
+            "its shutdown event; recovery is supposed to be a whole new "
+            "cycle that shares nothing with the old one"
+        )
+
+    def test_all_three_processes_of_a_cycle_share_one_shutdown_event(
+        self, launcher_env,
+    ):
+        """One shutdown event per cycle, held by all three processes.
+
+        This is what makes the death of any one process end the cycle for
+        the other two, and it is why no Input-only restart exists to be
+        used as a recovery path for a wedged command loop.
+        """
+        process_calls, _shm_names, _events, _positional = \
+            self._run_two_cycles(launcher_env)
+
+        # The slices below read positions 0-2 and 3-5 and would not notice a
+        # SEVENTH construction, so the count is asserted here rather than
+        # left to the helper's lower bound (codex round 6, finding
+        # .11.2.13).
+        assert len(process_calls) == 6, (
+            "the run built processes outside the two cycles this test reads: "
+            f"{[c['name'] for c in process_calls]}"
+        )
+
+        # Positions come from the three args tuples the launcher builds:
+        # logic_args[5], input_args[4], gui_args[0].
+        for cycle in (0, 1):
+            logic, inp, gui = process_calls[cycle * 3:cycle * 3 + 3]
+            shutdown = logic["args"][5]
+            assert inp["args"][4] is shutdown, (
+                f"cycle {cycle}: Input got a different shutdown event from Logic"
+            )
+            assert gui["args"][0] is shutdown, (
+                f"cycle {cycle}: GUI got a different shutdown event from Logic"
+            )
+
+    def test_a_second_cycle_shares_nothing_with_the_first(self, launcher_env):
+        """A restart discards the segment and the events, it does not reuse them.
+
+        A command frame is addressed by segment name and announced through
+        a specific event object. Both change, so nothing written for the
+        old Input process can be read by the new one -- which is the only
+        sense in which a restart "clears" a stale command.
+        """
+        process_calls, shm_names, _events, _positional = \
+            self._run_two_cycles(launcher_env)
+
+        # This test reads only constructions 1 and 4, so a seventh would go
+        # unnoticed here as well -- and a process rebuilt on its own reuses
+        # the existing segment, so the shared-memory count below does not
+        # catch it either (codex round 6, finding .11.2.13).
+        assert len(process_calls) == 6, (
+            "the run built processes outside the two cycles this test reads: "
+            f"{[c['name'] for c in process_calls]}"
+        )
+
+        # Two segments per cycle: the command segment, then the GUI segment.
+        assert len(shm_names) == 4, shm_names
+        assert shm_names[0] != shm_names[2], (
+            f"the second cycle reused the command segment name: {shm_names}"
+        )
+        assert shm_names[1] != shm_names[3], (
+            f"the second cycle reused the GUI segment name: {shm_names}"
+        )
+
+        first, second = process_calls[1], process_calls[4]
+        assert first["args"][0] == shm_names[0]
+        assert second["args"][0] == shm_names[2]
+        # command_ready_event, input_ready_event, shutdown_event.
+        for index in (1, 2, 4):
+            assert first["args"][index] is not second["args"][index], (
+                f"the second cycle reused the Input process's event at "
+                f"position {index}"
+            )

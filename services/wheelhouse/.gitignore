@@ -1,1 +1,20 @@
 .hypothesis/
+# Scratch directories the run_capture tests write into at run time
+# (tests/test_run_capture_action.py, evidence_tmp_dir fixture).
+.tdd-evidence/test-runtime/
+
+# Captured pytest output is no longer committed (decided 2026-08-17). A
+# saved text file of a failing run is self-reported, so it proves no more
+# than one sentence in the commit message, and it costs about 9 KB per
+# review finding. Record the red state instead as one line that names the
+# test and states how it failed, in the finding's bead comment and in the
+# fix commit message. The mutation-gate skill carries the full rule.
+#
+# The 151 files already tracked stay tracked, because a gitignore entry
+# does not affect files git already follows. Several finding beads point
+# at them by name, such as "evidence .tdd-evidence/rf23-*".
+#
+# The pattern covers text files only. A script in this directory can
+# still be committed, because a script re-runs and captured output does
+# not -- for example rf46-47-mutation-gate.py.
+.tdd-evidence/*.txt

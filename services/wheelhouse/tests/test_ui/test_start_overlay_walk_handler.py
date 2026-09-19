@@ -399,6 +399,58 @@ def test_unexpected_error_maps_to_error_outcome(handler):
     assert resp.trace_id == "trace-err"
 
 
+def test_transient_com_error_maps_to_execution_failed_at_warning(handler, caplog):
+    # wh-overlay-walk-theme-error: a Windows dark/light theme switch rebuilds
+    # the shell window mid-walk; the walker's bounded stale-window retries can
+    # all land inside the rebuild and re-raise COMError -2147220991. That is a
+    # known transient class, not a handler crash: it must ride the NORMAL
+    # execution_failed outcome (status="ok") and log at WARNING, because
+    # ERROR-level records pop a Windows notification box
+    # (ErrorNotificationHandler) for a blip that self-heals on the next
+    # focus-hook re-walk.
+    import logging
+
+    try:
+        from comtypes import COMError
+        transient = COMError(
+            -2147220991,
+            "An event was unable to invoke any of the subscribers",
+            (None, None, None, None, None),
+        )
+    except ImportError:
+        transient = OSError("stale window during shell rebuild")
+
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+
+    boom_finder = MagicMock()
+    boom_finder.overlay_walk.side_effect = transient
+    handler._click_element_finder = boom_finder
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=_foreground()), \
+            caplog.at_level(logging.DEBUG):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=2,
+            paint_generation=7,
+            trace_id="trace-transient",
+            request_id="req-walk-1",
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.outcome == "execution_failed"
+    assert resp.reason == "transient_com_error"
+    assert resp.overlay_session_id == 2
+    assert resp.paint_generation == 7
+    assert resp.trace_id == "trace-transient"
+    handler_records = [
+        r for r in caplog.records if "start_overlay_walk" in r.getMessage()
+    ]
+    assert not [r for r in handler_records if r.levelno >= logging.ERROR]
+    assert [r for r in handler_records if r.levelno == logging.WARNING]
+
+
 def test_emits_exactly_one_response(handler):
     top = FakeArrayTopLevel([_el("Save")])
     handler._click_element_finder = _make_finder(top)
@@ -528,7 +580,8 @@ def test_walk_deadline_anchored_at_command_dequeue(handler):
     # budget so the walk gives up before the Logic walk_in_flight timeout.
     # click_element already does this (wh-9f3t.73.1); start_overlay_walk mirrors
     # it. The deadline passed to ElementFinder.overlay_walk must equal
-    # dequeue + walk_deadline_ms/1000.
+    # dequeue + screen_read_walk_deadline_ms/1000 (the screen read's own bound
+    # since wh-overlay-slow-uia-stale-badges.3).
     from ui.click_config import ClickConfig
     from ui.element_finder import OverlayWalkResult
 
@@ -555,7 +608,45 @@ def test_walk_deadline_anchored_at_command_dequeue(handler):
     assert finder.overlay_walk.call_count == 1
     passed_deadline = finder.overlay_walk.call_args.kwargs.get("deadline")
     assert passed_deadline is not None
-    assert passed_deadline == dequeue + cfg.walk_deadline_ms / 1000.0
+    assert passed_deadline == dequeue + cfg.screen_read_walk_deadline_ms / 1000.0
+
+
+def test_screen_read_deadline_uses_its_own_key_not_the_click_walk_bound(handler):
+    """wh-overlay-slow-uia-stale-badges.3: the read reads its OWN key.
+
+    ``[click] screen_read_timeout_ms`` (8000 here) bounds the screen read;
+    ``walk_deadline_ms`` (2500 here) keeps bounding the by-name click walk
+    only. The deadline handed to ``overlay_walk`` must therefore be
+    dequeue + (8000 - 250)/1000 = dequeue + 7.75, not dequeue + 2.5.
+    """
+    from ui.click_config import ClickConfig
+    from ui.element_finder import OverlayWalkResult
+
+    cfg = ClickConfig.from_raw(
+        {"screen_read_timeout_ms": 8000, "walk_deadline_ms": 2500}
+    )
+    assert cfg.invalid_key is None
+    handler._click_config = cfg
+
+    finder = MagicMock()
+    finder.overlay_walk.return_value = OverlayWalkResult(
+        outcome="no_targets", reason=None, snapshot=None, summary=None,
+    )
+    handler._click_element_finder = finder
+
+    dequeue = 1000.0
+    with patch(f"{_MOD}._capture_click_foreground", return_value=_foreground()):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=1,
+            paint_generation=0,
+            trace_id="t",
+            request_id="req-walk-read-key",
+            command_dequeue_monotonic=dequeue,
+        )
+
+    passed_deadline = finder.overlay_walk.call_args.kwargs.get("deadline")
+    assert passed_deadline == dequeue + 7.75
 
 
 def test_walk_deadline_falls_back_to_handler_entry_without_dequeue(handler):
@@ -586,7 +677,7 @@ def test_walk_deadline_falls_back_to_handler_entry_without_dequeue(handler):
         )
 
     passed_deadline = finder.overlay_walk.call_args.kwargs.get("deadline")
-    assert passed_deadline == 500.0 + cfg.walk_deadline_ms / 1000.0
+    assert passed_deadline == 500.0 + cfg.screen_read_walk_deadline_ms / 1000.0
 
 
 def test_automation_unavailable_emits_distinct_reason():
@@ -633,3 +724,563 @@ def test_automation_unavailable_emits_distinct_reason():
         assert resp.overlay_session_id == 7
         assert resp.paint_generation == 2
         assert resp.trace_id == "trace-com"
+
+
+# ---------------------------------------------------------------------------
+# The post-click settle re-read (wh-overlay-slow-uia-stale-badges.2).
+#
+# ``settle=True`` makes the handler read the window through
+# ``ui.settle_detector.wait_for_settled_window`` instead of walking once, then
+# compare the settled read against the snapshot Logic is still holding. The
+# answer is the SAME snapshot id when nothing changed, which is how the Logic
+# state machine learns to restore the numbers it already had. A changed screen
+# can never produce that id by accident: every walk mints
+# ``walk-<uuid4 hex>-<counter>`` with a per-run salt and a monotonic counter.
+# ---------------------------------------------------------------------------
+
+
+class FakeMutableTopLevel:
+    """A fake top-level whose children can be swapped between walks."""
+
+    def __init__(self, elements):
+        self.elements = list(elements)
+        self.walks = 0
+
+    def FindAllBuildCache(self, _scope, _cond, _cache):
+        self.walks += 1
+        return FakeElementArray(list(self.elements))
+
+
+def _held_snapshot_id(handler, foreground):
+    """Walk once and return the id of the snapshot Logic would have pinned."""
+    walk = handler._click_element_finder.overlay_walk(foreground)
+    assert walk.outcome == "ok", walk.reason
+    return walk.snapshot.snapshot_id
+
+
+def test_settle_unchanged_screen_answers_with_the_held_snapshot_id(handler):
+    """Acceptance criterion 3: nothing changed, so answer with the held id.
+
+    The comparison is the ordered (control type id, accessible name, bounding
+    rectangle) list ``signature_of`` builds -- the same list the detector uses
+    to decide the window settled.
+    """
+    top = FakeMutableTopLevel([
+        _el("Save", rect=FakeRect(10, 20, 110, 70)),
+        _el("Cancel", rect=FakeRect(120, 20, 220, 70)),
+    ])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-settle-same",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.outcome == "ok"
+    assert resp.snapshot_id == held
+    # One walk built the held snapshot; the detector needs at least two more,
+    # because one read cannot prove a window stopped changing.
+    assert top.walks >= 3
+
+
+def test_settle_changed_screen_answers_with_a_new_snapshot_id(handler):
+    """Acceptance criterion 4: the content changed, so a new list is the answer.
+
+    The new id is necessarily different from the held one -- ids are minted
+    from a per-run salt and a monotonic counter and are never reused -- so the
+    Logic side reads "changed" from the id alone.
+    """
+    top = FakeMutableTopLevel([
+        _el("Save", rect=FakeRect(10, 20, 110, 70)),
+        _el("Cancel", rect=FakeRect(120, 20, 220, 70)),
+    ])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    # The click opened something: the window now shows a different control.
+    top.elements = [
+        _el("Save", rect=FakeRect(10, 20, 110, 70)),
+        _el("Cancel", rect=FakeRect(120, 20, 220, 70)),
+        _el("Overwrite?", rect=FakeRect(230, 20, 330, 70)),
+    ]
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-settle-diff",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.outcome == "ok"
+    assert resp.snapshot_id is not None
+    assert resp.snapshot_id != held
+    assert resp.snapshot_summary is not None
+    assert {i.name for i in resp.snapshot_summary.items} == {
+        "Save", "Cancel", "Overwrite?",
+    }
+
+
+def test_settle_refuses_to_reuse_a_held_list_from_another_window(handler):
+    """wh-overlay-slow-uia-stale-badges.2.2.2.
+
+    ``signature_of`` compares control type id, accessible name and bounding
+    rectangle. It carries NO window identity, so two windows with the same
+    layout compare as "unchanged". The ordinary way to reach that is a dialog
+    closed and reopened: identical controls, a new window handle and a new
+    creation time.
+
+    Here the held list belongs to window 1000 and the settle read happens
+    against window 2000. Answering with the held id would paint window 1000's
+    badges over window 2000, and the machine's unchanged branch repaints
+    WITHOUT re-pinning, so nothing would rebind the list to the window on
+    screen. The answer must be the fresh read instead.
+    """
+    from ui.click_config import ClickConfig
+    from ui.element_finder import ForegroundContext
+
+    layout = [
+        _el("Save", rect=FakeRect(10, 20, 110, 70)),
+        _el("Cancel", rect=FakeRect(120, 20, 220, 70)),
+    ]
+    handler._click_element_finder = _make_finder(FakeMutableTopLevel(layout))
+    handler._click_config = ClickConfig.from_raw({})
+
+    window_a = _foreground()
+    held = _held_snapshot_id(handler, window_a)
+
+    # Same layout, different window: every identity field moves, which is what
+    # a reopened dialog does.
+    window_b = ForegroundContext(
+        foreground_window=2000,
+        foreground_pid=8765,
+        foreground_process_name="notepad.exe",
+        foreground_window_creation_time=1234,
+        cursor_at_walk=(60, 45),
+        cursor_monitor_id=0,
+    )
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=window_b):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-settle-other-window",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.outcome == "ok"
+    assert resp.snapshot_id != held, (
+        "the settle answer reused window 1000's list for a read of window 2000"
+    )
+    # The whole point of returning the fresh list: a later click against the
+    # answer must not be refused for a foreground change. Asking the finder
+    # the same question click_snapshot_item asks is what proves it.
+    assert handler._click_element_finder.get_snapshot(
+        resp.snapshot_id,
+        current_foreground_window=window_b.foreground_window,
+        current_foreground_pid=window_b.foreground_pid,
+        current_foreground_process_name=window_b.foreground_process_name,
+        current_foreground_window_creation_time=(
+            window_b.foreground_window_creation_time
+        ),
+    ) is not None, (
+        "the answered snapshot is already refused for the window it was read "
+        "from, so the badges would paint and then every click would fail"
+    )
+
+
+def test_settle_uses_the_shared_detector_and_adds_no_second_mechanism(handler):
+    """Acceptance criterion 2: the re-read goes through the shipped detector.
+
+    Patching ``wait_for_settled_window`` is what proves it: a handler that
+    grew its own settle loop would still pass the two tests above.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    from ui import settle_detector
+
+    real = settle_detector.wait_for_settled_window
+    calls = []
+
+    def _spy(read, **kwargs):
+        calls.append(kwargs)
+        return real(read, **kwargs)
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg), \
+         patch.object(settle_detector, "wait_for_settled_window", _spy):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-settle-detector",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    assert len(calls) == 1, "the settle read must go through the detector once"
+    resp = _last_response(handler)
+    assert resp.snapshot_id == held
+
+
+def test_a_plain_walk_never_calls_the_detector(handler):
+    """Criterion 7's Input-side half: with settle off nothing new runs.
+
+    ``overlay_settle_after_click`` OFF means the machine never reaches the
+    settling state, so no request ever carries settle=True. This proves the
+    handler agrees: the shipped walk path is untouched.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+
+    from ui import settle_detector
+
+    calls = []
+
+    def _spy(read, **kwargs):  # pragma: no cover - must never run
+        calls.append(kwargs)
+        raise AssertionError("the plain walk path called the settle detector")
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=_foreground()), \
+         patch.object(settle_detector, "wait_for_settled_window", _spy):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-plain",
+            request_id="req-walk-1",
+        )
+
+    assert calls == []
+    resp = _last_response(handler)
+    assert resp.outcome == "ok"
+    assert top.walks == 1
+
+
+def test_the_settle_read_keeps_the_detector_own_maximum(handler):
+    """Acceptance criterion 6, the Input half of the double bound.
+
+    The handler must not pass its own ``max_ms``. David set 1500 ms on the
+    bead and the detector's module constant is the single place it lives, so
+    a handler that supplied its own number would put a second, unreviewed
+    bound in the path and the config one would stop meaning anything.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    from ui import settle_detector
+
+    real = settle_detector.wait_for_settled_window
+    seen = []
+
+    def _spy(read, **kwargs):
+        seen.append(kwargs)
+        return real(read, **kwargs)
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg), \
+         patch.object(settle_detector, "wait_for_settled_window", _spy):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-settle-max",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    assert len(seen) == 1
+    assert "max_ms" not in seen[0]
+    assert settle_detector.DEFAULT_SETTLE_MAX_MS == 1500
+
+
+def test_a_window_that_never_settles_answers_with_the_last_read(handler):
+    """Acceptance criterion 6: an unsettled window still produces numbers.
+
+    The detector returns its last completed read with ``settled=False`` when
+    the maximum expires. That read is a real, complete picture of one moment,
+    so it is painted -- the alternative is closing the overlay on exactly the
+    slow machines this whole bead exists for.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    from ui import settle_detector
+
+    real = settle_detector.wait_for_settled_window
+
+    def _never_settles(read, **kwargs):
+        # A clock that is already past the deadline on the first check: the
+        # detector takes its one mandatory read and returns settled=False.
+        ticks = iter([0.0] + [10_000.0] * 64)
+        return real(read, events_between=None, now_ms=lambda: next(ticks))
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg), \
+         patch.object(settle_detector, "wait_for_settled_window",
+                      _never_settles):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-never-settles",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.outcome == "ok"
+    assert resp.snapshot_summary is not None
+    assert [i.name for i in resp.snapshot_summary.items] == ["Save"]
+
+
+def test_a_vanished_held_snapshot_answers_with_the_fresh_read(handler):
+    """The held id is answered with ONLY after an equal comparison.
+
+    Its store entry can be gone by the time the settle finishes -- the 30 s
+    TTL expired, or it was unpinned and evicted. There is then nothing to
+    compare against, and answering with the id anyway would name a snapshot
+    the Input process is no longer holding, so a later "click 3" would find
+    no list. The fresh read is the answer instead.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+    # The screen is UNCHANGED, so only the missing entry can decide this.
+    # ``invalidate`` is the shipped way the store loses entries; TTL expiry
+    # and LRU eviction reach the same place through ``_drop``.
+    handler._click_element_finder.invalidate()
+    assert handler._click_element_finder.get_snapshot(held) is None
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-held-gone",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.snapshot_id is not None
+    assert resp.snapshot_id != held
+    assert resp.snapshot_summary is not None
+
+
+def test_a_settle_with_no_compare_id_answers_with_the_fresh_read(handler):
+    """An empty compare id is not a licence to report "unchanged".
+
+    Nothing in the shipped path sends one, so this pins the degrade rather
+    than a live case: with no comparison target the settled read is the
+    answer, exactly as a plain walk would be.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=_foreground()):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-no-compare",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id="",
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.outcome == "ok"
+    assert resp.snapshot_id
+    assert resp.snapshot_summary is not None
+
+
+def test_the_held_id_is_answered_with_the_held_snapshot_own_summary(handler):
+    """The held id and the summary beside it must name the SAME snapshot.
+
+    A ``WalkSnapshotSummary`` names the snapshot it was projected from, and
+    ``StartOverlayWalkResponse`` refuses a response whose
+    ``snapshot_summary.snapshot_id`` differs from its top-level
+    ``snapshot_id`` (shared/start_overlay_walk.py:266) -- Logic keys the
+    retained summary by the top-level id. So answering "unchanged" with the
+    held id but the fresh walk's summary would be rejected at the process
+    boundary and the whole response lost.
+
+    Note what this does NOT rest on: the item ids are identical either way.
+    Measured -- an item id is "<walker source>-<index>" and neither part
+    carries a snapshot id, so two walks of an unchanged window mint the same
+    ids. The snapshot_id agreement is the whole of the requirement.
+    """
+    top = FakeMutableTopLevel([
+        _el("Save", rect=FakeRect(10, 20, 110, 70)),
+        _el("Cancel", rect=FakeRect(120, 20, 220, 70)),
+    ])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-held-summary",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.snapshot_id == held
+    assert resp.snapshot_summary is not None
+    assert resp.snapshot_summary.snapshot_id == held
+    # And the response really does survive the schema the boundary applies.
+    StartOverlayWalkResponse.from_dict(resp.to_dict())
+
+
+def test_a_failed_second_read_answers_with_the_first_completed_read(handler):
+    """A read that produces no list does not throw away the one that did.
+
+    The detector's own contract is never to paint nothing when a read has
+    completed (decision point 3). A settle whose LAST read fails still has an
+    earlier post-click read in hand, and that read is no worse than the single
+    walk this path replaced -- so it is the answer, and the comparison against
+    the held snapshot still runs over it.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    finder = handler._click_element_finder
+    real_walk = finder.overlay_walk
+    calls = {"n": 0}
+
+    def _fail_after_the_first(foreground, **kwargs):
+        calls["n"] += 1
+        result = real_walk(foreground, **kwargs)
+        if calls["n"] == 1:
+            return result
+        # Every later read reports the deadline-truncation failure, which is
+        # the shipped no-list outcome (overlay_walk returns snapshot=None).
+        from ui.element_finder import OverlayWalkResult
+        return OverlayWalkResult(
+            outcome="execution_failed",
+            reason="walk_deadline_exceeded",
+            snapshot=None,
+            summary=None,
+        )
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg), \
+         patch.object(finder, "overlay_walk", _fail_after_the_first):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-second-read-failed",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.status == "ok"
+    assert resp.outcome == "ok", resp.reason
+    assert resp.snapshot_summary is not None
+    assert [i.name for i in resp.snapshot_summary.items] == ["Save"]
+
+
+def test_a_settle_with_no_completed_read_reports_the_failure(handler):
+    """The boundary of the rule above: nothing completed, so nothing to paint.
+
+    With no list in hand there is no honest answer but the failure, and the
+    handler's shipped execution_failed branch produces it.
+    """
+    top = FakeMutableTopLevel([_el("Save", rect=FakeRect(10, 20, 110, 70))])
+    handler._click_element_finder = _make_finder(top)
+    from ui.click_config import ClickConfig
+    handler._click_config = ClickConfig.from_raw({})
+    fg = _foreground()
+    held = _held_snapshot_id(handler, fg)
+
+    finder = handler._click_element_finder
+
+    def _always_fails(foreground, **kwargs):
+        from ui.element_finder import OverlayWalkResult
+        return OverlayWalkResult(
+            outcome="execution_failed",
+            reason="walk_deadline_exceeded",
+            snapshot=None,
+            summary=None,
+        )
+
+    with patch(f"{_MOD}._capture_click_foreground", return_value=fg), \
+         patch.object(finder, "overlay_walk", _always_fails):
+        handler.start_overlay_walk(
+            scope="focused_window",
+            overlay_session_id=5,
+            paint_generation=3,
+            trace_id="trace-no-read-at-all",
+            request_id="req-walk-1",
+            settle=True,
+            compare_snapshot_id=held,
+        )
+
+    resp = _last_response(handler)
+    assert resp.outcome == "execution_failed"
+    assert resp.reason == "walk_deadline_exceeded"
+    assert resp.snapshot_id is None
+    assert resp.snapshot_summary is None

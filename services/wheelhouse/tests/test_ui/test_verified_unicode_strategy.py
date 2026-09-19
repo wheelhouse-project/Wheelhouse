@@ -12,6 +12,7 @@ multi-word streamed dictation path is exercised end-to-end. The Win32
 boundary (type_string_verified, win32gui.GetForegroundWindow,
 ensure_focused) is patched.
 """
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -464,9 +465,14 @@ class TestVerifiedUnicodeStrategyFocusDrift:
     ):
         """wh-3nwy: a transient Chromium helper window briefly owns
         foreground after the paste. Different root HWND, SAME process
-        as the captured target. The post-send check accepts via the
-        same-process fallback rather than rejecting (the false-positive
-        failure that wh-3nwy fixes).
+        as the captured target, and the helper is INVISIBLE -- pinned
+        per-HWND below, because since
+        wh-ensure-focused-same-process-fallback.1.28 the pair-shape
+        guard also requires a helper shape on one side (.1.30: an
+        unconfigured shape probe made this test pass without proving
+        that condition). The post-send check accepts via the
+        same-process fallback rather than rejecting (the
+        false-positive failure that wh-3nwy fixes).
         """
         clipboard = _make_clipboard_ops()
         strategy = VerifiedUnicodeStrategy(
@@ -501,6 +507,18 @@ class TestVerifiedUnicodeStrategyFocusDrift:
             side_effect=_pid_by_hwnd,
         ), patch(
             "ui.hwnd_utils.psutil.Process", return_value=fake_proc,
+        ), patch(
+            # The observed popup (1573546) is the invisible helper;
+            # the captured main frame stays a visible plain window.
+            "ui.hwnd_utils.win32gui.IsWindowVisible",
+            side_effect=lambda hwnd: hwnd != 1573546,
+        ), patch(
+            "ui.hwnd_utils.win32gui.GetWindowLong", return_value=0,
+        ), patch(
+            # .1.31: the shape probe confirms liveness after an
+            # invisible answer; the invented popup handle must read
+            # as a live window or the credit is refused.
+            "ui.hwnd_utils.win32gui.IsWindow", return_value=1,
         ):
             result = strategy.insert("hello", context)
 
@@ -508,6 +526,120 @@ class TestVerifiedUnicodeStrategyFocusDrift:
         assert result.success is True
         # Counter credited.
         assert clipboard.accumulated_paste_chars == len("Hello")
+
+    def test_visible_sibling_same_process_drift_rejects(
+        self, buffer_manager, text_perfector, window_manager
+    ):
+        """wh-ensure-focused-same-process-fallback.1.28 (codex round
+        18): the captured target and the observed foreground are both
+        VISIBLE plain top-level Brave frames -- a genuine second
+        browser window took foreground, not a transient helper. The
+        raw PID and exe probes both pass, so only the pair-shape
+        guard separates this from wh-3nwy: neither side has the
+        helper shape (invisible or WS_EX_TOOLWINDOW), and the send
+        must be refused instead of credited into the sibling."""
+        clipboard = _make_clipboard_ops()
+        strategy = VerifiedUnicodeStrategy(
+            buffer_manager, text_perfector, clipboard, window_manager
+        )
+        context = _make_context(hwnd=4201052)
+
+        fake_proc = type("FakeProc", (), {"name": lambda self: "brave.exe"})()
+
+        with patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, len("Hello"), None),
+        ), patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=1573546
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.win32process.GetWindowThreadProcessId",
+            return_value=(1234, 8888),
+        ), patch(
+            "ui.hwnd_utils.psutil.Process", return_value=fake_proc,
+        ), patch(
+            "ui.hwnd_utils.win32gui.IsWindowVisible", return_value=True,
+        ), patch(
+            "ui.hwnd_utils.win32gui.GetWindowLong", return_value=0,
+        ):
+            result = strategy.insert("hello", context)
+
+        assert result.success is False, (
+            "Two visible plain same-process browser frames are the "
+            "wrong-window sibling shape; the fallback must stay strict."
+        )
+        assert clipboard.accumulated_paste_chars == 0
+
+    def test_same_exe_rebind_before_fallback_sample_rejects(
+        self, buffer_manager, text_perfector, window_manager
+    ):
+        """wh-ensure-focused-same-process-fallback.1.34 (deepseek round
+        24): the strategy resolves the captured target's exe name from
+        pid 2584 (Brave profile A), the transient helper dies, and
+        Windows reuses the handle for a helper of a SECOND brave.exe
+        process (profile B, pid 8888) before the fallback samples.
+        Both fallback samples then agree on 8888 and the exe gate
+        compares name strings, so the pre-send proof credited a send
+        into profile B. The fallback must refuse when its first sample
+        of the target differs from the pid the strategy's identity
+        sample produced. Shapes are pinned to the live one-sided
+        helper pair so only that comparison can refuse."""
+        clipboard = _make_clipboard_ops()
+        strategy = VerifiedUnicodeStrategy(
+            buffer_manager, text_perfector, clipboard, window_manager
+        )
+        context = _make_context(hwnd=4201052)
+
+        target_calls = {"n": 0}
+
+        def _rebinding_pids(hwnd):
+            if hwnd == 4201052:
+                target_calls["n"] += 1
+                if target_calls["n"] == 1:
+                    return (1234, 2584)   # profile A: the identity sample
+                return (1234, 8888)       # profile B: every later sample
+            return (1234, 8888)           # observed helper: profile B
+
+        fake_proc = type("FakeProc", (), {"name": lambda self: "brave.exe"})()
+
+        with patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, len("Hello"), None),
+        ), patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=1573546
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.win32process.GetWindowThreadProcessId",
+            side_effect=_rebinding_pids,
+        ), patch(
+            "ui.hwnd_utils.psutil.Process", return_value=fake_proc,
+        ), patch(
+            "ui.hwnd_utils.win32gui.IsWindowVisible",
+            side_effect=lambda hwnd: hwnd != 1573546,
+        ), patch(
+            "ui.hwnd_utils.win32gui.GetWindowLong", return_value=0,
+        ), patch(
+            "ui.hwnd_utils.win32gui.IsWindow", return_value=1,
+        ):
+            result = strategy.insert("hello", context)
+
+        assert result.success is False, (
+            "A same-exe cross-process handle rebind between the "
+            "identity sample and the fallback's first PID sample must "
+            "refuse the send: the keystrokes would land in the other "
+            "browser profile's process."
+        )
+        assert clipboard.accumulated_paste_chars == 0
 
     def test_non_browser_same_process_drift_still_rejects(
         self, buffer_manager, text_perfector, window_manager
@@ -518,6 +650,13 @@ class TestVerifiedUnicodeStrategyFocusDrift:
         strict GA_ROOT-only behavior is preserved -- a same-process
         focus shift to a sibling top-level window (a Word dialog,
         Visual Studio popup) is treated as a real drift and rejects.
+
+        Shapes are pinned to a live one-sided helper pair (.1.33,
+        grok round 23): unpinned, the real ui.hwnd_utils probes read
+        the invented handles as dead and the .1.28/.1.31 shape gates
+        refused, so a mutant that drops the browser-allowlist check
+        and force-allows the same-process tail stayed green. With the
+        pins, only the allowlist short-circuit refuses this pair.
         """
         clipboard = _make_clipboard_ops()
         strategy = VerifiedUnicodeStrategy(
@@ -548,6 +687,13 @@ class TestVerifiedUnicodeStrategyFocusDrift:
             side_effect=_pid_by_hwnd,
         ), patch(
             "ui.hwnd_utils.psutil.Process", return_value=fake_proc,
+        ), patch(
+            "ui.hwnd_utils.win32gui.IsWindowVisible",
+            side_effect=lambda hwnd: hwnd != 8888,
+        ), patch(
+            "ui.hwnd_utils.win32gui.GetWindowLong", return_value=0,
+        ), patch(
+            "ui.hwnd_utils.win32gui.IsWindow", return_value=1,
         ):
             result = strategy.insert("hello", context)
 
@@ -801,7 +947,19 @@ class TestVerifiedUnicodeStrategyPoisonRetract:
         self, buffer_manager, text_perfector, window_manager,
         send_outcome, foreground_outcome, normalize_outcome=_patched_normalize,
     ):
-        """Run strategy.insert with the given outcomes and return clipboard state."""
+        """Run strategy.insert with the given outcomes and return clipboard state.
+
+        wh-review-pattern-fixes.41: insert() proves the captured target
+        holds the foreground BEFORE the send as well as after it, so it
+        reads GetForegroundWindow twice and normalizes HWNDs in both
+        phases. Every scenario in this class describes a POST-send
+        failure, so the pre-send phase is pinned to the healthy shape
+        (foreground reports the captured HWND 4242, identity normalize)
+        and ``foreground_outcome`` / ``normalize_outcome`` apply only to
+        the calls that happen after the send. Without the split the
+        pre-send proof would abort first and no scenario here would
+        reach the code it is about.
+        """
         clipboard = _make_clipboard_ops()
         # Prior word in the same utterance succeeded.
         clipboard.accumulated_paste_chars = 5
@@ -811,29 +969,41 @@ class TestVerifiedUnicodeStrategyPoisonRetract:
         )
         context = _make_context(hwnd=4242)
 
-        if isinstance(send_outcome, BaseException):
-            send_kwargs = {"side_effect": send_outcome}
-        else:
-            send_kwargs = {"return_value": send_outcome}
+        # Flipped by the send stub below. Everything before the flip is
+        # the pre-send phase.
+        phase = {"sent": False}
 
-        if isinstance(foreground_outcome, BaseException):
-            fg_kwargs = {"side_effect": foreground_outcome}
-        else:
-            fg_kwargs = {"return_value": foreground_outcome}
+        def _send(*args, **kwargs):
+            phase["sent"] = True
+            if isinstance(send_outcome, BaseException):
+                raise send_outcome
+            return send_outcome
+
+        def _foreground(*args, **kwargs):
+            if not phase["sent"]:
+                return 4242
+            if isinstance(foreground_outcome, BaseException):
+                raise foreground_outcome
+            return foreground_outcome
+
+        def _normalize(hwnd):
+            if not phase["sent"]:
+                return _patched_normalize(hwnd)
+            return normalize_outcome(hwnd)
 
         # wh-ix1z.20: patch BOTH module paths so the post-send check's
         # internal call (via hwnds_match_for_foreground_compare) hits
         # the same normalize stub as the strategy module's reference.
         with patch(
-            f"{_STRAT_MOD}.type_string_verified", **send_kwargs
+            f"{_STRAT_MOD}.type_string_verified", side_effect=_send
         ), patch(
-            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", **fg_kwargs
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", side_effect=_foreground
         ), patch(
             f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
-            side_effect=normalize_outcome,
+            side_effect=_normalize,
         ), patch(
             "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
-            side_effect=normalize_outcome,
+            side_effect=_normalize,
         ):
             result = strategy.insert("world", context)
 
@@ -905,26 +1075,26 @@ class TestVerifiedUnicodeStrategyPoisonRetract:
     def test_target_hwnd_normalize_failure_poisons_retract(
         self, buffer_manager, text_perfector, window_manager
     ):
-        """target_hwnd normalization succeeds at strategy entry but fails
-        the second normalize call after the send (e.g. window destroyed
-        mid-paste). The post-send branch must still poison retract."""
-        # Two-step normalize: first call (in _hwnd_from_control at entry)
-        # succeeds, second call (post-send re-normalize for expected_root)
-        # fails. Subsequent observed-side calls still pass so the failure
-        # is unambiguously the target side.
+        """target_hwnd normalization succeeds before the send but fails
+        after it (e.g. the window was destroyed during the paste). The
+        post-send branch must still poison retract."""
+        # The stub below runs in the post-send phase only (see
+        # _run_failure_scenario). The comparison normalizes the expected
+        # side first, so failing the first post-send call and passing the
+        # rest makes the failure unambiguously the target side.
         call_state = {"count": 0}
 
-        def normalize_first_pass_then_fail(hwnd):
+        def normalize_target_fails_after_send(hwnd):
             call_state["count"] += 1
             if call_state["count"] == 1:
-                return int(hwnd) if hwnd is not None else None
-            return None
+                return None
+            return int(hwnd) if hwnd is not None else None
 
         result, clipboard = self._run_failure_scenario(
             buffer_manager, text_perfector, window_manager,
             send_outcome=(True, 6, None),
             foreground_outcome=4242,
-            normalize_outcome=normalize_first_pass_then_fail,
+            normalize_outcome=normalize_target_fails_after_send,
         )
         assert result.success is False
         assert clipboard.last_paste_was_optimistic is True
@@ -1154,14 +1324,70 @@ class TestVerifiedUnicodeStrategyVerbatim:
         assert clipboard.accumulated_paste_chars == len("verbatim")
 
 
-class TestVerifiedUnicodeStrategyDispatchInstrumentation:
-    """wh-trailing-corruption-instrument: every dispatch increments a
-    per-instance ordinal counter and emits a log line carrying the
-    ordinal, modifier-key state, length, and first/last codepoint of
-    the final string. The first few dispatches per process lifetime
-    log at INFO so the wh-startup-trailing-corruption hypothesis
-    (corruption clusters near process startup) is observable without
-    re-running WheelHouse at DEBUG."""
+class TestVerifiedUnicodeStrategyEmptyTiptapPrompt:
+    """wh-pzt: the first word into an empty Claude Code prompt gets no space.
+
+    The empty tiptap prompt reports its placeholder 'Type / for
+    commands' as its text (live probe, 2026-09-14). Before the fix the
+    re-read gave TextPerfector 'ds' as the preceding characters and the
+    word was sent as ' hello'.
+    """
+
+    def test_first_word_into_empty_prompt_has_no_leading_space(
+        self, text_perfector, window_manager
+    ):
+        clipboard = _make_clipboard_ops()
+        bm = ShadowBufferManager()  # invalid: the insert re-reads the prompt
+        strategy = VerifiedUnicodeStrategy(
+            bm, text_perfector, clipboard, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with patch("ui.shadow_buffer.auto") as mock_auto, patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, len("Hello"), None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=4242
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            mock_auto.UIAutomationInitializerInThread.return_value.__enter__ = MagicMock()
+            mock_auto.UIAutomationInitializerInThread.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
+            text_pattern = MagicMock()
+            focused = MagicMock()
+            focused.GetPattern.side_effect = (
+                lambda pid: text_pattern
+                if pid is mock_auto.PatternId.TextPattern else None
+            )
+            doc_range = MagicMock()
+            doc_range.GetText.return_value = "Type / for commands\n"
+            text_pattern.DocumentRange = doc_range
+            sel_range = MagicMock()
+            sel_range.GetText.return_value = ""
+            sel_range.GetEnclosingControl.return_value = MagicMock(
+                ClassName="is-empty is-editor-empty"
+            )
+            text_pattern.GetSelection.return_value = [sel_range]
+            cursor_range = MagicMock()
+            cursor_range.GetText.return_value = "Type / for commands"
+            doc_range.Clone.return_value = cursor_range
+            mock_auto.GetFocusedControl.return_value = focused
+
+            result = strategy.insert("hello", context)
+
+        assert result.success is True
+        mock_send.assert_called_once_with("Hello")
+        assert bm._buffer == "Hello"
+
+
+class TestVerifiedUnicodeStrategyDispatchDiagnostics:
+    """Each dispatch logs useful SendInput diagnostics at DEBUG."""
 
     def test_dispatch_counter_starts_at_zero(
         self, buffer_manager, text_perfector, window_manager
@@ -1199,7 +1425,7 @@ class TestVerifiedUnicodeStrategyDispatchInstrumentation:
 
         assert strategy._dispatch_count == 3
 
-    def test_first_dispatch_logs_at_info_with_ordinal_and_keystate(
+    def test_dispatch_logs_at_debug_with_ordinal_and_keystate(
         self, buffer_manager, text_perfector, window_manager, caplog
     ):
         import logging
@@ -1210,7 +1436,7 @@ class TestVerifiedUnicodeStrategyDispatchInstrumentation:
         )
         context = _make_context(hwnd=4242)
 
-        with caplog.at_level(logging.INFO, logger="ui.strategies.specific"), patch(
+        with caplog.at_level(logging.DEBUG, logger="ui.strategies.specific"), patch(
             f"{_STRAT_MOD}.type_string_verified",
             return_value=(True, len("Hello"), None),
         ), patch(
@@ -1233,23 +1459,17 @@ class TestVerifiedUnicodeStrategyDispatchInstrumentation:
         ]
         assert len(dispatch_logs) == 1
         record = dispatch_logs[0]
-        assert record.levelno == logging.INFO
+        assert record.levelno == logging.DEBUG
         msg = record.getMessage()
         assert "ord=1" in msg
         assert "shift=-" in msg
         assert "text_len=5" in msg
         assert "process=notepad.exe" in msg
 
-    def test_later_dispatch_logs_at_debug_not_info(
+    def test_multiple_dispatches_all_log_at_debug(
         self, buffer_manager, text_perfector, window_manager, caplog
     ):
-        """After the first few dispatches the log drops to DEBUG so a
-        long dictation session is not flooded with INFO records.
-        Verifies the ordinal threshold is honoured by counting how many
-        of the dispatch logs come through at INFO level."""
         import logging
-
-        from ui.strategies import specific as strat_mod
 
         clipboard = _make_clipboard_ops()
         strategy = VerifiedUnicodeStrategy(
@@ -1271,8 +1491,7 @@ class TestVerifiedUnicodeStrategyDispatchInstrumentation:
             "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
             side_effect=_patched_normalize,
         ):
-            # Run more dispatches than the INFO threshold.
-            total = strat_mod.DISPATCH_INFO_LOG_LIMIT + 2
+            total = 7
             for _ in range(total):
                 strategy.insert("hi", context)
 
@@ -1280,7 +1499,211 @@ class TestVerifiedUnicodeStrategyDispatchInstrumentation:
             r for r in caplog.records
             if "VerifiedUnicodeStrategy: dispatch" in r.getMessage()
         ]
-        info_count = sum(1 for r in dispatch_logs if r.levelno == logging.INFO)
-        debug_count = sum(1 for r in dispatch_logs if r.levelno == logging.DEBUG)
-        assert info_count == strat_mod.DISPATCH_INFO_LOG_LIMIT
-        assert debug_count == total - strat_mod.DISPATCH_INFO_LOG_LIMIT
+        assert len(dispatch_logs) == total
+        assert all(r.levelno == logging.DEBUG for r in dispatch_logs)
+
+
+class TestVerifiedUnicodePreSendFocusProof:
+    """The strategy must prove the captured target is foreground.
+
+    wh-review-pattern-fixes.41: the pre-send focus block discarded the
+    ``ensure_focused`` result and only logged a SetFocus failure, so the
+    Unicode SendInput burst still ran when focus never landed on the
+    captured control. The post-send foreground check sees that only
+    after the characters reached the wrong window.
+    """
+
+    def _strategy(self, buffer_manager, text_perfector, window_manager):
+        clipboard = _make_clipboard_ops()
+        strategy = VerifiedUnicodeStrategy(
+            buffer_manager, text_perfector, clipboard, window_manager
+        )
+        return strategy, clipboard
+
+    def test_ensure_focused_false_sends_nothing(
+        self, buffer_manager, text_perfector, window_manager
+    ):
+        window_manager.ensure_focused.return_value = False
+        strategy, clipboard = self._strategy(
+            buffer_manager, text_perfector, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, 5, None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=4242
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            result = strategy.insert("hello", context)
+
+        assert result.success is False
+        mock_send.assert_not_called()
+        assert clipboard.last_paste_was_sent is False
+        assert clipboard.accumulated_paste_chars == 0
+
+    def test_pre_send_focus_refusal_does_not_log_at_error(
+        self, buffer_manager, text_perfector, window_manager, caplog
+    ):
+        """A pre-send focus refusal must log below ERROR.
+
+        wh-focus-refusal-popup: every ERROR record becomes a Windows
+        notification box, because ErrorNotificationHandler in
+        utils/error_notifier.py is attached at ERROR level. This refusal
+        is not an error. It happens before ``last_paste_was_sent`` is
+        set, so ``UnicodeFirstStrategy`` always hands the insertion to
+        ``StandardStrategy``, which delivers the text. Logging it at
+        ERROR showed the user a popup for an operation that succeeded.
+
+        Observed 2026-08-19 in wheelhouse.log: the refusal fired while
+        dictating into a Brave text box, the clipboard path then pasted
+        the text, and the dispatch finished with status=ok.
+        """
+        window_manager.ensure_focused.return_value = False
+        strategy, _ = self._strategy(
+            buffer_manager, text_perfector, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with caplog.at_level(logging.DEBUG, logger=_STRAT_MOD), patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, 5, None),
+        ), patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=4242
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            strategy.insert("hello", context)
+
+        refusals = [
+            record
+            for record in caplog.records
+            if "ensure_focused" in record.getMessage()
+        ]
+        assert refusals, "expected the refusal to be logged at all"
+        assert all(
+            record.levelno < logging.ERROR for record in refusals
+        ), (
+            "the pre-send focus refusal logged at ERROR, which pops a "
+            "notification box for a recoverable condition: "
+            f"{[(r.levelname, r.getMessage()) for r in refusals]}"
+        )
+
+    def test_setfocus_failure_sends_nothing(
+        self, buffer_manager, text_perfector, window_manager
+    ):
+        strategy, clipboard = self._strategy(
+            buffer_manager, text_perfector, window_manager
+        )
+        context = _make_context(hwnd=4242)
+        context.focused_control.SetFocus.side_effect = Exception("COM error")
+
+        with patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, 5, None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=4242
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            result = strategy.insert("hello", context)
+
+        assert result.success is False
+        mock_send.assert_not_called()
+        assert clipboard.last_paste_was_sent is False
+
+    def test_foreground_mismatch_sends_nothing(
+        self, buffer_manager, text_perfector, window_manager
+    ):
+        """ensure_focused reports True, but a different window is foreground."""
+        strategy, clipboard = self._strategy(
+            buffer_manager, text_perfector, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, 5, None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=1111
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            result = strategy.insert("hello", context)
+
+        assert result.success is False
+        mock_send.assert_not_called()
+        assert clipboard.last_paste_was_sent is False
+
+    def test_ensure_focused_exception_sends_nothing(
+        self, buffer_manager, text_perfector, window_manager
+    ):
+        window_manager.ensure_focused.side_effect = Exception("win32 failure")
+        strategy, clipboard = self._strategy(
+            buffer_manager, text_perfector, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, 5, None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=4242
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            result = strategy.insert("hello", context)
+
+        assert result.success is False
+        mock_send.assert_not_called()
+        assert clipboard.last_paste_was_sent is False
+
+    def test_get_foreground_window_exception_sends_nothing(
+        self, buffer_manager, text_perfector, window_manager
+    ):
+        """A pre-send GetForegroundWindow failure cannot prove the target."""
+        strategy, clipboard = self._strategy(
+            buffer_manager, text_perfector, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, 5, None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow",
+            side_effect=OSError("rpc fail"),
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            result = strategy.insert("hello", context)
+
+        assert result.success is False
+        mock_send.assert_not_called()
+        assert clipboard.last_paste_was_sent is False

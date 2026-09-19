@@ -48,23 +48,18 @@ def _load_hints(adap: Dict[str, Any]) -> list[str]:
 
 
 @dataclass
-class OverflowDetectionConfig:
-    """Config for overflow detection and automatic restart."""
-    enabled: bool = True
-    overflow_threshold: int = 5
-    window_seconds: float = 30.0
-    restart_cooldown_seconds: float = 60.0
-    max_restart_attempts: int = 3
-    stable_reset_seconds: float = 300.0
-
-
-@dataclass
 class DebugConfig:
     """Granular debugging flags."""
     log_lifecycle: bool = False
     log_stream_responses: bool = False
     log_frame_stats: bool = False
     log_overflow_diagnostics: bool = False
+    # wh-stt-load-metrics.4: the consumer loop's CaptureLoadReporter and
+    # its periodic "[load-diag] window=" line. The Parakeet provider
+    # reads the same key, so one name turns the measurement on for
+    # either provider. Separate from log_overflow_diagnostics: the two
+    # answer different questions and a run can want either alone.
+    log_load_diagnostics: bool = False
 
 
 @dataclass
@@ -91,7 +86,6 @@ class AppConfig:
     # Required configuration objects
     latency: "LatencyConfig"
     debug: DebugConfig
-    overflow_detection: OverflowDetectionConfig
     agc: "AGCConfig"
     
     # Server
@@ -167,8 +161,16 @@ def load_config_or_exit(path: Path) -> Dict[str, Any]:
 
 
 def validate_config_or_exit(c: Dict[str, Any]) -> None:
-    required_sections = {"server", "adaptation", "client", "diagnostics", "debug", "latency", "overflow_detection"}
-    optional_sections = {"agc", "provider", "forwarding", "wake_word"}  # AGC optional for backward compat, provider for discovery, forwarding deprecated (use CLI args)
+    required_sections = {"server", "adaptation", "client", "diagnostics", "debug", "latency"}
+    # AGC optional for backward compat, provider for discovery, forwarding
+    # deprecated (use CLI args). overflow_detection is optional because it is
+    # gone: every value it carried was dead, and the capture layer builds its
+    # own OverflowConfig (David, QUESTIONS-2026-09-02 item 55, option 2). It
+    # stays listed so a settings file written before that ruling still starts.
+    # Unknown sections are refused below, so dropping the name outright would
+    # turn an old settings file into a startup refusal over a section nothing
+    # reads.
+    optional_sections = {"agc", "provider", "forwarding", "wake_word", "overflow_detection"}
     missing = required_sections - set(c.keys())
     extra = set(c.keys()) - required_sections - optional_sections
 
@@ -198,26 +200,17 @@ def load_config() -> tuple[argparse.Namespace, AppConfig]:
     diag = data["diagnostics"]
     dbg = data["debug"]
     lat = data.get("latency", {})
-    overflow = data.get("overflow_detection", {})
 
     debug_config = DebugConfig(
         log_lifecycle=dbg.get("log_lifecycle", False),
         log_stream_responses=dbg.get("log_stream_responses", False),
         log_frame_stats=dbg.get("log_frame_stats", False),
         log_overflow_diagnostics=dbg.get("log_overflow_diagnostics", False),
+        log_load_diagnostics=dbg.get("log_load_diagnostics", False),
     )
 
     latency_config = LatencyConfig(
         stability_commit_threshold=lat.get("stability_commit_threshold", 0.89),
-    )
-
-    overflow_config = OverflowDetectionConfig(
-        enabled=overflow.get("enabled", True),
-        overflow_threshold=overflow.get("overflow_threshold", 5),
-        window_seconds=overflow.get("window_seconds", 30.0),
-        restart_cooldown_seconds=overflow.get("restart_cooldown_seconds", 60.0),
-        max_restart_attempts=overflow.get("max_restart_attempts", 3),
-        stable_reset_seconds=overflow.get("stable_reset_seconds", 300.0),
     )
 
     agc_data = data.get("agc", {})
@@ -236,7 +229,6 @@ def load_config() -> tuple[argparse.Namespace, AppConfig]:
     app_config = AppConfig(
         latency=latency_config,
         debug=debug_config,
-        overflow_detection=overflow_config,
         agc=agc_config,
         model=srv["model"],
         language=srv["language_code"],

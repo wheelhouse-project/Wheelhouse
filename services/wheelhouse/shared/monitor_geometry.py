@@ -55,9 +55,10 @@ from __future__ import annotations
 import ctypes
 import logging
 import sys
+from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 from PySide6.QtCore import QRect
 
@@ -80,6 +81,82 @@ logger = logging.getLogger(__name__)
 # in the same enum exist (angular DPI, raw DPI) but they are not
 # relevant for placing a window on the correct physical monitor.
 _MDT_EFFECTIVE_DPI = 0
+
+# ``DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`` is the pseudo-handle -4
+# (winuser.h). ``DPI_AWARENESS`` enum: UNAWARE=0, SYSTEM_AWARE=1,
+# PER_MONITOR_AWARE=2 (v1 and v2 both report 2).
+_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+_DPI_AWARENESS_PER_MONITOR_AWARE = 2
+
+
+@contextmanager
+def per_monitor_dpi_context() -> Iterator[bool]:
+    """Make the calling thread per-monitor-DPI-aware for the block.
+
+    Yields ``True`` when monitor / window rectangles read inside the
+    block are true physical pixels: either the thread context was
+    switched to Per-Monitor v2 for the duration of the block (and is
+    restored on exit), or the thread was already per-monitor aware.
+    Yields ``False`` when neither holds -- a DPI-unaware or
+    system-aware thread whose User32 geometry reads would be
+    DPI-virtualized (scaled by the primary monitor's factor; on a 300%
+    3840x2160 monitor an unaware thread reads 1280x720). Callers MUST
+    NOT trust rectangles read on a ``False`` context
+    (wh-mouse-grid.1.16).
+
+    The GUI (Qt6) and Input (uiautomation's import-time
+    ``SetProcessDpiAwareness``) processes are already per-monitor
+    aware, so for them the switch is a no-op that still restores
+    cleanly. The Logic process is the caller this exists for: plain
+    ``python.exe`` starts DPI-UNAWARE and nothing else in Logic sets a
+    context. Never raises.
+    """
+    if sys.platform != "win32":
+        yield True
+        return
+    prev = None
+    user32 = None
+    ok = False
+    try:
+        user32 = ctypes.windll.user32
+        # DPI_AWARENESS_CONTEXT values are pseudo-pointer handles --
+        # declare full 64-bit void* so they are never truncated.
+        user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        prev = user32.SetThreadDpiAwarenessContext(
+            ctypes.c_void_p(_DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+        )
+        ok = bool(prev)
+        if not ok:
+            # The switch failed (returns NULL). Trust the block only if
+            # the thread is already per-monitor aware.
+            user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+            user32.GetAwarenessFromDpiAwarenessContext.restype = (
+                ctypes.c_int
+            )
+            user32.GetAwarenessFromDpiAwarenessContext.argtypes = [
+                ctypes.c_void_p
+            ]
+            ctx = user32.GetThreadDpiAwarenessContext()
+            ok = (
+                user32.GetAwarenessFromDpiAwarenessContext(ctx)
+                == _DPI_AWARENESS_PER_MONITOR_AWARE
+            )
+    except Exception:  # noqa: BLE001 -- fail closed on any ctypes surprise
+        logger.warning(
+            "per-monitor DPI context unavailable", exc_info=True
+        )
+        ok = False
+    try:
+        yield ok
+    finally:
+        if prev:
+            try:
+                user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(prev))
+            except Exception:  # noqa: BLE001 -- best-effort restore
+                logger.debug(
+                    "failed to restore thread DPI context", exc_info=True
+                )
 
 # ``EnumDisplayMonitors`` callback signature.
 _HMONITOR = wintypes.HANDLE

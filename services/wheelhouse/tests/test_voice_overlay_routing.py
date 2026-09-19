@@ -97,6 +97,7 @@ def _cache_with(*summaries: WalkSnapshotSummary) -> ClickSnapshotSummaryCache:
         OverlayState.PAINT_IN_FLIGHT,
         OverlayState.PAINTED,
         OverlayState.REFRESH_IN_FLIGHT,
+        OverlayState.POST_CLICK_SETTLING,
         OverlayState.PAUSED,
         OverlayState.ERROR,
     ],
@@ -120,6 +121,11 @@ def test_non_integer_routes_by_name_in_every_state(state):
 
 
 def test_closed_plus_integer_routes_by_name():
+    # GUARD (wh-overlay-slow-uia-stale-badges.1). Do not "fix" this to a
+    # notice. A control whose accessible name is the digit 7 -- the calculator
+    # key -- must stay reachable after the user says "hide numbers". The new
+    # POST_CLICK_SETTLING state exists so the settling gap does NOT reuse
+    # CLOSED, because CLOSED must keep this behaviour.
     cache = _cache_with(_summary("snap", 1, 2, 3))
     decision = route_click_n(
         state=OverlayState.CLOSED,
@@ -416,6 +422,60 @@ def test_error_plus_integer_routes_reject_notice():
 
 
 # ---------------------------------------------------------------------------
+# Pure resolver: POST_CLICK_SETTLING + N -> "numbers are updating" notice.
+# ---------------------------------------------------------------------------
+
+
+def test_post_click_settling_plus_integer_routes_updating_notice():
+    # The badges are off the screen and the next set is not built yet. Tell
+    # the user the numbers are updating. Never resolve N against the pin
+    # that the state machine still holds: those numbers are no longer
+    # visible.
+    cache = _cache_with(_summary("snap", 1, 2, 3))
+    decision = route_click_n(
+        state=OverlayState.POST_CLICK_SETTLING,
+        parsed_number=1,
+        cache=cache,
+        pinned_snapshot_id="snap",
+        prior_pinned_snapshot_id=None,
+        prior_pin_deferred=False,
+    )
+    assert decision.kind is RoutingKind.NOTICE
+    assert decision.reason == "numbers_updating"
+
+
+def test_post_click_settling_notice_carries_no_snapshot():
+    # The notice must not name a snapshot the user can no longer see.
+    cache = _cache_with(_summary("snap", 1, 2, 3))
+    decision = route_click_n(
+        state=OverlayState.POST_CLICK_SETTLING,
+        parsed_number=2,
+        cache=cache,
+        pinned_snapshot_id="snap",
+        prior_pinned_snapshot_id="older",
+        prior_pin_deferred=True,
+    )
+    assert decision.snapshot_id is None
+    assert decision.item_id is None
+
+
+def test_post_click_settling_never_routes_by_name():
+    # The defensive fallback at the end of route_click_n sends an unmodelled
+    # state to the by-name search. This test proves the new state has its own
+    # branch and does not reach that fallback.
+    cache = _cache_with(_summary("snap", 1, 2, 3))
+    decision = route_click_n(
+        state=OverlayState.POST_CLICK_SETTLING,
+        parsed_number=3,
+        cache=cache,
+        pinned_snapshot_id=None,
+        prior_pinned_snapshot_id=None,
+        prior_pin_deferred=False,
+    )
+    assert decision.kind is not RoutingKind.BY_NAME
+
+
+# ---------------------------------------------------------------------------
 # Logic wiring: forward_click_element routes by the resolver decision.
 # ---------------------------------------------------------------------------
 
@@ -436,6 +496,7 @@ def _make_controller(*, state: OverlayState = OverlayState.CLOSED,
     are real or simple fakes. app.send_request is captured.
     """
     from main import LogicController
+    from services.wheelhouse.overlay_focus_hooks import FocusChangeDebouncer
     from ui.click_config import ClickConfig
 
     c = MagicMock(spec=LogicController)
@@ -461,13 +522,15 @@ def _make_controller(*, state: OverlayState = OverlayState.CLOSED,
     machine.prior_pinned_snapshot_id = prior_pinned_snapshot_id
     machine._prior_pin_deferred = prior_pin_deferred
     c.click_overlay_state = machine
+    c._overlay_focus_debouncer = FocusChangeDebouncer()
 
     c.state_manager = MagicMock()
     c.state_manager.state_to_gui_queue = MagicMock()
 
     captured = {}
 
-    async def _send_request(action, params=None, timeout_s=None):
+    async def _send_request(action, params=None, timeout_s=None,
+                            on_late_response=None):
         captured["action"] = action
         captured["params"] = params
         captured["timeout_s"] = timeout_s
@@ -542,6 +605,119 @@ def test_painted_integer_miss_emits_notice_no_send_request():
     _, kwargs = c._forward_click_notice.call_args
     assert kwargs.get("outcome") == "execution_failed"
     assert kwargs.get("reason") == "no_badge_numbered"
+
+
+@pytest.mark.parametrize(
+    ("spoken", "badge"),
+    [("to", 2), ("too", 2), ("for", 4)],
+    ids=["to-is-2", "too-is-2", "for-is-4"],
+)
+def test_painted_homophone_clicks_the_badge_it_names(spoken, badge):
+    """wh-overlay-count-homophones: a badge number heard as its homophone.
+
+    The engine returns "to"/"too" for the spoken "two" and "for" for
+    "four". Before this change the badge path parsed with the default
+    aliases=False, so the word reached the by-name search and clicked
+    nothing. David's decision 2026-09-03 accepts the homophones here the
+    way the command counts already accept them.
+    """
+    c = _make_controller(
+        state=OverlayState.PAINTED, pinned_snapshot_id="snap",
+        cache_summaries=(_summary("snap", 1, 2, 3, 4),),
+    )
+    c._dispatch_snapshot_item_click = MagicMock()
+    asyncio.run(
+        c.forward_click_element(_query(name=spoken, role=None), "tr")
+    )
+    # No by-name IPC: the homophone resolved to a badge.
+    assert "action" not in c._captured
+    c._dispatch_snapshot_item_click.assert_called_once()
+    _, kwargs = c._dispatch_snapshot_item_click.call_args
+    assert kwargs.get("snapshot_id") == "snap"
+    assert kwargs.get("item_id") == "snap-item-%d" % badge
+
+
+def test_spoken_click_for_clicks_badge_four_through_the_real_parser():
+    """"click for" clicks badge 4, not a by-name search for "for".
+
+    Drives the real ClickCommandParser, so the query under test is the
+    one the speech path builds rather than a hand-made query.
+    """
+    from services.wheelhouse.speech.click_parser import ClickCommandParser
+
+    query = ClickCommandParser().parse("for")
+    assert query is not None
+    assert query.role is None
+
+    c = _make_controller(
+        state=OverlayState.PAINTED, pinned_snapshot_id="snap",
+        cache_summaries=(_summary("snap", 1, 2, 3, 4),),
+    )
+    c._dispatch_snapshot_item_click = MagicMock()
+    asyncio.run(c.forward_click_element(query, "tr"))
+    assert "action" not in c._captured
+    c._dispatch_snapshot_item_click.assert_called_once()
+    _, kwargs = c._dispatch_snapshot_item_click.call_args
+    assert kwargs.get("item_id") == "snap-item-4"
+
+
+def test_click_number_for_drops_the_filler_and_clicks_badge_four():
+    """"click number for" clicks badge 4.
+
+    click_parser drops a leading "number" filler only when what follows
+    parses as a number, so without the alias the filler stayed and the
+    query name was "number for" -- a by-name search for a control nobody
+    has. Drives the real parser.
+    """
+    from services.wheelhouse.speech.click_parser import ClickCommandParser
+
+    query = ClickCommandParser().parse("number for")
+    assert query is not None
+    assert query.name == "for"
+    assert query.role is None
+
+    c = _make_controller(
+        state=OverlayState.PAINTED, pinned_snapshot_id="snap",
+        cache_summaries=(_summary("snap", 1, 2, 3, 4),),
+    )
+    c._dispatch_snapshot_item_click = MagicMock()
+    asyncio.run(c.forward_click_element(query, "tr"))
+    assert "action" not in c._captured
+    # assert_called_once BEFORE reading call_args: an unclicked mock has
+    # call_args None, and unpacking None raises a TypeError that reads as
+    # a pass-for-the-wrong-reason in any gate that only counts failures.
+    c._dispatch_snapshot_item_click.assert_called_once()
+    _, kwargs = c._dispatch_snapshot_item_click.call_args
+    assert kwargs.get("item_id") == "snap-item-4"
+
+
+def test_a_real_name_beginning_with_the_filler_still_searches_by_name():
+    """"click number pad" keeps both words: "pad" is not a number.
+
+    The filler drop must stay guarded; the alias widens what counts as a
+    number, it must not make the guard unconditional.
+    """
+    from services.wheelhouse.speech.click_parser import ClickCommandParser
+
+    query = ClickCommandParser().parse("number pad")
+    assert query is not None
+    assert query.name == "number pad"
+
+
+def test_a_homophone_with_a_role_keyword_stays_a_by_name_click():
+    """"click for button" still searches for a control named "for".
+
+    The role check is what separates a badge number from a by-name
+    query; the alias change must not reach past it.
+    """
+    c = _make_controller(
+        state=OverlayState.PAINTED, pinned_snapshot_id="snap",
+        cache_summaries=(_summary("snap", 1, 2, 3, 4),),
+    )
+    asyncio.run(
+        c.forward_click_element(_query(name="for", role="Button"), "tr")
+    )
+    assert c._captured.get("action") == "click_element"
 
 
 def test_held_state_integer_routes_hold_stub_no_send_request():
@@ -968,8 +1144,14 @@ def test_renumber_safe_when_current_summary_unavailable():
     assert renumber_click_is_safe(prior, None, 1) is True
 
 
-def _guarded_controller(*, cache_summaries, swap, now=100.0):
-    """A routing controller with the REAL renumber-guard method bound."""
+def _guarded_controller(*, cache_summaries, swaps, now=100.0):
+    """A routing controller with the REAL renumber-guard method bound.
+
+    ``swaps`` is the list the guard keeps: one ``(prior_snapshot_id,
+    swap_monotonic)`` entry per repaint that replaced the badge list, oldest
+    first. Every entry is a list the user may have been reading when they
+    began speaking (wh-overlay-slow-uia-stale-badges.4.2.1).
+    """
     from main import LogicController
 
     c = _make_controller(
@@ -980,7 +1162,7 @@ def _guarded_controller(*, cache_summaries, swap, now=100.0):
         LogicController._overlay_renumber_click_safe.__get__(c)
     )
     c._overlay_now_monotonic = lambda: now
-    c._overlay_proactive_swap = swap
+    c._overlay_repaint_swaps = list(swaps)
     c._dispatch_snapshot_item_click = MagicMock()
     c._forward_click_notice = MagicMock()
     return c
@@ -992,7 +1174,7 @@ def test_click_n_within_grace_after_proactive_swap_blocked_when_renumbered():
             _named_summary("snap-old", {2: "Submit"}),
             _named_summary("snap-new", {2: "Delete"}),
         ),
-        swap=("snap-old", 99.0),  # 1s ago -- inside the grace window
+        swaps=[("snap-old", 99.0)],  # 1s ago -- inside the grace window
     )
     asyncio.run(c.forward_click_element(_query(name="2", role=None), "tr-rg"))
     c._dispatch_snapshot_item_click.assert_not_called()
@@ -1002,7 +1184,7 @@ def test_click_n_within_grace_after_proactive_swap_blocked_when_renumbered():
     assert kwargs.get("outcome") == "execution_failed"
     # One block per swap: the guard is consumed so the user's corrected
     # follow-up click is never blocked by the same swap.
-    assert c._overlay_proactive_swap is None
+    assert c._overlay_repaint_swaps == []
 
 
 def test_click_n_within_grace_proceeds_when_badge_name_unchanged():
@@ -1011,7 +1193,7 @@ def test_click_n_within_grace_proceeds_when_badge_name_unchanged():
             _named_summary("snap-old", {2: "Submit"}),
             _named_summary("snap-new", {2: "Submit"}),
         ),
-        swap=("snap-old", 99.0),
+        swaps=[("snap-old", 99.0)],
     )
     asyncio.run(c.forward_click_element(_query(name="2", role=None), "tr-rg2"))
     c._dispatch_snapshot_item_click.assert_called_once()
@@ -1024,12 +1206,61 @@ def test_click_n_after_grace_expiry_proceeds_and_clears_guard():
             _named_summary("snap-old", {2: "Submit"}),
             _named_summary("snap-new", {2: "Delete"}),
         ),
-        swap=("snap-old", 90.0),  # 10s ago -- grace long expired
+        swaps=[("snap-old", 90.0)],  # 10s ago -- grace long expired
     )
     asyncio.run(c.forward_click_element(_query(name="2", role=None), "tr-rg3"))
     c._dispatch_snapshot_item_click.assert_called_once()
     c._forward_click_notice.assert_not_called()
-    assert c._overlay_proactive_swap is None
+    assert c._overlay_repaint_swaps == []
+
+
+def test_click_n_blocked_when_an_intermediate_list_renumbered_badge_n():
+    """A chain of swaps: EVERY list in it is one the user may have read.
+
+    wh-overlay-slow-uia-stale-badges.4.2.1 (codex). A menu opens (snap-old ->
+    snap-mid) and closes again (snap-mid -> snap-new) inside one grace
+    window. Badge 2 is "Submit" on snap-old and on snap-new, but "Delete" on
+    snap-mid. A user who read snap-mid and said "click 2" means the Delete
+    button; comparing only the FIRST prior against the current list says
+    nothing changed, and the click lands on Submit.
+    """
+    c = _guarded_controller(
+        cache_summaries=(
+            _named_summary("snap-old", {2: "Submit"}),
+            _named_summary("snap-mid", {2: "Delete"}),
+            _named_summary("snap-new", {2: "Submit"}),
+        ),
+        swaps=[("snap-old", 99.0), ("snap-mid", 99.5)],
+    )
+    asyncio.run(c.forward_click_element(_query(name="2", role=None), "tr-rg4"))
+    c._dispatch_snapshot_item_click.assert_not_called()
+    c._forward_click_notice.assert_called_once()
+    _, kwargs = c._forward_click_notice.call_args
+    assert kwargs.get("reason") == OVERLAY_NUMBERS_CHANGED
+
+
+def test_a_later_swap_keeps_its_own_grace_window_after_the_first_expires():
+    """Each swap's window is measured from ITS OWN time, not the chain's.
+
+    wh-overlay-slow-uia-stale-badges.4.2.1 (codex). snap-old was replaced ten
+    seconds ago, so nobody is still speaking about it. snap-mid was replaced
+    one second ago and IS still protected. Expiring the whole guard on the
+    oldest entry's timestamp drops the protection for the swap that just
+    happened.
+    """
+    c = _guarded_controller(
+        cache_summaries=(
+            _named_summary("snap-old", {2: "Submit"}),
+            _named_summary("snap-mid", {2: "Delete"}),
+            _named_summary("snap-new", {2: "Submit"}),
+        ),
+        swaps=[("snap-old", 90.0), ("snap-mid", 99.0)],
+    )
+    asyncio.run(c.forward_click_element(_query(name="2", role=None), "tr-rg5"))
+    c._dispatch_snapshot_item_click.assert_not_called()
+    c._forward_click_notice.assert_called_once()
+    _, kwargs = c._forward_click_notice.call_args
+    assert kwargs.get("reason") == OVERLAY_NUMBERS_CHANGED
 
 
 # ---------------------------------------------------------------------------

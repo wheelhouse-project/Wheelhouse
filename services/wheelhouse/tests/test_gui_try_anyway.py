@@ -34,6 +34,19 @@ def _new_token() -> str:
     return str(uuid.uuid4())
 
 
+@pytest.fixture(autouse=True)
+def _enable_uncertain_notice():
+    """wh-dictation-gate-ux: the uncertain-category notice is disabled
+    in production until the dictation-gate UX redesign lands. These
+    tests exercise the Try-it-anyway machinery that stays in the code
+    for the redesign to re-enable, so they run with the suppression
+    switch off. See test_gui_uncertain_notice_disabled.py for the
+    suppression's own tests."""
+
+    with patch("gui.SUPPRESS_UNCERTAIN_REJECTION_NOTICE", False):
+        yield
+
+
 @pytest.fixture
 def manager():
     with patch("gui.FloatingButton"), \
@@ -57,7 +70,7 @@ class TestCorrelationTokenCapture:
     def test_show_rejection_captures_correlation_token(self, manager):
         token = _new_token()
 
-        with patch("gui.notification") as _notify:
+        with patch("plyer.notification") as _notify:
             # Bypass actual toast widget construction; we only need
             # to observe that the manager recorded the token from
             # the message.
@@ -189,7 +202,7 @@ class TestSignalWiring:
         across renders) or otherwise ensure idempotency.
         """
 
-        with patch("gui.notification"):
+        with patch("plyer.notification"):
             with patch.object(
                 manager, "_rejection_suppression"
             ) as mock_suppress, patch(
@@ -238,7 +251,7 @@ class TestSignalWiring:
     def test_second_show_updates_token(self, manager):
         """The recorded token must follow the most recent rejection."""
 
-        with patch("gui.notification"):
+        with patch("plyer.notification"):
             with patch.object(
                 manager, "_rejection_suppression"
             ) as mock_suppress, patch(
@@ -282,7 +295,7 @@ class TestSignalWiring:
         same target.
         """
 
-        with patch("gui.notification"):
+        with patch("plyer.notification"):
             with patch.object(
                 manager, "_rejection_suppression"
             ) as mock_suppress, patch(

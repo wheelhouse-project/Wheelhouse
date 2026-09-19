@@ -1063,7 +1063,7 @@
 <tr>
 <td>ampersand</td>
 <td>Types &amp; inline during dictation</td>
-<td>"and sign" also works</td>
+<td>Say "ampersand"; "and sign" types the words</td>
 </tr>
 <tr>
 <td>asterisk</td>
@@ -1508,7 +1508,7 @@
 <tr>
 <td>help</td>
 <td>Opens the Wheelhouse Assistant (the official online help) in your browser. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
-<td>Uses the gem_url setting under [ai.help]; if blanked, Wheelhouse says out loud that online help is not configured</td>
+<td>Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured, but only when the AI service is enabled; the Help menu item shows its notice whether or not the AI service is enabled</td>
 </tr>
 <tr>
 <td>patterns</td>
@@ -1523,7 +1523,7 @@
 <tr>
 <td>x-ray fix</td>
 <td>Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version</td>
-<td>Requires the AI server to be configured and reachable; Wheelhouse speaks its progress and always preserves your original text on any failure</td>
+<td>Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure</td>
 </tr>
 <tr>
 <td>simplify</td>
@@ -1569,7 +1569,7 @@
 <p><strong>COMMAND_TIMEOUT_MS</strong> <em>(default: <code>700</code>)</em> -- How long Wheelhouse waits after you stop speaking, in milliseconds, before deciding a command phrase is complete. Raise to 900-1000 if commands fire before you finish (common on slower machines); lower slightly if responses feel sluggish.</p>
 <p><strong>GREEDY_TIMEOUT_MS</strong> <em>(default: <code>5000</code>)</em> -- A longer wait, in milliseconds, for commands that intentionally keep listening for more words. Rarely needs changing.</p>
 <p><strong>COMMAND_COMPLETION_WAIT_MS</strong> <em>(default: <code>1000</code>)</em> -- A short pause, in milliseconds, after a command finishes so a fast follow-up does not collide with it. Raise on a slow machine if back-to-back commands step on each other.</p>
-<p><strong>ENABLE_AUDIO_SUPPRESSION</strong> <em>(default: <code>true</code>)</em> -- Pause listening while computer audio is playing. Turn off only if you want Wheelhouse listening during playback; expect more misrecognitions, because the microphone picks up the audio.</p>
+<p><strong>ENABLE_AUDIO_SUPPRESSION</strong> <em>(default: <code>"auto"</code>)</em> -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone has an echo canceller, and pauses only when Windows reports none or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.</p>
 <p><strong>ENABLE_SONOS_SUPPRESSION</strong> <em>(default: <code>true</code>)</em> -- Pause listening while Sonos music is playing. Turn off only if you want Wheelhouse listening during playback; expect more misrecognitions, because the microphone picks up the audio.</p>
 <p><strong>ENABLE_IDLE_SUPPRESSION</strong> <em>(default: <code>true</code>)</em> -- Pause listening after the computer sits idle. Turn off only if you never want idle pauses; the Idle Monitor plugin controls the timing.</p>
 <p><strong>LOG_FILE</strong> <em>(default: <code>""</code>)</em> -- Where the activity log goes; empty means the standard log location. Change only when a support conversation asks you to.</p>
@@ -1578,6 +1578,10 @@
 <p><strong>SIDE_OFFSET</strong> <em>(default: <code>10</code>)</em> -- Width in pixels of the left-edge screen zone where the mouse thumb wheel adjusts brightness instead of volume. Raise it if the brightness zone is hard to hit.</p>
 <p><strong>BRIGHTNESS_INCREMENT</strong> <em>(default: <code>1.0</code>)</em> -- The size of each thumb-wheel brightness adjustment step. Raise for faster, coarser changes; lower for finer control.</p>
 <p><strong>VOLUME_INCREMENT</strong> <em>(default: <code>0.5</code>)</em> -- The size of each thumb-wheel volume adjustment step. Raise for faster, coarser changes; lower for finer control.</p>
+<p><strong>THUMB_WHEEL_DEAD_ZONE_TICKS</strong> <em>(default: <code>3</code>)</em> -- How many thumb-wheel ticks a gesture must reach before the brightness or volume zone acts. Ticks below this are held; the batch that reaches it releases them, and every later tick in the same gesture acts at once. Raise if the wheel still reacts to an accidental touch; set to 1 to make every tick act at once.</p>
+<p><strong>THUMB_WHEEL_GESTURE_GAP_MS</strong> <em>(default: <code>500</code>)</em> -- The pause, in milliseconds, that ends a thumb-wheel gesture. After a longer pause the next touch starts in the dead zone again and any held ticks are forgotten. Raise if a slow, deliberate roll keeps stopping early; lower if a stray tick still adds up with the next touch.</p>
+<p><strong>THUMB_WHEEL_MAX_TICKS_PER_BATCH</strong> <em>(default: <code>3</code>)</em> -- The most thumb-wheel ticks one 50 ms batch may apply to brightness or volume. Ticks above this in a single batch are discarded, so a fast flick moves at most this many ticks per batch. Raise for larger changes from a fast roll; lower if a flick still jumps too far.</p>
+<p><strong>BRIGHTNESS_STEPS_PER_COMMAND</strong> <em>(default: <code>2</code>)</em> -- The most native TV brightness steps one thumb-wheel command may carry. The TV answers one command at a time, about 400 ms each for a Samsung, so this is how far brightness moves per round trip while the wheel turns. Ticks beyond it are discarded, so the TV never keeps moving after the wheel stops. Set 1 for the smoothest one-step-at-a-time change; raise it if brightness moves too slowly. A value below 1 counts as 1.</p>
 <p><strong>FLOATING_BUTTON_SIZE</strong> <em>(default: <code>50</code>)</em> -- Size in pixels of the small on-screen status button. Dragging the button's outer edge, or holding Ctrl and rolling the mouse wheel over it, writes this setting.</p>
 <p><strong>FLOATING_BUTTON_POS</strong> <em>(default: <code>[100, 100]</code>)</em> -- Screen position of the small on-screen status button, as [x, y] pixels from the top-left of the desktop. Dragging the button writes this setting, and so does resizing it, because the button grows and shrinks around its own centre.</p>
 <p><strong>FLOATING_BUTTON_VISIBLE</strong> <em>(default: <code>true</code>)</em> -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target, especially handy in push-to-talk mode.</p>
@@ -1586,11 +1590,8 @@
 <p><strong>SPATIAL_SOUND_EXEC</strong> <em>(default: <code>""</code>)</em> -- Path to the small free NirSoft helper tool used for voice switching of Dolby Atmos spatial sound; empty means the feature is off. Fill in the tool path only if you use Dolby Atmos and have that tool installed; everyone else can ignore it.</p>
 <p><strong>SPATIAL_SOUND_FORMAT</strong> <em>(default: <code>"Dolby Atmos for home theater"</code>)</em> -- The spatial sound format name passed to the helper tool. Only matters if SPATIAL_SOUND_EXEC is set.</p>
 <h3 id="brightness_coordinator">[brightness_coordinator]</h3>
-<p><strong>software_dimmer</strong> <em>(default: <code>"gamma_dimmer"</code>)</em> -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens through the graphics card), "overlay" (a translucent overlay window), or "flux" (drives a companion dimming app via hotkeys). Change only if dimming misbehaves with your monitor setup.</p>
+<p><strong>software_dimmer</strong> <em>(default: <code>"gamma_dimmer"</code>)</em> -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens through the graphics card), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.</p>
 <p><strong>unwinding_threshold</strong> <em>(default: <code>10</code>)</em> -- Currently has no effect -- Wheelhouse hands control back to the hardware only once software dimming is fully undone, whatever this is set to.</p>
-<p><strong>flux_transition_percent</strong> <em>(default: <code>2</code>)</em> -- Percent of brightness per simulated hotkey press when driving a companion dimming app.</p>
-<p><strong>flux_dim_hotkey</strong> <em>(default: <code>["alt", "pagedown"]</code>)</em> -- The shortcut pressed to drive the companion dimming app's dim action. Change only if you remapped the app's own hotkeys.</p>
-<p><strong>flux_brighten_hotkey</strong> <em>(default: <code>["alt", "pageup"]</code>)</em> -- The shortcut pressed to drive the companion dimming app's brighten action. Change only if you remapped the app's own hotkeys.</p>
 <h3 id="pluginsinternal_panel">[plugins.internal_panel]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the Internal Panel plugin on or off; it controls a laptop's built-in screen brightness from the brightness scroll zone. On a desktop PC with no built-in panel it does nothing and is safe to leave enabled.</p>
 <h3 id="pluginssonos">[plugins.sonos]</h3>
@@ -1637,10 +1638,10 @@
 <p><strong>same_process_browser_names</strong> <em>(default: <code>["brave.exe", "brave_beta.exe", "chrome.exe", "chromium.exe", "msedge.exe", "edge.exe", "vivaldi.exe", "opera.exe", "operagx.exe", "arc.exe"]</code>)</em> -- The web browsers Wheelhouse recognizes (browsers manage their windows in an unusual way); all the mainstream ones are already listed.</p>
 <p><strong>same_process_browser_names_extend</strong> <em>(default: <code>[]</code>)</em> -- Adds an unusual browser to the recognized list without retyping the built-ins.</p>
 <h3 id="ui_actionstext_target">[ui_actions.text_target]</h3>
-<p><strong>allow_class_names_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of window classes allowed to receive dictation. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.</p>
-<p><strong>deny_control_types_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of control types denied dictation. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.</p>
-<p><strong>deny_class_names_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of window classes denied dictation. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.</p>
-<p><strong>browser_process_names_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of browser process names used by the dictation safety check. Most people should use the built-in approval prompt instead -- when Wheelhouse is unsure about a text box, it asks on screen and remembers your answer.</p>
+<p><strong>allow_class_names_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of window classes allowed to receive dictation. Add a window here when you want your short phrases typed key by key into it. Wheelhouse pastes your words into a box it does not recognize, and it asks you nothing. In some apps your words are never typed key by key, whatever you add here, and long text is never typed either.</p>
+<p><strong>deny_control_types_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of control types denied dictation. Add a control here when Wheelhouse types into something that is not a text box. Wheelhouse then pastes your words there instead of typing them, so the words still arrive.</p>
+<p><strong>deny_class_names_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of window classes denied dictation. Add a window here when Wheelhouse types into something that is not a text box. Wheelhouse then pastes your words there instead of typing them, so the words still arrive.</p>
+<p><strong>browser_process_names_extend</strong> <em>(default: <code>[]</code>)</em> -- Extends the built-in list of browser process names used by the dictation safety check. Add a browser here when Wheelhouse types into the page itself, which scrolls the page. Wheelhouse then pastes your words instead of typing them.</p>
 <h3 id="speech">[speech]</h3>
 <p><strong>interaction_mode</strong> <em>(default: <code>"toggle"</code>)</em> -- The microphone interaction mode: toggle keeps the microphone on until you turn it off; push_to_talk listens only while you hold the floating button, muting system audio during the hold. Valid values: "toggle" or "push_to_talk". You can also switch by voice (push to talk mode / click to talk mode) without editing anything.</p>
 <p><strong>ptt_safety_timeout_seconds</strong> <em>(default: <code>30</code>)</em> -- In push-to-talk mode, automatically releases the microphone if a hold gets stuck. Raise it if you routinely dictate longer than 30 seconds in one hold.</p>
@@ -1665,7 +1666,7 @@
 <p><strong>gpu_layers</strong> <em>(default: <code>99</code>)</em> -- How much of the model to place on the graphics card. Valid values: 99 places the whole model on the graphics card; 0 runs it entirely on the processor, which the installer chooses for a machine with enough system memory but no suitable graphics card. Values in between split it. Lower it if the server fails to start because the graphics card is out of memory.</p>
 <p><strong>startup_timeout_seconds</strong> <em>(default: <code>90</code>)</em> -- How long Wheelhouse waits for its model server to report itself ready before giving up and leaving the AI features off. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.</p>
 <h3 id="aihelp">[ai.help]</h3>
-<p><strong>gem_url</strong> <em>(default: <code>"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"</code>)</em> -- The web address the wheelhouse-help-online voice command opens in your browser; if you blank it out, the command answers out loud that online help is not configured.</p>
+<p><strong>gem_url</strong> <em>(default: <code>"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"</code>)</em> -- The web address the wheelhouse-help-online voice command opens in your browser; if you blank it out, the command shows a notice that online help is not configured, but only when the AI service is enabled.</p>
 <p><strong>max_response_tokens</strong> <em>(default: <code>800</code>)</em> -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.</p>
 <h3 id="click">[click]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- The master switch for voice clicking -- the click-something-by-name commands and the numbered overlay.</p>
@@ -1688,7 +1689,7 @@
 <p><strong>output_cap_chars</strong> <em>(default: <code>10000</code>)</em> -- The most characters a pattern step's captured text may hold -- the output a run_capture program prints or the reply an ask_ai step receives; longer output makes the step fail rather than insert an incomplete piece of it. Raise it (up to the 15360 ceiling) if a legitimate script prints more; lower it for a tighter guard against a runaway program filling your document.</p>
 <p><strong>run_capture_timeout_default_s</strong> <em>(default: <code>10</code>)</em> -- How many seconds a run_capture pattern step waits for its program to finish when the pattern gives no timeout number of its own. Raise it if your scripts legitimately run longer; 60 seconds is the most any waiting step will wait, because voice commands wait their turn while a step runs.</p>
 <hr />
-<p>Generated: 2026-07-31 for the v1.0.7 release</p>
+<p>Generated: 2026-09-18 for the v1.0.8 release</p>
 </main>
 </body>
 </html>

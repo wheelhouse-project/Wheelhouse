@@ -33,6 +33,11 @@ Entry shape (all fields required):
   skip_clipboard_restore, capture_clipboard, add_hint_to_stt,
   set_speech_interaction_mode. Moving an entry between basic and advanced
   is a one-line audience change; do not touch the internal set.
+- ``group``    -- one name from ACTION_GROUPS: the sub-heading the picker
+  lists this entry under (wh-action-picker-ordering). Every entry carries
+  one, including basic and internal entries, so an audience change stays
+  a one-line edit. ``picker_sections`` below turns audience + group into
+  the order the editor shows.
 
 Params describe what patterns.toml actually passes (ground truth checked
 against the shipped file), not the Python signature: e.g. ``hk`` takes a
@@ -44,6 +49,39 @@ whose stored return value becomes the query.
 # Allowed values, exported for consumers (the editor's field generator and
 # validators). Kept in sync with spec section 5.
 AUDIENCES = ("basic", "advanced", "internal")
+
+# Every group name an entry may declare (wh-action-picker-ordering). The
+# picker shows these as sub-headings under "Advanced actions", sorted A-Z,
+# and sorts the entries inside each one A-Z by label -- an order a user can
+# read off the list. The tuple is the spelling authority: a new group must
+# be added here first, so a typo cannot invent a near-duplicate heading.
+# "Clipboard" holds internal-only entries today and therefore never renders.
+ACTION_GROUPS = (
+    "AI",
+    "Clicking",
+    "Clipboard",
+    "Date and pauses",
+    "Keyboard",
+    "Mouse grid",
+    "Programs and web",
+    "Scrolling",
+    "Text",
+    "Wheelhouse",
+)
+
+# The actions that hand a value to the steps after them. The command
+# engine stores a step's string return under the function name, and under
+# the step's optional ``result`` name as well (speech/command_engine.py
+# lines 342-347). The editor offers a result-name field for exactly these
+# entries (wh-editor-step-result-name); every other action returns nothing
+# to name. capture_clipboard is listed because the engine treats it the
+# same way, though its internal audience keeps it out of the picker.
+RESULT_PRODUCING_ACTIONS = frozenset({
+    "ask_ai",
+    "capture_clipboard",
+    "date",
+    "run_capture",
+})
 PARAM_KINDS = (
     "text",
     "key",
@@ -54,6 +92,11 @@ PARAM_KINDS = (
     "group_ref",
     "choice",
 )
+
+# The four directions utils/win_input_sender.scroll_wheel accepts
+# (wh-voice-access-parity.2.3). Listed here rather than imported for the same
+# dependency-freeness reason as the transformation names below.
+_SCROLL_CHOICES = ("up", "down", "left", "right")
 
 # The 15 transformation names ui/selection_transformer.py accepts
 # (apply_transformation's dispatch chain). Listed here rather than imported
@@ -111,6 +154,77 @@ ACTION_CATALOG = (
             'saying "undo 3" presses Ctrl+Z three times.'
         ),
         "audience": "basic",
+        "group": "Keyboard",
+    },
+    {
+        "name": "scroll",
+        "label": "Scroll the mouse wheel",
+        "summary": (
+            "Turns the mouse wheel a number of notches, up, down, left or "
+            "right, without moving or pressing the mouse."
+        ),
+        "params": [
+            {
+                "name": "direction",
+                "summary": "Which way to turn the wheel.",
+                "kind": "choice",
+                "choices": list(_SCROLL_CHOICES),
+            },
+            {
+                "name": "clicks",
+                "summary": (
+                    "Optional last value: how many wheel notches to send "
+                    "(capped at 50); often a capture group like g1 so the "
+                    "spoken number is used."
+                ),
+                "kind": "number",
+            },
+        ],
+        "example": (
+            'Trigger "^scroll down\\s*(\\d+)?$" with params ["down", "g1"]: '
+            'saying "scroll down 3" turns the wheel three notches down.'
+        ),
+        "audience": "advanced",
+        "group": "Scrolling",
+    },
+    {
+        "name": "start_continuous_scroll",
+        "label": "Start scrolling and keep going",
+        "summary": (
+            "Starts turning the mouse wheel over and over, in one direction, "
+            "until a stop command arrives or the time limit is reached."
+        ),
+        "params": [
+            {
+                "name": "direction",
+                "summary": "Which way to keep turning the wheel.",
+                "kind": "choice",
+                "choices": list(_SCROLL_CHOICES),
+            },
+        ],
+        "example": (
+            'Trigger "^start scrolling down$" with params ["down"]: saying '
+            '"start scrolling down" scrolls down until you say "stop '
+            'scrolling".'
+        ),
+        "audience": "advanced",
+        "group": "Scrolling",
+    },
+    {
+        "name": "stop_continuous_scroll",
+        "label": "Stop the scrolling",
+        "summary": (
+            "Stops a scroll that was started with the continuous scroll "
+            "command. It takes no direction and does nothing when no scroll "
+            "is running."
+        ),
+        "params": [],
+        "example": (
+            'Trigger "^stop scrolling$" with no params: saying "stop '
+            'scrolling" ends the scroll that is running.'
+        ),
+        "audience": "advanced",
+        "group": "Scrolling",
     },
     {
         "name": "insert_text",
@@ -135,6 +249,7 @@ ACTION_CATALOG = (
             "of firing the submit command."
         ),
         "audience": "basic",
+        "group": "Text",
     },
     {
         "name": "run",
@@ -156,6 +271,7 @@ ACTION_CATALOG = (
             "opens the Windows Settings app."
         ),
         "audience": "basic",
+        "group": "Programs and web",
     },
     {
         "name": "activate",
@@ -177,9 +293,11 @@ ACTION_CATALOG = (
         ],
         "example": (
             'Trigger "^notepad$" with params ["notepad.exe"]: saying '
-            '"x-ray notepad" focuses the Notepad window.'
+            '"notepad", and nothing else in that utterance, focuses the '
+            "Notepad window."
         ),
         "audience": "basic",
+        "group": "Programs and web",
     },
     # ------------------------------------------------------------------
     # advanced -- everything else user-meaningful
@@ -210,6 +328,7 @@ ACTION_CATALOG = (
             'saying "delete 3" presses the Delete key three times.'
         ),
         "audience": "advanced",
+        "group": "Keyboard",
     },
     {
         "name": "press_keys",
@@ -235,6 +354,7 @@ ACTION_CATALOG = (
             '"press control alt delete" presses Ctrl+Alt+Delete.'
         ),
         "audience": "advanced",
+        "group": "Keyboard",
     },
     {
         "name": "literal",
@@ -257,6 +377,7 @@ ACTION_CATALOG = (
             'types "hello" with no command matching or cleanup.'
         ),
         "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "type_text",
@@ -280,6 +401,7 @@ ACTION_CATALOG = (
             'types "hello".'
         ),
         "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "insert_raw",
@@ -303,6 +425,32 @@ ACTION_CATALOG = (
             '"insert TODO:" inserts "TODO:" exactly, no leading space.'
         ),
         "audience": "advanced",
+        "group": "Text",
+    },
+    {
+        "name": "select_phrase",
+        "label": "Select a spoken phrase",
+        "summary": (
+            "Finds the first match of the spoken words in the focused text "
+            "control and selects it. The match is exact apart from letter "
+            "case."
+        ),
+        "params": [
+            {
+                "name": "phrase",
+                "summary": (
+                    "The words to find; may be a capture group like g1."
+                ),
+                "kind": "text",
+            },
+        ],
+        "example": (
+            'Trigger "^select (.+)$" with params ["g1"]: saying '
+            '"x-ray select brown fox" selects the first "brown fox" in the '
+            "document. This one needs the hotword first."
+        ),
+        "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "insert_newlines",
@@ -325,6 +473,7 @@ ACTION_CATALOG = (
             '"blank lines 3" inserts three newlines.'
         ),
         "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "transform_selection",
@@ -348,6 +497,7 @@ ACTION_CATALOG = (
             'with "hello_world".'
         ),
         "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "text",
@@ -373,6 +523,7 @@ ACTION_CATALOG = (
             'during dictation inserts "." instead of the word.'
         ),
         "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "number_point",
@@ -396,6 +547,7 @@ ACTION_CATALOG = (
             'inserts "5.".'
         ),
         "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "wrap_or_insert",
@@ -431,6 +583,7 @@ ACTION_CATALOG = (
             '"parentheses" wraps the selection or inserts "()".'
         ),
         "audience": "advanced",
+        "group": "Text",
     },
     {
         "name": "cursor_navigate",
@@ -456,6 +609,7 @@ ACTION_CATALOG = (
             "end of the line."
         ),
         "audience": "advanced",
+        "group": "Keyboard",
     },
     {
         "name": "click_element",
@@ -475,10 +629,12 @@ ACTION_CATALOG = (
             },
         ],
         "example": (
-            'Trigger "^click\\s+(.+)$" with params ["g1"]: saying "click '
-            'submit button" clicks the button labeled Submit.'
+            'Trigger "^(?:click|tap)\\s+(.+)$" with params ["g1"]: saying '
+            '"x-ray click submit button" clicks the button labeled Submit. '
+            "This one needs the hotword first."
         ),
         "audience": "advanced",
+        "group": "Clicking",
     },
     {
         "name": "show_overlay_command",
@@ -489,11 +645,12 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^apply numbers$" with no params: saying "apply '
-            "numbers\" shows the badges; then \"click 4\" clicks control "
-            "number 4."
+            'Trigger "^(?:show|apply) numbers$" with no params: saying '
+            "\"show numbers\" shows the badges; then \"x-ray click 4\" "
+            "clicks control number 4. \"apply numbers\" does the same."
         ),
         "audience": "advanced",
+        "group": "Clicking",
     },
     {
         "name": "hide_overlay_command",
@@ -504,10 +661,253 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^dismiss numbers$" with no params: saying "dismiss '
-            'numbers" hides the badges.'
+            'Trigger "^(?:hide|dismiss) numbers$" with no params: saying '
+            '"hide numbers" hides the badges. "dismiss numbers" does the '
+            'same.'
         ),
         "audience": "advanced",
+        "group": "Clicking",
+    },
+    {
+        "name": "click_element_command",
+        "label": "Right- or double-click a control by name",
+        "summary": (
+            "Parses a full gesture click command (right click X, double "
+            "click X) and clicks the named control with that mouse "
+            "gesture."
+        ),
+        "params": [
+            {
+                "name": "utterance",
+                "summary": (
+                    "Capture group holding the whole spoken command "
+                    "including the gesture words, usually g1."
+                ),
+                "kind": "group_ref",
+            },
+        ],
+        "example": (
+            'Trigger "^((?:right|double)[\\s-]+click\\s+.+)$" with params '
+            '["g1"]: saying "right click recycle bin" opens the context '
+            "menu of the Recycle Bin icon."
+        ),
+        "audience": "advanced",
+        "group": "Clicking",
+    },
+    {
+        "name": "grid_show_command",
+        "label": "Show the mouse grid",
+        "summary": (
+            "Opens the 3x3 mouse grid over the focused monitor; spoken "
+            "numbers then narrow it to a point you can click, drag, or "
+            "move to."
+        ),
+        "params": [],
+        "example": (
+            'Trigger "^(?:show|apply) grid$" with no params: saying '
+            '"show grid" or "apply grid" paints the grid; "5" then "click" clicks the '
+            "center."
+        ),
+        "audience": "advanced",
+        "group": "Mouse grid",
+    },
+    {
+        "name": "grid_dismiss_command",
+        "label": "Dismiss the mouse grid",
+        "summary": "Closes the mouse grid without clicking anything.",
+        "params": [],
+        "example": (
+            'Trigger "^(?:hide|dismiss) grid$" with no params: saying '
+            '"hide grid" removes the grid. "dismiss grid" does the same.'
+        ),
+        "audience": "advanced",
+        "group": "Mouse grid",
+    },
+    {
+        "name": "grid_next_screen_command",
+        "label": "Move the mouse grid to the next monitor",
+        "summary": (
+            "Moves the open mouse grid to the next monitor, resetting it "
+            "to cover that whole screen."
+        ),
+        "params": [],
+        "example": (
+            'Trigger "^grid next screen$" with no params: saying "grid '
+            'next screen" jumps the grid to the other monitor.'
+        ),
+        "audience": "advanced",
+        "group": "Mouse grid",
+    },
+    {
+        "name": "grid_action_command",
+        "label": "Mouse-grid action word",
+        "summary": (
+            "Runs one grid-only action word (mark, drag, or move_here) at "
+            "the grid's current cell; with the grid closed the word types "
+            "as normal dictation."
+        ),
+        "params": [
+            {
+                "name": "action",
+                "summary": (
+                    "Fixed action name: mark, drag, or move_here."
+                ),
+                "kind": "text",
+            },
+            {
+                "name": "utterance",
+                "summary": (
+                    "Capture group holding the spoken word for the "
+                    "dictation fallback, usually g1."
+                ),
+                "kind": "group_ref",
+            },
+        ],
+        "example": (
+            'Trigger "^(mark[.!?]?)$" with params ["mark", "g1"]: with '
+            'the grid open, saying "mark" pins the drag start point; '
+            'with it closed, "mark" just types the word.'
+        ),
+        "audience": "advanced",
+        "group": "Mouse grid",
+    },
+    {
+        "name": "grid_number_command",
+        "label": "Mouse-grid number",
+        "summary": (
+            "Narrows the open mouse grid to the spoken cell (1-9); with "
+            "the grid closed the number types as normal dictation."
+        ),
+        "params": [
+            {
+                "name": "utterance",
+                "summary": (
+                    "Capture group holding the whole spoken text for the "
+                    "dictation fallback, usually g1."
+                ),
+                "kind": "group_ref",
+            },
+            {
+                "name": "number_word",
+                "summary": (
+                    "Capture group holding just the number word or digit, "
+                    "usually g2."
+                ),
+                "kind": "group_ref",
+            },
+        ],
+        "example": (
+            'Saying "five" with the grid open zooms the grid into cell '
+            '5; with the grid closed it types "five".'
+        ),
+        "audience": "advanced",
+        "group": "Mouse grid",
+    },
+    {
+        "name": "grid_click_command",
+        "label": "Mouse-grid bare click",
+        "summary": (
+            "Clicks at the open mouse grid's current cell center (click, "
+            "right click, or double click); with the grid closed the "
+            "words type as normal dictation."
+        ),
+        "params": [
+            {
+                "name": "utterance",
+                "summary": (
+                    "Capture group holding the spoken gesture words, "
+                    "usually g1."
+                ),
+                "kind": "group_ref",
+            },
+        ],
+        "example": (
+            'With the grid narrowed to the target, saying "right click" '
+            "opens the context menu at the cell center."
+        ),
+        "audience": "advanced",
+        "group": "Mouse grid",
+    },
+    {
+        "name": "open_url",
+        "label": "Open a web address",
+        "summary": (
+            "Opens a web address in the default browser. Spoken words and "
+            "earlier step results substitute into the address URL-encoded, "
+            "so the address itself must start with http:// or https:// -- "
+            "anything else fails the step and stops the pattern. The site "
+            "part of the address (everything from http:// or https:// up "
+            "to the first slash, question mark, or number sign) must be "
+            "written out in the pattern: a capture group or result name "
+            "there fails the step, and so does a capture group that did "
+            "not match any spoken words. The address must use the normal "
+            "form -- http:// or https:// followed directly by the site "
+            "name, with no extra slashes and no control characters."
+        ),
+        "params": [
+            {
+                "name": "url_template",
+                "summary": (
+                    "The full web address, starting with http:// or "
+                    "https://. Capture groups (g1) or an earlier step's "
+                    "result name embedded in it are replaced with their "
+                    "text, URL-encoded so the spoken words arrive as data."
+                ),
+                "kind": "text",
+            },
+        ],
+        "example": (
+            'Trigger "^jira (.+)$" with params '
+            '["https://mycompany.atlassian.net/issues/?jql=text~%22g1%22"] '
+            "searches Jira for the spoken words."
+        ),
+        "audience": "advanced",
+        "group": "Programs and web",
+    },
+    {
+        "name": "run_capture",
+        "label": "Run a program and capture its text",
+        "summary": (
+            "Runs a program without a shell and stores the text it prints for "
+            "a later step. An optional leading, unquoted TOML number sets the "
+            "timeout in seconds and is clamped from 0.1 to 60; failures, "
+            "including output over the configured cap, stop the pattern."
+        ),
+        "params": [
+            {
+                "name": "timeout",
+                "summary": (
+                    "Optional leading timeout in seconds. It must be an "
+                    "unquoted TOML number and is clamped from 0.1 to 60 "
+                    "seconds. A quoted numeric string is passed to the "
+                    "program as an argument."
+                ),
+                "kind": "number",
+            },
+            {
+                "name": "program",
+                "summary": (
+                    "Program path to run. It is run directly, without a "
+                    "shell."
+                ),
+                "kind": "path",
+            },
+            {
+                "name": "argument",
+                "summary": (
+                    "Repeatable program argument. Add one separate field for "
+                    "each argument; no shell parsing is performed."
+                ),
+                "kind": "text",
+            },
+        ],
+        "example": (
+            'Trigger "^look up (.+)$" with params '
+            '[0.5, "C:\\\\Tools\\\\lookup.exe", "g1"] and result "answer", then '
+            'use params ["answer"] in a following insert_text step.'
+        ),
+        "audience": "advanced",
+        "group": "Programs and web",
     },
     {
         "name": "gs",
@@ -530,9 +930,10 @@ ACTION_CATALOG = (
         "example": (
             'Trigger "^search$" copies the selection, captures the '
             'clipboard, then calls gs with params ["capture_clipboard"]: '
-            'saying "x-ray search" Googles the selected text.'
+            'saying "search" by itself Googles the selected text.'
         ),
         "audience": "advanced",
+        "group": "Programs and web",
     },
     {
         "name": "date",
@@ -556,6 +957,7 @@ ACTION_CATALOG = (
             '["date"]}]: inserts today\'s date, like 2026-07-09.'
         ),
         "audience": "advanced",
+        "group": "Date and pauses",
     },
     {
         "name": "sleep",
@@ -580,6 +982,7 @@ ACTION_CATALOG = (
             "for Notepad to open before typing."
         ),
         "audience": "advanced",
+        "group": "Date and pauses",
     },
     {
         "name": "fix_text_ai",
@@ -595,6 +998,7 @@ ACTION_CATALOG = (
             "the text in the focused field."
         ),
         "audience": "advanced",
+        "group": "AI",
     },
     {
         "name": "rewrite_text_ai",
@@ -622,10 +1026,37 @@ ACTION_CATALOG = (
         "example": (
             'Trigger "^simplify$" with params ["Rewrite this text in plain '
             'language. Keep every fact. Return only the rewritten text."]: '
-            'saying "x-ray simplify" rewrites the highlighted text in '
-            "plain language."
+            'saying "simplify" by itself rewrites the highlighted text '
+            "in plain language."
         ),
         "audience": "advanced",
+        "group": "AI",
+    },
+    {
+        "name": "ask_ai",
+        "label": "Ask AI",
+        "summary": (
+            "Sends one prompt to the configured AI and stores its reply for "
+            "a later step. Capture groups and earlier step results substitute "
+            "into the prompt; failures stop the pattern."
+        ),
+        "params": [
+            {
+                "name": "prompt",
+                "summary": (
+                    "Question or instruction for the AI. It may include a "
+                    "capture group or an earlier step's result name."
+                ),
+                "kind": "text",
+            },
+        ],
+        "example": (
+            'Trigger "^ask (.+)$" with params ["Answer in one short '
+            'sentence, no preamble: g1"] and result "answer", then use '
+            'params ["answer"] in a following insert_text step.'
+        ),
+        "audience": "advanced",
+        "group": "AI",
     },
     {
         "name": "cancel_fix",
@@ -640,6 +1071,7 @@ ACTION_CATALOG = (
             'fix" stops the running correction.'
         ),
         "audience": "advanced",
+        "group": "AI",
     },
     # The in-app help chat action (wheelhouse_help) is deliberately absent.
     # Its registration in actions.py is commented out while the help chat is
@@ -657,6 +1089,7 @@ ACTION_CATALOG = (
             "the help page."
         ),
         "audience": "advanced",
+        "group": "Wheelhouse",
     },
     {
         "name": "open_pattern_manager",
@@ -671,6 +1104,23 @@ ACTION_CATALOG = (
             'patterns" opens the Pattern Manager.'
         ),
         "audience": "advanced",
+        "group": "Wheelhouse",
+    },
+    {
+        "name": "open_calibration",
+        "label": "Teach WheelHouse your voice",
+        "summary": (
+            "Opens the voice-teaching window, where WheelHouse learns "
+            "how you sound so it stops missing short words. Only the "
+            "Distil-Whisper speech engine uses it."
+        ),
+        "params": [],
+        "example": (
+            'Trigger "^learn my voice$" with no params: saying "learn '
+            'my voice" opens the voice-teaching window.'
+        ),
+        "audience": "advanced",
+        "group": "Wheelhouse",
     },
     # ------------------------------------------------------------------
     # internal -- never shown in the picker (set fixed by spec section 5)
@@ -689,6 +1139,7 @@ ACTION_CATALOG = (
             "ctrl+c] so the copied text stays on the clipboard."
         ),
         "audience": "internal",
+        "group": "Clipboard",
     },
     {
         "name": "capture_clipboard",
@@ -704,6 +1155,7 @@ ACTION_CATALOG = (
             "search query."
         ),
         "audience": "internal",
+        "group": "Clipboard",
     },
     {
         "name": "add_hint_to_stt",
@@ -714,10 +1166,11 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^boost$": select a word, say "x-ray boost", and '
-            "the word is copied and sent to the speech engine as a hint."
+            'Trigger "^boost$": select a word, say "boost" by itself, '
+            "and the word is copied and sent to the speech engine as a hint."
         ),
         "audience": "internal",
+        "group": "Wheelhouse",
     },
     {
         "name": "set_speech_interaction_mode",
@@ -739,9 +1192,55 @@ ACTION_CATALOG = (
             "saying it switches the microphone to push-to-talk."
         ),
         "audience": "internal",
+        "group": "Wheelhouse",
     },
 )
 
 # Name -> entry index for O(1) lookup by consumers (picker, explainer,
 # help generator). Built once at import; entries are shared, not copied.
 CATALOG_BY_NAME = {entry["name"]: entry for entry in ACTION_CATALOG}
+
+
+def _by_label(entry: dict) -> str:
+    return entry["label"].casefold()
+
+
+def picker_sections(audience: str) -> tuple:
+    """Entries of one audience, in the order the editor's picker shows.
+
+    Returns a tuple of ``(group, entries)`` sections. The ordering rule is
+    the one a user can read off the list (wh-action-picker-ordering):
+
+    * "advanced" -- one section per group, groups sorted A-Z by name,
+      entries sorted A-Z by label inside each group.
+    * "basic" -- ONE section with a group of ``None``, entries sorted A-Z
+      by label. The basic tier holds four entries that spread over three
+      groups, so sub-headings there would outnumber the entries they
+      introduce; a plain A-Z list is the same rule with nothing to hide.
+    * "internal" -- empty, because internal entries never reach a picker.
+
+    Sorting keys use ``casefold`` so the order matches how the labels read
+    on screen. Entries are the shared catalog dicts, never copies, and an
+    entry never moves between audiences here: the ``audience`` field alone
+    decides which heading lists it.
+    """
+    if audience == "internal":
+        return ()
+    entries = [
+        entry for entry in ACTION_CATALOG if entry["audience"] == audience
+    ]
+    if not entries:
+        return ()
+    if audience == "basic":
+        return ((None, tuple(sorted(entries, key=_by_label))),)
+    groups = sorted({entry["group"] for entry in entries}, key=str.casefold)
+    return tuple(
+        (
+            group,
+            tuple(sorted(
+                (entry for entry in entries if entry["group"] == group),
+                key=_by_label,
+            )),
+        )
+        for group in groups
+    )

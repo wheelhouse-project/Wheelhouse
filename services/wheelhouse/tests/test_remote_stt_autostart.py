@@ -123,21 +123,6 @@ launcher = "launcher.py"
         )
         assert "RemoteSTTLauncher(" in helper_source
 
-    def test_remote_stt_launcher_not_initialized_in_process_mode(self, mock_services):
-        """RemoteSTTLauncher is only created when stt.mode is 'remote'.
-
-        This is a code inspection test - verifying the conditional exists.
-        """
-        from service_manager import ServiceManager
-        import inspect
-
-        # Verify initialize_services has conditional for remote mode
-        source = inspect.getsource(ServiceManager.initialize_services)
-        # The RemoteSTTLauncher should only be created in the else branch (remote mode)
-        assert 'stt_mode == "in_process"' in source or "stt_mode == 'in_process'" in source
-        # And the launcher is in the else branch
-        assert "else:" in source
-
     def _service_manager_shell(self, config_map):
         """A ServiceManager shell carrying only config_service, enough to
         drive _build_remote_stt_launcher without the full constructor."""

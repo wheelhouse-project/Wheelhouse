@@ -36,7 +36,7 @@ class TestErrorNotificationHandler:
 
     # --- Rate limiting ---
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_first_error_sends_notification(self, mock_notif):
         handler = self._make_handler()
         record = self._make_record()
@@ -45,7 +45,7 @@ class TestErrorNotificationHandler:
 
         mock_notif.notify.assert_called_once()
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_duplicate_within_rate_limit_suppressed(self, mock_notif):
         handler = self._make_handler(rate_limit=60)
         record = self._make_record()
@@ -55,7 +55,7 @@ class TestErrorNotificationHandler:
 
         assert mock_notif.notify.call_count == 1
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_different_errors_not_rate_limited(self, mock_notif):
         handler = self._make_handler(rate_limit=60)
         record1 = self._make_record(msg="Error A")
@@ -66,7 +66,7 @@ class TestErrorNotificationHandler:
 
         assert mock_notif.notify.call_count == 2
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_same_error_after_rate_limit_sends_again(self, mock_notif):
         handler = self._make_handler(rate_limit=0)  # Effectively no limit
         record = self._make_record()
@@ -76,7 +76,7 @@ class TestErrorNotificationHandler:
 
         assert mock_notif.notify.call_count == 2
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_rate_limit_key_includes_name_and_level(self, mock_notif):
         handler = self._make_handler(rate_limit=60)
         # Same message, different logger names
@@ -90,7 +90,7 @@ class TestErrorNotificationHandler:
 
     # --- Message truncation ---
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_short_message_not_truncated(self, mock_notif):
         handler = self._make_handler()
         record = self._make_record(msg="Short error")
@@ -100,7 +100,7 @@ class TestErrorNotificationHandler:
         call_kwargs = mock_notif.notify.call_args[1]
         assert call_kwargs["message"] == "Short error"
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_long_message_truncated(self, mock_notif):
         handler = self._make_handler()
         long_msg = "x" * 300
@@ -111,7 +111,7 @@ class TestErrorNotificationHandler:
         call_kwargs = mock_notif.notify.call_args[1]
         assert len(call_kwargs["message"]) < 300
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_long_message_with_delimiter_truncated_cleanly(self, mock_notif):
         handler = self._make_handler()
         # Message with a period delimiter early enough
@@ -125,7 +125,7 @@ class TestErrorNotificationHandler:
 
     # --- Title formatting ---
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_error_level_title(self, mock_notif):
         handler = self._make_handler()
         record = self._make_record(name="speech.processor", level=logging.ERROR)
@@ -136,7 +136,7 @@ class TestErrorNotificationHandler:
         assert "[ERROR]" in call_kwargs["title"]
         assert "processor" in call_kwargs["title"]
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_critical_level_title(self, mock_notif):
         handler = self._make_handler()
         record = self._make_record(name="app", level=logging.CRITICAL)
@@ -146,7 +146,7 @@ class TestErrorNotificationHandler:
         call_kwargs = mock_notif.notify.call_args[1]
         assert "[CRITICAL]" in call_kwargs["title"]
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_root_logger_title(self, mock_notif):
         handler = self._make_handler()
         record = self._make_record(name="root")
@@ -158,7 +158,7 @@ class TestErrorNotificationHandler:
 
     # --- Cleanup ---
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_cleanup_removes_old_entries(self, mock_notif):
         handler = self._make_handler(rate_limit=1)
         # Manually add old entries
@@ -172,7 +172,7 @@ class TestErrorNotificationHandler:
 
     # --- Error resilience ---
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_notification_failure_doesnt_raise(self, mock_notif):
         handler = self._make_handler()
         mock_notif.notify.side_effect = RuntimeError("notification system broken")
@@ -181,7 +181,7 @@ class TestErrorNotificationHandler:
         # Should not raise
         handler.emit(record)
 
-    @patch("utils.error_notifier.notification")
+    @patch("plyer.notification")
     def test_notify_not_callable_handled(self, mock_notif):
         handler = self._make_handler()
         # Make notify not callable

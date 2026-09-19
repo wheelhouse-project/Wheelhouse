@@ -31,6 +31,7 @@ from multiprocessing import Queue, shared_memory
 from multiprocessing.synchronize import Event
 import logging
 
+from shared.dialog_owner import STARTUP_OWNER
 from utils.redact import redact_transcript
 from utils.app_version import get_app_version
 from floating_button_geometry import (
@@ -43,14 +44,17 @@ from floating_button_geometry import (
 import sys
 import struct
 import json
+import uuid
 import math
 from pathlib import Path
 from queue import Empty, Full
 import threading
+import time
+import uuid
 from functools import partial
 
 # --- Qt and PySide6 Imports ---
-from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame, QMessageBox, QFileDialog
+from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame, QMessageBox
 from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject
 from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QAction, QFont, QPixmap
 
@@ -59,7 +63,11 @@ import pystray
 from PIL import Image, ImageDraw
 
 # --- Notification Imports ---
-from plyer import notification
+# wh-notice-length-guard: every notice goes through send_notice, which
+# measures the text against the fixed-size fields plyer writes it into.
+# Calling plyer from here again would walk around that measurement, and
+# the failure is silent -- see utils/notice_text.py.
+from utils.notice_text import send_notice
 
 logger = logging.getLogger(__name__)
 
@@ -148,15 +156,19 @@ def load_tray_icon():
 # wh-n29v.118 / wh-n29v.120.1: the numbered-overlay "walking" cue self-clear
 # fallback timer must outlast the ACTUAL Logic-side success-path latency. On the
 # success path the cue is cleared by the GUI when paint_overlay arrives, and
-# paint_overlay is enqueued only AFTER both the walk send_request AND the
-# PIN_SNAPSHOT ack await complete -- each bounded by
-# click_config.response_timeout_ms (default 3000; validated only by
-# _is_int_at_least(100) -- NO upper bound). So the bound the cue must survive is
-# walk + pin = 2 * response_timeout_ms, not the walk alone. Logic carries that
-# combined value in the overlay_walk_cue payload (walk_timeout_ms = 2 *
-# response_timeout_ms), so an operator who raises response_timeout_ms does not
-# get the cue cleared before the numbers paint. When the field is absent or not
-# a usable int, the cue falls back to this default.
+# paint_overlay is enqueued only AFTER both the build's send_request AND the
+# PIN_SNAPSHOT ack await complete -- the send_request bounded by
+# click_config.screen_read_timeout_ms for a walk build (WALK / REFRESH /
+# SETTLE) or click_config.response_timeout_ms for AUTO_OPEN, the pin ack
+# always bounded by response_timeout_ms (default 3000; validated only by
+# _is_int_at_least(100) -- NO upper bound). So the bound the cue must survive
+# is the build's own awaited window plus response_timeout_ms for the pin, plus
+# the sentence-wait bound for a walk build (wh-overlay-slow-uia-stale-
+# badges.3.1.1). Logic carries that combined value in the overlay_walk_cue
+# payload as walk_timeout_ms (``_overlay_dispatch_build``'s ``cue_bound_ms``),
+# so an operator who raises those keys does not get the cue cleared before the
+# numbers paint. When the field is absent or not a usable int, the cue falls
+# back to this default.
 _WALK_CUE_DEFAULT_WALK_MS = 3000
 # The buffer the fallback adds on top of the carried walk_timeout_ms bound. It
 # must comfortably exceed the up-to-100ms GUI poll interval on the cue's own
@@ -174,6 +186,35 @@ _WALK_CUE_FALLBACK_BUFFER_MS = 1000
 # QTimer.start raise OverflowError. The fallback interval is clamped to this
 # ceiling so the timer always arms with a value Qt can hold.
 _QT_TIMER_MAX_INTERVAL_MS = 2147483647
+
+# wh-overlay-slow-uia-stale-badges.9: the numbered-overlay badge lease. An
+# accepted paint arms a single-shot lease timer at this interval; Logic's
+# keepalive tick renews it (overlay_lease_renew carries its own lease_ms);
+# an accepted clear cancels it. If the lease expires -- Logic crashed, hung,
+# or its clear was lost -- the GUI tears the badges down itself and reports
+# state="expired". The default must comfortably exceed the renew cadence
+# (Logic renews every keepalive tick, default 15s, with lease_ms >= 60s) so
+# a healthy Logic never lets it fire. Class-level default, not a config key.
+_OVERLAY_LEASE_DEFAULT_MS = 90000
+
+# wh-overlay-slow-uia-stale-badges.18.4: interval between GUI-side retries of
+# a teardown that left a surviving badge window (a DestroyWindow failed).
+# Single-shot; re-armed after every still-pending retry, so the retries run
+# unbounded until the sweep ends clean -- a repeated no-op is cheap.
+_OVERLAY_TEARDOWN_RETRY_MS = 2000
+
+# wh-dictation-gate-ux: the uncertain-category rejection notice
+# ("Wheelhouse isn't sure it can type here", the only notice with the
+# Try-it-anyway button) is disabled until the dictation-gate UX
+# redesign lands. David reviewed the flow on 2026-08-04 and found it
+# confusing end to end. The suppression lives here in the GUI, NOT in
+# the Input-process emission gate
+# (shared/rejection_category.py:should_emit_notice), so the event
+# emission, word aggregation, text cache, and Try-it-anyway retry
+# machinery stay in place and tested; the redesign re-enables the flow
+# by flipping this one constant. The elevated (administrator boundary)
+# notice is unaffected.
+SUPPRESS_UNCERTAIN_REJECTION_NOTICE = True
 
 
 class FloatingButton(QWidget):
@@ -209,6 +250,7 @@ class FloatingButton(QWidget):
         self._is_enabled = False
         self._is_indeterminate = True
         self._is_ptt_mode = False
+        self._ptt_feedback = ""
         self._is_dragging = False
         self._drag_position = QPoint(0, 0)
         self._initial_press_pos = None
@@ -278,11 +320,12 @@ class FloatingButton(QWidget):
         # wh-n29v.117 / wh-n29v.118: single-shot fallback that force-clears the
         # walk cue. MANDATORY because a fresh-walk TIMEOUT sends NO clear_overlay
         # to the GUI, so without this timer the cue could stick on screen. The
-        # interval is armed in set_walk_cue from the effective Logic walk bound
-        # (response_timeout_ms, carried in the payload) plus
-        # _WALK_CUE_FALLBACK_BUFFER_MS -- NOT a hardcoded value -- so a raised
-        # response_timeout_ms does not clear the cue mid-walk (see the module
-        # constants above for the full rationale).
+        # interval is armed in set_walk_cue from the cue bound
+        # ``_overlay_dispatch_build`` computes (the build's own awaited window
+        # plus response_timeout_ms, plus the sentence-wait bound for a walk
+        # build, carried in the payload) plus _WALK_CUE_FALLBACK_BUFFER_MS --
+        # NOT a hardcoded value -- so raising those keys does not clear the cue
+        # mid-walk (see the module constants above for the full rationale).
         self._walk_timeout_timer = QTimer(self)
         self._walk_timeout_timer.setSingleShot(True)
         self._walk_timeout_timer.timeout.connect(self._on_walk_timeout)
@@ -307,6 +350,14 @@ class FloatingButton(QWidget):
     def set_ptt_mode(self, ptt_mode: bool):
         """Set push-to-talk mode indicator and repaint."""
         self._is_ptt_mode = ptt_mode
+        self.update()
+
+    def set_ptt_feedback(self, state: str, description: str):
+        """Expose requested/refused listening without claiming recording."""
+        self._ptt_feedback = state
+        self.setAccessibleName("WheelHouse microphone")
+        self.setAccessibleDescription(description)
+        self.setToolTip(description)
         self.update()
 
     def set_size(self, diameter: int):
@@ -507,7 +558,11 @@ class FloatingButton(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        if self._is_indeterminate:
+        if self._ptt_feedback == "pending":
+            color = QColor(230, 165, 20, 230)  # Amber: requested, not confirmed
+        elif self._ptt_feedback == "refused":
+            color = QColor(110, 65, 150, 230)  # Purple: not listening
+        elif self._is_indeterminate:
             color = QColor(100, 100, 100, 220)  # Dark Grey
         elif not self._is_enabled and self._is_ptt_mode:
             color = QColor(50, 120, 200, 220)   # Blue (PTT mode idle)
@@ -529,6 +584,15 @@ class FloatingButton(QWidget):
         painter.setBrush(QBrush(color))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(self.rect())
+
+        if self._ptt_feedback in ("pending", "refused"):
+            # Dark on the amber pending fill, white on the dark purple refused
+            # fill. White on amber is 2.15:1, under the WCAG 3.0:1 minimum for
+            # a graphical object, and this glyph is the only channel that is
+            # not colour. (40, 40, 40) is the walk cue outline below.
+            painter.setPen(QColor(40, 40, 40) if self._ptt_feedback == "pending" else QColor(255, 255, 255))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                             "..." if self._ptt_feedback == "pending" else "!")
 
         # wh-n29v.117: composable "walking" progress cue. Drawn AFTER the base
         # ellipse, on top, as a small white dot with a dark outline in the
@@ -588,13 +652,16 @@ class FloatingButton(QWidget):
         fresh-walk timeout sends no clear_overlay to the GUI. On active=False
         the timer is stopped.
 
-        wh-n29v.118: ``walk_timeout_ms`` is the effective Logic-side walk bound
-        (``response_timeout_ms``) carried in the payload. The fallback timer is
-        armed at that value plus ``_WALK_CUE_FALLBACK_BUFFER_MS`` so it always
-        outlasts the real walk -- even when an operator raises
-        ``response_timeout_ms`` above the GUI default. When the value is absent
-        or not a usable int (``bool`` is rejected even though it subclasses
-        ``int``), it degrades to ``_WALK_CUE_DEFAULT_WALK_MS``.
+        wh-n29v.118: ``walk_timeout_ms`` carries the GUI fallback bound
+        ``_overlay_dispatch_build`` computes (the build's own awaited window --
+        ``screen_read_timeout_ms`` for a walk, ``response_timeout_ms`` for
+        AUTO_OPEN -- plus ``response_timeout_ms`` for the pin ack, plus the
+        sentence-wait bound for a walk build) in the payload. The fallback
+        timer is armed at that value plus ``_WALK_CUE_FALLBACK_BUFFER_MS`` so
+        it always outlasts the real walk -- even when an operator raises
+        those keys above the GUI default. When the value is absent or not a
+        usable int (``bool`` is rejected even though it subclasses ``int``),
+        it degrades to ``_WALK_CUE_DEFAULT_WALK_MS``.
         """
         active = bool(active)
         if active:
@@ -605,10 +672,10 @@ class FloatingButton(QWidget):
             else:
                 base_ms = _WALK_CUE_DEFAULT_WALK_MS
             # wh-n29v.119.1: clamp the interval to the Qt signed-32-bit timer
-            # range (response_timeout_ms has no upper bound), and arm the timer
-            # BEFORE marking the cue active so we can fail closed: if the start
-            # still raises for any reason, leave the cue inactive rather than
-            # stranding the dot on screen with no fallback timer to clear it.
+            # range, and arm the timer BEFORE marking the cue active so we can
+            # refuse by default: if the start still raises for any reason,
+            # leave the cue inactive rather than stranding the dot on screen
+            # with no fallback timer to clear it.
             interval_ms = min(
                 base_ms + _WALK_CUE_FALLBACK_BUFFER_MS, _QT_TIMER_MAX_INTERVAL_MS
             )
@@ -918,6 +985,13 @@ class WorkingDialog(QDialog):
 
         self._base_message = ""
         self._dot_count = 0
+        # The operation this dialog is currently showing for, or None
+        # when whoever raised it named no operation. Every provider and
+        # every AI request share this one dialog, so a dismiss has to
+        # say which operation it is for (wh-launch-addressed-notices,
+        # wh-dialog-ownership-token). The token is a string
+        # "<source>:<id>"; see shared/dialog_owner.py.
+        self._owner: str | None = None
 
         # --- Plaque image header ---
         image_label = QLabel()
@@ -950,14 +1024,19 @@ class WorkingDialog(QDialog):
         self._dot_timer = QTimer(self)
         self._dot_timer.timeout.connect(self._animate_dots)
 
-    def show_working(self, message: str) -> None:
+    def show_working(self, message: str, owner: str | None = None) -> None:
         """Show the dialog with a message and start dot animation.
 
         If already visible, updates the message text.
 
         Args:
             message: The status message to display (dots are appended automatically).
+            owner: The operation this dialog is being raised for, or
+                None when the caller names no operation. It decides
+                which later dismiss the dialog will accept
+                (wh-launch-addressed-notices).
         """
+        self._owner = owner
         self._base_message = message
         self._dot_count = 0
         self._message_label.setText(message)
@@ -973,8 +1052,66 @@ class WorkingDialog(QDialog):
                 self.move(x, y)
             self.show()
 
-    def hide_working(self) -> None:
-        """Hide the dialog and stop dot animation."""
+    def hide_working(self, owner: str | None = None) -> None:
+        """Hide the dialog and stop dot animation.
+
+        A dismiss addressed to a launch that no longer owns the dialog
+        is dropped. The launcher cannot make that decision itself: it
+        asks whether its launch is still current and then acts, and the
+        replacement can land in between (wh-launch-generation.2.9).
+        Deciding here needs no lock, and not because the queue puts the
+        replacement's show first: the two messages come from racing
+        threads -- the hide from the replaced launch's monitor, the show
+        from whoever starts the replacement -- so either order reaches
+        this method. The owner comparison ends in the same state in
+        both. Given show(new) then hide(old), the dismiss is dropped.
+        Given hide(old) then show(new), the dismiss applies to the
+        dialog the old launch still owns and the show raises it again.
+        The dialog displays the new launch either way
+        (wh-launch-addressed-notices).
+
+        A dismiss must NAME the operation that owns the dialog. It used
+        to be enough for the two sides not to contradict each other, so
+        a dismiss naming nothing closed whatever was up -- and an AI
+        request finishing closed the "Loading <engine>" dialog of a
+        provider switch started after it, while the engine went on
+        starting with nothing on screen to say so
+        (wh-dialog-ownership-token). Naming nothing is now a claim like
+        any other: it matches only a dialog that no operation owns, and
+        no shipped sender raises one. The provider launch sends
+        ``stt:<generation>``, both AI actions send ``ai:<uuid4>``, and
+        GUI startup sends ``STARTUP_OWNER``. An unnamed dismiss is
+        therefore dropped in practice, which is the whole point of the
+        rule. The None case is kept because the queue reader supplies
+        it for a message with no "owner" key, and because dropping such
+        a dismiss is the safe answer rather than an error.
+
+        The startup plaque is the one exception, and it is not a
+        weakening of the rule. `STARTUP_OWNER` marks a placeholder
+        rather than an operation: nothing can outlive startup, and what
+        ends startup does not always know a launch token -- the
+        WebSocket ready path sends the connection's launch stamp, which
+        is None whenever no launch stamped that connection (no launcher
+        at all, or the counter has not moved yet). Requiring a match
+        there would leave the plaque on screen for the rest of the
+        session. So any dismiss ends the placeholder, and the moment a
+        real operation claims the dialog the ordinary rule applies
+        again.
+
+        Args:
+            owner: The operation the dismiss is for, or None when the
+                caller names none.
+        """
+        if owner != self._owner and self._owner != STARTUP_OWNER:
+            return
+        # Cleared with the dialog rather than left behind. A left-behind
+        # owner is worse than it was before this rule: an operation that
+        # names none would raise the dialog, inherit the dead owner, and
+        # then have its own dismiss dropped against it. `show_working`
+        # assigns on every raise, so nothing can read a stale owner
+        # today; the clear is what keeps that true if `show_working`
+        # ever returns early for a dialog already up.
+        self._owner = None
         self._dot_timer.stop()
         self._dot_count = 0
         self.hide()
@@ -1040,7 +1177,15 @@ class GuiManager(QObject):
         self.debug_mode = False  # Whether log level is DEBUG
         self.speech_interaction_mode = "toggle"  # Updated from state_update
         self._ptt_held = False
-        self._speech_before_hold = False  # Saved speech state for drag cancel
+        self._ptt_request_id = None
+        self._ptt_feedback = ""
+        self._ptt_feedback_text = ""
+
+        self._settings_requests = {}
+        self._settings_latest = {}
+        self._settings_confirmed = {}
+        self.settings_status_text = ''
+        self._settings_notice = None
 
         self.button = FloatingButton()
         self.working_dialog = WorkingDialog()
@@ -1135,11 +1280,75 @@ class GuiManager(QObject):
                 badge_shadow=_click_config.overlay_badge_shadow,
                 badge_corner=_click_config.overlay_badge_corner,
                 badge_trailing_space=_click_config.overlay_badge_trailing_space,
+                badge_theme=_click_config.overlay_badge_theme,
             )
         except Exception:  # noqa: BLE001 - overlay is non-critical
             logger.warning(
                 "Failed to construct OverlayPaintWindowManager; the "
                 "numbered overlay will be unavailable this session.",
+                exc_info=True,
+            )
+
+        # wh-overlay-slow-uia-stale-badges.9: the badge lease. Single-shot;
+        # armed by an accepted paint, renewed by overlay_lease_renew,
+        # cancelled by an accepted clear or a reset_overlay. On expiry the
+        # GUI destroys the badge windows itself (Logic stopped talking) and
+        # reports state="expired" back on commands_to_logic_queue.
+        self._overlay_lease_timer = QTimer(self)
+        self._overlay_lease_timer.setSingleShot(True)
+        self._overlay_lease_timer.timeout.connect(
+            self._on_overlay_lease_expired
+        )
+        # The (overlay_session_id, paint_generation) pair the lease covers,
+        # or None when no lease is active.
+        self._overlay_lease_pair: tuple[int, int] | None = None
+
+        # wh-overlay-slow-uia-stale-badges.18.4: the teardown retry.
+        # Single-shot; armed whenever a clear / lease expiry / reset left
+        # the manager with teardown_pending True (a DestroyWindow failed,
+        # so a badge window may still be on screen), re-armed until a
+        # retry sweep ends clean. An incomplete clear emits NO ack, so
+        # Logic's clear-ack watchdog stays unresolved and its 5000 ms
+        # deadline fires a truthful "badges may still be on the screen"
+        # ERROR; the deferred cleared/expired ack then arrives after a
+        # later successful retry as bookkeeping. That is the designed
+        # behavior, not a bug.
+        self._overlay_teardown_retry_timer = QTimer(self)
+        self._overlay_teardown_retry_timer.setSingleShot(True)
+        self._overlay_teardown_retry_timer.timeout.connect(
+            self._on_overlay_teardown_retry
+        )
+
+        # wh-grid-paint-mode: the mouse grid's paint window manager. Logic
+        # drives it via the "paint_grid" / "paint_grid_pin" / "clear_grid"
+        # actions on the state queue; the manager paints three-by-three grid
+        # lines, nine cell numbers, and the drag-anchor pin on the same kind
+        # of per-monitor click-through layered window the badges use. No
+        # reply goes back to Logic -- the grid has no build phase to
+        # acknowledge (see shared/clear_grid.py).
+        #
+        # A THIRD dedicated OverlayPaintWindowManager, for the same reason
+        # the working badge owns the second one: a manager's clear destroys
+        # every window IT owns, so sharing an instance between two features
+        # would let one feature's teardown erase the other's drawing. The
+        # process-global window class is registered once and its WNDPROC is
+        # the stateless module-scope _PROCESS_WND_PROC, so extra instances
+        # cost nothing and cannot leave the class pointing at a freed
+        # callback (wh-overlay-shared-wndproc). Badge styling arguments are
+        # irrelevant to the grid (its styling is hard-coded beside the
+        # badges') except badge_shadow, which the grid labels honor as the
+        # same accessibility setting.
+        self._grid_overlay = None
+        try:
+            from overlay_paint_window import OverlayPaintWindowManager
+
+            self._grid_overlay = OverlayPaintWindowManager(
+                badge_shadow=_click_config.overlay_badge_shadow,
+            )
+        except Exception:  # noqa: BLE001 - the grid is non-critical
+            logger.warning(
+                "Failed to construct the mouse-grid overlay; the voice mouse "
+                "grid will be unavailable this session.",
                 exc_info=True,
             )
 
@@ -1185,11 +1394,14 @@ class GuiManager(QObject):
                 # callback, so constructing or destroying a manager at
                 # runtime can never leave the class pointing at a freed
                 # callback.
+                # badge_theme is passed for construction symmetry; the working
+                # glyph keeps its own fixed colors and ignores it.
                 self._working_badge_overlay = OverlayPaintWindowManager(
                     badge_font_pt=_click_config.overlay_badge_font_pt,
                     badge_shadow=_click_config.overlay_badge_shadow,
                     badge_corner=_click_config.overlay_badge_corner,
                     badge_trailing_space=_click_config.overlay_badge_trailing_space,
+                    badge_theme=_click_config.overlay_badge_theme,
                 )
             except Exception:  # noqa: BLE001 - indicator is non-critical
                 logger.warning(
@@ -1305,6 +1517,9 @@ class GuiManager(QObject):
         self._press_timer.setSingleShot(True)
         self._press_timer.timeout.connect(self._on_hold_threshold)
         self._PTT_HOLD_THRESHOLD_MS = 200
+        self._ptt_ack_timer = QTimer(self)
+        self._ptt_ack_timer.setSingleShot(True)
+        self._ptt_ack_timer.timeout.connect(self._ptt_pending_timeout)
 
         self._double_click_timer = QTimer(self)
         self._double_click_timer.setSingleShot(True)
@@ -1328,7 +1543,7 @@ class GuiManager(QObject):
         self.button.show()
 
         # Show working dialog immediately so the plaque appears during startup
-        self.working_dialog.show_working("Starting")
+        self.working_dialog.show_working("Starting", STARTUP_OWNER)
 
         self.queue_timer.start(100)
         self.send_command({'action': 'request_initial_state'})
@@ -1522,6 +1737,10 @@ class GuiManager(QObject):
             return
 
         # Drain all available messages per tick (prevents help response lag)
+        try:
+            self._check_settings_timeout()
+        except Exception:
+            logger.exception('Error checking the settings acknowledgement timeout')
         while True:
             try:
                 message = self.state_from_logic_queue.get_nowait()
@@ -1542,6 +1761,7 @@ class GuiManager(QObject):
                 :notes: Handles 'state_update' and 'initial_state' actions by extracting all GUI-relevant state variables (speech_enabled, button_visible, FLOATING_BUTTON_SIZE, FLOATING_BUTTON_POS) from IPC message payload. Sets initial_state_received flag on first message to enable user interactions. Calls update_ui_state() to propagate changes to visual elements.
                 """
                 if action in ["initial_state", "state_update"]:
+                    message = self._settings_filter_state(message)
                     was_initial = not self.initial_state_received
                     if was_initial:
                         self.initial_state_received = True
@@ -1558,6 +1778,7 @@ class GuiManager(QObject):
                     self.interim_results_enabled = message.get('interim_results_enabled', True)
                     self.debug_mode = message.get('debug_mode', False)
                     self.speech_interaction_mode = message.get('speech_interaction_mode', 'toggle')
+                    self._handle_ptt_state(message)
                     # Not while the user is dragging. Size and position are
                     # saved when the drag ends, so during one the settings
                     # still hold the geometry from before it started. Putting
@@ -1598,18 +1819,33 @@ class GuiManager(QObject):
                         self.button.set_ready_for_gestures(True)
 
                     self.update_ui_state()
+                elif action in ('config_write_result', 'config_values_result'):
+                    self._handle_settings_result(message)
+                elif action == 'toggle_button_visibility':
+                    self.toggle_button_visibility()
                 elif action == "show_working":
-                    self.working_dialog.show_working(message.get("message", "Working"))
+                    # The operation this dialog belongs to travels with
+                    # it, so a later dismiss can be matched against it.
+                    # Every shipped sender now supplies it: the speech
+                    # launcher, both AI actions, and GUI startup
+                    # (wh-launch-addressed-notices,
+                    # wh-dialog-ownership-token). `.get` stays rather
+                    # than `[]` so a message without the key reaches
+                    # the dialog as None -- an ordinary claim that
+                    # matches only an unowned dialog -- instead of
+                    # raising KeyError in the queue reader.
+                    self.working_dialog.show_working(
+                        message.get("message", "Working"),
+                        message.get("owner"),
+                    )
                 elif action == "hide_working":
-                    self.working_dialog.hide_working()
+                    self.working_dialog.hide_working(message.get("owner"))
                 elif action == "show_notification":
-                    if notification.notify:
-                        notification.notify(
-                            title=message.get("title", "Wheelhouse"),
-                            message=message.get("message", ""),
-                            timeout=message.get("timeout", 5)
-                        )
-                    else:
+                    if not send_notice(
+                        message.get("title", "Wheelhouse"),
+                        message.get("message", ""),
+                        timeout=message.get("timeout", 5),
+                    ):
                         logger.warning("Notification service not available for message: %s", message.get("title"))
                 elif action == "click_first_use_hint":
                     # wh-r3xy1: one-shot screen-reader-flag discovery hint.
@@ -1650,6 +1886,32 @@ class GuiManager(QObject):
                     # walk, so clear the walking cue here too.
                     self.button.set_walk_cue(False)
                     self._handle_clear_overlay(message)
+                elif action == "overlay_lease_renew":
+                    # wh-overlay-slow-uia-stale-badges.9: Logic's keepalive
+                    # tick renews the badge lease while its machine sits in
+                    # painted. Side-channel dict, no shared/ schema (the
+                    # walk-cue precedent, wh-n29v.117).
+                    self._handle_overlay_lease_renew(message)
+                elif action == "reset_overlay":
+                    # wh-overlay-slow-uia-stale-badges.9: a (re)started
+                    # Logic announces itself. Tear down any badges a dead
+                    # Logic left behind and reset the generation gate so
+                    # the new Logic's from-zero pair numbering can paint.
+                    # A reset also ends any in-flight walk cue.
+                    self.button.set_walk_cue(False)
+                    self._handle_reset_overlay(message)
+                elif action == "paint_grid":
+                    # wh-grid-paint-mode: Logic asks the GUI to draw the
+                    # mouse grid over one rectangle on one monitor.
+                    self._handle_paint_grid(message)
+                elif action == "paint_grid_pin":
+                    # wh-grid-paint-mode: Logic asks the GUI to draw the
+                    # drag-anchor pin ("mark"). It coexists with the grid.
+                    self._handle_paint_grid_pin(message)
+                elif action == "clear_grid":
+                    # wh-grid-paint-mode: Logic asks the GUI to tear the
+                    # mouse grid down, pin included.
+                    self._handle_clear_grid(message)
                 elif action == "overlay_walk_cue":
                     # wh-n29v.117: a small "walking" progress cue on the
                     # floating button while a numbered-overlay walk is in
@@ -1662,8 +1924,10 @@ class GuiManager(QObject):
                     # through this 100ms state queue, not the 10ms
                     # shared-memory activity fast path.
                     #
-                    # wh-n29v.118: thread the effective Logic walk bound
-                    # (walk_timeout_ms = response_timeout_ms) through to
+                    # wh-n29v.118: thread the GUI fallback bound (walk_timeout_ms
+                    # = the build's own awaited window plus response_timeout_ms,
+                    # plus the sentence-wait bound for a walk build; see
+                    # _overlay_dispatch_build) through to
                     # set_walk_cue so the GUI fallback outlasts the real walk.
                     # Pass it through raw (None when absent); set_walk_cue does
                     # the int/bool validation and falls back to its default.
@@ -1696,8 +1960,15 @@ class GuiManager(QObject):
                     self._show_declined_write_failed_toast(message)
                 elif action == "open_pattern_manager":
                     self._open_pattern_manager()
-                elif action == "open_google_credentials_picker":
-                    self._pick_google_credentials_file()
+                elif action == "open_calibration":
+                    # wh-7ou.7.3.1: voice-command path ("learn my voice").
+                    # Logic asks the GUI to open the voice-teaching window.
+                    self._open_calibration()
+                elif action == "cal_state":
+                    # wh-7ou.7.3.1: the window renders whatever screen the
+                    # latest cal_state names; it holds no session logic.
+                    if hasattr(self, '_cal_dialog') and self._cal_dialog is not None:
+                        self._cal_dialog.handle_state(message.get("state") or {})
                 elif action and action.startswith("pm_"):
                     if hasattr(self, '_pm_dialog') and self._pm_dialog is not None:
                         self._pm_dialog.handle_response(message)
@@ -1751,13 +2022,7 @@ class GuiManager(QObject):
             text = message.get("message", "") or ""
             if not text:
                 return
-            if notification.notify:
-                notification.notify(
-                    title="Wheelhouse",
-                    message=text,
-                    timeout=8,
-                )
-            else:
+            if not send_notice("Wheelhouse", text, timeout=8):
                 logger.warning(
                     "click_first_use_hint: notification service unavailable; "
                     "hint not shown",
@@ -1792,6 +2057,29 @@ class GuiManager(QObject):
             class_name = message.get("class_name", "") or ""
             control_type = message.get("control_type", "") or ""
             reason = message.get("reason", "") or ""
+
+            # wh-dictation-gate-ux: the uncertain-category notice is
+            # disabled until the dictation-gate UX redesign lands (see
+            # the SUPPRESS_UNCERTAIN_REJECTION_NOTICE comment at module
+            # level). Elevated notices fall through and still show.
+            if SUPPRESS_UNCERTAIN_REJECTION_NOTICE:
+                from shared.rejection_category import (
+                    CATEGORY_UNCERTAIN,
+                    categorize_rejection,
+                )
+                category = categorize_rejection(
+                    reason=reason,
+                    process_name=process_name,
+                    class_name=class_name,
+                )
+                if category == CATEGORY_UNCERTAIN:
+                    logger.debug(
+                        "rejection toast suppressed "
+                        "(wh-dictation-gate-ux interim disable) "
+                        "process=%s class=%s control_type=%s reason=%s",
+                        process_name, class_name, control_type, reason,
+                    )
+                    return
 
             # wh-vbvgf.3.1: update the active correlation_token BEFORE
             # the suppression check returns. A same-key rejection that
@@ -1939,6 +2227,16 @@ class GuiManager(QObject):
                 overlay_session_id=event.overlay_session_id,
                 paint_generation=event.paint_generation,
             )
+            if result is not None:
+                # wh-overlay-slow-uia-stale-badges.9: the paint presented
+                # (or failed partway, which can also leave windows), so
+                # badges may be on screen -- arm the lease. A stale-gated
+                # paint (None) presented nothing; any active lease belongs
+                # to the overlay already on screen and must keep running.
+                self._arm_overlay_lease(
+                    (event.overlay_session_id, event.paint_generation),
+                    _OVERLAY_LEASE_DEFAULT_MS,
+                )
             self._emit_overlay_state_changed(result)
         except Exception as exc:  # noqa: BLE001 - overlay is non-critical
             logger.warning(
@@ -1968,10 +2266,282 @@ class GuiManager(QObject):
                 overlay_session_id=event.overlay_session_id,
                 paint_generation=event.paint_generation,
             )
+            if result is not None:
+                # wh-overlay-slow-uia-stale-badges.9: the badges are gone,
+                # so nothing is left to lease. A STALE clear (None) tore
+                # down nothing -- the newer overlay's lease keeps running.
+                # An INCOMPLETE clear (also None, teardown_pending True)
+                # left a survivor: the lease keeps covering it while the
+                # retry timer finishes the teardown (.18.4).
+                self._cancel_overlay_lease()
+            self._arm_teardown_retry_if_pending()
             self._emit_overlay_state_changed(result)
         except Exception as exc:  # noqa: BLE001 - overlay is non-critical
             logger.warning(
                 "clear_overlay handling failed: %s", exc, exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Numbered-overlay badge lease (wh-overlay-slow-uia-stale-badges.9)
+    # ------------------------------------------------------------------
+
+    def _arm_overlay_lease(self, pair: tuple[int, int], lease_ms: int) -> None:
+        """Start (or restart) the badge lease for ``pair``.
+
+        The interval is clamped to Qt's signed-32-bit ceiling
+        (``_QT_TIMER_MAX_INTERVAL_MS``) so ``QTimer.start`` can never raise
+        ``OverflowError`` on an oversized renew.
+        """
+        self._overlay_lease_pair = pair
+        self._overlay_lease_timer.start(
+            min(int(lease_ms), _QT_TIMER_MAX_INTERVAL_MS)
+        )
+
+    def _cancel_overlay_lease(self) -> None:
+        """Stop the badge lease; no badges remain to watch."""
+        self._overlay_lease_pair = None
+        self._overlay_lease_timer.stop()
+
+    def _handle_overlay_lease_renew(self, message: dict) -> None:
+        """Re-arm the badge lease for a Logic keepalive renew.
+
+        Side-channel dict (no shared/ schema -- the walk-cue precedent),
+        so validation is local and defensive (bool excluded -- it is an
+        int subclass). The lease audits that Logic is ALIVE and believes
+        this session's badges are visible -- not that Logic's view of the
+        generation matches the GUI's. So a renew is accepted when its
+        session id equals the armed lease pair's session id AND its
+        (sid, gen) pair is <= the armed pair
+        (wh-overlay-slow-uia-stale-badges.18.5): a renew from an OLDER
+        view of the same session (a late or failed refresh paint armed
+        the lease at a newer pair while Logic fell back to its prior
+        visible pair) still proves liveness, and the exact-pair rule made
+        the 60 s lease kill visible badges in that divergence. A renew
+        for a pair NEWER than the armed lease stays rejected -- the GUI
+        never presented that pair; Logic's visible-pair renew (.18.2)
+        covers that direction. A different session id is rejected in both
+        generation directions. The re-arm keeps the ARMED pair, so a
+        later expiry tears down under the pair the generation gate
+        painted. A malformed ``lease_ms`` falls back to the default
+        rather than dropping the renew: a healthy Logic is talking, so
+        keep the lease alive.
+        """
+        try:
+            if self._overlay_lease_pair is None:
+                return
+            sid = message.get("overlay_session_id")
+            gen = message.get("paint_generation")
+            if isinstance(sid, bool) or not isinstance(sid, int):
+                return
+            if isinstance(gen, bool) or not isinstance(gen, int):
+                return
+            armed_sid, armed_gen = self._overlay_lease_pair
+            if sid != armed_sid or (sid, gen) > (armed_sid, armed_gen):
+                return
+            lease_ms = message.get("lease_ms")
+            if isinstance(lease_ms, bool) or not isinstance(lease_ms, int) \
+                    or lease_ms <= 0:
+                lease_ms = _OVERLAY_LEASE_DEFAULT_MS
+            self._arm_overlay_lease((armed_sid, armed_gen), lease_ms)
+        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
+            logger.warning(
+                "overlay_lease_renew handling failed: %s", exc, exc_info=True,
+            )
+
+    def _on_overlay_lease_expired(self) -> None:
+        """The badge lease ran out: Logic stopped renewing.
+
+        Either Logic crashed / hung, or its clear_overlay never arrived
+        (a Full queue drops it with only a warning). Tear the badges down
+        so they cannot outlive Logic's intent, and report
+        ``state="expired"`` so a live Logic can reconcile (its machine
+        closes from ``painted``; everywhere else the ack is bookkeeping).
+        ``expire_lease`` returns None when the armed pair lost a race with
+        a newer paint/clear -- then the newer overlay owns the screen and
+        nothing is reported.
+        """
+        try:
+            pair = self._overlay_lease_pair
+            self._overlay_lease_pair = None
+            if pair is None or self._overlay_manager is None:
+                return
+            logger.warning(
+                "numbered-overlay badge lease expired for pair %s; "
+                "tearing the badges down GUI-side", pair,
+            )
+            result = self._overlay_manager.expire_lease(
+                overlay_session_id=pair[0], paint_generation=pair[1],
+            )
+            self._arm_teardown_retry_if_pending()
+            self._emit_overlay_state_changed(result)
+        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
+            logger.warning(
+                "overlay lease expiry handling failed: %s", exc, exc_info=True,
+            )
+
+    def _handle_reset_overlay(self, message: dict) -> None:
+        """A (re)started Logic announced itself: start the overlay fresh.
+
+        Destroys any badge windows a previous Logic left behind and resets
+        the manager's generation gate (a restarted Logic numbers its pairs
+        from zero, which the old high-water mark would gate forever). Also
+        cancels the lease -- there is no Logic intent left to watch. No
+        event is emitted; the new Logic starts from ``closed``.
+        """
+        try:
+            self._cancel_overlay_lease()
+            if self._overlay_manager is None:
+                return
+            self._overlay_manager.reset()
+            # reset() dropped any deferred ack (the old Logic is gone),
+            # but a survivor its destroy attempt failed on still needs
+            # the retry (.18.4).
+            self._arm_teardown_retry_if_pending()
+        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
+            logger.warning(
+                "reset_overlay handling failed: %s", exc, exc_info=True,
+            )
+
+    def _arm_teardown_retry_if_pending(self) -> None:
+        """Arm or stop the teardown retry timer to match the manager.
+
+        Called after every clear / expire_lease / reset drive into the
+        overlay manager (wh-overlay-slow-uia-stale-badges.18.4): when a
+        DestroyWindow failed, a badge window may still be on screen, and
+        the retry timer is the mechanism that finishes the teardown.
+
+        The stop branch (wh-overlay-slow-uia-stale-badges.18.8): a clean
+        teardown pays the debt an EARLIER incomplete teardown armed the
+        timer for. Left armed, that stale single-shot fire would arrive
+        after a fresh paint took the screen (``retry_teardown`` itself
+        no longer sweeps without debt; this stop is the timer-side half
+        of the same fix). The timer stays armed while a deferred ack is
+        still parked, so a fire can release it as late bookkeeping --
+        the accepted residual.
+        """
+        if self._overlay_manager is None:
+            return
+        if self._overlay_manager.teardown_pending:
+            self._overlay_teardown_retry_timer.start(
+                _OVERLAY_TEARDOWN_RETRY_MS
+            )
+        elif not self._overlay_manager.has_deferred_teardown_ack:
+            self._overlay_teardown_retry_timer.stop()
+
+    def _on_overlay_teardown_retry(self) -> None:
+        """Retry destroying badge windows an incomplete teardown left.
+
+        Drives ``retry_teardown`` (wh-overlay-slow-uia-stale-badges.18.4):
+        a clean sweep releases the deferred cleared/expired ack, which is
+        forwarded to Logic as late bookkeeping (its clear-ack watchdog
+        already fired its truthful ERROR at 5000 ms -- designed behavior,
+        not a bug); a still-failing sweep re-arms the timer. Unbounded
+        2 s retries are fine -- a repeated no-op is cheap.
+
+        A released CLEARED ack whose pair exactly matches the armed lease
+        also cancels the lease (.18.6): the clean sweep is the same
+        badges-are-gone proof that makes a direct clean clear cancel it,
+        and a stranded lease would later fire expire_lease over an empty
+        screen and report a spurious expired ack. Exact-match only: an
+        old parked cleared ack must not cancel a newer overlay's lease,
+        and a deferred EXPIRED ack's own expiry already dropped its
+        lease.
+        """
+        try:
+            if self._overlay_manager is None:
+                return
+            ack = self._overlay_manager.retry_teardown()
+            if ack is not None:
+                if ack.get("state") == "cleared" and (
+                    ack.get("overlay_session_id"),
+                    ack.get("paint_generation"),
+                ) == self._overlay_lease_pair:
+                    self._cancel_overlay_lease()
+                self._emit_overlay_state_changed(ack)
+            if self._overlay_manager.teardown_pending:
+                self._overlay_teardown_retry_timer.start(
+                    _OVERLAY_TEARDOWN_RETRY_MS
+                )
+        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
+            logger.warning(
+                "overlay teardown retry failed: %s", exc, exc_info=True,
+            )
+
+    def _handle_paint_grid(self, message: dict) -> None:
+        """Drive the grid manager for a paint_grid action (wh-grid-paint-mode).
+
+        Parses the inbound dict via ``PaintGridEvent.from_dict`` (a malformed
+        payload is logged and dropped, never raised, so a version-skewed
+        sender cannot crash the GUI loop -- wh-uf54) and hands the event
+        straight to the manager. Nothing is sent back to Logic: the grid has
+        no in-flight build phase and no generation pair to acknowledge.
+        """
+        if self._grid_overlay is None:
+            return
+        try:
+            from shared.ipc_schema_validation import safe_parse
+            from shared.paint_grid import PaintGridEvent
+
+            event = safe_parse(
+                PaintGridEvent.from_dict, message, log_label="paint_grid",
+            )
+            if event is None:
+                return  # already logged
+            self._grid_overlay.paint_grid(event)
+        except Exception as exc:  # noqa: BLE001 - the grid is non-critical
+            logger.warning(
+                "paint_grid handling failed: %s", exc, exc_info=True,
+            )
+
+    def _handle_paint_grid_pin(self, message: dict) -> None:
+        """Drive the grid manager for a paint_grid_pin action
+        (wh-grid-paint-mode).
+
+        Same defensive parse as ``_handle_paint_grid``. The pin does not
+        replace the grid -- the manager repaints both -- so no clear is sent
+        first.
+        """
+        if self._grid_overlay is None:
+            return
+        try:
+            from shared.ipc_schema_validation import safe_parse
+            from shared.paint_grid_pin import PaintGridPinEvent
+
+            event = safe_parse(
+                PaintGridPinEvent.from_dict, message,
+                log_label="paint_grid_pin",
+            )
+            if event is None:
+                return  # already logged
+            self._grid_overlay.paint_grid_pin(event)
+        except Exception as exc:  # noqa: BLE001 - the grid is non-critical
+            logger.warning(
+                "paint_grid_pin handling failed: %s", exc, exc_info=True,
+            )
+
+    def _handle_clear_grid(self, message: dict) -> None:
+        """Drive the grid manager for a clear_grid action
+        (wh-grid-paint-mode).
+
+        ``ClearGridEvent`` carries no fields, but it is still parsed so a
+        payload addressed to a different action can never tear the grid down.
+        One clear removes the grid AND the pin.
+        """
+        if self._grid_overlay is None:
+            return
+        try:
+            from shared.ipc_schema_validation import safe_parse
+            from shared.clear_grid import ClearGridEvent
+
+            event = safe_parse(
+                ClearGridEvent.from_dict, message, log_label="clear_grid",
+            )
+            if event is None:
+                return  # already logged
+            self._grid_overlay.clear_grid()
+        except Exception as exc:  # noqa: BLE001 - the grid is non-critical
+            logger.warning(
+                "clear_grid handling failed: %s", exc, exc_info=True,
             )
 
     def _emit_overlay_state_changed(self, result) -> None:
@@ -2468,7 +3038,7 @@ class GuiManager(QObject):
         :data_out: Updated floating button and tray menu visuals
         :notes: Called after internal state variables are updated (from step 7). Synchronizes three visual components: (1) button.set_state() - updates button color/appearance based on speech_enabled, (2) button.setVisible() - shows/hides button based on button_visible, (3) update_tray_menu() - rebuilds tray icon menu to reflect current state.
         """
-        self.button.set_state(self.speech_enabled)
+        self.button.set_state(self.speech_enabled and self._ptt_feedback not in ("pending", "refused"))
         self.button.set_ptt_mode(self.speech_interaction_mode == "push_to_talk")
         self.button.setVisible(self.button_visible)
         self.update_tray_menu()
@@ -2481,10 +3051,166 @@ class GuiManager(QObject):
         :data_out: Command placed in commands_to_logic_queue
         :notes: IPC transport layer using multiprocessing.Queue for cross-process communication. Uses put_nowait() to avoid blocking GUI thread. If queue is full, command is dropped with warning log. This is the outbound half of bidirectional GUI↔Logic IPC. Queue is consumed by main.py's _listen_for_gui_commands() in logic process.
         """
+        # An acknowledged settings write, set_config_value or
+        # set_config_values, takes the staged path: a request ID, pending
+        # bookkeeping, reconciliation on a silence, and a failure message.
+        if command.get('action') in ('set_config_value', 'set_config_values'):
+            self._send_settings_command(command)
+            return
         try:
             self.commands_to_logic_queue.put_nowait(command)
+            return True
         except Full:
             logger.warning("Logic process queue full, command dropped: %s", command.get('action'))
+            return False
+
+    @property
+    def settings_pending(self):
+        return bool(self._settings_requests)
+
+    def _settings_show_status(self, text, *, failure=False):
+        self.settings_status_text = text
+        rendered = False
+        try:
+            if self._settings_notice is None:
+                from soft_allow_write_failed_toast import SoftAllowWriteFailedToast
+                self._settings_notice = SoftAllowWriteFailedToast()
+            self._settings_notice.setAccessibleName(text)
+            self._settings_notice.show_message(
+                title='WheelHouse settings', body=text,
+                lifetime_ms=15000 if failure else 2147483647,
+            )
+            rendered = True
+        except Exception:
+            logger.exception('Could not render settings notice')
+        if failure or not rendered:
+            # send_notice does not catch its own delivery failures.
+            try:
+                send_notice('WheelHouse settings', text, timeout=15)
+            except Exception:
+                logger.exception('Could not deliver the settings notice')
+
+    def _send_settings_command(self, command):
+        values = (dict(command.get('values') or {})
+                  if command['action'] == 'set_config_values'
+                  else {command['key']: command['value']})
+        if not values:
+            return
+        request_id = uuid.uuid4().hex
+        # Register only an enqueued write. A rejected newer command must not
+        # supersede an older write whose acknowledgement is still in flight.
+        try:
+            self.commands_to_logic_queue.put_nowait(dict(command, request_id=request_id))
+        except (Full, OSError, ValueError):
+            self._apply_geometry((self._settings_confirmed.get('FLOATING_BUTTON_SIZE', 50),
+                                  self._settings_confirmed.get('FLOATING_BUTTON_POS', [100, 100])))
+            self._settings_show_status("Couldn't send settings. Restored the confirmed values.", failure=True)
+            return
+        self._settings_requests[request_id] = {
+            'values': values, 'deadline': time.monotonic() + 5.0, 'attempts': 0,
+        }
+        for key in values:
+            self._settings_latest[key] = request_id
+        # Superseded groups may still own other keys; retain those keys only.
+        for old_id, pending in list(self._settings_requests.items()):
+            pending['values'] = {key: value for key, value in pending['values'].items()
+                                 if self._settings_latest.get(key) == old_id}
+            if not pending['values']:
+                del self._settings_requests[old_id]
+        self._settings_show_status('Saving settings. Waiting for confirmation.')
+
+    def _settings_filter_state(self, message):
+        message = dict(message)
+        for key, wire_key, default in (
+            ('FLOATING_BUTTON_SIZE', 'FLOATING_BUTTON_SIZE', 50),
+            ('FLOATING_BUTTON_POS', 'FLOATING_BUTTON_POS', [100, 100]),
+            ('FLOATING_BUTTON_VISIBLE', 'button_visible', True),
+            ('SHOW_SPEECH_PULSE', 'SHOW_SPEECH_PULSE', True),
+        ):
+            pending = self._settings_requests.get(self._settings_latest.get(key))
+            if pending:
+                message[wire_key] = pending['values'][key]
+            else:
+                # Live state still drives the display, but only the disk
+                # snapshot can advance the rollback/confirmation baseline.
+                persisted = message.get('settings_persisted', {})
+                self._settings_confirmed[key] = persisted.get(key, message.get(wire_key, default))
+        return message
+
+    def _handle_settings_result(self, message):
+        if message['action'] == 'config_write_result' and type(message.get('saved')) is not bool:
+            return
+        request_id = message.get('request_id')
+        pending = self._settings_requests.get(request_id)
+        if pending is None:
+            return
+        values = message.get('values', {})
+        keys = [key for key in pending['values']
+                if self._settings_latest.get(key) == request_id and key in values]
+        if not keys:
+            return
+        failed = message['action'] == 'config_write_result' and message.get('saved') is False
+        defaults = {'FLOATING_BUTTON_SIZE': 50, 'FLOATING_BUTTON_POS': [100, 100],
+                    'FLOATING_BUTTON_VISIBLE': True, 'SHOW_SPEECH_PULSE': True}
+        for key in keys:
+            self._settings_confirmed[key] = (defaults.get(key) if values[key] is None
+                                             else values[key])
+            del pending['values'][key]
+        if not pending['values']:
+            del self._settings_requests[request_id]
+        geometry = (
+            self._settings_confirmed.get('FLOATING_BUTTON_SIZE', 50),
+            self._settings_confirmed.get('FLOATING_BUTTON_POS', [100, 100]),
+        )
+        # A group reply must not move a different key with a newer request.
+        geometry = tuple(
+            self._settings_requests[self._settings_latest[key]]['values'][key]
+            if self._settings_latest.get(key) in self._settings_requests else value
+            for key, value in zip(('FLOATING_BUTTON_SIZE', 'FLOATING_BUTTON_POS'), geometry)
+        )
+        if self.button._gesture_running and not failed:
+            self._deferred_geometry = geometry
+        else:
+            self._apply_geometry(geometry)
+        if 'FLOATING_BUTTON_VISIBLE' in keys:
+            self.button_visible = self._settings_confirmed['FLOATING_BUTTON_VISIBLE']
+        if 'SHOW_SPEECH_PULSE' in keys:
+            self.show_speech_pulse = self._settings_confirmed['SHOW_SPEECH_PULSE']
+        self.update_ui_state()
+        if failed:
+            self._settings_show_status("Couldn't save settings. Restored the confirmed values.", failure=True)
+        elif not self.settings_pending:
+            self.settings_status_text = ''
+            if self._settings_notice is not None:
+                self._settings_notice.close()
+
+    def _settings_fail_request(self, request_id):
+        """Retire a request that never came back, and say so."""
+        self._settings_requests.pop(request_id, None)
+        self._settings_show_status(
+            "Couldn't confirm the settings. They may not have been saved.", failure=True)
+
+    def _check_settings_timeout(self):
+        now = time.monotonic()
+        for request_id, pending in list(self._settings_requests.items()):
+            if now < pending['deadline']:
+                continue
+            # A stalled logic process must end in a failure the user can
+            # see, not a notice that waits for an answer forever.
+            if pending['attempts'] >= 3:
+                self._settings_fail_request(request_id)
+                continue
+            pending['attempts'] += 1
+            pending['deadline'] = now + 5.0
+            self._settings_show_status('Settings outcome unknown. Checking the current settings.')
+            try:
+                self.commands_to_logic_queue.put_nowait({
+                    'action': 'get_config_values', 'request_id': request_id,
+                    'keys': list(pending['values']),
+                })
+            except (Full, OSError, ValueError):
+                logger.warning('Settings reconciliation queue unavailable')
+                self._settings_fail_request(request_id)
 
     def send_toggle_speech_command(self):
         """:flow: GUI State Synchronization
@@ -2537,9 +3263,23 @@ class GuiManager(QObject):
             },
         })
 
+    def _request_tray_visibility_toggle(self):
+        """Queue tray intent so settings state and notices stay on Qt's thread."""
+        try:
+            self.state_from_logic_queue.put_nowait({'action': 'toggle_button_visibility'})
+        except (Full, OSError, ValueError):
+            logger.warning('GUI state queue unavailable; visibility toggle not sent')
+            try:
+                send_notice('WheelHouse settings', "Couldn't change button visibility. Please try again.", timeout=15)
+            except Exception:
+                logger.exception('Could not report the refused visibility toggle')
+
     def toggle_button_visibility(self):
-        """Send command to toggle floating button visibility."""
-        self.send_command({'action': 'toggle_button_visibility'})
+        """Toggle through the staged settings write and its outcome feedback."""
+        key = 'FLOATING_BUTTON_VISIBLE'
+        pending = self._settings_requests.get(self._settings_latest.get(key))
+        visible = pending['values'].get(key, self.button_visible) if pending else self.button_visible
+        self.send_command({'action': 'set_config_value', 'key': key, 'value': not visible})
 
     def toggle_interim_results(self):
         """Send command to toggle interim (partial) STT results."""
@@ -2563,7 +3303,6 @@ class GuiManager(QObject):
         # Both modes use hold threshold -- quick clicks do nothing in PTT mode,
         # and defer toggle in toggle mode.
         self._ptt_held = False
-        self._speech_before_hold = self.speech_enabled  # Save for drag cancel
         self._press_timer.start(self._PTT_HOLD_THRESHOLD_MS)
 
     def _on_button_release(self):
@@ -2598,23 +3337,109 @@ class GuiManager(QObject):
     def _start_ptt(self, source: str = "floating_button"):
         """Send ptt_start command to Logic process."""
         self._ptt_held = True
-        self.send_command({"action": "ptt_start", "source": source})
-        # Optimistic UI update -- show active state immediately
-        # (Logic process will confirm via state_update later)
-        self.speech_enabled = True
-        self.button.set_ptt_mode(self.speech_interaction_mode == "push_to_talk")
-        self.button.set_state(True)
-        self.update_tray_menu()
+        self._ptt_request_id = uuid.uuid4().hex
+        self._set_ptt_feedback("pending", "Push to talk requested. Waiting for listening confirmation.")
+        self.update_ui_state()
+        accepted = self.send_command({"action": "ptt_start", "source": source,
+                                      "request_id": self._ptt_request_id})
+        if accepted is False:
+            self._ptt_request_id = None
+            self._ptt_ack_timer.stop()
+            self._set_ptt_feedback("refused", "Push to talk could not start: the command queue is full.")
+            self.update_ui_state()
+        else:
+            self._ptt_ack_timer.start(5000)
+
+    def _set_ptt_feedback(self, state: str, description: str):
+        changed = (state, description) != (self._ptt_feedback, self._ptt_feedback_text)
+        self._ptt_feedback, self._ptt_feedback_text = state, description
+        self.button.set_ptt_feedback(state, description)
+        if state == "refused" and changed:
+            try:
+                send_notice("Push to talk", description, timeout=8)
+            except Exception:
+                logger.warning("PTT notice unavailable; button retains the reason", exc_info=True)
+
+    def _handle_ptt_state(self, message: dict):
+        if self._ptt_request_id is None:
+            if not self._ptt_feedback or not self._ptt_held or message.get("speech_enabled", False):
+                self._set_ptt_feedback("", "Listening." if message.get("speech_enabled", False) else "Not listening.")
+            return
+        if message.get("ptt_request_id") != self._ptt_request_id:
+            # A restarted Logic has no request token and no active hold. Once
+            # pending ends, its real state must replace the missing-ack notice.
+            # Keep rejecting named older holds, including after timeout/release.
+            if (self._ptt_feedback != "pending"
+                    and message.get("ptt_request_id") is None
+                    and not message.get("ptt_active", False)):
+                self._ptt_request_id = None
+                self._ptt_ack_timer.stop()
+                self._set_ptt_feedback("", "Listening." if message.get("speech_enabled", False) else "Not listening.")
+            return
+        # A start reply can still be queued when the button has been released.
+        # Wait for the stopped state instead of confirming a released request.
+        if not self._ptt_held and message.get("ptt_active", False):
+            return
+        self._ptt_ack_timer.stop()
+        # ptt_active first: the hold owns the release instruction. A toggle-mode
+        # release restores the pre-hold setting, so the stopped reply carries
+        # speech_enabled True with nothing left to release, and choosing on
+        # speech alone told the user to release a hold that had already ended.
+        if message.get("ptt_active", False) and message.get("speech_enabled", False):
+            self._set_ptt_feedback("", "Listening. Release to stop push to talk.")
+        elif message.get("ptt_active", False):
+            self._set_ptt_feedback("refused", message.get("ptt_refusal_reason") or "Push to talk is not listening.")
+        elif self._ptt_held:
+            # The safety cutoff ends a hold the user is still holding, and it
+            # restores the pre-hold setting, so this reply can say listening is
+            # on. The ended hold then belongs in the text only: "refused"
+            # paints the purple fill documented as not listening and turns the
+            # button off through update_ui_state, which would claim an off
+            # microphone while the engine transcribes -- the failure
+            # wh-ptt-release-disables-speech.1.5 ruled against.
+            listening = message.get("speech_enabled", False)
+            self._set_ptt_feedback(
+                "" if listening else "refused",
+                "Listening. Push to talk ended." if listening
+                else "Push to talk ended. Release and hold again to listen.")
+        elif message.get("speech_enabled", False):
+            self._set_ptt_feedback("", "Listening.")
+        else:
+            self._set_ptt_feedback("", "Push to talk released.")
+        if not message.get("ptt_active", False):
+            self._ptt_request_id = None
+
+    def _ptt_pending_timeout(self):
+        if self._ptt_feedback == "pending" and not self.shutdown_event.is_set():
+            self._set_ptt_feedback("refused", "Listening has not been confirmed. Release and try push to talk again.")
+            self.update_ui_state()
+            # A restart snapshot may have arrived while pending and lacked our
+            # token. Read current state once; never repeat the start command.
+            self.send_command({"action": "request_initial_state"})
 
     def _stop_ptt(self):
-        """Send ptt_stop command to Logic process."""
+        """Send ptt_stop command to Logic process.
+
+        No guess about speech is made here. This used to show the microphone
+        off at once, which was right while StateManager.ptt_stop forced the
+        setting off for an ordinary release. That release now restores the
+        pre-hold setting (wh-ptt-release-disables-speech), so the answer can be
+        on, and the guess showed an off microphone while the speech engine was
+        listening -- with a hands-free user having no other indicator
+        (wh-ptt-release-disables-speech.1.5).
+
+        This process cannot work out the answer for itself. A state update
+        carries only the computed speech_enabled, not the setting and not the
+        three suppression flags, and the hold's own audio override changes the
+        computed answer while the hold runs. So ptt_stop's own state update
+        decides, on the next queue poll, 100 ms away. _cancel_pending_press
+        takes the same position for the two cancellations, since
+        wh-ptt-release-disables-speech.1.8; before that it restored the value
+        saved at the press.
+        """
         self._ptt_held = False
         self.send_command({"action": "ptt_stop"})
-        # Optimistic UI update -- show inactive state immediately
-        self.speech_enabled = False
         self.button.set_ptt_mode(self.speech_interaction_mode == "push_to_talk")
-        self.button.set_state(False)
-        self.update_tray_menu()
 
     def _on_double_click(self):
         """Handle double-click -- toggle between PTT and toggle interaction modes."""
@@ -2646,18 +3471,26 @@ class GuiManager(QObject):
         self._cancel_pending_press("gesture_cancel")
 
     def _cancel_pending_press(self, reason: str):
-        """Drop a press in progress and put the microphone back as it was."""
+        """Drop a press in progress and let Logic say what the microphone does.
+
+        This used to put back the value saved at the press. That value is the
+        computed display, while StateManager.ptt_stop restores the raw setting,
+        and commit 10983243 made an explicit decision taken during the hold
+        move the raw value Logic restores. The pre-press value did not move
+        with it, so a cancellation put the display back to a decision the user
+        had already replaced (wh-ptt-release-disables-speech.1.8).
+
+        A cancellation ends a hold exactly as a release does, so it takes the
+        same position as _stop_ptt: send the command, and show what the state
+        update reports.
+        """
         self._press_timer.stop()
         self._double_click_timer.stop()
         if self._ptt_held:
-            # Hold timer activated PTT before the interruption -- cancel PTT
-            # and restore the pre-hold speech state (don't change what the user had)
+            # Hold timer activated PTT before the interruption -- cancel PTT.
             self._ptt_held = False
             self.send_command({"action": "ptt_stop", "reason": reason})
-            self.speech_enabled = self._speech_before_hold
-            self.button.set_state(self._speech_before_hold)
             self.button.set_ptt_mode(self.speech_interaction_mode == "push_to_talk")
-            self.update_tray_menu()
 
     def _on_tray_left_click(self):
         """Handle system tray icon left-click with double-click detection."""
@@ -2688,25 +3521,6 @@ class GuiManager(QObject):
         """Request STT provider switch from Logic process."""
         self.send_command({'action': 'switch_stt_provider', 'provider': provider})
 
-    def set_google_credentials_file(self, path: str) -> None:
-        """Send the chosen Google service-account key path to Logic."""
-        self.send_command({'action': 'set_google_credentials_file', 'path': path})
-
-    def _pick_google_credentials_file(self):
-        """Open a file dialog for the Google service-account key.
-
-        Must run on the Qt thread; the pystray menu item marshals here
-        through the state queue, like the Pattern Manager item.
-        """
-        path, _ = QFileDialog.getOpenFileName(
-            None,
-            "Choose your Google service-account key file",
-            "",
-            "JSON key files (*.json);;All files (*.*)",
-        )
-        if path:
-            self.set_google_credentials_file(path)
-
     def _get_provider_display_name(self, provider: str) -> str:
         """Get user-friendly display name for STT provider.
 
@@ -2721,7 +3535,6 @@ class GuiManager(QObject):
         fallback_names = {
             "google_remote": "Google Cloud (WebSocket)",
             "google": "Google Cloud",
-            "azure": "Azure Speech",
         }
         return fallback_names.get(provider, provider.replace("_", " ").title())
 
@@ -2779,31 +3592,10 @@ class GuiManager(QObject):
         """Send restart_program command to logic process and show notification."""
         try:
             self.commands_to_logic_queue.put_nowait({'action': 'restart_program'})
-            if notification.notify:
-                notification.notify(title="Wheelhouse", message="Restarting application...")
+            send_notice("Wheelhouse", "Restarting application...")
         except Exception as e:
             logger.error(f"Failed to send restart command: {e}")
-            if notification.notify:
-                notification.notify(title="Wheelhouse", message="Could not restart: Logic process is unresponsive.")
-
-    def request_stt_restart(self):
-        """
-        :flow: STT Restart Request
-        :step: 1
-        :produces_for: WheelHouse Logic Process
-        :description: Sends hard restart command to logic process when user clicks
-            "Restart Transcription Service" in the system tray menu.
-            Shows working dialog to indicate the operation is in progress.
-        :data_in: User menu click event
-        :data_out: {action: 'hard_restart_stt_service'} message to commands_queue
-        """
-        try:
-            self.commands_to_logic_queue.put_nowait({'action': 'hard_restart_stt_service'})
-            self.working_dialog.show_working("Restarting speech recognition")
-        except Exception as e:
-            logger.error(f"Failed to send STT restart command: {e}")
-            if notification.notify:
-                notification.notify(title="Wheelhouse", message="Could not restart STT: Logic process is unresponsive.")
+            send_notice("Wheelhouse", "Could not restart: Logic process is unresponsive.")
 
     def _open_help_chat(self, question: str = ""):
         """Open or show the help chat window."""
@@ -2890,9 +3682,16 @@ class GuiManager(QObject):
                 "Failed to enqueue editor_rebuilt notification: %s", exc,
             )
 
-    def _on_te_cancelled(self):
-        """Forward cancel to Logic Process."""
-        self.commands_to_logic_queue.put_nowait({"action": "te_cancelled"})
+    def _on_te_cancelled(self, request_id: str):
+        """Forward cancel to Logic Process.
+
+        wh-overlay-slow-uia-stale-badges.14.17: carries the session's
+        show request_id so the input-process proxy can ignore a
+        cancellation delivered late from an older session.
+        """
+        self.commands_to_logic_queue.put_nowait(
+            {"action": "te_cancelled", "request_id": request_id},
+        )
 
     def _on_te_event_acked(self, request_id: str, op: str, editor_hwnd: int):
         """Forward te_event ack from editor window to Logic Process (wh-t81d9.2).
@@ -2929,12 +3728,11 @@ class GuiManager(QObject):
             )
         if op.startswith("submit_failed"):
             try:
-                if notification.notify:
-                    notification.notify(
-                        title="Terminal paste failed",
-                        message="Command not submitted.",
-                        timeout=5,
-                    )
+                send_notice(
+                    "Terminal paste failed",
+                    "Command not submitted.",
+                    timeout=5,
+                )
             except Exception as exc:
                 logger.warning(
                     "submit_failed toast emission raised: %s", exc,
@@ -2954,6 +3752,24 @@ class GuiManager(QObject):
 
     def _send_pm_command(self, command: dict):
         """Forward Pattern Manager commands to Logic process."""
+        self.commands_to_logic_queue.put_nowait(command)
+
+    def _open_calibration(self):
+        """Open the voice-teaching (calibration) window (wh-7ou.7.3.1)."""
+        from calibration_dialog import CalibrationDialog
+        if not hasattr(self, '_cal_dialog') or self._cal_dialog is None:
+            self._cal_dialog = CalibrationDialog(parent=None)
+            self._cal_dialog.calibration_action.connect(self._send_cal_command)
+        # Blank the window and re-arm its one-shot cancel; Logic answers
+        # cal_session_open with the first cal_state to render.
+        self._cal_dialog.reset_session()
+        self.commands_to_logic_queue.put_nowait({"action": "cal_session_open"})
+        self._cal_dialog.show()
+        self._cal_dialog.raise_()
+        self._cal_dialog.activateWindow()
+
+    def _send_cal_command(self, command: dict):
+        """Forward voice-teaching commands to Logic process."""
         self.commands_to_logic_queue.put_nowait(command)
 
     def _create_menu(self, is_tray_menu=True):
@@ -2981,7 +3797,7 @@ class GuiManager(QObject):
                 ),
                 pystray.MenuItem(
                     "Show Floating Button",
-                    self.toggle_button_visibility,
+                    self._request_tray_visibility_toggle,
                     checked=lambda item: button_is_visible,
                     enabled=is_ready
                 ),
@@ -3016,22 +3832,20 @@ class GuiManager(QObject):
                             enabled=is_ready
                         )
                     )
+                # Voice teaching sits with the engine list, because it
+                # teaches one engine (wh-voice-teaching-stt-submenu). It
+                # marshals to the Qt thread via the state queue, like the
+                # Pattern Manager (wh-7ou.7.3.1).
+                provider_items.append(pystray.Menu.SEPARATOR)
+                provider_items.append(
+                    pystray.MenuItem(
+                        "Teach WheelHouse your voice...",
+                        lambda: self.state_from_logic_queue.put({"action": "open_calibration"}),
+                        enabled=is_ready
+                    )
+                )
                 menu_items.append(
                     pystray.MenuItem("STT Provider", pystray.Menu(*provider_items))
-                )
-
-            # Google credentials picker, only when google_stt is installed
-            # (marshal to Qt thread via state queue -- file dialogs must
-            # run there, like the Pattern Manager)
-            if "google_stt" in self.stt_providers_available:
-                menu_items.append(
-                    pystray.MenuItem(
-                        "Google Cloud Credentials",
-                        lambda: self.state_from_logic_queue.put(
-                            {"action": "open_google_credentials_picker"}
-                        ),
-                        enabled=is_ready,
-                    )
                 )
 
             # Add AI Model submenu if models available
@@ -3101,7 +3915,6 @@ class GuiManager(QObject):
                 pystray.MenuItem("Help", self.request_help_online, enabled=is_ready),
                 pystray.MenuItem("About Wheelhouse", self.show_about_dialog),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Restart Transcription Service", self.request_stt_restart, enabled=is_ready),
                 pystray.MenuItem("Restart Wheelhouse", self.request_restart, enabled=is_ready),
                 pystray.MenuItem("Exit", self.exit_app, enabled=is_ready)
             ])
@@ -3109,11 +3922,17 @@ class GuiManager(QObject):
             return pystray.Menu(*menu_items)
         else:
             menu = QMenu()
+            # A QMenu hides the tooltips of its actions unless this is on.
+            menu.setToolTipsVisible(True)
             
             speech_action = QAction("Speech Enabled", self)
             speech_action.setCheckable(True)
             speech_action.setChecked(speech_is_checked)
             speech_action.setEnabled(is_ready)
+            speech_action.setToolTip(
+                "Switch listening on or off. The checkmark shows the current"
+                " state."
+            )
             speech_action.triggered.connect(self.send_toggle_speech_command)
             menu.addAction(speech_action)
 
@@ -3121,6 +3940,10 @@ class GuiManager(QObject):
             button_action.setCheckable(True)
             button_action.setChecked(button_is_visible)
             button_action.setEnabled(is_ready)
+            button_action.setToolTip(
+                "Show or hide the floating button. The checkmark shows whether"
+                " it is visible."
+            )
             button_action.triggered.connect(self.toggle_button_visibility)
             menu.addAction(button_action)
 
@@ -3128,6 +3951,10 @@ class GuiManager(QObject):
             interim_action.setCheckable(True)
             interim_action.setChecked(interim_results_checked)
             interim_action.setEnabled(is_ready)
+            interim_action.setToolTip(
+                "Select whether Wheelhouse types words as the engine recognizes"
+                " them, or holds them until the phrase ends."
+            )
             interim_action.triggered.connect(self.toggle_interim_results)
             menu.addAction(interim_action)
 
@@ -3135,49 +3962,82 @@ class GuiManager(QObject):
             ptt_mode_action.setCheckable(True)
             ptt_mode_action.setChecked(self.speech_interaction_mode == "push_to_talk")
             ptt_mode_action.setEnabled(is_ready)
+            ptt_mode_action.setToolTip(
+                "Switch between the two interaction modes. The checkmark shows"
+                " when push-to-talk is active."
+            )
             ptt_mode_action.triggered.connect(self._toggle_ptt_mode)
             menu.addAction(ptt_mode_action)
 
             # STT Provider submenu (only if providers available)
             if self.stt_providers_available:
                 stt_submenu = QMenu("STT Provider", menu)
+                stt_submenu.setToolTipsVisible(True)
+                # The hover comment belongs on the action that OPENS the
+                # submenu, because that is the action the parent menu lists.
+                stt_submenu.menuAction().setToolTip(
+                    "Select the speech engine. This menu lists only the engines"
+                    " set up on this computer."
+                )
                 for provider in self.stt_providers_available:
                     display_name = self._get_provider_display_name(provider)
                     action = QAction(display_name, stt_submenu)
                     action.setCheckable(True)
                     action.setChecked(provider == self.stt_provider)
                     action.setEnabled(is_ready)
+                    action.setToolTip(
+                        "Switch the speech engine to this one. The change takes"
+                        " effect at once."
+                    )
                     # Capture provider value in lambda closure
                     action.triggered.connect(
                         lambda checked, p=provider: self.switch_stt_provider(p)
                     )
                     stt_submenu.addAction(action)
+                # Voice teaching sits with the engine list, because it
+                # teaches one engine (wh-voice-teaching-stt-submenu;
+                # wh-7ou.7.3.1 for the handler).
+                stt_submenu.addSeparator()
+                cal_action = stt_submenu.addAction("Teach WheelHouse your voice...")
+                cal_action.setEnabled(is_ready)
+                cal_action.setToolTip(
+                    "Open the voice-teaching session for the Distil-Whisper engine."
+                )
+                cal_action.triggered.connect(self._open_calibration)
                 menu.addMenu(stt_submenu)
-
-            # Google credentials picker, only when google_stt is installed
-            if "google_stt" in self.stt_providers_available:
-                creds_action = menu.addAction("Google Cloud Credentials")
-                creds_action.setEnabled(is_ready)
-                creds_action.triggered.connect(self._pick_google_credentials_file)
 
             # AI Model submenu (only if models available)
             if self.ai_providers_available:
                 ai_submenu = QMenu("AI Model", menu)
+                ai_submenu.setToolTipsVisible(True)
+                ai_submenu.menuAction().setToolTip(
+                    "Select the AI model. This menu lists the models the"
+                    " settings file names and the server offers."
+                )
                 for provider in self.ai_providers_available:
                     is_unconfigured = provider == "__ai_unconfigured__"
                     is_disabled = provider == "__ai_disabled__"
                     is_placeholder = is_unconfigured or is_disabled
                     if is_unconfigured:
                         display_name = "AI not configured"
+                        hover_comment = (
+                            "The settings file names no AI server, so Wheelhouse"
+                            " can offer no model."
+                        )
                     elif is_disabled:
                         display_name = "AI disabled"
+                        hover_comment = (
+                            "The settings file switches the AI features off."
+                        )
                     else:
                         display_name = self._get_ai_provider_display_name(provider)
+                        hover_comment = "Use this model for the AI features."
                     action = QAction(display_name, ai_submenu)
                     action.setCheckable(True)
                     action.setChecked(provider == self.ai_provider)
                     # Sentinel placeholders are non-selectable.
                     action.setEnabled(is_ready and not is_placeholder)
+                    action.setToolTip(hover_comment)
                     action.triggered.connect(
                         lambda checked, p=provider: self.switch_ai_provider(p)
                     )
@@ -3192,12 +4052,17 @@ class GuiManager(QObject):
                         ai_submenu,
                     )
                     absent.setEnabled(False)
+                    absent.setToolTip(
+                        "The settings file names this model. It is not among the"
+                        " models on offer."
+                    )
                     ai_submenu.addAction(absent)
                 menu.addMenu(ai_submenu)
 
             # Pattern Manager
             pm_action = menu.addAction("Pattern Manager")
             pm_action.setEnabled(is_ready)
+            pm_action.setToolTip("Open the editor for personal voice patterns.")
             pm_action.triggered.connect(self._open_pattern_manager)
 
             menu.addSeparator()
@@ -3206,6 +4071,11 @@ class GuiManager(QObject):
             debug_action.setCheckable(True)
             debug_action.setChecked(debug_is_checked)
             debug_action.setEnabled(is_ready)
+            debug_action.setToolTip(
+                "Switch detailed logging on or off. Leave it off except when"
+                " diagnosing or reporting a problem. The checkmark shows the"
+                " current state."
+            )
             debug_action.triggered.connect(lambda: self.send_command({'action': 'toggle_log_level'}))
             menu.addAction(debug_action)
 
@@ -3213,29 +4083,40 @@ class GuiManager(QObject):
 
             help_action = QAction("Help", self)
             help_action.setEnabled(is_ready)
+            help_action.setToolTip(
+                'Open the Wheelhouse Assistant in the browser. The spoken'
+                ' command "x-ray help" opens the same page.'
+            )
             help_action.triggered.connect(self.request_help_online)
             menu.addAction(help_action)
 
             # No is_ready check. This one needs nothing from the Logic
             # process, so it works even when the rest of the menu cannot.
             about_action = QAction("About Wheelhouse", self)
+            about_action.setToolTip(
+                "Show the program name and the running version. Include the"
+                " version in any problem report."
+            )
             about_action.triggered.connect(self.show_about_dialog)
             menu.addAction(about_action)
 
             menu.addSeparator()
 
-            restart_stt_action = QAction("Restart Transcription Service", self)
-            restart_stt_action.setEnabled(is_ready)
-            restart_stt_action.triggered.connect(self.request_stt_restart)
-            menu.addAction(restart_stt_action)
-
             restart_action = QAction("Restart Wheelhouse", self)
             restart_action.setEnabled(is_ready)
+            restart_action.setToolTip(
+                "Restart the whole program. This is the first step when speech"
+                " recognition stops responding."
+            )
             restart_action.triggered.connect(self.request_restart)
             menu.addAction(restart_action)
 
             exit_action = QAction("Exit", self)
             exit_action.setEnabled(is_ready)
+            exit_action.setToolTip(
+                "Close Wheelhouse. Do this before running the installer to"
+                " update, and before uninstalling."
+            )
             exit_action.triggered.connect(self.exit_app)
             menu.addAction(exit_action)
             
@@ -3271,8 +4152,8 @@ class GuiManager(QObject):
                 "Wheelhouse\n"
                 f"Version {version}\n\n"
                 "Voice-controlled desktop automation for Windows.\n\n"
-                "Choose Help from this menu, or say \"x-ray wheelhouse help "
-                "online\", to open the Wheelhouse Assistant in your browser."
+                "Choose Help from this menu, or say \"open voice access help\", "
+                "to open the Wheelhouse Assistant in your browser."
             ),
         )
 
@@ -3281,6 +4162,7 @@ class GuiManager(QObject):
         self.shutdown_event.set()
 
     def _shutdown_gui(self):
+        self._ptt_ack_timer.stop()
         self.queue_timer.stop()
         self.icon.stop()
         app = QApplication.instance()
@@ -3319,11 +4201,19 @@ def gui_process_target(shutdown_event: Event, commands_to_logic_queue: Queue, st
     """
     from services.wheelhouse.config_service import ConfigService
     from utils.logging_setup import setup_logging
-    
+    from utils.process_priority import elevate_process_priority
+
     # Use consistent logging setup across all processes
     config_service = ConfigService()
     config = config_service.get_config()
     setup_logging(config)
+
+    # High process class keeps the overlay painting under a saturated CPU;
+    # the Below Normal class a Task Scheduler launch hands down starves it
+    # (wh-process-priority-durable). After setup_logging so a refusal's
+    # warning reaches the process log instead of bare stderr
+    # (wh-process-priority-durable.1.4).
+    elevate_process_priority()
     
     logger.info("GUI process started.")
     try:

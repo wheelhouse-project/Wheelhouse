@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 from ..context import UIContext
 
 
@@ -40,9 +40,23 @@ class InsertionOptions:
     wh-iti5: introduced for the option-4 design that came out of the
     wh-9r0i (design review for routing wrap_or_insert / transform_selection)
     review loop.
+
+    wh-review-pattern-fixes.45: ``captured_target_control`` and
+    ``captured_target_hwnd`` carry the control a selection was copied
+    from, and the top-level window that control belongs to, through the
+    router to the chosen strategy. ``transform_selection`` and the
+    selection branch of ``wrap_or_insert`` set them. A strategy that
+    resolves its own target from the fresh capture ignores them,
+    because the handler already proved the captured target holds the
+    foreground before it routed. ``SimplePasteStrategy`` reads them,
+    because it has no control of its own and would otherwise reach the
+    deliberate no-captured-target branch of ``verified_paste``.
+    Ordinary dictation leaves both None and keeps that branch.
     """
 
     mode: InsertionMode = InsertionMode.DICTATION
+    captured_target_control: Any = None
+    captured_target_hwnd: Optional[int] = None
 
 
 @dataclass(frozen=True)

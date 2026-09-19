@@ -65,6 +65,20 @@ Logic and Input each run ``from_raw`` over the same raw ``[click]`` block
 independently and agree on the overlay gating with no IPC handoff. Ranges and
 defaults come from docs/plans/2026-05-28-voice-element-clicking-phase-1-5-
 design-v4.md Configuration.
+
+Mouse-grid keys (wh-grid-state-machine):
+========================================
+The mouse grid ("show grid") adds ``grid_min_cell_px`` and
+``drag_duration_ms``. Both validate on the OVERLAY track above, not the Phase 1
+track. Two reasons. The grid spec
+(``docs/superpowers/specs/2026-08-09-mouse-grid-overlay-design.md``,
+Configuration) asks for "never raises; degrades to safe defaults" -- which is
+what the overlay track does and what the Phase 1 track deliberately does not (a
+bad Phase 1 value disables the whole feature). And the grid and the numbered
+overlay are mutually exclusive views of ONE visual-selection layer, so a bad
+grid value disabling both, while by-name click stays operative, is the
+proportionate degrade. The grid's on/off gate is the ``[click]`` master switch
+``enabled``: if voice clicking is off, the grid is off.
 """
 
 from __future__ import annotations
@@ -100,12 +114,14 @@ _DEFAULT_BROWSER_PROCESSES: tuple[str, ...] = (
 class ClickConfig:
     """Validated, immutable voice-clicking configuration.
 
-    The 17 Phase 1 [click] keys plus ``invalid_key`` (``None`` when the config is
+    The 19 Phase 1 [click] keys plus ``invalid_key`` (``None`` when the config is
     valid -- or when the operator validly set ``enabled=false`` -- or the name of
     the first key that failed type/range validation when the feature was disabled
-    BY a validation failure), plus the nine Phase 1.5 overlay fields
-    (wh-n29v.29) and the derived ``overlay_enabled_effective`` property. The
-    overlay fields validate on a separate track. ``overlay_enabled_effective``
+    BY a validation failure), plus the Phase 1.5 overlay fields (wh-n29v.29),
+    the two mouse-grid fields (wh-grid-state-machine), and the derived
+    ``overlay_enabled_effective`` property. The overlay and grid fields validate
+    on a separate track from Phase 1 (see the module docstring for why the grid
+    keys ride the overlay track). ``overlay_enabled_effective``
     is a read-only property (NOT a stored field) that gates every overlay entry
     point and equals ``overlay_enabled AND overlay_invalid_key == ()`` by
     construction -- deriving it instead of storing it makes that invariant
@@ -128,6 +144,19 @@ class ClickConfig:
     snapshot_ttl_seconds: int
     response_timeout_ms: int
     walk_deadline_ms: int
+    # wh-overlay-slow-uia-stale-badges.3: the screen read's OWN time limit --
+    # how long Logic waits for a read of the window's clickable controls
+    # (show numbers, the refresh after a focus change, the settle re-read
+    # after a click). Separate from response_timeout_ms, which bounds a click
+    # reply, and NOT validated against it: a read of the whole window and a
+    # reply to one click are different operations with different costs.
+    screen_read_timeout_ms: int
+    # wh-overlay-slow-uia-stale-badges.6: the ClickExecutor pre-click
+    # verification wall-clock budget. Validates on the MAIN track (a bad
+    # value disables clicking, same as response_timeout_ms) because an
+    # unbounded verification block is what let a click blow through the
+    # Logic awaiter and mislabel a refusal as a transport timeout.
+    verification_budget_ms: int
     min_substring_query_length: int
     min_substring_overlap_ratio: float
     enable_coordinate_click_on_com_error: bool
@@ -136,7 +165,7 @@ class ClickConfig:
     invalid_key: Optional[str] = None
     # -- Phase 1.5 overlay fields (wh-n29v.29) -------------------------------
     overlay_enabled: bool = True
-    overlay_badge_font_pt: int = 16
+    overlay_badge_font_pt: int = 8
     # Which corner of a control the overlay number sits on. Default "top_right"
     # so the digit clears the icon and the label text, which Windows list rows,
     # tree items, and menu entries keep at the LEFT (wh-overlay-badge-occludes-
@@ -158,7 +187,19 @@ class ClickConfig:
     # second UI-tree walk plus a new Input-to-GUI message for the obstacle
     # rectangles).
     overlay_badge_trailing_space: bool = True
-    overlay_badge_shadow: bool = True
+    # No drop shadow by default (user visual review 2026-08-08): the offset
+    # dark copy behind every numeral added visual noise without aiding
+    # legibility -- the bubble's border stroke already separates it from the
+    # background. True restores the shadow.
+    overlay_badge_shadow: bool = False
+    # The bubble badge's own color scheme (wh-overlay-bubble-badges): "light"
+    # is a white bubble with a black digit, "dark" a near-black bubble with a
+    # white digit, and "auto" (the default) picks per paint from the Windows
+    # app theme -- system dark theme -> light bubble, system light theme ->
+    # dark bubble, so the bubble contrasts with typical screen content. The
+    # values name the BUBBLE color, not the system theme. Spec:
+    # docs/plans/2026-08-04-overlay-bubble-badges-design-v1.md.
+    overlay_badge_theme: str = "auto"
     overlay_auto_open_on_ambiguous: bool = True
     overlay_focus_debounce_ms: int = 250
     # Renamed from overlay_bounds_tolerance_logical_px (wh-bounds-tol-rename-
@@ -173,6 +214,34 @@ class ClickConfig:
     # the keepalive tick (snapshot_ttl_seconds/2, 15s at defaults), so the
     # real window is this value rounded up to the next tick.
     overlay_browser_refresh_seconds: int = 10
+    # wh-overlay-slow-uia-stale-badges.1: when True, a successful badge click
+    # clears the numbers at once. Child .1 stops there -- nothing paints the
+    # next set, and the overlay closes at the settle timeout unless the user
+    # speaks. Child .2 adds the read that brings the numbers back, which is
+    # why this key must stay False until it lands. When False (the default
+    # and the shipped behaviour) the click starts a refresh and the OLD
+    # numbers stay on screen for the whole re-walk -- which is the stale-badge
+    # defect this bead family fixes.
+    #
+    # KEEP THIS DEFAULT False until child .2 has landed. Child .1 only opens
+    # the gap after the click; child .2 is the half that reads the screen and
+    # brings the numbers back. Child .1 alone leaves the user with no numbers
+    # after every click.
+    overlay_settle_after_click: bool = False
+    # -- Mouse-grid fields (wh-grid-state-machine) ---------------------------
+    # The cell side length (physical pixels) below which the grid stops
+    # refining: a spoken number is ignored once the current cell is under this
+    # on a side, because a cell that small already locates the pointer to
+    # within a click's precision. grid_overlay_state.can_refine clamps the
+    # effective floor up to three pixels regardless -- a shorter side cannot
+    # split into three non-empty cells -- so a configured 1 or 2 behaves as 3.
+    grid_min_cell_px: int = 24
+    # How long the grid's "drag" spends interpolating between the mark and the
+    # destination. The movement is gradual because many applications ignore a
+    # drag whose pointer teleports: they never see the intermediate movement
+    # that makes them begin the drag operation. 0 is valid and means a single
+    # move then release (most applications will ignore it).
+    drag_duration_ms: int = 250
     # An immutable tuple, not a list: a frozen dataclass auto-generates __hash__
     # over its fields, so a list field would make every ClickConfig unhashable (a
     # regression from Phase 1, whose fields were all hashable) and would be
@@ -200,6 +269,57 @@ class ClickConfig:
         two processes cannot disagree on whether the overlay is on.
         """
         return self.overlay_enabled and self.overlay_invalid_key == ()
+
+    @property
+    def screen_read_walk_deadline_ms(self) -> int:
+        """The Input-side bound for a screen read (derived, not stored).
+
+        ``screen_read_timeout_ms`` is the LOGIC-side awaiter, measured from
+        the IPC send. The Input-side walk deadline starts later, at command
+        dequeue, so it takes the same ``PRE_WALK_MARGIN_MS`` slack the click
+        pair uses (see ``_clamp_default_walk_deadline``) and gives up before
+        the awaiter rather than after it. Floored at
+        ``_WALK_DEADLINE_FLOOR_MS`` so the tightest legal read limit still
+        yields a usable bound. 9750 at the shipped 10000 default.
+
+        Derived rather than stored so there is one configured number and no
+        second key that can disagree with it (wh-overlay-slow-uia-stale-
+        badges.3).
+        """
+        return max(
+            _WALK_DEADLINE_FLOOR_MS,
+            self.screen_read_timeout_ms - _WALK_DEADLINE_MARGIN_MS,
+        )
+
+    # The two [click] keys that belong to the mouse grid. They validate on the
+    # overlay track (see the module docstring), so a failure lands in
+    # overlay_invalid_key -- this tuple is how grid_enabled_effective picks the
+    # grid's own failures out of that shared tuple.
+    _GRID_KEYS = ("grid_min_cell_px", "drag_duration_ms")
+
+    @property
+    def grid_enabled_effective(self) -> bool:
+        """Whether the mouse grid is effectively on (derived, not stored).
+
+        The grid's documented on/off gate is the ``[click]`` master switch
+        ``enabled`` -- but its two keys validate on the OVERLAY track, so
+        ``enabled`` alone misses a bad ``grid_min_cell_px`` /
+        ``drag_duration_ms`` (wh-mouse-grid.1.21: ``grid_min_cell_px=0``
+        yielded ``enabled=True`` and the grid opened on the silently-restored
+        default, contradicting the documented degrade). The effective gate::
+
+            grid_enabled_effective == (enabled AND no GRID key failed)
+
+        This is deliberately NOT ``overlay_enabled_effective``: a valid
+        ``overlay_enabled=false`` is a numbered-overlay opt-out and must not
+        take the grid down, and a bad overlay-only key (say
+        ``snapshot_store_capacity``) says nothing about the grid. Derived
+        like ``overlay_enabled_effective`` so it cannot fall out of sync,
+        and Logic and Input compute the same value from the same raw block.
+        """
+        return self.enabled and not any(
+            key in self.overlay_invalid_key for key in self._GRID_KEYS
+        )
 
     @classmethod
     def from_raw(cls, raw: Any) -> "ClickConfig":
@@ -277,9 +397,46 @@ class ClickConfig:
             notice_max_names = take("notice_max_names", _is_int_at_least(1))
             enable_screen_reader_flag = take("enable_screen_reader_flag", _is_bool)
             snapshot_ttl_seconds = take("snapshot_ttl_seconds", _is_int_at_least(1))
-            response_timeout_ms = take("response_timeout_ms", _is_int_at_least(100))
-            # walk_deadline_ms bounds the Input-side UIA click walk so it gives
-            # up before the Logic-side click awaiter (wh-9f3t.54.2). The
+            # The 10000 CEILING (wh-click-response-timeout-unbounded, David
+            # 2026-09-03 QUESTIONS-2026-09-02 item 36) matches
+            # verification_budget_ms. Without it this key accepted any int at
+            # or above 100, and ConfigService reads the file with tomllib,
+            # which parses arbitrary-precision integers rather than enforcing
+            # TOML's 64-bit range: 10 followed by 308 zeroes reached a live
+            # ENABLED config with all 309 digits kept. This key is the one
+            # most often multiplied to derive another timer, and one such
+            # site already raised OverflowError on it
+            # (wh-overlay-slow-uia-stale-badges.21.10, fixed at the derived
+            # site). Bounding the key protects the derived sites nobody has
+            # written yet. 10000 stays above what an operator on a slow
+            # hardware tier could want, which is why the key exists.
+            response_timeout_ms = take(
+                "response_timeout_ms", _is_int_in_range(100, 10000)
+            )
+            # The executor's pre-click verification budget
+            # (wh-overlay-slow-uia-stale-badges.6). Same floor as
+            # response_timeout_ms; still no cross-key invariant against it --
+            # the budget bounds Input-side COM reads, and a budget larger
+            # than the awaiter window is legal. The 10000 CEILING
+            # (wh-overlay-slow-uia-stale-badges.20.5) protects the
+            # late-answer correction, which holds only while the refusal
+            # arrives inside response_timeout_ms plus app.py's fixed 15 s
+            # registry grace: the cap keeps the worst case at defaults
+            # (walk_deadline_ms 2500 + budget 10000 = 12.5 s) inside that
+            # window, while an uncapped value (e.g. 60000) would push every
+            # slow-verification refusal past the grace and silently
+            # reintroduce the wrong "timed out" notice.
+            verification_budget_ms = take(
+                "verification_budget_ms", _is_int_in_range(100, 10000)
+            )
+            # walk_deadline_ms bounds the Input-side UIA walk of the BY-NAME
+            # CLICK only, so it gives up before the Logic-side click awaiter
+            # (wh-9f3t.54.2). The screen read (show numbers, the refresh after
+            # a focus change, the settle re-read) has its OWN key,
+            # screen_read_timeout_ms, validated below with no cross-key rule
+            # against either of these two -- so nothing here forces a read to
+            # finish inside a click reply's window
+            # (wh-overlay-slow-uia-stale-badges.3). The
             # cross-key invariant is walk_deadline_ms STRICTLY < response_timeout_ms
             # (FINDING 3): the two timers have DIFFERENT zero points -- the Logic
             # awaiter measures from IPC SEND, while the walk deadline (even when
@@ -324,6 +481,19 @@ class ClickConfig:
                 walk_deadline_ms = _clamp_default_walk_deadline(
                     defaults["walk_deadline_ms"], response_timeout_ms
                 )
+            # The screen read's own Logic-side limit
+            # (wh-overlay-slow-uia-stale-badges.3). A plain closed range with
+            # NO cross-key check against response_timeout_ms or
+            # walk_deadline_ms: coupling the read to the click reply is the
+            # defect this key removes -- a read that answered correctly at
+            # 7031 ms was thrown away because the reply limit was 3000. The
+            # 60000 ceiling bounds how long the single Input command loop can
+            # be held, and how long the user waits for the "could not draw the
+            # numbers" notice, on a value typed by mistake.
+            screen_read_timeout_ms = take(
+                "screen_read_timeout_ms",
+                _is_int_in_range(100, _SCREEN_READ_TIMEOUT_MAX_MS),
+            )
             min_substring_query_length = take(
                 "min_substring_query_length", _is_int_at_least(1)
             )
@@ -364,6 +534,8 @@ class ClickConfig:
             snapshot_ttl_seconds=snapshot_ttl_seconds,
             response_timeout_ms=response_timeout_ms,
             walk_deadline_ms=walk_deadline_ms,
+            screen_read_timeout_ms=screen_read_timeout_ms,
+            verification_budget_ms=verification_budget_ms,
             min_substring_query_length=min_substring_query_length,
             min_substring_overlap_ratio=min_substring_overlap_ratio,
             enable_coordinate_click_on_com_error=enable_coord_click,
@@ -375,6 +547,7 @@ class ClickConfig:
             overlay_badge_corner=overlay.overlay_badge_corner,
             overlay_badge_trailing_space=overlay.overlay_badge_trailing_space,
             overlay_badge_shadow=overlay.overlay_badge_shadow,
+            overlay_badge_theme=overlay.overlay_badge_theme,
             overlay_auto_open_on_ambiguous=overlay.overlay_auto_open_on_ambiguous,
             overlay_focus_debounce_ms=overlay.overlay_focus_debounce_ms,
             overlay_bounds_tolerance_physical_px=(
@@ -384,6 +557,9 @@ class ClickConfig:
             overlay_browser_refresh_seconds=(
                 overlay.overlay_browser_refresh_seconds
             ),
+            overlay_settle_after_click=overlay.overlay_settle_after_click,
+            grid_min_cell_px=overlay.grid_min_cell_px,
+            drag_duration_ms=overlay.drag_duration_ms,
             overlay_invalid_key=overlay.overlay_invalid_key,
         )
 
@@ -474,12 +650,24 @@ def _is_int_in_range(minimum: int, maximum: int) -> Any:
     return check
 
 
-# The slack (ms) the missing-key walk_deadline_ms clamp leaves below
-# response_timeout_ms to cover the pre-walk latency (SharedMemory round-trip,
-# foreground capture, ElementFromHandle) that the Logic awaiter's
+# The slack (ms) an Input-side walk bound leaves below the Logic-side awaiter
+# that is waiting on it, to cover the pre-walk latency (SharedMemory
+# round-trip, foreground capture, ElementFromHandle) that the awaiter's
 # IPC-send-anchored timer already counts but the walk deadline does not start
-# until command-dequeue (wh-9f3t.54.2 FINDING 3).
-_WALK_DEADLINE_MARGIN_MS = 250
+# until command-dequeue (wh-9f3t.54.2 FINDING 3). Used by the missing-key
+# walk_deadline_ms clamp, by the derived screen_read_walk_deadline_ms, and --
+# through the PUBLIC alias below -- by main.make_click_overlay_state_machine,
+# which pads the machine's own deadlines by the same amount so a machine timer
+# cannot fire while the Input read it is waiting on is still inside its bound
+# (wh-overlay-slow-uia-stale-badges.3).
+PRE_WALK_MARGIN_MS = 250
+_WALK_DEADLINE_MARGIN_MS = PRE_WALK_MARGIN_MS
+
+# The ceiling on screen_read_timeout_ms (wh-overlay-slow-uia-stale-badges.3).
+# The read holds the ONE Input command loop for its whole duration, so an
+# operator typo must not be able to hold voice control for minutes; 60 s is
+# far above any measured read and still a bounded wait.
+_SCREEN_READ_TIMEOUT_MAX_MS = 60000
 
 # The lowest value walk_deadline_ms is allowed to take (matches the floor of
 # both response_timeout_ms and the explicit walk_deadline_ms validator).
@@ -517,6 +705,20 @@ def _is_badge_corner(value: Any) -> tuple[bool, Any]:
     validation failure that disables only the overlay, keeping by-name click on.
     """
     return (isinstance(value, str) and value in _BADGE_CORNERS, value)
+
+
+_BADGE_THEMES: frozenset[str] = frozenset({"auto", "light", "dark"})
+
+
+def _is_badge_theme(value: Any) -> tuple[bool, Any]:
+    """A string naming the bubble badge's color scheme. Anything else fails.
+
+    "light" / "dark" name the BUBBLE's own color (white bubble / near-black
+    bubble); "auto" picks per paint from the Windows app theme
+    (wh-overlay-bubble-badges). A non-str or an unknown name is a validation
+    failure that disables only the overlay, keeping by-name click on.
+    """
+    return (isinstance(value, str) and value in _BADGE_THEMES, value)
 
 
 def _is_exe_list(value: Any) -> tuple[bool, Any]:
@@ -558,6 +760,22 @@ _DEFAULTS: dict[str, Any] = {
     # walk_deadline_ms default is strictly below response_timeout_ms's default
     # (2500 < 3000) so the Input walk gives up before the Logic awaiter.
     "walk_deadline_ms": 2500,
+    # wh-overlay-slow-uia-stale-badges.3: the screen read's own limit. 10000
+    # is chosen from two measured reads of the same slow application: one ran
+    # 7031 ms and returned the CORRECT new content, and one spent about 7.5 s
+    # inside a single FindAllBuildCache call and would have needed about
+    # 7.8-8.7 s to finish. 10000 covers both with at least 1.3 s to spare and
+    # keeps the derived Input-side bound (9750) above both. The cost is that a
+    # read that truly fails makes the user wait 10 s, with the walking cue
+    # visible throughout, instead of 3 s.
+    "screen_read_timeout_ms": 10000,
+    # wh-overlay-slow-uia-stale-badges.6: the executor's pre-click
+    # verification budget. 2000 < response_timeout_ms's 3000 so a slow
+    # application usually refuses inside the awaiter window. Validated as
+    # [100, 10000] (wh-overlay-slow-uia-stale-badges.20.5): the ceiling
+    # keeps a late refusal inside the late-answer correction window
+    # (response_timeout_ms + the fixed 15 s registry grace in app.py).
+    "verification_budget_ms": 2000,
     "min_substring_query_length": 4,
     "min_substring_overlap_ratio": 0.6,
     "enable_coordinate_click_on_com_error": False,
@@ -565,15 +783,22 @@ _DEFAULTS: dict[str, Any] = {
     "browser_processes_extend": (),
     # -- Phase 1.5 overlay defaults (wh-n29v.29, design-v4 Configuration) ----
     "overlay_enabled": True,
-    "overlay_badge_font_pt": 16,
+    "overlay_badge_font_pt": 8,
     "overlay_badge_corner": "top_right",
     "overlay_badge_trailing_space": True,
-    "overlay_badge_shadow": True,
+    "overlay_badge_shadow": False,
+    "overlay_badge_theme": "auto",
     "overlay_auto_open_on_ambiguous": True,
     "overlay_focus_debounce_ms": 250,
     "overlay_bounds_tolerance_physical_px": 8,
     "snapshot_store_capacity": 4,
     "overlay_browser_refresh_seconds": 10,
+    # wh-overlay-slow-uia-stale-badges.1. Do NOT flip this to True until
+    # child .2 ships; see the field comment on ClickConfig.
+    "overlay_settle_after_click": False,
+    # -- Mouse-grid defaults (wh-grid-state-machine, grid spec Configuration) -
+    "grid_min_cell_px": 24,
+    "drag_duration_ms": 250,
 }
 
 
@@ -600,6 +825,7 @@ _OVERLAY_VALIDATORS: dict[str, Any] = {
     "overlay_badge_corner": _is_badge_corner,
     "overlay_badge_trailing_space": _is_bool,
     "overlay_badge_shadow": _is_bool,
+    "overlay_badge_theme": _is_badge_theme,
     "overlay_auto_open_on_ambiguous": _is_bool,
     "overlay_focus_debounce_ms": _is_int_in_range(0, 5000),
     "overlay_bounds_tolerance_physical_px": _is_int_in_range(0, 200),
@@ -607,6 +833,18 @@ _OVERLAY_VALIDATORS: dict[str, Any] = {
     # wh-n29v.121: 0 is a VALID value (proactive refresh off), so the floor
     # is 0, not 1.
     "overlay_browser_refresh_seconds": _is_int_in_range(0, 300),
+    "overlay_settle_after_click": _is_bool,
+    # -- Mouse-grid keys (wh-grid-state-machine) -----------------------------
+    # grid_min_cell_px floors at 1, not 0: a floor of 0 would ask the grid to
+    # refine into cells with no pixels in them. The ceiling of 500 is well past
+    # any useful stopping size (a 500-pixel cell already spans a quarter of a
+    # 1080p screen height, so the grid would refuse the first number on most
+    # monitors) -- it is there to catch a units mistake, not to tune anything.
+    "grid_min_cell_px": _is_int_in_range(1, 500),
+    # drag_duration_ms floors at 0 (a valid "no interpolation" choice, like
+    # overlay_focus_debounce_ms's no-debounce 0). The 5000 ceiling matches that
+    # key's; a drag longer than five seconds is a stuck pointer, not a setting.
+    "drag_duration_ms": _is_int_in_range(0, 5000),
 }
 
 
@@ -624,16 +862,20 @@ class _OverlayResult:
     overlay_badge_corner: str
     overlay_badge_trailing_space: bool
     overlay_badge_shadow: bool
+    overlay_badge_theme: str
     overlay_auto_open_on_ambiguous: bool
     overlay_focus_debounce_ms: int
     overlay_bounds_tolerance_physical_px: int
     snapshot_store_capacity: int
     overlay_browser_refresh_seconds: int
+    overlay_settle_after_click: bool
+    grid_min_cell_px: int
+    drag_duration_ms: int
     overlay_invalid_key: tuple[str, ...]
 
 
 def _validate_overlay(raw: dict[str, Any], defaults: dict[str, Any]) -> _OverlayResult:
-    """Validate the ten overlay keys on a separate track from Phase 1.
+    """Validate the overlay and mouse-grid keys on a separate track from Phase 1.
 
     A MISSING overlay key takes its default and never lands in
     overlay_invalid_key. A PRESENT-but-bad overlay key keeps its default value
@@ -699,6 +941,7 @@ def _validate_overlay(raw: dict[str, Any], defaults: dict[str, Any]) -> _Overlay
         overlay_badge_corner=coerced["overlay_badge_corner"],
         overlay_badge_trailing_space=coerced["overlay_badge_trailing_space"],
         overlay_badge_shadow=coerced["overlay_badge_shadow"],
+        overlay_badge_theme=coerced["overlay_badge_theme"],
         overlay_auto_open_on_ambiguous=coerced["overlay_auto_open_on_ambiguous"],
         overlay_focus_debounce_ms=coerced["overlay_focus_debounce_ms"],
         overlay_bounds_tolerance_physical_px=coerced[
@@ -706,6 +949,9 @@ def _validate_overlay(raw: dict[str, Any], defaults: dict[str, Any]) -> _Overlay
         ],
         snapshot_store_capacity=coerced["snapshot_store_capacity"],
         overlay_browser_refresh_seconds=coerced["overlay_browser_refresh_seconds"],
+        overlay_settle_after_click=coerced["overlay_settle_after_click"],
+        grid_min_cell_px=coerced["grid_min_cell_px"],
+        drag_duration_ms=coerced["drag_duration_ms"],
         # Convert the mutable accumulator to an immutable tuple for the frozen
         # ClickConfig field (keeps every ClickConfig hashable; see the field
         # comment on overlay_invalid_key).
@@ -730,6 +976,8 @@ def _disabled(*, invalid_key: Optional[str]) -> ClickConfig:
         snapshot_ttl_seconds=_DEFAULTS["snapshot_ttl_seconds"],
         response_timeout_ms=_DEFAULTS["response_timeout_ms"],
         walk_deadline_ms=_DEFAULTS["walk_deadline_ms"],
+        screen_read_timeout_ms=_DEFAULTS["screen_read_timeout_ms"],
+        verification_budget_ms=_DEFAULTS["verification_budget_ms"],
         min_substring_query_length=_DEFAULTS["min_substring_query_length"],
         min_substring_overlap_ratio=_DEFAULTS["min_substring_overlap_ratio"],
         enable_coordinate_click_on_com_error=(
@@ -749,6 +997,7 @@ def _disabled(*, invalid_key: Optional[str]) -> ClickConfig:
         overlay_badge_corner=_DEFAULTS["overlay_badge_corner"],
         overlay_badge_trailing_space=_DEFAULTS["overlay_badge_trailing_space"],
         overlay_badge_shadow=_DEFAULTS["overlay_badge_shadow"],
+        overlay_badge_theme=_DEFAULTS["overlay_badge_theme"],
         overlay_auto_open_on_ambiguous=_DEFAULTS["overlay_auto_open_on_ambiguous"],
         overlay_focus_debounce_ms=_DEFAULTS["overlay_focus_debounce_ms"],
         overlay_bounds_tolerance_physical_px=(
@@ -758,6 +1007,9 @@ def _disabled(*, invalid_key: Optional[str]) -> ClickConfig:
         overlay_browser_refresh_seconds=(
             _DEFAULTS["overlay_browser_refresh_seconds"]
         ),
+        overlay_settle_after_click=_DEFAULTS["overlay_settle_after_click"],
+        grid_min_cell_px=_DEFAULTS["grid_min_cell_px"],
+        drag_duration_ms=_DEFAULTS["drag_duration_ms"],
         overlay_invalid_key=(),
     )
 
@@ -771,4 +1023,5 @@ DISABLED_CLICK_CONFIG: ClickConfig = _disabled(invalid_key=None)
 __all__ = [
     "ClickConfig",
     "DISABLED_CLICK_CONFIG",
+    "PRE_WALK_MARGIN_MS",
 ]

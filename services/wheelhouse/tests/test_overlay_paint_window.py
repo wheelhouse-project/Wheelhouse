@@ -3,8 +3,9 @@
 
 The module manages one transparent, always-on-top, no-activate,
 click-through layered Win32 window PER monitor that currently has badges
-and paints centered outlined numerals onto on-screen controls via the
-existing Qt-to-GDI per-pixel-alpha bridge. These tests mock ctypes (the
+and paints numbered speech bubbles (with pointer tails or leader lines,
+wh-overlay-bubble-badges) onto on-screen controls via the existing
+Qt-to-GDI per-pixel-alpha bridge. These tests mock ctypes (the
 Win32 window lifecycle), the bitmap bridge (``build_layered_dib`` /
 ``composite_layered_window``), the DPI converter
 (``resolve_overlay_paint_rect``), the native-monitor enumeration, and the
@@ -27,6 +28,7 @@ Test groups mirror the TDD bundle steps:
 from __future__ import annotations
 
 import ctypes
+import math
 from ctypes import wintypes
 from unittest.mock import MagicMock, patch
 
@@ -36,12 +38,12 @@ import pytest
 # (wh-pytest-flaky-segfault).
 pytestmark = pytest.mark.usefixtures("mock_editor_window")
 
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QColor, QImage
 
 from ui.element_types import WalkSnapshotSummary, WalkSnapshotSummaryItem
 from shared.overlay_dpi_resolver import OverlayPaintRect
 from shared.monitor_geometry import _NativeMonitor
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, QRectF
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,20 @@ def _paint_rect(
         monitor=monitor,
         hmonitor=hmonitor,
         screen=None,
+    )
+
+
+def _fill_badge_box(
+    painter, _number, placement, _control, _dpr, _scheme, _metrics, _font,
+    _mon_w_phys=None, _mon_h_phys=None,
+):
+    """Test double for ``_draw_numeral_bubble``: fill the badge BOX fully
+    opaque, so an opaque-pixel scan locates exactly WHERE the badge landed
+    (the real bubble is inset from the box and rounded, which would blur the
+    placement assertions these tests pin)."""
+    _bw, _bh, (bl, bt, br, bb) = placement
+    painter.fillRect(
+        QRectF(bl, bt, br - bl, bb - bt), QColor(255, 255, 255, 255)
     )
 
 
@@ -210,6 +226,76 @@ class TestGenerationGate:
         assert gate.accept_clear(7, 5) is True
         # The prior-generation paint is now stale.
         assert gate.accept_paint(7, 4) is False
+
+    def test_paused_resume_repaint_passes_the_gate(self, overlay_mgr):
+        # wh-overlay-slow-uia-stale-badges.17: cross-module guard. Replay the
+        # REAL overlay state machine's mic-pause clear and mic-resume restore
+        # paint through a REAL gate. The machine reports PAINTED after the
+        # resume and routes "click N" to badges, so the restore paint MUST
+        # present; a pair the gate refuses leaves the user with an empty
+        # screen and a machine that believes the badges are up.
+        from services.wheelhouse.click_overlay_state import (
+            ClickOverlayStateMachine,
+            EffectKind,
+            OverlayEvent,
+            OverlayEventKind,
+            OverlayState,
+            PaintAckState,
+        )
+
+        mgr, mod, _ = overlay_mgr
+        gate = mod.GenerationGate()
+        m = ClickOverlayStateMachine()
+
+        def _pair(machine):
+            return machine.overlay_session_id, machine.paint_generation
+
+        # closed -> walk_in_flight -> paint_in_flight -> painted.
+        m.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+        sid, gen = _pair(m)
+        m.apply(
+            OverlayEvent(
+                OverlayEventKind.BUILD_RESPONSE,
+                overlay_session_id=sid,
+                paint_generation=gen,
+                snapshot_id="snapP",
+            )
+        )
+        # The first paint presents.
+        assert gate.accept_paint(sid, gen) is True
+        m.apply(
+            OverlayEvent(
+                OverlayEventKind.PAINT_ACK,
+                overlay_session_id=sid,
+                paint_generation=gen,
+                paint_state=PaintAckState.PAINTED,
+            )
+        )
+        assert m.state is OverlayState.PAINTED
+
+        # Mic pause: the machine's clear hides the badges.
+        pause = m.apply(OverlayEvent(OverlayEventKind.MIC_PAUSE))
+        clear = [
+            e for e in pause.effects if e.kind is EffectKind.DISPATCH_CLEAR
+        ][0]
+        assert (
+            gate.accept_clear(clear.overlay_session_id, clear.paint_generation)
+            is True
+        )
+
+        # Mic resume with a still-valid snapshot: the restore paint must
+        # actually present, because the machine now says PAINTED.
+        resume = m.apply(
+            OverlayEvent(OverlayEventKind.MIC_RESUME, snapshot_valid=True)
+        )
+        assert m.state is OverlayState.PAINTED
+        paint = [
+            e for e in resume.effects if e.kind is EffectKind.DISPATCH_PAINT
+        ][0]
+        assert (
+            gate.accept_paint(paint.overlay_session_id, paint.paint_generation)
+            is True
+        )
 
 
 # ===========================================================================
@@ -530,11 +616,14 @@ class TestWindowLifecycle:
 
 class TestBadgeRender:
     def test_render_badge_returns_premultiplied_qimage(self, overlay_mgr):
+        # _render_badge now renders only the WORKING glyph (numerals draw as
+        # bubbles on the surface -- wh-overlay-bubble-badges), so the image
+        # contract is pinned through the sentinel.
         mgr, mod, _ = overlay_mgr
-        img = mgr._render_badge(7, width=80, height=40)
+        img = mgr._render_badge(mod.WORKING_BADGE_NUMBER, width=80, height=40)
         assert isinstance(img, QImage)
         assert img.format() == QImage.Format.Format_ARGB32_Premultiplied
-        # Some non-transparent pixels were painted (the numeral / outline).
+        # Some non-transparent pixels were painted (the glyph / outline).
         # Scan for any pixel with non-zero alpha.
         found = False
         for y in range(img.height()):
@@ -548,16 +637,19 @@ class TestBadgeRender:
 
     def test_render_badge_uses_font_pt_and_shadow(self, overlay_mgr):
         mgr, mod, _ = overlay_mgr
-        # The manager carries font pt and shadow flag from construction.
-        assert mgr._badge_font_pt == 16
-        assert mgr._badge_shadow is True
+        # The manager carries font pt and shadow flag from construction. The
+        # default is 10 pt, no shadow (user visual review 2026-08-08, down
+        # from 12 pt with shadow; matches the documented defaults in
+        # config.toml.example).
+        assert mgr._badge_font_pt == 10
+        assert mgr._badge_shadow is False
         # Constructing with explicit overrides honors them.
         import overlay_paint_window
         m2 = overlay_paint_window.OverlayPaintWindowManager(
-            badge_font_pt=24, badge_shadow=False
+            badge_font_pt=24, badge_shadow=True
         )
         assert m2._badge_font_pt == 24
-        assert m2._badge_shadow is False
+        assert m2._badge_shadow is True
 
     def test_numeral_badge_anchors_to_control_top_left(self, overlay_mgr):
         # The numeral badge is anchored to the control's TOP-LEFT corner, NOT
@@ -678,6 +770,16 @@ class TestBadgeRender:
         m2 = overlay_paint_window.OverlayPaintWindowManager(badge_corner="nonsense")
         assert m2._badge_corner == "top_right"
 
+    def test_manager_reads_badge_theme_from_construction(self):
+        # The bubble badge's color scheme (wh-bubble-theme-config). ClickConfig
+        # already validates the value; the manager normalizes defensively so an
+        # unexpected string falls back to "auto" instead of an unknown scheme.
+        import overlay_paint_window
+        m = overlay_paint_window.OverlayPaintWindowManager(badge_theme="dark")
+        assert m._badge_theme == "dark"
+        m2 = overlay_paint_window.OverlayPaintWindowManager(badge_theme="nonsense")
+        assert m2._badge_theme == "auto"
+
     def test_right_edge_badge_shifted_inward_end_to_end(self, overlay_mgr):
         # End-to-end: a small control at the monitor's right edge must have its
         # FULL badge painted inside the surface, not truncated at the surface
@@ -702,16 +804,12 @@ class TestBadgeRender:
         )
         badges = [(rect, 7)]
 
-        # Pin the numeral size to 24x24 so the bbox math and the opaque spy agree.
+        # Pin the numeral size to 24x24 so the bbox math and the box fill agree.
         with patch.object(mgr, "_numeral_badge_size", return_value=(24, 24)):
             bbox = mgr._compute_monitor_bbox(monitor, badges)
-
-            def _opaque_badge(_n, _w, _h, _dpr=1.0):
-                img = QImage(24, 24, QImage.Format.Format_ARGB32_Premultiplied)
-                img.fill(0xFFFFFFFF)
-                return img
-
-            with patch.object(mgr, "_render_badge", side_effect=_opaque_badge):
+            with patch.object(
+                mgr, "_draw_numeral_bubble", side_effect=_fill_badge_box
+            ):
                 surface = mgr._render_monitor_surface(monitor, badges, bbox)
 
         xs = [
@@ -757,18 +855,13 @@ class TestBadgeRender:
             screen=None,
         )
 
-        # A small fully-opaque badge so the opaque-pixel scan is unambiguous.
-        def _opaque_badge(_number, _w, _h, _dpr=1.0):
-            badge = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
-            badge.fill(0xFFFFFFFF)  # opaque white (ARGB premultiplied)
-            return badge
-
         badges = [(rect, 7)]
-        # The bbox is computed on the LOGICAL rect (width 100/height 40), but
-        # the opaque PAINT footprint is the 4px-logical badge image scaled by
-        # dpr. The bbox bounds the full logical rect: physical footprint
-        # left=200*1.5=300, top=300*1.5=450, right=300*1.5=450, bottom=510;
-        # margin=5*1.5=7.5; min_x=floor(300-7.5)=292, min_y=floor(450-7.5)=442;
+        # The bbox is computed on the LOGICAL rect (width 100/height 40), and
+        # the opaque PAINT footprint (the box fill below) is the badge box the
+        # placement pass produced. The bbox bounds the full logical rect:
+        # physical footprint left=200*1.5=300, top=300*1.5=450,
+        # right=300*1.5=450, bottom=510; margin=5*1.5=7.5;
+        # min_x=floor(300-7.5)=292, min_y=floor(450-7.5)=442;
         # max_x=ceil(450+7.5)=458, max_y=ceil(510+7.5)=518.
         bbox = mgr._compute_monitor_bbox(monitor, badges)
         assert bbox.offset_x == 292
@@ -776,7 +869,11 @@ class TestBadgeRender:
         assert bbox.width == 458 - 292  # 166
         assert bbox.height == 518 - 442  # 76
 
-        with patch.object(mgr, "_render_badge", side_effect=_opaque_badge):
+        # Fill the badge box fully opaque so the opaque-pixel scan pins WHERE
+        # the badge landed, independent of the bubble's inset/rounding.
+        with patch.object(
+            mgr, "_draw_numeral_bubble", side_effect=_fill_badge_box
+        ):
             surface = mgr._render_monitor_surface(monitor, badges, bbox)
 
         assert surface.width() == 166
@@ -821,7 +918,7 @@ class TestBadgeRender:
         ), patch.object(mod, "_screens", return_value=[]), patch.object(
             mod, "resolve_overlay_paint_rect", return_value=rect
         ), patch.object(
-            mgr, "_render_badge", return_value=QImage(2, 2, QImage.Format.Format_ARGB32_Premultiplied)
+            mgr, "_draw_numeral_bubble"
         ), patch.object(
             mod, "build_layered_dib", return_value=dib
         ), patch.object(
@@ -854,9 +951,10 @@ class TestBadgeSharpnessAndSize:
     be large enough to read (wh-dictation-retraction-indicator.11)."""
 
     def test_badge_rendered_at_physical_resolution_when_scaled(self, overlay_mgr):
-        """At dpr 2.0 each badge image is rendered at the PHYSICAL pixel size
-        (logical * dpr) and given the dpr, so its edges are sharp rather than
-        an enlarged logical-resolution image."""
+        """At dpr 2.0 each numeral bubble is drawn at the PHYSICAL badge-box
+        geometry (logical * dpr) with the dpr forwarded (which scales the
+        font, pens, and shadow), so its edges are sharp rather than an
+        enlarged logical-resolution drawing."""
         mgr, mod, _ = overlay_mgr
         monitor = _NativeMonitor(
             hmonitor=10, rect_phys=QRect(0, 0, 3840, 2160), dpi=192
@@ -868,30 +966,24 @@ class TestBadgeSharpnessAndSize:
 
         seen = []
 
-        def _spy(_number, w, h, dpr=1.0):
-            seen.append((w, h, dpr))
-            img = QImage(
-                max(1, int(w)), max(1, int(h)),
-                QImage.Format.Format_ARGB32_Premultiplied,
-            )
-            img.fill(0xFFFFFFFF)
-            return img
+        def _spy(
+            _painter, _number, placement, _control, dpr, _scheme, _metrics,
+            _font, _mon_w_phys=None, _mon_h_phys=None,
+        ):
+            bw, bh, _footprint = placement
+            seen.append((bw, bh, dpr))
 
-        with patch.object(mgr, "_render_badge", side_effect=_spy):
+        with patch.object(mgr, "_draw_numeral_bubble", side_effect=_spy):
             mgr._render_monitor_surface(monitor, badges, bbox)
 
-        # Tight numeral image at physical resolution (dpr 2.0 forwarded), sized
-        # to the glyph -- NOT the 120x48 control physical size -- so a number
-        # over a large control no longer allocates a control-sized image
-        # (wh-overlay-badge-alloc-decouple).
+        # Tight physical badge box (dpr 2.0 forwarded), sized to the glyph --
+        # NOT the 120x48 control physical size (wh-overlay-badge-alloc-decouple).
         assert seen == [(*mgr._numeral_badge_size(3, 2.0), 2.0)]
 
     def test_numeral_badge_call_is_tight_physical_at_dpr_1(self, overlay_mgr):
-        """At dpr 1.0 the numeral badge is rendered into a tight numeral-sized
-        image (from _numeral_badge_size) with dpr 1.0 forwarded -- decoupled
-        from the control size (wh-overlay-badge-alloc-decouple). The glyph
-        itself is the same font at the same point size, so the visible numeral
-        is unchanged at 100%."""
+        """At dpr 1.0 the numeral bubble is drawn in a tight numeral-sized
+        badge box (from _numeral_badge_size) with dpr 1.0 forwarded --
+        decoupled from the control size (wh-overlay-badge-alloc-decouple)."""
         mgr, mod, _ = overlay_mgr
         monitor = _NativeMonitor(
             hmonitor=10, rect_phys=QRect(0, 0, 1920, 1080), dpi=96
@@ -903,53 +995,17 @@ class TestBadgeSharpnessAndSize:
 
         seen = []
 
-        def _spy(_number, w, h, dpr=1.0):
-            seen.append((w, h, dpr))
-            return QImage(
-                max(1, int(w)), max(1, int(h)),
-                QImage.Format.Format_ARGB32_Premultiplied,
-            )
+        def _spy(
+            _painter, _number, placement, _control, dpr, _scheme, _metrics,
+            _font, _mon_w_phys=None, _mon_h_phys=None,
+        ):
+            bw, bh, _footprint = placement
+            seen.append((bw, bh, dpr))
 
-        with patch.object(mgr, "_render_badge", side_effect=_spy):
+        with patch.object(mgr, "_draw_numeral_bubble", side_effect=_spy):
             mgr._render_monitor_surface(monitor, badges, bbox)
 
         assert seen == [(*mgr._numeral_badge_size(5, 1.0), 1.0)]
-
-    def test_numeral_not_swallowed_by_outline(self, overlay_mgr):
-        """A numeral must render as a legible white glyph, not a near-solid
-        black blob.
-
-        The outline is stroked centered on the glyph path edge, so a pen that
-        is too wide for the glyph's stroke thickness eats the white fill and
-        the numeral reads as a dark blob (perceived as "blurry"). This asserts
-        the white fill survives at a representative scaled size
-        (wh-dictation-retraction-indicator.11).
-        """
-        mgr, _mod, _ = overlay_mgr
-        # A scaled monitor (dpr 1.5) at a typical control size: 80x40 logical
-        # -> 120x60 physical, font 16*1.5 pt. This is where the heavy outline
-        # collapsed the glyph to ~0% white fill.
-        img = mgr._render_badge(7, 120, 60, dpr=1.5)
-
-        opaque = white = 0
-        for y in range(img.height()):
-            for x in range(img.width()):
-                px = img.pixel(x, y)
-                if ((px >> 24) & 0xFF) < 128:
-                    continue
-                opaque += 1
-                if (
-                    ((px >> 16) & 0xFF) > 200
-                    and ((px >> 8) & 0xFF) > 200
-                    and (px & 0xFF) > 200
-                ):
-                    white += 1
-        ratio = (white / opaque) if opaque else 0.0
-        assert opaque > 0, "numeral drew nothing"
-        assert ratio >= 0.10, (
-            f"numeral collapsed to a near-solid blob (white fill {ratio:.2f} "
-            "of opaque pixels) -- the outline pen is too heavy for the glyph"
-        )
 
     def test_working_badge_default_logical_size_is_halved_from_64(self, overlay_mgr):
         """The working hourglass default size was halved from 64 to 32
@@ -1037,17 +1093,17 @@ class TestBadgeSharpnessAndSize:
 
 
 class TestNumeralBadgeSizeDecoupled:
-    """wh-overlay-badge-alloc-decouple -- a numeral badge image is sized to the
-    NUMERAL (font metrics + decoration margin), NOT to the control. A number
-    over a large control no longer allocates a control-sized (dpr^2) transient
-    QImage; the numeral is still drawn at the control center, so on-screen
-    placement is unchanged. The working glyph (which fills its box) is not
-    affected."""
+    """wh-overlay-badge-alloc-decouple -- a numeral's badge box is sized to
+    the NUMERAL (font metrics + bubble padding + decoration margin), NOT to
+    the control. A number over a large control never involves a control-sized
+    (dpr^2) allocation -- since wh-overlay-bubble-badges there is no per-badge
+    allocation at all: the bubble path draws directly on the surface inside
+    the badge box. The working glyph (which fills its box) is not affected."""
 
-    def test_numeral_image_is_tight_not_control_sized(self, overlay_mgr):
-        """For a large control on a hi-DPI monitor, _render_badge is called with
-        a small numeral-sized image, NOT the control's physical size (which
-        would be 2000x400 = ~3 MB here)."""
+    def test_numeral_box_is_tight_not_control_sized(self, overlay_mgr):
+        """For a large control on a hi-DPI monitor, the bubble is drawn in a
+        small numeral-sized badge box, NOT at the control's physical size
+        (2000x400 here)."""
         mgr, _mod, _ = overlay_mgr
         monitor = _NativeMonitor(
             hmonitor=10, rect_phys=QRect(0, 0, 3840, 2160), dpi=192
@@ -1059,23 +1115,23 @@ class TestNumeralBadgeSizeDecoupled:
 
         seen = []
 
-        def _spy(_number, w, h, dpr=1.0):
-            seen.append((w, h, dpr))
-            return QImage(
-                max(1, int(w)), max(1, int(h)),
-                QImage.Format.Format_ARGB32_Premultiplied,
-            )
+        def _spy(
+            _painter, _number, placement, _control, dpr, _scheme, _metrics,
+            _font, _mon_w_phys=None, _mon_h_phys=None,
+        ):
+            bw, bh, _footprint = placement
+            seen.append((bw, bh, dpr))
 
-        with patch.object(mgr, "_render_badge", side_effect=_spy):
+        with patch.object(mgr, "_draw_numeral_bubble", side_effect=_spy):
             mgr._render_monitor_surface(monitor, badges, bbox)
 
         assert len(seen) == 1
         bw, bh, bdpr = seen[0]
         # Still physical-resolution: the dpr is forwarded so the glyph is sharp.
         assert bdpr == 2.0
-        # The image is tight (a single bold numeral), far smaller than the
-        # 2000x400 control physical size.
-        assert bw < 200 and bh < 200, f"badge image not decoupled: {bw}x{bh}"
+        # The box is tight (a single bold numeral's bubble), far smaller than
+        # the 2000x400 control physical size.
+        assert bw < 200 and bh < 200, f"badge box not decoupled: {bw}x{bh}"
         # And it matches the dedicated size helper.
         assert (bw, bh) == mgr._numeral_badge_size(5, 2.0)
 
@@ -1098,14 +1154,11 @@ class TestNumeralBadgeSizeDecoupled:
         badges = [(rect, 7)]
         bbox = mgr._compute_monitor_bbox(monitor, badges)
 
-        # A 10x10 opaque badge so its top-left is unambiguous (the spy ignores
-        # the requested size, which is what lets us check WHERE it is drawn).
-        def _opaque_badge(_number, _w, _h, _dpr=1.0):
-            img = QImage(10, 10, QImage.Format.Format_ARGB32_Premultiplied)
-            img.fill(0xFFFFFFFF)
-            return img
-
-        with patch.object(mgr, "_render_badge", side_effect=_opaque_badge):
+        # Fill the badge box fully opaque so its top-left is unambiguous: the
+        # scan pins WHERE the badge landed, independent of the bubble inset.
+        with patch.object(
+            mgr, "_draw_numeral_bubble", side_effect=_fill_badge_box
+        ):
             surface = mgr._render_monitor_surface(monitor, badges, bbox)
 
         opaque = [
@@ -1127,42 +1180,74 @@ class TestNumeralBadgeSizeDecoupled:
         assert badge_left == ctrl_left
         assert badge_top == ctrl_top
 
-    def test_numeral_glyph_fits_in_tight_badge_size(self, overlay_mgr):
-        """The tight size from ``_numeral_badge_size`` actually CONTAINS the
-        rendered glyph: rendering the numeral into exactly that size leaves the
-        image-border pixels transparent, so no digit is clipped.
+    def test_numeral_bubble_fits_in_tight_badge_box(self, overlay_mgr):
+        """The badge box from ``_numeral_badge_size`` actually CONTAINS the
+        drawn bubble: composing a surface leaves every opaque pixel strictly
+        inside the box footprint, so no bubble, border, shadow, or digit is
+        clipped.
 
-        This is the real fit contract. The size-equality tests above compare the
-        render call against ``_numeral_badge_size``'s own output, so a bug INSIDE
-        ``_numeral_badge_size`` (too-small margin, capHeight under-measuring,
-        wrong dpr factor) would size every badge wrong AND still match itself,
-        passing CI while digits clip on screen. This test renders the real glyph
-        into the computed size and fails if the opaque ink reaches the border
-        (wh-overlay-4bug-review.1)."""
-        mgr, _mod, _ = overlay_mgr
+        This is the real fit contract. The size-equality tests above compare
+        the placement box against ``_numeral_badge_size``'s own output, so a
+        bug INSIDE ``_numeral_badge_size`` (too-small margin, capHeight
+        under-measuring, wrong dpr factor) would size every box wrong AND
+        still match itself, passing CI while bubbles clip on screen. This test
+        draws the real bubble and fails if the opaque ink reaches the box edge
+        (wh-overlay-4bug-review.1). The corner is pinned INSIDE a large
+        control so the state is "overlap". An overlapping bubble draws an
+        inward pointer tail toward the control's center (user decision
+        2026-08-07), which by design extends past the box on the control's
+        side by (_BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX - the 5.25 box margin)
+        logical px; here the control center lies down-right of the badge, so
+        only the right/bottom bounds get that allowance. The strict top/left
+        bounds still catch a clipped bubble, border, shadow, or digit."""
+        mgr, mod, _ = overlay_mgr
+        tail_overhang_logical = mod._BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX - 5.25
+        assert tail_overhang_logical > 0
+        mgr._badge_corner = "top_left"
+        mgr._badge_trailing_space = False
         for number in (1, 7, 10, 100):
-            for dpr in (1.0, 2.0):
-                w, h = mgr._numeral_badge_size(number, dpr)
-                img = mgr._render_badge(number, w, h, dpr)
-                assert img.width() == w and img.height() == h
-                xs: list[int] = []
-                ys: list[int] = []
-                for y in range(h):
-                    for x in range(w):
-                        if ((img.pixel(x, y) >> 24) & 0xFF) >= 128:
-                            xs.append(x)
-                            ys.append(y)
-                assert xs, f"numeral {number} at dpr {dpr} drew nothing"
-                # Opaque ink must stay strictly inside the image: a clipped digit
-                # would push ink onto the first/last row or column.
-                assert min(xs) >= 1 and min(ys) >= 1, (
-                    f"numeral {number} at dpr {dpr} ink touches the top/left edge "
-                    f"(min x={min(xs)}, y={min(ys)}) -- tight size too small"
+            for dpi, dpr in ((96, 1.0), (192, 2.0)):
+                monitor = _NativeMonitor(
+                    hmonitor=10, rect_phys=QRect(0, 0, 3840, 2160), dpi=dpi
                 )
-                assert max(xs) <= w - 2 and max(ys) <= h - 2, (
-                    f"numeral {number} at dpr {dpr} ink touches the bottom/right "
-                    f"edge (max x={max(xs)}, y={max(ys)} in {w}x{h}) -- tight size "
-                    "too small"
+                assert monitor.dpr == dpr
+                rect = _paint_rect(
+                    10, monitor, x=100, y=100, width=400, height=200
+                )
+                badges = [(rect, number)]
+                bbox = mgr._compute_monitor_bbox(monitor, badges)
+                placements = mgr._numeral_badge_placements_phys(
+                    badges, dpr, 3840.0, 2160.0, corner="top_left"
+                )
+                assert placements[0] is not None
+                bw, bh, (fl, ft, fr, fb) = placements[0]
+                assert (bw, bh) == mgr._numeral_badge_size(number, dpr)
+                surface = mgr._render_monitor_surface(monitor, badges, bbox)
+                xs: list[float] = []
+                ys: list[float] = []
+                for y in range(surface.height()):
+                    for x in range(surface.width()):
+                        if ((surface.pixel(x, y) >> 24) & 0xFF) >= 128:
+                            xs.append(x + bbox.offset_x)
+                            ys.append(y + bbox.offset_y)
+                assert xs, f"numeral {number} at dpr {dpr} drew nothing"
+                # Opaque ink must stay strictly inside the badge box: a
+                # clipped bubble would push ink onto the box's first/last row
+                # or column.
+                assert min(xs) >= fl + 1 and min(ys) >= ft + 1, (
+                    f"numeral {number} at dpr {dpr} ink touches the box "
+                    f"top/left edge (min x={min(xs)}, y={min(ys)}; box "
+                    f"({fl}, {ft})-({fr}, {fb})) -- badge box too small"
+                )
+                # The inward tail may exceed the box toward the control
+                # (down-right here) by the overhang, plus 1 px antialias.
+                allow = math.ceil(tail_overhang_logical * dpr) + 1
+                assert max(xs) <= fr + allow and max(ys) <= fb + allow, (
+                    f"numeral {number} at dpr {dpr} ink exceeds the box "
+                    f"bottom/right edge beyond the tail overhang "
+                    f"(max x={max(xs)}, y={max(ys)}; box "
+                    f"({fl}, {ft})-({fr}, {fb}); allow={allow}) -- badge "
+                    f"box too small"
                 )
 
     def test_numeral_font_metrics_built_once_per_surface(self, overlay_mgr):
@@ -1194,6 +1279,38 @@ class TestNumeralBadgeSizeDecoupled:
         assert metrics_mock.call_count == 1, (
             f"QFontMetricsF built {metrics_mock.call_count} times for 3 badges; "
             "the sizing metrics should be built once and shared"
+        )
+
+    def test_numeral_font_built_once_per_surface(self, overlay_mgr):
+        """The numeral QFont is built ONCE per surface render and shared with
+        every badge's digit drawing, not rebuilt per badge.
+
+        The metrics hoist (wh-overlay-4bug-review.2) shared the QFontMetricsF
+        across badges, but ``_draw_numeral_bubble`` still called
+        ``_numeral_font(dpr)`` for each digit's ``addText``, so a dense
+        show-numbers paint constructed one identical QFont per badge (the
+        font's only variable, dpr, is constant per surface).
+        ``_render_monitor_surface`` now builds the font once and passes it
+        down alongside the metrics (wh-overlay-bubble-badges.1.1)."""
+        mgr, mod, _ = overlay_mgr
+        monitor = _NativeMonitor(
+            hmonitor=10, rect_phys=QRect(0, 0, 1920, 1080), dpi=96
+        )
+        rects = [
+            _paint_rect(10, monitor, x=100 + 200 * i, y=200, width=60, height=24)
+            for i in range(3)
+        ]
+        badges = [(r, i + 1) for i, r in enumerate(rects)]
+        bbox = mgr._compute_monitor_bbox(monitor, badges)
+
+        with patch.object(
+            mgr, "_numeral_font", wraps=mgr._numeral_font
+        ) as font_mock:
+            mgr._render_monitor_surface(monitor, badges, bbox)
+
+        assert font_mock.call_count == 1, (
+            f"_numeral_font called {font_mock.call_count} times for 3 badges; "
+            "the numeral font should be built once per surface and shared"
         )
 
 
@@ -1242,11 +1359,7 @@ class TestBoundingBoxSurface:
         assert (bbox.offset_x, bbox.offset_y) == (95, 195)
         assert (bbox.width, bbox.height) == (490, 450)
 
-        with patch.object(
-            mgr,
-            "_render_badge",
-            return_value=QImage(2, 2, QImage.Format.Format_ARGB32_Premultiplied),
-        ):
+        with patch.object(mgr, "_draw_numeral_bubble"):
             surface = mgr._render_monitor_surface(monitor, badges, bbox)
         assert surface.width() == 490
         assert surface.height() == 450
@@ -1319,23 +1432,25 @@ class TestBoundingBoxSurface:
             hmonitor=10, rect_phys=QRect(0, 0, 3840, 2160), dpi=192
         )
         assert monitor.dpr == 2.0
-        rect = _paint_rect(10, monitor, x=400, y=250, width=60, height=24)
+        # 100x80 logical = 200x160 physical: comfortably more than TWICE the
+        # bubble badge box (about 70x70 physical at dpr 2) on both axes, so the
+        # small-control corner-point rule does not fire and the corner anchor
+        # under test is exercised. (The pre-bubble fixture was 60x24 logical;
+        # the bubble box reclassified it as small -- wh-bubble-geometry-fns.)
+        rect = _paint_rect(10, monitor, x=400, y=250, width=100, height=80)
         badges = [(rect, 3)]
 
         bbox = mgr._compute_monitor_bbox(monitor, badges)
         # Physical control top-left = (400*2, 250*2) = (800, 500); margin=5*2=10.
-        # The numeral "3" is anchored to that corner and is smaller than the
-        # 120x48 control on both axes, so the badge footprint stays inside the
-        # control box and the bbox is the control box minus the margin:
+        # The numeral "3" bubble is anchored to that corner and is smaller than
+        # the 200x160 control on both axes, so the badge footprint stays inside
+        # the control box and the bbox is the control box minus the margin:
         # offset = (floor(800-10), floor(500-10)) = (790, 490).
         assert (bbox.offset_x, bbox.offset_y) == (790, 490)
 
-        def _opaque_badge(_n, _w, _h, _dpr=1.0):
-            img = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
-            img.fill(0xFFFFFFFF)
-            return img
-
-        with patch.object(mgr, "_render_badge", side_effect=_opaque_badge):
+        with patch.object(
+            mgr, "_draw_numeral_bubble", side_effect=_fill_badge_box
+        ):
             surface = mgr._render_monitor_surface(monitor, badges, bbox)
 
         opaque = [
@@ -1367,6 +1482,9 @@ class TestBoundingBoxSurface:
         # goes negative, so the clamp path would go untested (the control box
         # would dominate the union). wh-overlay-badge-occludes-label.
         mgr._badge_corner = "top_left"
+        # Pin inside placement so the footprint call below (which takes only
+        # the corner) mirrors the placement the bbox actually used.
+        mgr._badge_trailing_space = False
         monitor = _NativeMonitor(
             hmonitor=10, rect_phys=QRect(0, 0, 1920, 1080), dpi=96
         )
@@ -1376,10 +1494,23 @@ class TestBoundingBoxSurface:
 
         bbox = mgr._compute_monitor_bbox(monitor, badges)
 
-        # Footprint left=-30/top=-20 clamps to 0; right=70/bottom=30 stay.
-        # Margin 5 then clamps min back to 0; max = 70+5 / 30+5.
+        # The clamp under test: control left/top -30/-20 clamps to 0, so the
+        # surface starts AT the monitor's top-left.
         assert (bbox.offset_x, bbox.offset_y) == (0, 0)
-        assert (bbox.width, bbox.height) == (75, 35)
+        # Width/height are the union of the control box (right=70, bottom=30)
+        # and the badge's ACTUAL placed footprint (the monitor-edge shift moves
+        # the overhanging badge fully on-monitor, and the bubble box may extend
+        # past the control's bottom), plus the margin. Derived from the same
+        # footprint helper the bbox path uses so the expectation cannot encode
+        # a stale badge size (wh-bubble-geometry-fns).
+        bw, bh = mgr._numeral_badge_size(1, 1.0)
+        _bl, _bt, br, bb = mgr._numeral_badge_footprint_phys(
+            rect, bw, bh, 1.0, 1920, 1080, corner="top_left"
+        )
+        margin = mod._SURFACE_MARGIN_PX
+        assert (bbox.width, bbox.height) == (
+            int(max(70.0, br) + margin), int(max(30.0, bb) + margin),
+        )
         # The window therefore starts AT the monitor's top-left, not before it.
         assert monitor.rect_phys.left() + bbox.offset_x == 0
         assert monitor.rect_phys.top() + bbox.offset_y == 0
@@ -1756,13 +1887,9 @@ class TestNumeralTrailingSpacePlacement:
         badges = [(rect, 5)]
         with patch.object(mgr, "_numeral_badge_size", return_value=(24, 24)):
             bbox = mgr._compute_monitor_bbox(mon, badges)
-
-            def _opaque_badge(_n, _w, _h, _dpr=1.0):
-                img = QImage(24, 24, QImage.Format.Format_ARGB32_Premultiplied)
-                img.fill(0xFFFFFFFF)
-                return img
-
-            with patch.object(mgr, "_render_badge", side_effect=_opaque_badge):
+            with patch.object(
+                mgr, "_draw_numeral_bubble", side_effect=_fill_badge_box
+            ):
                 surface = mgr._render_monitor_surface(mon, badges, bbox)
 
         xs = [
@@ -1792,9 +1919,10 @@ class TestBadgeCollisionAvoidance:
     trailing strips are occupied, and both corner anchors land in the same
     spot, so the two digits stacked into an unreadable blob (39/40 on the
     Size header). Placement is now a sequential pass: each badge avoids the
-    badges already placed, nudging inward / below / above when the corner
-    collides, and only a pathological pile-up (every candidate occupied)
-    accepts the overlap rather than dropping the number.
+    badges already placed, searching rings of eight directions at one, two,
+    and three badge-size steps out when the corner collides
+    (wh-overlay-bubble-badges.4), and only a pathological pile-up (every
+    candidate occupied) accepts the overlap rather than dropping the number.
     """
 
     @staticmethod
@@ -1895,6 +2023,24 @@ class TestBadgeCollisionAvoidance:
         assert len(placements) == 5
         assert all(entry is not None for entry in placements)
 
+    def test_pileup_deeper_than_every_ring_still_never_drops(self, overlay_mgr):
+        # wh-overlay-bubble-badges.4: forty identical stacked controls share
+        # one base anchor and 24 ring candidates, so the candidates genuinely
+        # run out. Every badge past that point must still get a placement
+        # (the base anchor, overlap accepted) rather than raising or being
+        # dropped.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 500, 500, 30, 40), n) for n in range(1, 41)
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        assert len(placements) == 40
+        assert all(entry is not None for entry in placements)
+
     def test_placement_pass_skips_working_glyph(self, overlay_mgr):
         mgr, _mod, _ = overlay_mgr
         mon = self._mon()
@@ -1938,22 +2084,22 @@ class TestBadgeCollisionAvoidance:
         self, overlay_mgr
     ):
         # Second tier: when EVERY control-free spot is gone, a nudge onto a
-        # neighbouring control is still better than stacking on a badge.
+        # neighbouring control is still better than stacking on a badge. A
+        # full-window canvas control (a Chromium Document fills its whole
+        # window) makes every candidate at every distance control-occupied.
         mgr, _mod, _ = overlay_mgr
         mon = self._mon()
         rect = self._rect(mon, 100, 200, 300, 40)
         own_box = (100.0, 200.0, 400.0, 240.0)
         neighbour_right = (400.0, 200.0, 500.0, 240.0)
-        # Controls above AND below, so no nudge spot is control-free.
-        neighbour_below = (300.0, 240.0, 400.0, 280.0)
-        neighbour_above = (300.0, 160.0, 400.0, 200.0)
+        canvas = (0.0, 0.0, 1920.0, 1080.0)
         placed = [
             (380.0, 200.0, 400.0, 230.0),
             (357.0, 200.0, 377.0, 230.0),
         ]
         got = mgr._numeral_badge_placement_phys(
             rect, 20, 30, 1.0, 1920, 1080,
-            [own_box, neighbour_right, neighbour_below, neighbour_above],
+            [own_box, neighbour_right, canvas],
             corner="top_right", placed_badges=placed,
         )
         # First badge-free candidate in nudge order: below.
@@ -1961,6 +2107,99 @@ class TestBadgeCollisionAvoidance:
         assert not any(
             mgr._rects_overlap_phys(got, p) for p in placed
         )
+
+    def test_ring_two_spot_found_when_ring_one_is_full(self, overlay_mgr):
+        # wh-overlay-bubble-badges.4: badges already occupy the base anchor
+        # and every ring-1 candidate (all eight directions). The search must
+        # continue to ring 2 and return the ring-2 inward spot: two badge
+        # widths plus two 3-px gaps left of the base corner.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        rect = self._rect(mon, 100, 200, 300, 40)
+        neighbour_right = (400.0, 200.0, 500.0, 240.0)   # blocks trailing strip
+        placed = [
+            (380.0, 200.0, 400.0, 230.0),   # base
+            (357.0, 200.0, 377.0, 230.0),   # inward
+            (380.0, 233.0, 400.0, 263.0),   # below
+            (380.0, 167.0, 400.0, 197.0),   # above
+            (403.0, 200.0, 423.0, 230.0),   # outward
+            (357.0, 233.0, 377.0, 263.0),   # inward+below
+            (357.0, 167.0, 377.0, 197.0),   # inward+above
+            (403.0, 233.0, 423.0, 263.0),   # outward+below
+            (403.0, 167.0, 423.0, 197.0),   # outward+above
+        ]
+        got = mgr._numeral_badge_placement_phys(
+            rect, 20, 30, 1.0, 1920, 1080, [neighbour_right],
+            corner="top_right", placed_badges=placed,
+        )
+        assert (got[0], got[1]) == (334.0, 200.0)
+        assert all(
+            not mgr._rects_overlap_phys(got, p) for p in placed
+        )
+
+    def test_diagonal_spot_found_when_straight_nudges_are_full(
+        self, overlay_mgr
+    ):
+        # wh-overlay-bubble-badges.4: the base anchor and the four straight
+        # ring-1 candidates are taken, but the first diagonal (inward+below)
+        # is free. The search must return it rather than jumping to ring 2.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        rect = self._rect(mon, 100, 200, 300, 40)
+        neighbour_right = (400.0, 200.0, 500.0, 240.0)   # blocks trailing strip
+        placed = [
+            (380.0, 200.0, 400.0, 230.0),   # base
+            (357.0, 200.0, 377.0, 230.0),   # inward
+            (380.0, 233.0, 400.0, 263.0),   # below
+            (380.0, 167.0, 400.0, 197.0),   # above
+            (403.0, 200.0, 423.0, 230.0),   # outward
+        ]
+        got = mgr._numeral_badge_placement_phys(
+            rect, 20, 30, 1.0, 1920, 1080, [neighbour_right],
+            corner="top_right", placed_badges=placed,
+        )
+        assert (got[0], got[1]) == (357.0, 233.0)
+        assert all(
+            not mgr._rects_overlap_phys(got, p) for p in placed
+        )
+
+    def test_identical_pileup_separates_all_badges(self, overlay_mgr):
+        # wh-overlay-bubble-badges.4: five identical stacked controls used to
+        # exhaust the three-candidate list, and the fifth digit stacked on the
+        # first. With the ring search every badge finds its own spot.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [(self._rect(mon, 500, 500, 30, 40), n) for n in range(1, 6)]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        assert len(rects) == 5
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
+
+    def test_corner_pileup_separates_all_badges_on_monitor(self, overlay_mgr):
+        # wh-overlay-bubble-badges.4, the live-screenshot shape: a pile-up at
+        # the top-right MONITOR corner, where the above and outward candidates
+        # fall off the monitor. Every badge must still get its own on-monitor
+        # spot.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [(self._rect(mon, 1890, 0, 30, 40), n) for n in range(1, 6)]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        assert len(rects) == 5
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
+        for left, top, right, bottom in rects:
+            assert left >= 0.0 and top >= 0.0
+            assert right <= 1920.0 and bottom <= 1080.0
 
     def test_bbox_contains_every_nudged_badge(self, overlay_mgr):
         # The surface bounding box must contain the FINAL (possibly nudged)
@@ -2080,6 +2319,581 @@ class TestSmallControlCornerPoint:
                 assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
 
 
+class TestEdgeClusterColumn:
+    """Small controls packed against a vertical monitor edge get their badges
+    laid out as ONE single-file column beside the cluster, in the same
+    top-to-bottom order as the controls (wh-taskbar-badge-mispoint, option 1).
+
+    The live trigger: the tray corner of a vertical right-edge taskbar. The
+    icons are packed tighter than one badge height, so the collision rings
+    scattered the badges up and left in ring order -- not target order -- and
+    the leader lines crossed into an unreadable tangle. A column beside the
+    cluster keeps every leader line short and parallel; crossings are
+    impossible because badge order matches target order by construction.
+
+    The column triggers ONLY for a packed cluster: at least three controls,
+    each small and lying entirely within a narrow band at the monitor edge,
+    stacked with more badges than fit single-file in the cluster's own
+    vertical extent. Everything else keeps the existing placement unchanged.
+    """
+
+    @staticmethod
+    def _mon() -> _NativeMonitor:
+        return _NativeMonitor(hmonitor=1, rect_phys=QRect(0, 0, 1920, 1080), dpi=96)
+
+    @staticmethod
+    def _rect(mon, x, y, width, height) -> OverlayPaintRect:
+        return OverlayPaintRect(
+            x=x, y=y, width=width, height=height,
+            monitor=mon, hmonitor=1, screen=None,
+        )
+
+    @staticmethod
+    def _manual_sequential(mgr, badges, bw, bh, corner="top_right"):
+        """The pre-cluster sequential placement, computed control by control:
+        the expected output wherever the cluster layout must NOT trigger."""
+        ctrl = [
+            (r.x, r.y, r.x + r.width, r.y + r.height) for r, _n in badges
+        ]
+        placed = []
+        out = []
+        for rect, _n in badges:
+            fp = mgr._numeral_badge_placement_phys(
+                rect, bw, bh, 1.0, 1920, 1080, ctrl,
+                corner=corner, placed_badges=placed,
+            )
+            placed.append(fp)
+            out.append((bw, bh, fp))
+        return out
+
+    def test_packed_tray_corner_forms_ordered_column(self, overlay_mgr):
+        # The screenshot profile: six 24x24 tray icons packed two-across in
+        # the bottom-right corner, inside a 60px-wide vertical taskbar flush
+        # against the right monitor edge. Badge 20x30: the 24px row pitch
+        # cannot fit 30px badges, so the old rings tangled them.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = []
+        n = 1
+        for top in (990, 1014, 1038):
+            for left in (1864, 1892):
+                badges.append((self._rect(mon, left, top, 24, 24), n))
+                n += 1
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        # One column: every badge shares the same right edge, fully LEFT of
+        # the cluster's leftmost control edge (1864).
+        assert len({r[2] for r in rects}) == 1
+        assert all(r[2] <= 1864.0 for r in rects)
+        # Same top-to-bottom order as the targets; rows first. Within one
+        # two-across row the FARTHER icon's badge goes higher (see
+        # test_same_row_pair_lines_nest_instead_of_crossing), so the target
+        # order for a right-edge column is (top, -left). Distinct rows must
+        # still come out strictly top-to-bottom -- this is what makes
+        # crossing leader lines impossible between rows.
+        tops = [r[1] for r in rects]
+        assert len(set(tops)) == len(tops)
+        row_tops = [min(tops[i], tops[i + 1]) for i in range(0, 6, 2)]
+        assert row_tops == sorted(row_tops)
+        # Every badge of an earlier row sits above every badge of a later row.
+        assert max(tops[0:2]) < min(tops[2:4])
+        assert max(tops[2:4]) < min(tops[4:6])
+        # Disjoint and fully on the monitor.
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
+        for left, top, right, bottom in rects:
+            assert left >= 0.0 and top >= 0.0
+            assert right <= 1920.0 and bottom <= 1080.0
+
+    def test_left_edge_cluster_mirrors_to_right_column(self, overlay_mgr):
+        # Three 24x24 icons single-file against the LEFT edge, 24px pitch:
+        # the column goes just RIGHT of the cluster. Exact positions: column
+        # left edge on the cluster's right edge plus the 3px gap (28 + 3);
+        # each badge wants its control's vertical center (tops 297/321/345),
+        # and the 24px pitch forces the minimal downward shifts to 330/363.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 4, 300, 24, 24), 1),
+            (self._rect(mon, 4, 324, 24, 24), 2),
+            (self._rect(mon, 4, 348, 24, 24), 3),
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        assert rects == [
+            (31.0, 297.0, 51.0, 327.0),
+            (31.0, 330.0, 51.0, 360.0),
+            (31.0, 363.0, 51.0, 393.0),
+        ]
+
+    def test_bottom_corner_column_shifts_up_onto_monitor(self, overlay_mgr):
+        # The tray cluster sits at the very bottom: the column cannot extend
+        # below the monitor, so the whole run shifts up while preserving
+        # order and separation.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1890, 1008, 24, 24), 1),
+            (self._rect(mon, 1890, 1032, 24, 24), 2),
+            (self._rect(mon, 1890, 1056, 24, 24), 3),
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        # Still one column beside the cluster, in target order.
+        assert len({r[2] for r in rects}) == 1
+        assert all(r[2] <= 1890.0 for r in rects)
+        tops = [r[1] for r in rects]
+        assert tops == sorted(tops)
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
+        for left, top, right, bottom in rects:
+            assert top >= 0.0 and bottom <= 1080.0
+
+    def test_spaced_edge_run_keeps_existing_placement(self, overlay_mgr):
+        # Four full-width taskbar rows at 40px pitch: a genuine edge run,
+        # but NOT packed (four 33px badge slots fit in the 156px extent), so
+        # the shipped placement must be byte-identical.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1860, 200, 60, 36), 1),
+            (self._rect(mon, 1860, 240, 60, 36), 2),
+            (self._rect(mon, 1860, 280, 60, 36), 3),
+            (self._rect(mon, 1860, 320, 60, 36), 4),
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+            expected = self._manual_sequential(mgr, badges, 20, 30)
+        assert placements == expected
+
+    def test_wide_rows_at_edge_never_cluster(self, overlay_mgr):
+        # Nav-pane-style rows: packed 30px pitch and flush to the left edge,
+        # but 250px wide -- far wider than the edge band -- so the trailing
+        # -space placement they get today must be unchanged.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 0, 100 + 30 * i, 250, 30), i + 1)
+            for i in range(4)
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+            expected = self._manual_sequential(mgr, badges, 20, 30)
+        assert placements == expected
+
+    def test_two_member_stack_never_clusters(self, overlay_mgr):
+        # Two packed tray icons: below the three-member minimum, the
+        # collision nudge already handles a pair unambiguously.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1890, 990, 24, 24), 1),
+            (self._rect(mon, 1890, 1014, 24, 24), 2),
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+            expected = self._manual_sequential(mgr, badges, 20, 30)
+        assert placements == expected
+
+    def test_same_row_pair_lines_nest_instead_of_crossing(self, overlay_mgr):
+        # Two icons side by side in one row of a right-edge cluster (the
+        # live tray packs CPU left, keyboard right). The column sits LEFT of
+        # the cluster, so if the higher badge points at the NEARER (left)
+        # icon, the lower badge's line to the farther (right) icon swaps
+        # over it -- the lines cross. The farther icon's badge must go
+        # higher so the two lines nest. Third row keeps the run packed.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1864, 990, 24, 24), 1),    # row 1, LEFT icon
+            (self._rect(mon, 1892, 990, 24, 24), 2),    # row 1, RIGHT icon
+            (self._rect(mon, 1864, 1014, 24, 24), 3),   # row 2, left
+            (self._rect(mon, 1892, 1014, 24, 24), 4),   # row 2, right
+            (self._rect(mon, 1864, 1038, 24, 24), 5),   # row 3, left
+            (self._rect(mon, 1892, 1038, 24, 24), 6),   # row 3, right
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        # Within every row: the RIGHT icon's badge is strictly higher than
+        # the LEFT icon's badge.
+        assert rects[1][1] < rects[0][1]
+        assert rects[3][1] < rects[2][1]
+        assert rects[5][1] < rects[4][1]
+
+    def test_left_edge_same_row_pair_keeps_left_first(self, overlay_mgr):
+        # Mirror case: a LEFT-edge cluster's column sits RIGHT of the
+        # cluster, so the farther icon is the LEFT one and plain (top,
+        # left) order already nests the lines. Pin it so the right-edge
+        # fix cannot flip this side too.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 4, 300, 24, 24), 1),    # row 1, LEFT icon
+            (self._rect(mon, 32, 300, 24, 24), 2),   # row 1, RIGHT icon
+            (self._rect(mon, 4, 324, 24, 24), 3),
+            (self._rect(mon, 32, 324, 24, 24), 4),
+            (self._rect(mon, 4, 348, 24, 24), 5),
+            (self._rect(mon, 32, 348, 24, 24), 6),
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        # Within every row: the LEFT icon's badge is strictly higher.
+        assert rects[0][1] < rects[1][1]
+        assert rects[2][1] < rects[3][1]
+        assert rects[4][1] < rects[5][1]
+
+    def test_packed_bottom_tray_row_forms_ordered_row(self, overlay_mgr):
+        # The horizontal-taskbar curve ball: six 24x24 tray icons in one
+        # packed row against the BOTTOM monitor edge. Badges (30 wide) are
+        # wider than the 24px icon pitch, so the old rings tangled them.
+        # They must come out as ONE row just above the cluster, left to
+        # right in target order.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1700 + 24 * i, 1044, 24, 24), i + 1)
+            for i in range(6)
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(30, 24)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        # One row: every badge shares the same bottom edge, fully ABOVE the
+        # cluster's top edge (1044).
+        assert len({r[3] for r in rects}) == 1
+        assert all(r[3] <= 1044.0 for r in rects)
+        # Left-to-right target order; distinct, disjoint, on the monitor.
+        lefts = [r[0] for r in rects]
+        assert lefts == sorted(lefts)
+        assert len(set(lefts)) == len(lefts)
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
+        for left, top, right, bottom in rects:
+            assert left >= 0.0 and top >= 0.0
+            assert right <= 1920.0 and bottom <= 1080.0
+
+    def test_row_overflow_extends_away_from_the_corner(self, overlay_mgr):
+        # A packed run cannot give every badge its control's center, so
+        # the overflow must extend somewhere. It must extend AWAY from the
+        # nearer monitor corner: the live 2026-08-08 screenshot showed the
+        # tray row's overflow drifting rightward into the corner region
+        # where the badges of cluster-excluded controls (the wide clock,
+        # the bell + Show-desktop pair) also sit, and the two groups'
+        # leader lines crossed. Six 24px icons ending 56px short of the
+        # right edge need 198px of badges; the extra must go LEFT, over
+        # the open space, keeping every badge right edge near the run.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1720 + 24 * i, 1044, 24, 24), i + 1)
+            for i in range(6)
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(30, 24)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        assert len({r[3] for r in rects}) == 1
+        assert all(r[3] <= 1044.0 for r in rects)
+        lefts = [r[0] for r in rects]
+        assert lefts == sorted(lefts)
+        # No badge may extend more than one badge width past the last
+        # icon's right edge (1864): the corner region stays free.
+        assert max(r[2] for r in rects) <= 1894.0
+        # The overflow went leftward past the first icon's ideal spot.
+        assert min(r[0] for r in rects) < 1717.0
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
+
+    def test_bottom_right_corner_row_shifts_left_onto_monitor(
+        self, overlay_mgr
+    ):
+        # The row cannot extend past the right monitor edge, so the whole
+        # run shifts left while preserving order and separation.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1820 + 24 * i, 1044, 24, 24), i + 1)
+            for i in range(4)
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(30, 24)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        assert len({r[3] for r in rects}) == 1
+        assert all(r[3] <= 1044.0 for r in rects)
+        lefts = [r[0] for r in rects]
+        assert lefts == sorted(lefts)
+        for i in range(len(rects)):
+            for j in range(i + 1, len(rects)):
+                assert _rects_disjoint(rects[i], rects[j]), (i, j, rects)
+        for left, top, right, bottom in rects:
+            assert right <= 1920.0
+
+    def test_bottom_stacked_pair_lines_nest_instead_of_crossing(
+        self, overlay_mgr
+    ):
+        # Mirror of the two-across vertical case: icons stacked two-HIGH in
+        # a bottom-edge row. The badge row sits ABOVE the cluster, so the
+        # farther (lower) icon's badge must come first (left) for the
+        # pair's leader lines to nest.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = []
+        n = 1
+        for left in (1700, 1724, 1748):
+            for top in (1032, 1056):
+                badges.append((self._rect(mon, left, top, 24, 24), n))
+                n += 1
+        with patch.object(mgr, "_numeral_badge_size", return_value=(30, 24)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        # Input order per column is (top icon, bottom icon): the BOTTOM
+        # icon's badge must sit strictly left of the TOP icon's badge.
+        assert rects[1][0] < rects[0][0]
+        assert rects[3][0] < rects[2][0]
+        assert rects[5][0] < rects[4][0]
+
+    def test_wide_bottom_buttons_never_cluster(self, overlay_mgr):
+        # Labeled app buttons on a horizontal taskbar: flush to the bottom
+        # edge and side by side, but far wider than the width cap, so the
+        # shipped placement must be byte-identical.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 100 + 150 * i, 1040, 146, 40), i + 1)
+            for i in range(4)
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+            expected = self._manual_sequential(mgr, badges, 20, 30)
+        assert placements == expected
+
+    def test_corner_row_never_mistaken_for_vertical_column(self, overlay_mgr):
+        # A packed horizontal row whose right end reaches into the
+        # right-edge band: the right-edge (vertical) pass sees three
+        # same-top members, but a run WIDER than it is tall must not form
+        # a vertical column -- the bottom-edge pass owns it. The badges
+        # must come out as one row above the icons.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        badges = [
+            (self._rect(mon, 1848 + 24 * i, 1044, 24, 24), i + 1)
+            for i in range(3)
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(30, 24)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        rects = [fp for _w, _h, fp in placements]
+        assert len({r[3] for r in rects}) == 1
+        assert all(r[3] <= 1044.0 for r in rects)
+        lefts = [r[0] for r in rects]
+        assert lefts == sorted(lefts)
+
+    def test_working_glyph_never_joins_a_cluster(self, overlay_mgr):
+        # A working glyph inside the edge band neither gets a numeral
+        # placement nor counts toward cluster membership.
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        import overlay_paint_window as opw
+        badges = [
+            (self._rect(mon, 1890, 950, 24, 24), opw.WORKING_BADGE_NUMBER),
+            (self._rect(mon, 1890, 990, 24, 24), 1),
+            (self._rect(mon, 1890, 1014, 24, 24), 2),
+            (self._rect(mon, 1890, 1038, 24, 24), 3),
+        ]
+        with patch.object(mgr, "_numeral_badge_size", return_value=(20, 30)):
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920, 1080, corner="top_right",
+            )
+        assert placements[0] is None
+        rects = [fp for _w, _h, fp in placements[1:]]
+        # The three numerals still form the ordered column beside the icons.
+        assert len({r[2] for r in rects}) == 1
+        assert all(r[2] <= 1890.0 for r in rects)
+        tops = [r[1] for r in rects]
+        assert tops == sorted(tops)
+
+
+class TestBasePlacementAvoidsNeighborControls:
+    """The BASE placement (not just a collision nudge) must not sit on a
+    NEIGHBORING numbered control (wh-taskbar-badge-mispoint).
+
+    The live trigger is a vertical right-edge taskbar: every button reports
+    a full-row rectangle, the half-outside corner-point badge of one row
+    overhangs the row above (covering its icon), and the monitor clamp
+    pushes the bottom "Show desktop" sliver's badge up onto the
+    notification bell. When the canonical spot intrudes on another numbered
+    control, the badge moves to the LEADING gutter beside the control
+    (fully outside, covering nothing), or -- for a small control -- the
+    fully-inside corner, before accepting the intrusion. A canonical spot
+    clean of other controls is unchanged (the existing
+    TestSmallControlCornerPoint expectations pin that)."""
+
+    @staticmethod
+    def _mon() -> _NativeMonitor:
+        return _NativeMonitor(hmonitor=1, rect_phys=QRect(0, 0, 1920, 1080), dpi=96)
+
+    @staticmethod
+    def _rect(mon, x, y, width, height) -> OverlayPaintRect:
+        return OverlayPaintRect(
+            x=x, y=y, width=width, height=height,
+            monitor=mon, hmonitor=1, screen=None,
+        )
+
+    def test_small_control_moves_to_gutter_when_corner_point_intrudes(
+        self, overlay_mgr
+    ):
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        # Vertical-taskbar shape at the monitor's right edge: two stacked
+        # full-width rows; the LOWER row's badge is being placed. The
+        # trailing strip is off-monitor, and the half-outside corner point
+        # (after the monitor clamp) overhangs the row above.
+        rect = self._rect(mon, 1776, 110, 144, 108)      # own row
+        own_box = (1776.0, 110.0, 1920.0, 218.0)
+        row_above = (1776.0, 0.0, 1920.0, 108.0)
+        got = mgr._numeral_badge_placement_phys(
+            rect, 80, 60, 1.0, 1920, 1080, [own_box, row_above],
+            corner="top_right", placed_badges=[],
+        )
+        # Leading gutter: badge's right edge on the control's left edge,
+        # top-aligned with the row -- fully outside, covering nothing.
+        assert got == (1696.0, 110.0, 1776.0, 170.0)
+
+    def test_small_control_gutter_when_neighbors_block_trailing(
+        self, overlay_mgr
+    ):
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        # Half-width tray-icon shape: a neighbor above (the corner point
+        # overhangs it) and a neighbor right (blocks the trailing strip).
+        rect = self._rect(mon, 500, 500, 30, 40)
+        own_box = (500.0, 500.0, 530.0, 540.0)
+        above = (480.0, 460.0, 550.0, 500.0)
+        right = (530.0, 495.0, 570.0, 535.0)
+        got = mgr._numeral_badge_placement_phys(
+            rect, 20, 30, 1.0, 1920, 1080, [own_box, above, right],
+            corner="top_right", placed_badges=[],
+        )
+        assert got == (480.0, 500.0, 500.0, 530.0)
+
+    def test_small_control_falls_back_inside_when_gutter_blocked(
+        self, overlay_mgr
+    ):
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        # Neighbors above, right, AND left: only the fully-inside corner is
+        # clean. Covering the control's own icon beats covering a neighbor's.
+        rect = self._rect(mon, 500, 500, 30, 40)
+        own_box = (500.0, 500.0, 530.0, 540.0)
+        above = (480.0, 460.0, 550.0, 500.0)
+        right = (530.0, 495.0, 570.0, 535.0)
+        left = (460.0, 490.0, 500.0, 550.0)
+        got = mgr._numeral_badge_placement_phys(
+            rect, 20, 30, 1.0, 1920, 1080, [own_box, above, right, left],
+            corner="top_right", placed_badges=[],
+        )
+        assert got == (510.0, 500.0, 530.0, 530.0)
+
+    def test_clamped_sliver_badge_moves_to_gutter_not_onto_neighbor(
+        self, overlay_mgr
+    ):
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        # The "Show desktop" shape: a wide sliver at the monitor's very
+        # bottom. The inside-corner anchor is clamped up ONTO the control
+        # above (the bell); the badge must move to the gutter beside the
+        # sliver (vertically clamped onto the monitor) instead.
+        rect = self._rect(mon, 500, 1069, 144, 11)
+        own_box = (500.0, 1069.0, 644.0, 1080.0)
+        bell = (500.0, 999.0, 644.0, 1069.0)
+        got = mgr._numeral_badge_placement_phys(
+            rect, 20, 30, 1.0, 1920, 1080, [own_box, bell],
+            corner="top_right", placed_badges=[],
+        )
+        assert got == (480.0, 1050.0, 500.0, 1080.0)
+
+    def test_gutter_candidate_avoids_placed_badge(self, overlay_mgr):
+        mgr, _mod, _ = overlay_mgr
+        mon = self._mon()
+        # The gutter spot is clean of controls but an earlier badge already
+        # sits there: fall through (here to the small inside corner).
+        rect = self._rect(mon, 500, 500, 30, 40)
+        own_box = (500.0, 500.0, 530.0, 540.0)
+        above = (480.0, 460.0, 550.0, 500.0)
+        right = (530.0, 495.0, 570.0, 535.0)
+        placed = [(480.0, 500.0, 500.0, 530.0)]
+        got = mgr._numeral_badge_placement_phys(
+            rect, 20, 30, 1.0, 1920, 1080, [own_box, above, right],
+            corner="top_right", placed_badges=placed,
+        )
+        assert got == (510.0, 500.0, 530.0, 530.0)
+
+
+class TestNudgePrefersStayingAttached:
+    """A collision nudge prefers a spot that keeps the badge ON (or within
+    the attach gap of) its OWN control -- which draws with a pointer tail,
+    unambiguous by construction -- over a spot that avoids every control
+    but detaches the bubble (wh-taskbar-badge-mispoint).
+
+    On a vertical taskbar every candidate inside the column overlaps some
+    full-width row, so the old preference (first candidate clean of all
+    other controls) systematically pushed overflow badges onto the desktop,
+    a leader line pointing back at blank taskbar edge."""
+
+    def test_nudge_prefers_staying_attached_over_desktop_exile(
+        self, overlay_mgr
+    ):
+        mgr, _mod, _ = overlay_mgr
+        own_box = (1776.0, 110.0, 1920.0, 218.0)
+        row_above = (1776.0, 0.0, 1920.0, 108.0)
+        # A wide badge on a full-width right-edge row: the base straddles
+        # the row boundary and collides with an already-placed badge.
+        base = (1770.0, 85.0, 1920.0, 115.0)
+        placed = [(1770.0, 80.0, 1920.0, 112.0)]
+        got = mgr._resolve_badge_collision(
+            base, 150, 30, 1.0, 1920, 1080, placed, [row_above],
+            corner="top_right", own_box=own_box,
+        )
+        # Ring-1 below overlaps the own row (attached, clean of the row
+        # above); ring-1 inward is fully on the desktop -- clean but
+        # DETACHED -- and comes first in ring order. Attached must win.
+        assert got == (1770.0, 118.0, 1920.0, 148.0)
+
+
 # ===========================================================================
 # Step 5: paint_overlay end-to-end + emit
 # ===========================================================================
@@ -2156,7 +2970,7 @@ class TestPaintEndToEnd:
         ), patch.object(mod, "_screens", return_value=[]), patch.object(
             mod, "resolve_overlay_paint_rect", return_value=_paint_rect(10, mon)
         ), patch.object(
-            mgr, "_render_badge", side_effect=RuntimeError("boom")
+            mgr, "_draw_numeral_bubble", side_effect=RuntimeError("boom")
         ):
             result = mgr.paint(
                 _make_summary([_make_item(1)]),
@@ -2267,6 +3081,22 @@ class _GuiStub:
         self._handle_clear_overlay = GuiManager._handle_clear_overlay.__get__(self)
         self._emit_overlay_state_changed = (
             GuiManager._emit_overlay_state_changed.__get__(self)
+        )
+        # wh-overlay-slow-uia-stale-badges.9: the paint/clear handlers arm
+        # and cancel the badge lease, so the stub carries the real helpers
+        # over a mock timer.
+        self._overlay_lease_timer = MagicMock()
+        self._overlay_lease_pair = None
+        self._arm_overlay_lease = GuiManager._arm_overlay_lease.__get__(self)
+        self._cancel_overlay_lease = (
+            GuiManager._cancel_overlay_lease.__get__(self)
+        )
+        # wh-overlay-slow-uia-stale-badges.18.4: the clear handler checks
+        # teardown_pending after driving the manager, so the stub carries
+        # the real helper over a mock retry timer.
+        self._overlay_teardown_retry_timer = MagicMock()
+        self._arm_teardown_retry_if_pending = (
+            GuiManager._arm_teardown_retry_if_pending.__get__(self)
         )
 
 
@@ -2423,6 +3253,84 @@ class TestStaleClearDoesNotTearDownNewerOverlay:
         assert cleared["state"] == "cleared"
         assert not mgr._windows
         user32.DestroyWindow.assert_called_once()
+
+
+class TestLeaseExpiry:
+    """wh-overlay-slow-uia-stale-badges.9 -- GUI-side badge lease.
+
+    ``expire_lease`` is the lease timer's teardown: destroy every badge
+    window, advance the generation gate exactly like a clear, and report
+    ``state="expired"`` so Logic learns the badges are gone. A stale
+    expiry (the pair lost a race with a newer paint/clear) is a no-op.
+    """
+
+    def test_expire_lease_tears_down_and_emits_expired(self, overlay_mgr):
+        mgr, mod, (user32, _, _) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
+        assert result["state"] == "painted"
+        user32.DestroyWindow.reset_mock()
+
+        expired = mgr.expire_lease(overlay_session_id=5, paint_generation=4)
+        assert expired is not None
+        assert expired["action"] == "overlay_state_changed"
+        assert expired["state"] == "expired"
+        assert expired["overlay_session_id"] == 5
+        assert expired["paint_generation"] == 4
+        assert not mgr._windows
+        user32.DestroyWindow.assert_called_once()
+
+    def test_expire_lease_blocks_same_pair_late_paint(self, overlay_mgr):
+        mgr, mod, (user32, _, _) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
+        assert result["state"] == "painted"
+        assert mgr.expire_lease(overlay_session_id=5, paint_generation=4)
+        user32.CreateWindowExW.reset_mock()
+
+        # A late paint at the expired pair must not re-present dead badges.
+        late, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
+        assert late is None
+        user32.CreateWindowExW.assert_not_called()
+
+    def test_stale_expire_returns_none_and_leaves_windows(self, overlay_mgr):
+        mgr, mod, (user32, _, _) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
+        assert result["state"] == "painted"
+        user32.DestroyWindow.reset_mock()
+
+        # An expiry for a pair the mark already passed is a race loser:
+        # a newer overlay is on screen and must stay.
+        stale = mgr.expire_lease(overlay_session_id=5, paint_generation=3)
+        assert stale is None
+        assert mgr._windows, "stale expiry must NOT destroy the newer overlay"
+        user32.DestroyWindow.assert_not_called()
+
+
+class TestReset:
+    """wh-overlay-slow-uia-stale-badges.9 -- Logic-restart reset.
+
+    ``reset`` is the ``reset_overlay`` startup action: destroy any badge
+    windows a previous Logic left behind and start a FRESH generation
+    gate, because a restarted Logic restarts its (session, generation)
+    numbering from zero and the old high-water mark would gate every new
+    paint forever. No event is emitted -- there is no pair to report.
+    """
+
+    def test_reset_destroys_windows_and_accepts_restarted_pairs(
+        self, overlay_mgr
+    ):
+        mgr, mod, (user32, _, _) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
+        assert result["state"] == "painted"
+        user32.DestroyWindow.reset_mock()
+
+        assert mgr.reset() is None
+        assert not mgr._windows
+        user32.DestroyWindow.assert_called_once()
+
+        # A restarted Logic paints at a pair the OLD gate would refuse.
+        fresh, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert fresh is not None
+        assert fresh["state"] == "painted"
 
 
 class TestRegisterClassResetsArgtypes:
@@ -2703,14 +3611,21 @@ class TestDestroyFailureRetainsHandleAndWindow:
 
         cleared = mgr.clear(overlay_session_id=1, paint_generation=1)
         # The clear pair advances the mark, so it is honored, but the
-        # destroy failed: the window must be retained for retry.
-        assert cleared is not None
-        assert cleared["state"] == "cleared"
+        # destroy failed: the window must be retained for retry, and the
+        # ack is DEFERRED, not returned -- an immediate "cleared" would
+        # claim success while the badge stayed on screen
+        # (wh-overlay-slow-uia-stale-badges.18.4).
+        assert cleared is None
+        assert mgr.teardown_pending is True
         assert window.hwnd is not None, (
             "a window whose DestroyWindow failed must keep its handle"
         )
-        assert 10 in mgr._windows, (
-            "the manager must retain a window that failed to destroy"
+        assert window in mgr._pending_destroy, (
+            "the manager must move a window that failed to destroy into "
+            "the _pending_destroy debt cohort (.18.10)"
+        )
+        assert not mgr._windows, (
+            "_windows must end empty after a teardown sweep (.18.10)"
         )
         kernel32.GetLastError.assert_called()
 
@@ -2718,7 +3633,8 @@ class TestDestroyFailureRetainsHandleAndWindow:
         user32.DestroyWindow.return_value = 1
         mgr.clear(overlay_session_id=1, paint_generation=2)
         assert window.hwnd is None
-        assert 10 not in mgr._windows
+        assert mgr._pending_destroy == []
+        assert not mgr._windows
 
     def test_destroy_idempotent_on_none_hwnd(self, overlay_mgr):
         mgr, mod, (user32, _, _) = overlay_mgr
@@ -2892,6 +3808,447 @@ class TestDestroyFailureRetainsHandleAndWindow:
         )
 
 
+class TestIncompleteTeardownDefersAck:
+    """wh-overlay-slow-uia-stale-badges.18.4 -- a teardown that leaves a
+    surviving window must not claim success.
+
+    ``_destroy_all`` retains any window whose DestroyWindow failed,
+    because that window can still be on screen. Emitting ``cleared`` /
+    ``expired`` anyway let Logic resolve its clear-ack watchdog and let
+    the GUI cancel the badge lease -- the only retry drivers -- while the
+    survivor stayed visible. Now an incomplete teardown emits NOTHING:
+    the would-be ack is parked in ``_deferred_teardown_ack``,
+    ``teardown_pending`` turns True, and the GUI retry timer drives
+    ``retry_teardown`` until the sweep ends clean, which releases the
+    parked ack exactly once. Logic's 5000 ms clear-ack watchdog fires a
+    truthful "badges may still be on the screen" ERROR in the meantime
+    -- that is the designed behavior, not a bug.
+    """
+
+    @staticmethod
+    def _fail_destroys(user32, kernel32):
+        user32.DestroyWindow.return_value = 0
+        kernel32.GetLastError.return_value = 1400  # ERROR_INVALID_WINDOW_HANDLE
+
+    def test_incomplete_clear_defers_ack_and_advances_gate(self, overlay_mgr):
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        window = mgr._windows[10]
+        self._fail_destroys(user32, kernel32)
+
+        cleared = mgr.clear(overlay_session_id=1, paint_generation=1)
+
+        # No ack while a window survived: a "cleared" here would resolve
+        # Logic's clear-ack watchdog with badges still on screen. The
+        # survivor moves into the debt cohort (.18.10).
+        assert cleared is None
+        assert mgr.teardown_pending is True
+        assert window in mgr._pending_destroy
+        assert not mgr._windows
+        # The would-be ack is parked for the retry path.
+        deferred = mgr._deferred_teardown_ack
+        assert deferred is not None
+        assert deferred["state"] == "cleared"
+        assert deferred["overlay_session_id"] == 1
+        assert deferred["paint_generation"] == 1
+        # The gate DID advance: a late paint at the cleared pair stays
+        # blocked exactly as after a clean clear.
+        late, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=1)
+        assert late is None
+
+    def test_incomplete_expire_lease_defers_ack(self, overlay_mgr):
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
+        assert result["state"] == "painted"
+        window = mgr._windows[10]
+        self._fail_destroys(user32, kernel32)
+
+        expired = mgr.expire_lease(overlay_session_id=5, paint_generation=4)
+
+        assert expired is None
+        assert mgr.teardown_pending is True
+        assert window in mgr._pending_destroy
+        assert not mgr._windows
+        deferred = mgr._deferred_teardown_ack
+        assert deferred is not None
+        assert deferred["state"] == "expired"
+        assert deferred["overlay_session_id"] == 5
+        assert deferred["paint_generation"] == 4
+
+    def test_retry_teardown_releases_deferred_ack_exactly_once(
+        self, overlay_mgr
+    ):
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        window = mgr._windows[10]
+        self._fail_destroys(user32, kernel32)
+        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
+
+        # Destroy still fails: the retry releases nothing and stays pending.
+        assert mgr.retry_teardown() is None
+        assert mgr.teardown_pending is True
+        assert window in mgr._pending_destroy
+
+        # Destroy now succeeds: the deferred ack is released exactly once.
+        user32.DestroyWindow.return_value = 1
+        ack = mgr.retry_teardown()
+        assert ack is not None
+        assert ack["state"] == "cleared"
+        assert ack["overlay_session_id"] == 1
+        assert ack["paint_generation"] == 1
+        assert mgr.teardown_pending is False
+        assert window.hwnd is None
+        assert mgr._pending_destroy == []
+        assert not mgr._windows
+        # A later retry finds nothing and must not repeat the ack.
+        assert mgr.retry_teardown() is None
+
+    def test_reset_drops_deferred_ack_but_keeps_retry_pending(
+        self, overlay_mgr
+    ):
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        self._fail_destroys(user32, kernel32)
+        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
+        assert mgr._deferred_teardown_ack is not None
+
+        # A restarted Logic announced itself: the old Logic's parked ack
+        # must never surface, but the survivor still needs the retry.
+        mgr.reset()
+        assert mgr._deferred_teardown_ack is None
+        assert mgr.teardown_pending is True
+
+        # A later successful retry destroys the survivor and emits nothing.
+        user32.DestroyWindow.return_value = 1
+        assert mgr.retry_teardown() is None
+        assert mgr.teardown_pending is False
+        assert mgr._pending_destroy == []
+        assert not mgr._windows
+
+    def test_clean_teardowns_return_ack_and_stay_unpending(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        assert mgr.teardown_pending is False
+
+        cleared = mgr.clear(overlay_session_id=1, paint_generation=1)
+        assert cleared is not None
+        assert cleared["state"] == "cleared"
+        assert mgr.teardown_pending is False
+        assert mgr._deferred_teardown_ack is None
+
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=2)
+        assert result["state"] == "painted"
+        expired = mgr.expire_lease(overlay_session_id=1, paint_generation=2)
+        assert expired is not None
+        assert expired["state"] == "expired"
+        assert mgr.teardown_pending is False
+        assert mgr._deferred_teardown_ack is None
+
+
+class TestStaleRetryDoesNotSweepFreshWindows:
+    """wh-overlay-slow-uia-stale-badges.18.8 -- a stale teardown retry
+    must not destroy a newer overlay.
+
+    A single-shot retry timer can outlive the teardown it was armed
+    for: a later clean clear / expire_lease / reset pays the teardown
+    debt (``teardown_pending`` goes False) before the timer fires, and
+    a fresh paint then takes the screen. ``retry_teardown`` is
+    ownership-aware: without teardown debt it never sweeps -- it only
+    releases a still-parked ack (the accepted late-bookkeeping
+    residual) or does nothing.
+    """
+
+    @staticmethod
+    def _fail_destroys(user32, kernel32):
+        user32.DestroyWindow.return_value = 0
+        kernel32.GetLastError.return_value = 1400  # ERROR_INVALID_WINDOW_HANDLE
+
+    def test_retry_without_debt_leaves_fresh_windows_alone(self, overlay_mgr):
+        mgr, mod, (user32, _, _) = overlay_mgr
+        # A fresh paint owns the screen; no teardown debt exists.
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        assert mgr.teardown_pending is False
+        user32.DestroyWindow.reset_mock()
+
+        assert mgr.retry_teardown() is None
+
+        # No sweep ran: the fresh paint's window is untouched.
+        user32.DestroyWindow.assert_not_called()
+        assert 10 in mgr._windows
+        assert mgr._windows[10].hwnd is not None
+
+    def test_retry_without_debt_releases_parked_ack_without_sweep(
+        self, overlay_mgr
+    ):
+        mgr, mod, (user32, _, _) = overlay_mgr
+        # A fresh paint owns the screen. Simulate an OLD parked ack whose
+        # debt a later clean sweep already paid (teardown_pending False).
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=3)
+        assert result["state"] == "painted"
+        old_ack = {
+            "action": "overlay_state_changed", "state": "cleared",
+            "overlay_session_id": 1, "paint_generation": 1,
+        }
+        mgr._deferred_teardown_ack = old_ack
+        assert mgr.teardown_pending is False
+        user32.DestroyWindow.reset_mock()
+
+        # The parked ack is released exactly once, with NO sweep.
+        assert mgr.retry_teardown() is old_ack
+        user32.DestroyWindow.assert_not_called()
+        assert 10 in mgr._windows
+        assert mgr.retry_teardown() is None
+        assert 10 in mgr._windows
+
+    def test_retry_with_debt_still_sweeps_and_stays_pending(
+        self, overlay_mgr
+    ):
+        # Pin: the debt path sweeps the COHORT -- a still-failing survivor
+        # in _pending_destroy is re-swept and the retry stays pending. It
+        # never touches _windows (wh-overlay-slow-uia-stale-badges.18.10).
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        window = mgr._windows[10]
+        self._fail_destroys(user32, kernel32)
+        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
+        assert mgr.teardown_pending is True
+        user32.DestroyWindow.reset_mock()
+
+        assert mgr.retry_teardown() is None
+
+        user32.DestroyWindow.assert_called()  # the cohort sweep DID run
+        assert mgr.teardown_pending is True
+        assert window in mgr._pending_destroy
+        assert not mgr._windows
+
+    def test_stale_retry_after_clean_clear_preserves_fresh_paint(
+        self, overlay_mgr
+    ):
+        # The finding's ordering (a): incomplete clear at P parks P's ack
+        # -> a later clean clear pays the debt -> fresh paint R -> the
+        # stale timer fires. R's windows survive; the old parked P ack is
+        # released as late bookkeeping, exactly once.
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        self._fail_destroys(user32, kernel32)
+        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
+        assert mgr.teardown_pending is True
+
+        # DestroyWindow works again: a later clean clear pays the debt.
+        user32.DestroyWindow.return_value = 1
+        later = mgr.clear(overlay_session_id=1, paint_generation=2)
+        assert later is not None
+        assert later["state"] == "cleared"
+        assert mgr.teardown_pending is False
+
+        # A fresh paint R takes the screen.
+        fresh, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=3)
+        assert fresh["state"] == "painted"
+        window = mgr._windows[10]
+
+        ack = mgr.retry_teardown()
+
+        assert ack is not None
+        assert ack["state"] == "cleared"
+        assert ack["overlay_session_id"] == 1
+        assert ack["paint_generation"] == 1
+        assert mgr._windows.get(10) is window
+        assert window.hwnd is not None
+        # Released exactly once; R still untouched.
+        assert mgr.retry_teardown() is None
+        assert mgr._windows.get(10) is window
+
+    def test_stale_retry_after_reset_preserves_fresh_paint(
+        self, overlay_mgr
+    ):
+        # The finding's ordering (b): the debt-payer is reset() (which
+        # drops the parked ack). R's windows survive and NO ack is
+        # returned.
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        self._fail_destroys(user32, kernel32)
+        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
+
+        # DestroyWindow works again: reset() pays the debt, drops the ack.
+        user32.DestroyWindow.return_value = 1
+        mgr.reset()
+        assert mgr.teardown_pending is False
+        assert mgr._deferred_teardown_ack is None
+
+        # Fresh paint from the restarted Logic (pairs restart from zero).
+        fresh, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert fresh["state"] == "painted"
+        window = mgr._windows[10]
+
+        assert mgr.retry_teardown() is None
+
+        assert mgr._windows.get(10) is window
+        assert window.hwnd is not None
+
+
+class TestDebtBearingRetrySweepsOnlyCohort:
+    """wh-overlay-slow-uia-stale-badges.18.10 -- a DEBT-BEARING retry must
+    not destroy a newer paint's windows.
+
+    An incomplete teardown of pair P moves its survivor into the
+    ``_pending_destroy`` debt cohort and leaves ``_windows`` empty. A
+    newer accepted paint Q then owns ``_windows`` alone. The retry
+    sweeps ONLY the cohort (``_destroy_pending``), so it can never
+    touch a window Q owns. Before this fix the debt branch called
+    ``_destroy_all``, which swept the whole live map and could destroy
+    (or recycle-then-destroy) Q's windows while Logic stayed PAINTED
+    at Q -- a permanent invisible-but-active overlay.
+    """
+
+    @staticmethod
+    def _fail_destroys(user32, kernel32):
+        user32.DestroyWindow.return_value = 0
+        kernel32.GetLastError.return_value = 1400  # ERROR_INVALID_WINDOW_HANDLE
+
+    def test_failed_clear_then_new_paint_retry_preserves_new_windows(
+        self, overlay_mgr
+    ):
+        # The finding's primary sequence: failed clear(P) -> accepted new
+        # paint Q -> retry. Q's windows survive both the failing retry and
+        # the finally-successful one; the successful one releases P's
+        # parked cleared ack as late bookkeeping.
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        p_window = mgr._windows[10]
+        self._fail_destroys(user32, kernel32)
+
+        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
+        assert mgr.teardown_pending is True
+        # The survivor is the teardown's debt cohort; the live map is empty.
+        assert p_window in mgr._pending_destroy
+        assert not mgr._windows
+
+        # A NEW accepted paint Q takes the screen while the destroy still
+        # fails. Q gets a FRESH window -- the survivor is never recycled.
+        fresh, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=2)
+        assert fresh["state"] == "painted"
+        q_window = mgr._windows[10]
+        assert q_window is not p_window
+        # The paint-time orphan sweep retried the survivor and kept it.
+        assert p_window in mgr._pending_destroy
+
+        # A retry while the destroy still fails sweeps ONLY the cohort.
+        user32.DestroyWindow.reset_mock()
+        assert mgr.retry_teardown() is None
+        assert mgr.teardown_pending is True
+        user32.DestroyWindow.assert_called_once()  # the survivor was retried
+        assert mgr._windows.get(10) is q_window
+        assert q_window.hwnd is not None
+
+        # The survivor's destroy finally succeeds: the retry releases P's
+        # parked cleared ack while Q's windows remain untouched.
+        user32.DestroyWindow.return_value = 1
+        ack = mgr.retry_teardown()
+        assert ack is not None
+        assert ack["state"] == "cleared"
+        assert ack["overlay_session_id"] == 1
+        assert ack["paint_generation"] == 1
+        assert mgr.teardown_pending is False
+        assert p_window.hwnd is None
+        assert mgr._pending_destroy == []
+        assert mgr._windows.get(10) is q_window
+        assert q_window.hwnd is not None
+        # Released exactly once; Q still untouched afterwards.
+        assert mgr.retry_teardown() is None
+        assert mgr._windows.get(10) is q_window
+
+    def test_reset_with_survivor_then_fresh_paint_retry_preserves_it(
+        self, overlay_mgr
+    ):
+        # The fresh-Logic path: reset() keeps the debt but parks no ack.
+        # The restarted Logic paints its fresh pair; the retry sweeps only
+        # the cohort and returns nothing.
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert result["state"] == "painted"
+        p_window = mgr._windows[10]
+        self._fail_destroys(user32, kernel32)
+
+        mgr.reset()
+        assert mgr.teardown_pending is True
+        assert mgr._deferred_teardown_ack is None
+        assert p_window in mgr._pending_destroy
+        assert not mgr._windows
+
+        # The restarted Logic numbers from zero; the reset gate accepts it.
+        fresh, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
+        assert fresh["state"] == "painted"
+        q_window = mgr._windows[10]
+        assert q_window is not p_window
+
+        user32.DestroyWindow.reset_mock()
+        assert mgr.retry_teardown() is None
+        assert mgr.teardown_pending is True
+        assert mgr._windows.get(10) is q_window
+        assert q_window.hwnd is not None
+
+        # The destroy succeeds: the debt is paid, nothing is released
+        # (reset dropped the old Logic's ack), and Q survives.
+        user32.DestroyWindow.return_value = 1
+        assert mgr.retry_teardown() is None
+        assert mgr.teardown_pending is False
+        assert p_window.hwnd is None
+        assert mgr._pending_destroy == []
+        assert mgr._windows.get(10) is q_window
+        assert q_window.hwnd is not None
+
+    def test_incomplete_expiry_then_repaint_retry_preserves_new_windows(
+        self, overlay_mgr
+    ):
+        # The incomplete-expiry path: expire_lease(P) parks an expired ack;
+        # a repaint takes the screen; the retry sweeps only the cohort and
+        # releases the expired ack once the survivor destroys.
+        mgr, mod, (user32, _, kernel32) = overlay_mgr
+        result, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
+        assert result["state"] == "painted"
+        p_window = mgr._windows[10]
+        self._fail_destroys(user32, kernel32)
+
+        assert mgr.expire_lease(overlay_session_id=5, paint_generation=4) is None
+        assert mgr.teardown_pending is True
+        assert p_window in mgr._pending_destroy
+        assert not mgr._windows
+
+        repaint, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=5)
+        assert repaint["state"] == "painted"
+        q_window = mgr._windows[10]
+        assert q_window is not p_window
+
+        user32.DestroyWindow.reset_mock()
+        assert mgr.retry_teardown() is None
+        assert mgr.teardown_pending is True
+        assert mgr._windows.get(10) is q_window
+        assert q_window.hwnd is not None
+
+        user32.DestroyWindow.return_value = 1
+        ack = mgr.retry_teardown()
+        assert ack is not None
+        assert ack["state"] == "expired"
+        assert ack["overlay_session_id"] == 5
+        assert ack["paint_generation"] == 4
+        assert mgr.teardown_pending is False
+        assert p_window.hwnd is None
+        assert mgr._pending_destroy == []
+        assert mgr._windows.get(10) is q_window
+        assert q_window.hwnd is not None
+        assert mgr.retry_teardown() is None
+        assert mgr._windows.get(10) is q_window
+
+
 # ===========================================================================
 # 8. GUI config wiring (wh-n29v.58): the validated overlay badge settings
 #    actually reach OverlayPaintWindowManager.
@@ -2901,6 +4258,832 @@ class TestDestroyFailureRetainsHandleAndWindow:
 #    so the constructor defaults (16 / True) are always used. This proves the
 #    config -> ClickConfig.from_raw -> OverlayPaintWindowManager path.
 # ===========================================================================
+
+
+# ===========================================================================
+# Bubble badge geometry (wh-bubble-geometry-fns): pure functions for the
+# speech-bubble redesign -- theme mapping, three-state drawing decision, and
+# the bubble-sized badge box. All unit-tested before any painting changes.
+# Spec: docs/plans/2026-08-04-overlay-bubble-badges-design-v1.md.
+# ===========================================================================
+
+
+class TestBubbleSchemeMapping:
+    """``_resolve_bubble_scheme`` maps the validated overlay_badge_theme plus
+    the system color scheme to the bubble's OWN scheme ("light" or "dark",
+    never "auto"). "auto" inverts the system theme for contrast: a mostly-dark
+    screen gets a white bubble, a mostly-light screen a near-black bubble."""
+
+    def test_auto_with_system_dark_gives_light_bubble(self):
+        import overlay_paint_window as mod
+        from PySide6.QtCore import Qt
+        assert mod._resolve_bubble_scheme("auto", Qt.ColorScheme.Dark) == "light"
+
+    def test_auto_with_system_light_gives_dark_bubble(self):
+        import overlay_paint_window as mod
+        from PySide6.QtCore import Qt
+        assert mod._resolve_bubble_scheme("auto", Qt.ColorScheme.Light) == "dark"
+
+    def test_auto_with_unknown_scheme_gives_light_bubble(self):
+        import overlay_paint_window as mod
+        from PySide6.QtCore import Qt
+        assert (
+            mod._resolve_bubble_scheme("auto", Qt.ColorScheme.Unknown) == "light"
+        )
+
+    def test_pinned_values_ignore_the_system_scheme(self):
+        import overlay_paint_window as mod
+        from PySide6.QtCore import Qt
+        schemes = (
+            Qt.ColorScheme.Dark, Qt.ColorScheme.Light, Qt.ColorScheme.Unknown
+        )
+        for scheme in schemes:
+            assert mod._resolve_bubble_scheme("light", scheme) == "light"
+            assert mod._resolve_bubble_scheme("dark", scheme) == "dark"
+
+    def test_system_scheme_seam_reads_style_hints(self, qapp):
+        # _system_color_scheme is the one place that touches
+        # QGuiApplication.styleHints(); with a live app it reports the real
+        # scheme, read fresh at each call (each paint).
+        import overlay_paint_window as mod
+        assert mod._system_color_scheme() == qapp.styleHints().colorScheme()
+
+    def test_system_scheme_seam_degrades_to_unknown_on_failure(self):
+        # A failing styleHints read degrades to Unknown instead of raising, so
+        # a paint can never crash on the theme read.
+        import overlay_paint_window as mod
+        from PySide6.QtCore import Qt
+        with patch.object(
+            mod.QGuiApplication, "styleHints", side_effect=RuntimeError("boom")
+        ):
+            assert mod._system_color_scheme() == Qt.ColorScheme.Unknown
+
+
+class TestBubbleDrawingState:
+    """``_bubble_drawing_state`` picks per badge among the three drawing
+    states from the shortest straight-line distance between the bubble's
+    placed rectangle and the control's rectangle (both physical px):
+    "overlap" (rectangles intersect by area -> bubble + inward pointer
+    tail), "adjacent" (gap <= 8 logical px -> bubble + pointer tail across
+    the gap), "detached" (further -> bubble + leader line). The threshold
+    scales with the device pixel ratio."""
+
+    _CONTROL = (100.0, 100.0, 300.0, 200.0)
+
+    def _state(self, bubble, dpr=1.0):
+        import overlay_paint_window as mod
+        return mod._bubble_drawing_state(bubble, self._CONTROL, dpr)
+
+    def test_intersecting_rects_are_overlap(self):
+        # Small-control corner-point placement: the bubble sits half over the
+        # control's corner.
+        assert self._state((90.0, 90.0, 130.0, 120.0)) == "overlap"
+
+    def test_flush_touching_rects_are_adjacent(self):
+        # Trailing-space placement drops the bubble flush against the
+        # control's right edge: touching is NOT area overlap, and gap 0 is
+        # within the threshold, so the tail is drawn.
+        assert self._state((300.0, 100.0, 340.0, 130.0)) == "adjacent"
+
+    def test_gap_exactly_at_threshold_is_adjacent(self):
+        # Control right edge 300, bubble left 308: gap exactly 8 at dpr 1.0.
+        assert self._state((308.0, 100.0, 348.0, 130.0)) == "adjacent"
+
+    def test_gap_just_past_threshold_is_detached(self):
+        assert self._state((308.5, 100.0, 348.5, 130.0)) == "detached"
+
+    def test_threshold_scales_with_device_pixel_ratio(self):
+        # A 12-physical-px gap: past the threshold at dpr 1.0 (8 physical px)
+        # but within it at dpr 2.0 (16 physical px).
+        bubble = (312.0, 100.0, 352.0, 130.0)
+        assert self._state(bubble, dpr=1.0) == "detached"
+        assert self._state(bubble, dpr=2.0) == "adjacent"
+
+    def test_diagonal_gap_uses_straight_line_distance(self):
+        # Bubble past the control's bottom-right corner. dx 6, dy 6 ->
+        # straight-line gap 8.49 > 8: detached, even though each axis gap
+        # alone is under the threshold.
+        assert self._state((306.0, 206.0, 346.0, 236.0)) == "detached"
+        # dx 5, dy 5 -> 7.07 <= 8: adjacent.
+        assert self._state((305.0, 205.0, 345.0, 235.0)) == "adjacent"
+
+
+class TestBubbleTailPath:
+    """Geometry contract of ``_bubble_tail_path``'s INWARD branch
+    (wh-overlay-bubble-badges.3.1): the whole tail stays inside the union of
+    the bubble's rectangle and the control's rectangle. The apex reach is
+    capped where the aim ray leaves the control, because a sliver control at
+    a monitor edge would otherwise carry the apex past the control AND past
+    the monitor clamp in ``_compute_monitor_bbox``, and the surface clamp
+    would cut the tail tip flat."""
+
+    def _union_bounds(self, bubble, control):
+        return (
+            min(bubble.left(), control[0]),
+            min(bubble.top(), control[1]),
+            max(bubble.right(), control[2]),
+            max(bubble.bottom(), control[3]),
+        )
+
+    def test_inward_apex_capped_at_a_sliver_control_edge(self, overlay_mgr):
+        # Codex round-1 repro: a 1x14 sliver control at the bottom edge of a
+        # 1080-high monitor; the badge box clamps against the monitor and the
+        # bubble overlaps the control (anchor distance zero -> inward branch).
+        # Uncapped, the apex lands at y ~= 1081.7 -- past the control's and
+        # the monitor's bottom -- and the surface clamp truncates the tail.
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(85.25, 1048.25, 29.5, 26.5)
+        control = (100.0, 1066.0, 101.0, 1080.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 1920.0, 1080.0)
+        ul, ut, ur, ub = self._union_bounds(bubble, control)
+        rect = tail.boundingRect()
+        assert rect.bottom() <= ub + 1e-6, (
+            f"tail bottom {rect.bottom()} exceeds the control/monitor "
+            f"bottom {ub}"
+        )
+        assert rect.left() >= ul - 1e-6
+        assert rect.top() >= ut - 1e-6
+        assert rect.right() <= ur + 1e-6
+
+    def test_inward_apex_reaches_full_length_inside_a_large_control(
+        self, overlay_mgr
+    ):
+        # Guard against over-capping: with the control extending far past the
+        # bubble in the aim direction, the apex must protrude the FULL
+        # inward reach past the bubble edge -- the cap only ever shortens a
+        # tail that would leave the control.
+        mgr, mod, _ = overlay_mgr
+        # Control center (300, 118.5) level with the bubble center (120,
+        # 118.5): the aim direction is exactly +x, the ray exits the bubble's
+        # right edge at x = 134.75, and the apex ends 7 px further right.
+        bubble = QRectF(105.25, 105.25, 29.5, 26.5)
+        control = (100.0, 100.0, 500.0, 137.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 2000.0, 1200.0)
+        expected_apex_x = (
+            bubble.right() + mod._BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX
+        )
+        assert tail.boundingRect().right() == pytest.approx(expected_apex_x)
+
+    def test_bubble_covering_its_control_draws_no_protruding_tail(
+        self, overlay_mgr
+    ):
+        # The bubble fully covers a tiny control. The anchor distance here is
+        # NONZERO (the bubble's nearest-edge point sits outside the control's
+        # interior), so the ADJACENT construction fires and its apex ends 3
+        # px inside the control -- deep inside the bubble. Either way, the
+        # contract this test pins is that no tail ink can protrude from the
+        # bubble when the control is entirely underneath it.
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(100.0, 100.0, 40.0, 30.0)
+        control = (110.0, 110.0, 120.0, 118.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 500.0, 400.0)
+        rect = tail.boundingRect()
+        assert rect.left() >= bubble.left() - 1e-6
+        assert rect.top() >= bubble.top() - 1e-6
+        assert rect.right() <= bubble.right() + 1e-6
+        assert rect.bottom() <= bubble.bottom() + 1e-6
+
+    def _assert_tail_in_safe_region(
+        self, tail, bubble, control, margin, mon_w, mon_h
+    ):
+        """The whole tail must stay inside the region the surface clamp
+        preserves: the badge box (placement clamps it onto the monitor) union
+        the control's ON-monitor part. Everything outside is cut flat by the
+        monitor clamp in ``_compute_monitor_bbox``
+        (wh-overlay-bubble-badges.3.3)."""
+        box = bubble.adjusted(-margin, -margin, margin, margin)
+        clipped = (
+            max(control[0], 0.0),
+            max(control[1], 0.0),
+            min(control[2], mon_w),
+            min(control[3], mon_h),
+        )
+        rect = tail.boundingRect()
+        assert rect.left() >= min(box.left(), clipped[0]) - 1e-6
+        assert rect.top() >= min(box.top(), clipped[1]) - 1e-6
+        assert rect.right() <= max(box.right(), clipped[2]) + 1e-6
+        assert rect.bottom() <= max(box.bottom(), clipped[3]) + 1e-6
+        assert rect.left() >= -1e-6
+        assert rect.top() >= -1e-6
+        assert rect.right() <= mon_w + 1e-6
+        assert rect.bottom() <= mon_h + 1e-6
+
+    def test_pre_entry_inward_tail_stays_on_the_monitor(self, overlay_mgr):
+        # Codex round-2 repro (wh-overlay-bubble-badges.3.3): a tall narrow
+        # control hanging off the bottom of a 240x180 monitor, badge box
+        # corner-clamped flush to the monitor bottom. The bubble's left-edge
+        # midpoint is inside the control (anchor distance zero -> inward
+        # branch), but the center-directed ray exits the bubble's BOTTOM edge
+        # at x ~= 14.3 -- outside the control's x span -- so the ray enters
+        # the control only at t ~= 11, past the 7 px reach. An
+        # exit-distance-only cap leaves the apex at (11.6, 181.2): outside
+        # the control, past the monitor bottom, cut flat by the surface
+        # clamp.
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(5.25, 148.25, 29.5, 26.5)
+        control = (0.0, 159.0, 10.0, 234.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 240.0, 180.0)
+        self._assert_tail_in_safe_region(
+            tail, bubble, control, 5.25, 240.0, 180.0
+        )
+        # A tail must still exist: some ink beyond the bubble's rectangle.
+        assert not bubble.contains(tail.boundingRect())
+
+    def test_inward_tail_stays_inside_a_control_crossing_the_monitor_edge(
+        self, overlay_mgr
+    ):
+        # The sibling case an entry-distance check alone would miss: the ray
+        # reaches the control BEFORE the 7 px apex, but the control continues
+        # past the monitor bottom and the aim (the raw control center at
+        # y=195) points through the off-monitor part. An apex inside the
+        # control at y ~= 181.5 is still outside the 180-high monitor, so
+        # the surface clamp cuts it flat. The safe region is the control's
+        # ON-monitor part.
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(5.25, 148.25, 29.5, 26.5)
+        control = (0.0, 150.0, 60.0, 240.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 400.0, 180.0)
+        self._assert_tail_in_safe_region(
+            tail, bubble, control, 5.25, 400.0, 180.0
+        )
+        assert not bubble.contains(tail.boundingRect())
+
+    def test_adjacent_tail_apex_stops_at_the_monitor_edge(self, overlay_mgr):
+        # Same defect class in the ADJACENT branch: the control hangs off the
+        # monitor's LEFT edge with a 2 px on-monitor sliver, and the badge
+        # sits across a 6 px gap to its right. The apex ends 3 px past the
+        # control's nearest boundary point -- at x = -1, off the monitor --
+        # unless the reach is capped at the control's on-monitor part. The
+        # cap must additionally leave room for the border pen's half-width
+        # (0.625 px at dpr 1.0): an apex exactly ON the edge still strokes
+        # ink past it (wh-overlay-bubble-badges.3.4).
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(13.25, 101.25, 29.5, 26.5)
+        control = (-50.0, 100.0, 2.0, 130.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 400.0, 300.0)
+        rect = tail.boundingRect()
+        assert rect.left() == pytest.approx(0.625), (
+            f"tail left {rect.left()} must stop half the border pen inside "
+            f"the monitor's left edge"
+        )
+        # The tail must still span the gap and touch the control's
+        # on-monitor sliver.
+        assert rect.left() <= 2.0 + 1e-6
+
+    def test_adjacent_sliver_thinner_than_the_ink_inset_falls_back(
+        self, overlay_mgr
+    ):
+        # An on-monitor sliver THINNER than the border pen's half-width: the
+        # control's nearest boundary point (x = 0.5) sits inside the
+        # monitor-edge ink band, so NO apex position at the control keeps the
+        # stroke on the monitor. The apex must fall back to the badge-box ink
+        # budget measured from the BUBBLE anchor (3.25 px past the bubble's
+        # left edge at dpr 1.0 -> x = 10), not sit at x = 0 where the pen
+        # strokes off-monitor ink (wh-overlay-bubble-badges.3.4).
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(13.25, 101.25, 29.5, 26.5)
+        control = (-50.0, 100.0, 0.5, 130.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 400.0, 300.0)
+        rect = tail.boundingRect()
+        assert rect.left() == pytest.approx(10.0)
+        box = bubble.adjusted(-5.25, -5.25, 5.25, 5.25)
+        assert rect.left() >= box.left() - 1e-6
+        assert rect.top() >= box.top() - 1e-6
+        assert rect.right() <= box.right() + 1e-6
+        assert rect.bottom() <= box.bottom() + 1e-6
+        # A visible tail still exists: ink past the bubble's left edge.
+        assert rect.left() < bubble.left() - 1e-6
+
+    def test_adjacent_apex_capped_at_an_interior_sliver_far_edge(
+        self, overlay_mgr
+    ):
+        # The control-boundary cap is still load-bearing AWAY from monitor
+        # edges: a 2 px sliver control deep in the monitor's interior, gap
+        # 6.5 px. The 3 px apex inset would overshoot the sliver's far edge
+        # at x = 139 and point past the control into empty space; the cap
+        # stops it exactly at the far edge (wh-overlay-bubble-badges.3.1).
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(100.0, 100.0, 29.5, 26.5)
+        control = (136.0, 100.0, 138.0, 130.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 400.0, 300.0)
+        assert tail.boundingRect().right() == pytest.approx(138.0)
+
+    def test_pre_entry_fallback_scales_with_dpr(self, overlay_mgr):
+        # The pre-entry repro at dpr 1.5 (every coordinate scaled by 1.5):
+        # the cap and the badge-box fallback are physical-pixel math, so the
+        # same containment must hold on a fractional-DPR monitor.
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(7.875, 222.375, 44.25, 39.75)
+        control = (0.0, 238.5, 15.0, 351.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.5, 360.0, 270.0)
+        self._assert_tail_in_safe_region(
+            tail, bubble, control, 5.25 * 1.5, 360.0, 270.0
+        )
+        assert not bubble.contains(tail.boundingRect())
+
+    def test_unreachable_control_falls_back_to_the_badge_box_budget(
+        self, overlay_mgr
+    ):
+        # A geometry where even the ray aimed at the ON-monitor control's
+        # center enters the control only at t ~= 10.5, past the 7 px reach:
+        # the bubble's left-edge midpoint is inside the tall narrow control
+        # (anchor distance zero), but the center-directed ray exits through
+        # the bubble's TOP edge at x ~= 12.9, right of the control. No point
+        # of the requested reach lies inside the control, so the apex must
+        # fall back to the badge-box ink budget (box margin 5.25 minus the
+        # 2 px shadow offset = 3.25 px past the bubble edge): a visible tail
+        # whose ink the always-on-monitor badge box fully contains.
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(5.25, 148.25, 29.5, 26.5)
+        control = (0.0, 100.0, 8.0, 163.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 400.0, 300.0)
+        rect = tail.boundingRect()
+        box = bubble.adjusted(-5.25, -5.25, 5.25, 5.25)
+        assert rect.left() >= box.left() - 1e-6
+        assert rect.top() >= box.top() - 1e-6
+        assert rect.right() <= box.right() + 1e-6
+        assert rect.bottom() <= box.bottom() + 1e-6
+        assert not bubble.contains(rect)
+        # The apex sits exactly the fallback budget past the bubble's top
+        # edge along the aim direction (uy = -30/34 for this geometry).
+        assert rect.top() == pytest.approx(bubble.top() - 3.25 * (30.0 / 34.0))
+
+    def test_inward_apex_capped_at_the_monitor_edge_of_a_crossing_control(
+        self, overlay_mgr
+    ):
+        # The cap must bind at the CONTROL'S ON-MONITOR PART, not the raw
+        # control: a wide control crossing the monitor bottom, aim steeply
+        # downward, ray well inside the raw control for 25+ px. Slabbed
+        # against the raw control the apex would land at y ~= 180.8, past
+        # the 180-high monitor. The cap must ALSO leave room for the shadow
+        # fill, which is the whole path translated down-right by the 2 px
+        # shadow offset: an apex exactly ON the 180 monitor bottom still
+        # paints shadow ink to 182, cut flat by the surface clamp
+        # (wh-overlay-bubble-badges.3.4). So the apex stops the shadow
+        # offset inside the edge: y = 178.
+        mgr, _mod, _ = overlay_mgr
+        bubble = QRectF(5.25, 148.25, 29.5, 26.5)
+        control = (0.0, 150.0, 36.0, 400.0)
+        tail = mgr._bubble_tail_path(bubble, control, 1.0, 400.0, 180.0)
+        rect = tail.boundingRect()
+        assert rect.bottom() <= 180.0 - 2.0 + 1e-6
+        assert rect.bottom() == pytest.approx(178.0)
+
+
+class TestBubbleTailInk:
+    """Rendered-PIXEL containment for the tail fix
+    (wh-overlay-bubble-badges.3.4): the path-geometry tests above inspect
+    only ``boundingRect()``, which cannot see the border stroke (half the
+    pen's width of ink past the path on every side) or the shadow (the whole
+    path translated down-right by the shadow offset). These tests render one
+    badge through the real ``_draw_numeral_bubble`` into an image PADDED
+    past the monitor rect and assert no non-transparent pixel lands outside
+    the monitor -- the pixels the real surface clamp would cut flat."""
+
+    def _render_bubble(self, mgr, placement, control, dpr, mon_w, mon_h, pad):
+        from PySide6.QtGui import QFontMetricsF, QPainter
+        _bw, _bh, (fl, ft, fr, fb) = placement
+        img_w = int(round((fr - fl) + 2 * pad))
+        img_h = int(round((fb - ft) + 2 * pad))
+        img = QImage(img_w, img_h, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        painter = QPainter(img)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.translate(-(fl - pad), -(ft - pad))
+        font = mgr._numeral_font(dpr)
+        metrics = QFontMetricsF(font)
+        mgr._draw_numeral_bubble(
+            painter, 1, placement, control, dpr, "light", metrics, font,
+            mon_w, mon_h,
+        )
+        painter.end()
+        return img, (int(fl - pad), int(ft - pad))
+
+    @staticmethod
+    def _pixels_outside_monitor(img, origin, mon_w, mon_h):
+        ox, oy = origin
+        out = []
+        for sy in range(img.height()):
+            for sx in range(img.width()):
+                if (img.pixel(sx, sy) >> 24) & 0xFF:
+                    mx, my = sx + ox, sy + oy
+                    if not (0 <= mx < mon_w and 0 <= my < mon_h):
+                        out.append((mx, my))
+        return out
+
+    @pytest.mark.parametrize("dpr", [1.0, 1.25, 1.5, 2.0])
+    def test_no_tail_ink_past_the_monitor_right_edge(self, overlay_mgr, dpr):
+        # Codex's production shape (wh-overlay-bubble-badges.3.4): the badge
+        # box flush in the monitor's bottom-right corner, its control a
+        # narrow strip along the right edge crossing the monitor bottom. The
+        # inward aim points right; the reach cap lands the apex at the
+        # monitor's right edge, and the border stroke plus the down-right
+        # shadow then paint PAST the edge unless the cap subtracts the
+        # rendered-ink extents.
+        mgr, mod, _ = overlay_mgr
+        mon_w, mon_h = 400.0 * dpr, 300.0 * dpr
+        bw, bh = mgr._numeral_badge_size(1, dpr)
+        fl, ft = mon_w - bw, mon_h - bh
+        placement = (bw, bh, (fl, ft, mon_w, mon_h))
+        control = (
+            mon_w - 10.0 * dpr, ft + bh / 4.0,
+            mon_w + 30.0 * dpr, mon_h + 60.0 * dpr,
+        )
+        assert mod._bubble_drawing_state(
+            placement[2], control, dpr
+        ) == "overlap"
+        img, origin = self._render_bubble(
+            mgr, placement, control, dpr, mon_w, mon_h, 40.0 * dpr
+        )
+        out = self._pixels_outside_monitor(img, origin, mon_w, mon_h)
+        assert out == [], (
+            f"dpr {dpr}: {len(out)} rendered pixels outside the monitor, "
+            f"e.g. {out[:5]}"
+        )
+
+    @pytest.mark.parametrize("dpr", [1.0, 1.25, 1.5, 2.0])
+    def test_no_tail_ink_past_the_monitor_left_or_top_edge(
+        self, overlay_mgr, dpr
+    ):
+        # Mirror geometry for the pen-half inset on the LEFT and TOP edges
+        # (the shadow only extends down-right; the border pen strokes past
+        # the apex on every side): badge box flush in the top-left corner,
+        # one control crossing the left edge (aim exactly -x), one crossing
+        # the top edge (aim exactly -y).
+        mgr, mod, _ = overlay_mgr
+        mon_w, mon_h = 400.0 * dpr, 300.0 * dpr
+        bw, bh = mgr._numeral_badge_size(1, dpr)
+        placement = (bw, bh, (0.0, 0.0, float(bw), float(bh)))
+        controls = [
+            (-30.0 * dpr, bh / 4.0, 10.0 * dpr, 3.0 * bh / 4.0),
+            (bw / 4.0, -30.0 * dpr, 3.0 * bw / 4.0, 10.0 * dpr),
+        ]
+        for control in controls:
+            assert mod._bubble_drawing_state(
+                placement[2], control, dpr
+            ) == "overlap"
+            img, origin = self._render_bubble(
+                mgr, placement, control, dpr, mon_w, mon_h, 40.0 * dpr
+            )
+            out = self._pixels_outside_monitor(img, origin, mon_w, mon_h)
+            assert out == [], (
+                f"dpr {dpr}, control {control}: {len(out)} rendered pixels "
+                f"outside the monitor, e.g. {out[:5]}"
+            )
+
+
+class TestBubbleBadgeSize:
+    """``_numeral_badge_size`` returns the BUBBLE's size: glyph advance and
+    cap height plus proportional padding (0.4 x cap height per side
+    horizontally, 0.3 x cap height vertically, each at least 3 logical px)
+    plus the existing outline+shadow+antialias margin. The untouched
+    placement pass and collision nudges then operate on the bubble's true
+    size with no placement-code changes."""
+
+    def test_bubble_size_is_glyph_plus_padding_and_margins(self, overlay_mgr):
+        # Pins the SPEC numbers (0.4 / 0.3 / 3 logical px minimum) as
+        # literals, not the module's own constants, so a drifted constant
+        # fails here.
+        import math
+        from PySide6.QtGui import QFontMetricsF
+        mgr, _mod, _ = overlay_mgr
+        for number in (1, 42):
+            for dpr in (1.0, 2.0):
+                metrics = QFontMetricsF(mgr._numeral_font(dpr))
+                text_w = metrics.horizontalAdvance(str(number))
+                cap_h = metrics.capHeight()
+                pad_x = max(0.4 * cap_h, 3.0 * dpr)
+                pad_y = max(0.3 * cap_h, 3.0 * dpr)
+                margin = (1.25 + 2.0 + 2.0) * dpr
+                expected_w = max(1, int(math.ceil(text_w + 2 * pad_x + 2 * margin)))
+                expected_h = max(1, int(math.ceil(cap_h + 2 * pad_y + 2 * margin)))
+                assert mgr._numeral_badge_size(number, dpr) == (
+                    expected_w, expected_h,
+                ), f"number {number} at dpr {dpr}"
+
+    def test_bubble_adds_padding_over_the_bare_glyph_box(self, overlay_mgr):
+        # Behavior check independent of the exact formula: the bubble box is
+        # at least the 3-logical-px minimum padding per side larger than the
+        # old tight glyph-plus-margin box on both axes.
+        import math
+        from PySide6.QtGui import QFontMetricsF
+        mgr, _mod, _ = overlay_mgr
+        for dpr in (1.0, 2.0):
+            metrics = QFontMetricsF(mgr._numeral_font(dpr))
+            text_w = metrics.horizontalAdvance("7")
+            cap_h = metrics.capHeight()
+            margin = (1.25 + 2.0 + 2.0) * dpr
+            bare_w = math.ceil(text_w + 2 * margin)
+            bare_h = math.ceil(cap_h + 2 * margin)
+            w, h = mgr._numeral_badge_size(7, dpr)
+            assert w >= bare_w + 2 * 3.0 * dpr, f"dpr {dpr}"
+            assert h >= bare_h + 2 * 3.0 * dpr, f"dpr {dpr}"
+
+    def test_bubble_size_grows_with_font_point_size(self, qapp):
+        import overlay_paint_window
+        small = overlay_paint_window.OverlayPaintWindowManager(badge_font_pt=16)
+        large = overlay_paint_window.OverlayPaintWindowManager(badge_font_pt=32)
+        sw, sh = small._numeral_badge_size(8, 1.0)
+        lw, lh = large._numeral_badge_size(8, 1.0)
+        assert lw > sw and lh > sh
+
+
+class TestBubbleRender:
+    """Pixel assertions on the composed monitor surface for the speech-bubble
+    badges (wh-bubble-render-path). Each numeral badge is one QPainterPath
+    drawn directly onto the per-monitor surface: rounded-rect bubble, merged
+    pointer tail when adjacent, leader line underneath when detached, colors
+    from the theme mapping. Spec:
+    docs/plans/2026-08-04-overlay-bubble-badges-design-v1.md."""
+
+    # Scheme colors from the spec's table.
+    _LIGHT_FILL = (255, 255, 255)
+    _LIGHT_DIGIT = (0, 0, 0)
+    _DARK_FILL = (32, 32, 32)
+    _DARK_DIGIT = (255, 255, 255)
+    _LIGHT_BORDER = (102, 102, 102)
+    _DARK_BORDER = (170, 170, 170)
+
+    def _compose(self, mgr, *, x=100, y=100, w=200, h=100, number=1):
+        """One control, one numeral badge; returns (surface, bbox, placement,
+        control_phys) with placement/control in monitor-local PHYSICAL px
+        (dpr 1.0 monitor, so logical == physical)."""
+        monitor = _NativeMonitor(
+            hmonitor=10, rect_phys=QRect(0, 0, 1920, 1080), dpi=96
+        )
+        rect = _paint_rect(10, monitor, x=x, y=y, width=w, height=h)
+        badges = [(rect, number)]
+        bbox = mgr._compute_monitor_bbox(monitor, badges)
+        placements = mgr._numeral_badge_placements_phys(
+            badges, 1.0, 1920, 1080, corner=mgr._badge_corner
+        )
+        surface = mgr._render_monitor_surface(monitor, badges, bbox)
+        control = (float(x), float(y), float(x + w), float(y + h))
+        return surface, bbox, placements[0], control
+
+    @staticmethod
+    def _rgba(surface, bbox, px, py):
+        """(alpha, r, g, b) at PHYSICAL point (px, py); converts to
+        surface-local via the bbox offset."""
+        x = int(px) - bbox.offset_x
+        y = int(py) - bbox.offset_y
+        p = surface.pixel(x, y)
+        return ((p >> 24) & 0xFF, (p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF)
+
+    @staticmethod
+    def _margin(mod, dpr=1.0):
+        """The badge box's per-side margin around the visible bubble (border
+        pen + shadow offset + antialias slack), matching _numeral_badge_size."""
+        return (
+            mod._NUMERAL_OUTLINE_PX * dpr
+            + mod._SHADOW_OFFSET_PX * dpr
+            + 2.0 * dpr
+        )
+
+    def _fill_sample(self, mod, placement):
+        """A PHYSICAL point inside the bubble's fill, clear of the border
+        (just inside the bubble's left edge) and of the centered digit."""
+        _bw, _bh, (bl, bt, _br, bb) = placement
+        margin = self._margin(mod)
+        return (bl + margin + 3.0, (bt + bb) / 2.0)
+
+    def test_overlapping_badge_ink_stays_in_box_plus_tail_overhang(
+        self, overlay_mgr
+    ):
+        mgr, mod, _ = overlay_mgr
+        # Inside-corner placement over a large control: the badge box overlaps
+        # the control, so the bubble draws with an INWARD pointer tail toward
+        # the control's center (down-right of the badge here) and NO leader
+        # line.
+        mgr._badge_corner = "top_left"
+        mgr._badge_trailing_space = False
+        mgr._badge_theme = "light"
+        surface, bbox, placement, control = self._compose(mgr)
+        bw, bh, (bl, bt, br, bb) = placement
+        assert mod._bubble_drawing_state((bl, bt, br, bb), control, 1.0) == (
+            "overlap"
+        )
+        # Bubble fill: opaque white at the fill sample point.
+        fx, fy = self._fill_sample(mod, placement)
+        assert self._rgba(surface, bbox, fx, fy) == (255, *self._LIGHT_FILL)
+        # Just inside the badge box's top-left corner: OUTSIDE the rounded
+        # bubble (and away from the bottom-right shadow), so transparent.
+        a, _r, _g, _b = self._rgba(surface, bbox, bl + 1, bt + 1)
+        assert a == 0
+        # Ink containment: the top/left sides stay within the box (1 px slack
+        # for rounding); the right/bottom sides additionally allow the inward
+        # tail's overhang past the box on the control-center side
+        # (_BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX minus the 5.25 box margin,
+        # plus 1 px antialias).
+        allow = math.ceil(mod._BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX - 5.25) + 1
+        for sy in range(surface.height()):
+            for sx in range(surface.width()):
+                if (surface.pixel(sx, sy) >> 24) & 0xFF:
+                    px = sx + bbox.offset_x
+                    py = sy + bbox.offset_y
+                    assert bl - 1 <= px <= br + allow, (px, py)
+                    assert bt - 1 <= py <= bb + allow, (px, py)
+
+    def test_overlapping_badge_draws_inward_tail(self, overlay_mgr):
+        """An overlapping badge points at its control too (user decision
+        2026-08-07, matching Voice Access): the bubble merges a pointer tail
+        aimed from the bubble's edge toward the control's center, reaching
+        _BUBBLE_TAIL_INWARD_APEX_LOGICAL_PX logical px past the edge. A pure
+        fill-colored pixel strictly outside the bubble's rectangle can only
+        be that tail's interior -- the border stroke is border-colored and
+        the shadow is translucent black."""
+        mgr, mod, _ = overlay_mgr
+        mgr._badge_corner = "top_left"
+        mgr._badge_trailing_space = False
+        mgr._badge_theme = "light"
+        surface, bbox, placement, control = self._compose(mgr)
+        _bw, _bh, (bl, bt, br, bb) = placement
+        assert mod._bubble_drawing_state((bl, bt, br, bb), control, 1.0) == (
+            "overlap"
+        )
+        margin = self._margin(mod)
+        # The bubble's rectangle (the rounded rect's bounds), grown 1 px for
+        # antialias slack around its border.
+        rl, rt = bl + margin - 1.0, bt + margin - 1.0
+        rr, rb = br - margin + 1.0, bb - margin + 1.0
+        found = False
+        for py in range(int(bt), int(bb) + 9):
+            for px in range(int(bl), int(br) + 9):
+                if rl <= px <= rr and rt <= py <= rb:
+                    continue
+                if self._rgba(surface, bbox, px, py) == (
+                    255, *self._LIGHT_FILL
+                ):
+                    found = True
+                    break
+            if found:
+                break
+        assert found, (
+            "no fill-colored tail ink outside the overlapping bubble"
+        )
+
+    def test_light_scheme_draws_black_digit_in_white_bubble(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        mgr._badge_theme = "light"
+        surface, bbox, placement, _control = self._compose(mgr)
+        fx, fy = self._fill_sample(mod, placement)
+        assert self._rgba(surface, bbox, fx, fy) == (255, *self._LIGHT_FILL)
+        # The digit itself: some pure-black pixel inside the bubble.
+        _bw, _bh, (bl, bt, br, bb) = placement
+        found = False
+        for py in range(int(bt), int(bb)):
+            for px in range(int(bl), int(br)):
+                if self._rgba(surface, bbox, px, py) == (
+                    255, *self._LIGHT_DIGIT
+                ):
+                    found = True
+                    break
+            if found:
+                break
+        assert found, "no black digit pixel inside the light bubble"
+
+    def test_dark_scheme_draws_white_digit_in_near_black_bubble(
+        self, overlay_mgr
+    ):
+        mgr, mod, _ = overlay_mgr
+        mgr._badge_theme = "dark"
+        surface, bbox, placement, _control = self._compose(mgr)
+        fx, fy = self._fill_sample(mod, placement)
+        assert self._rgba(surface, bbox, fx, fy) == (255, *self._DARK_FILL)
+        _bw, _bh, (bl, bt, br, bb) = placement
+        found = False
+        for py in range(int(bt), int(bb)):
+            for px in range(int(bl), int(br)):
+                if self._rgba(surface, bbox, px, py) == (
+                    255, *self._DARK_DIGIT
+                ):
+                    found = True
+                    break
+            if found:
+                break
+        assert found, "no white digit pixel inside the dark bubble"
+
+    def test_auto_theme_inverts_the_system_scheme_per_paint(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        from PySide6.QtCore import Qt
+        assert mgr._badge_theme == "auto"
+        # System DARK theme -> LIGHT (white) bubble.
+        with patch.object(
+            mod, "_system_color_scheme", return_value=Qt.ColorScheme.Dark
+        ):
+            surface, bbox, placement, _control = self._compose(mgr)
+            fx, fy = self._fill_sample(mod, placement)
+            assert self._rgba(surface, bbox, fx, fy) == (
+                255, *self._LIGHT_FILL
+            )
+        # System LIGHT theme -> DARK (near-black) bubble, on the next paint.
+        with patch.object(
+            mod, "_system_color_scheme", return_value=Qt.ColorScheme.Light
+        ):
+            surface, bbox, placement, _control = self._compose(mgr)
+            fx, fy = self._fill_sample(mod, placement)
+            assert self._rgba(surface, bbox, fx, fy) == (
+                255, *self._DARK_FILL
+            )
+
+    def test_adjacent_badge_draws_tail_toward_the_control(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        mgr._badge_theme = "light"
+        # Default trailing-space placement: the badge box sits flush against
+        # the control's right edge (gap 0 -> adjacent -> pointer tail).
+        surface, bbox, placement, control = self._compose(mgr)
+        bw, bh, (bl, bt, br, bb) = placement
+        assert mod._bubble_drawing_state((bl, bt, br, bb), control, 1.0) == (
+            "adjacent"
+        )
+        # The tail spans from the bubble's left edge across the box margin to
+        # 3 logical px inside the control. At the control's right edge, on the
+        # bubble's vertical center line, the tail interior is fill-colored.
+        cy = (bt + bb) / 2.0
+        cr = control[2]
+        found = False
+        for px in range(int(cr) - 1, int(bl + self._margin(mod)) + 1):
+            if self._rgba(surface, bbox, px, cy) == (255, *self._LIGHT_FILL):
+                found = True
+                break
+        assert found, "no fill-colored tail pixel between control and bubble"
+
+    def test_detached_badge_draws_a_leader_line(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        mgr._badge_theme = "light"
+        # Pin a detached placement (as a collision nudge or monitor-edge shift
+        # would produce): the badge box 100 px right of the control.
+        detached = (400.0, 100.0, 435.0, 135.0)
+        with patch.object(
+            mgr, "_numeral_badge_placement_phys", return_value=detached
+        ):
+            surface, bbox, placement, control = self._compose(mgr)
+        bw, bh, footprint = placement
+        assert footprint == detached
+        assert mod._bubble_drawing_state(footprint, control, 1.0) == "detached"
+        # The leader line runs from the center of the bubble edge nearest
+        # the target to the CENTER of the control's on-monitor part
+        # (wh-taskbar-badge-mispoint) -- not to the nearest point on the
+        # control's rectangle, which for a wide control is blank space at
+        # its edge. At the segment's midpoint, the topmost stroke is the
+        # fill-color core over the border-color outer stroke -- accept
+        # either (antialiasing decides which row the sample lands on).
+        margin = self._margin(mod)
+        start_x = detached[0] + margin
+        start_y = (detached[1] + detached[3]) / 2.0
+        target_x = (control[0] + control[2]) / 2.0
+        target_y = (control[1] + control[3]) / 2.0
+        mid_x = (start_x + target_x) / 2.0
+        mid_y = (start_y + target_y) / 2.0
+        acceptable = {
+            (255, *self._LIGHT_FILL), (255, *self._LIGHT_BORDER),
+        }
+        found = False
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if self._rgba(
+                    surface, bbox, mid_x + dx, mid_y + dy
+                ) in acceptable:
+                    found = True
+        assert found, "no leader-line pixel at the line's midpoint"
+
+    def test_leader_endpoint_is_control_center(self, overlay_mgr):
+        # wh-taskbar-badge-mispoint: a taskbar button reports a full-row
+        # rectangle with its visible icon centered inside, so the old
+        # nearest-point endpoint landed on blank pixels at the row's edge.
+        _mgr, mod, _ = overlay_mgr
+        bubble = (300.0, 120.0, 350.0, 160.0)
+        control = (500.0, 100.0, 1000.0, 200.0)
+        (pax, pay), (pbx, pby) = mod._leader_anchor_points(
+            bubble, control, 1920.0, 1080.0
+        )
+        assert (pbx, pby) == (750.0, 150.0)
+        # The line leaves the bubble from the edge center nearest the target.
+        assert (pax, pay) == (350.0, 140.0)
+
+    def test_leader_endpoint_uses_on_monitor_part(self, overlay_mgr):
+        _mgr, mod, _ = overlay_mgr
+        bubble = (300.0, 120.0, 350.0, 160.0)
+        control = (500.0, 100.0, 1000.0, 200.0)
+        # The monitor ends at x=800: the off-monitor part is invisible, so
+        # the line aims at the visible part's center.
+        _pa, (pbx, pby) = mod._leader_anchor_points(
+            bubble, control, 800.0, 1080.0
+        )
+        assert (pbx, pby) == (650.0, 150.0)
+
+    def test_leader_endpoints_distinct_for_adjacent_cells(self, overlay_mgr):
+        # The converging-lines symptom: two stacked full-width rows share a
+        # corner, and nearest-point endpoints from far-left bubbles clamped
+        # to that SAME shared corner. Center endpoints are distinct.
+        _mgr, mod, _ = overlay_mgr
+        upper = (500.0, 100.0, 1000.0, 172.0)
+        lower = (500.0, 172.0, 1000.0, 244.0)
+        bubble_a = (300.0, 60.0, 350.0, 100.0)
+        bubble_b = (300.0, 250.0, 350.0, 290.0)
+        _a, end_a = mod._leader_anchor_points(bubble_a, upper, 1920.0, 1080.0)
+        _b, end_b = mod._leader_anchor_points(bubble_b, lower, 1920.0, 1080.0)
+        assert end_a != end_b
 
 
 class TestGuiOverlayConfigWiring:
@@ -2941,33 +5124,38 @@ class TestGuiOverlayConfigWiring:
                 "overlay_badge_shadow": False,
                 "overlay_badge_corner": "bottom_left",
                 "overlay_badge_trailing_space": False,
+                "overlay_badge_theme": "dark",
             }
         }
         overlay_ctor = self._build_manager(config)
-        # Two managers are now constructed -- the numbered overlay AND the
-        # dedicated working-badge overlay (wh-dictation-retraction-indicator.3)
-        # -- both with the same validated badge settings, so assert the
-        # settings reached a construction (not that there was only one).
-        assert overlay_ctor.call_count == 2
+        # Three managers are now constructed -- the numbered overlay, the
+        # dedicated working-badge overlay (wh-dictation-retraction-indicator.3),
+        # and the dedicated mouse-grid overlay (wh-grid-paint-mode) -- so
+        # assert the settings reached a construction (not that there was only
+        # one). The grid's own styling is hard-coded, so it takes only
+        # badge_shadow and is not the call matched below.
+        assert overlay_ctor.call_count == 3
         overlay_ctor.assert_any_call(
             badge_font_pt=32,
             badge_shadow=False,
             badge_corner="bottom_left",
             badge_trailing_space=False,
+            badge_theme="dark",
         )
 
     def test_missing_click_block_uses_validated_defaults(self, qapp):
         # No [click] block: ClickConfig.from_raw({}) yields the validated
-        # defaults (font 16, shadow True), and those reach the manager.
+        # defaults (font 10, no shadow), and those reach the manager.
         overlay_ctor = self._build_manager({})
-        # Two managers (numbered overlay + working-badge overlay), both with
-        # the validated defaults.
-        assert overlay_ctor.call_count == 2
+        # Three managers (numbered overlay + working-badge overlay + mouse-grid
+        # overlay); the first two carry the validated badge defaults.
+        assert overlay_ctor.call_count == 3
         overlay_ctor.assert_any_call(
-            badge_font_pt=16,
-            badge_shadow=True,
+            badge_font_pt=8,
+            badge_shadow=False,
             badge_corner="top_right",
             badge_trailing_space=True,
+            badge_theme="auto",
         )
 
     def test_no_config_argument_uses_validated_defaults(self, qapp):
@@ -2986,14 +5174,15 @@ class TestGuiOverlayConfigWiring:
             from gui import GuiManager
 
             GuiManager(MagicMock(), MagicMock(), MagicMock())
-            # Two managers (numbered overlay + working-badge overlay), both
-            # with the validated defaults.
-            assert overlay_ctor.call_count == 2
+            # Three managers (numbered overlay + working-badge overlay +
+            # mouse-grid overlay); the first two carry the validated defaults.
+            assert overlay_ctor.call_count == 3
             overlay_ctor.assert_any_call(
-                badge_font_pt=16,
-                badge_shadow=True,
+                badge_font_pt=8,
+                badge_shadow=False,
                 badge_corner="top_right",
                 badge_trailing_space=True,
+                badge_theme="auto",
             )
 
 
@@ -3033,7 +5222,9 @@ class TestWorkingBadge:
 
     def test_render_badge_routes_working_sentinel_to_glyph(self, overlay_mgr):
         """_render_badge delegates to the working glyph for the sentinel
-        number, and still renders a numeral for a real number."""
+        number, and REFUSES a real number -- numerals draw as speech bubbles
+        on the monitor surface (wh-overlay-bubble-badges), so nothing can
+        silently exercise the deleted numeral-image path."""
         mgr, mod, _ = overlay_mgr
         sentinel_img = QImage(3, 3, QImage.Format.Format_ARGB32_Premultiplied)
         with patch.object(
@@ -3042,9 +5233,10 @@ class TestWorkingBadge:
             out = mgr._render_badge(mod.WORKING_BADGE_NUMBER, width=40, height=40)
         glyph_mock.assert_called_once_with(40, 40, 1.0)
         assert out is sentinel_img
-        # A real number does NOT route to the glyph.
+        # A real number does NOT route to the glyph: it raises.
         with patch.object(mgr, "_render_working_glyph") as glyph_mock2:
-            mgr._render_badge(7, width=40, height=40)
+            with pytest.raises(ValueError):
+                mgr._render_badge(7, width=40, height=40)
         glyph_mock2.assert_not_called()
 
     def test_paint_working_badge_centers_summary_on_point_and_paints(
@@ -3212,3 +5404,270 @@ class TestWorkingBadge:
         assert _opaque(high) > _opaque(low), (
             "higher dpr must thicken the working glyph outline/shadow"
         )
+
+
+_HEBREW_SAVE = "שמור"  # bidi class R
+_ARABIC_SAVE = "حفظ"  # bidi class AL
+
+
+class TestWideRowLeadingGutter:
+    """A row at least ten times wider than tall gets its numeral in the
+    LEADING gutter -- beside the edge where its label starts -- instead of
+    past the far trailing edge (wh-vscode-menu-badge-misplaced). A VS Code
+    menu row is 861 pixels wide, so today's trailing placement puts the
+    number about 870 pixels from the word it labels.
+
+    The rule applies only when ALL of these hold: the row is not marked
+    ``bounds_outside_menu``; its physical rect lies fully on its monitor; and
+    width >= 10 x height. Leading is left for left-to-right text and right
+    for right-to-left text, from the first strong bidi character of the
+    name. A gutter that is off the monitor or lands on another numbered
+    control or a placed badge falls through to today's placement. Every
+    "keep today's placement" test compares against the SAME geometry as a
+    plain OverlayPaintRect (no name, no mark), which is today's code path.
+    """
+
+    @staticmethod
+    def _mon() -> _NativeMonitor:
+        return _NativeMonitor(hmonitor=1, rect_phys=QRect(0, 0, 1920, 1080), dpi=96)
+
+    @classmethod
+    def _plain(cls, x, y, width, height) -> OverlayPaintRect:
+        return OverlayPaintRect(
+            x=x, y=y, width=width, height=height,
+            monitor=cls._mon(), hmonitor=1, screen=None,
+        )
+
+    @classmethod
+    def _row(cls, mod, x, y, width, height, *, name="Save", suspect=False):
+        return mod._TargetPaintRect(
+            x=x, y=y, width=width, height=height,
+            monitor=cls._mon(), hmonitor=1, screen=None,
+            target_name=name, bounds_outside_menu=suspect,
+        )
+
+    @staticmethod
+    def _place(mgr, rect, *, corner="top_right", ctrl=None, placed=None):
+        return mgr._numeral_badge_placement_phys(
+            rect, 20, 30, 1.0, 1920, 1080, list(ctrl or []),
+            corner=corner, placed_badges=placed,
+        )
+
+    def _today(self, mgr, x, y, width, height, **kwargs):
+        return self._place(mgr, self._plain(x, y, width, height), **kwargs)
+
+    # -- the rule applies ---------------------------------------------------
+
+    def test_wide_valid_ltr_row_uses_left_gutter(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # 600 x 40 is 15:1. Today: past the right edge at x=900.
+        assert self._today(mgr, 300, 200, 600, 40) == (900.0, 200.0, 920.0, 230.0)
+        placement = self._place(mgr, self._row(mod, 300, 200, 600, 40))
+        # The badge's right edge sits on the row's left edge.
+        assert placement == (280.0, 200.0, 300.0, 230.0)
+
+    def test_wide_valid_rtl_hebrew_row_uses_right_gutter(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # A left corner makes today's trailing spot the LEFT gutter, so an RTL
+        # row moving to the right proves the side follows the text direction.
+        assert self._today(mgr, 300, 200, 600, 40, corner="top_left") == (
+            280.0, 200.0, 300.0, 230.0,
+        )
+        placement = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40, name=_HEBREW_SAVE),
+            corner="top_left",
+        )
+        assert placement == (900.0, 200.0, 920.0, 230.0)
+
+    def test_wide_valid_rtl_arabic_row_uses_right_gutter(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        placement = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40, name=_ARABIC_SAVE),
+            corner="top_left",
+        )
+        assert placement == (900.0, 200.0, 920.0, 230.0)
+
+    def test_ltr_row_uses_left_gutter_under_left_corner_bottom(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # The gutter's vertical alignment follows the corner, like ladder
+        # step 1: a bottom corner bottom-aligns it.
+        placement = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40), corner="bottom_right",
+        )
+        assert placement == (280.0, 210.0, 300.0, 240.0)
+
+    def test_first_strong_character_decides_direction(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # Digits and spaces are weak or neutral; the first STRONG character
+        # is Hebrew, so the row is right-to-left.
+        rtl = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40, name="12 " + _HEBREW_SAVE),
+            corner="top_left",
+        )
+        assert rtl == (900.0, 200.0, 920.0, 230.0)
+        # A Latin letter first: left-to-right, even with Hebrew after it.
+        ltr = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40, name="Save " + _HEBREW_SAVE),
+        )
+        assert ltr == (280.0, 200.0, 300.0, 230.0)
+
+    def test_name_without_strong_character_is_ltr(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        placement = self._place(mgr, self._row(mod, 300, 200, 600, 40, name="12"))
+        assert placement == (280.0, 200.0, 300.0, 230.0)
+        empty = self._place(mgr, self._row(mod, 300, 200, 600, 40, name=""))
+        assert empty == (280.0, 200.0, 300.0, 230.0)
+
+    def test_exactly_ten_to_one_applies(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        placement = self._place(mgr, self._row(mod, 300, 200, 400, 40))
+        assert placement == (280.0, 200.0, 300.0, 230.0)
+
+    def test_vscode_like_twelve_to_one_row_applies(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # 861 x 72: about the measured VS Code menu row width.
+        placement = self._place(mgr, self._row(mod, 40, 300, 861, 72, name="Exit"))
+        assert placement == (20.0, 300.0, 40.0, 330.0)
+
+    def test_threshold_constant_is_ten(self, overlay_mgr):
+        _mgr, mod, _ = overlay_mgr
+        assert mod._WIDE_ROW_MIN_ASPECT == 10
+
+    # -- the rule does not apply: today's placement, unchanged --------------
+
+    def test_just_under_ten_to_one_keeps_todays_placement(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        placement = self._place(mgr, self._row(mod, 300, 200, 399, 40))
+        assert placement == self._today(mgr, 300, 200, 399, 40)
+        assert placement == (699.0, 200.0, 719.0, 230.0)
+
+    def test_suspect_row_keeps_todays_placement(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        placement = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40, suspect=True),
+        )
+        assert placement == self._today(mgr, 300, 200, 600, 40)
+        assert placement == (900.0, 200.0, 920.0, 230.0)
+
+    def test_row_past_right_monitor_edge_keeps_todays_placement(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # 1400..2100 hangs past the 1920 edge; its left gutter is on-screen
+        # and clean, so only the on-monitor test keeps today's placement.
+        placement = self._place(mgr, self._row(mod, 1400, 200, 700, 40))
+        assert placement == self._today(mgr, 1400, 200, 700, 40)
+        assert placement[0] != 1380.0
+
+    def test_row_past_bottom_monitor_edge_keeps_todays_placement(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        placement = self._place(mgr, self._row(mod, 300, 1060, 600, 40))
+        assert placement == self._today(mgr, 300, 1060, 600, 40)
+        assert placement[0] != 280.0
+
+    def test_row_past_top_monitor_edge_keeps_todays_placement(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        placement = self._place(mgr, self._row(mod, 300, -10, 600, 40))
+        assert placement == self._today(mgr, 300, -10, 600, 40)
+        assert placement[0] != 280.0
+
+    def test_rtl_row_past_left_monitor_edge_keeps_todays_placement(
+        self, overlay_mgr
+    ):
+        mgr, mod, _ = overlay_mgr
+        # -100..500: the RTL gutter at 500..520 is on-screen and clean.
+        placement = self._place(
+            mgr, self._row(mod, -100, 200, 600, 40, name=_HEBREW_SAVE),
+            corner="top_left",
+        )
+        assert placement == self._today(mgr, -100, 200, 600, 40, corner="top_left")
+        assert placement[0] != 500.0
+
+    def test_gutter_off_monitor_falls_through(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # Row at x=10: the left gutter would start at x=-10.
+        placement = self._place(mgr, self._row(mod, 10, 200, 600, 40))
+        assert placement == self._today(mgr, 10, 200, 600, 40)
+        assert placement == (610.0, 200.0, 630.0, 230.0)
+
+    def test_gutter_blocked_by_numbered_control_falls_through(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        neighbour = (270.0, 190.0, 295.0, 250.0)  # overlaps 280..300 x 200..230
+        placement = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40), ctrl=[neighbour],
+        )
+        assert placement == self._today(mgr, 300, 200, 600, 40, ctrl=[neighbour])
+        assert placement == (900.0, 200.0, 920.0, 230.0)
+
+    def test_gutter_blocked_by_placed_badge_falls_through(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        earlier = [(285.0, 205.0, 300.0, 225.0)]
+        placement = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40), placed=earlier,
+        )
+        assert placement == self._today(mgr, 300, 200, 600, 40, placed=earlier)
+        assert placement == (900.0, 200.0, 920.0, 230.0)
+
+    def test_own_row_box_does_not_block_the_gutter(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        # The caller passes every badge's box, the row's own included; the
+        # gutter shares one edge with it and must not count as blocked.
+        placement = self._place(
+            mgr, self._row(mod, 300, 200, 600, 40),
+            ctrl=[(300.0, 200.0, 900.0, 240.0)],
+        )
+        assert placement == (280.0, 200.0, 300.0, 230.0)
+
+    # -- direction helper ---------------------------------------------------
+
+    def test_name_is_right_to_left(self, overlay_mgr):
+        _mgr, mod, _ = overlay_mgr
+        assert mod._name_is_right_to_left(_HEBREW_SAVE) is True
+        assert mod._name_is_right_to_left(_ARABIC_SAVE) is True
+        assert mod._name_is_right_to_left("  3 " + _ARABIC_SAVE) is True
+        assert mod._name_is_right_to_left("Save") is False
+        assert mod._name_is_right_to_left("Save " + _HEBREW_SAVE) is False
+        assert mod._name_is_right_to_left("123 ...") is False
+        assert mod._name_is_right_to_left("") is False
+
+    # -- end to end through paint() -----------------------------------------
+
+    def _paint_one(self, mgr, mod, item):
+        mon = _native_monitor(10)
+        with patch.object(
+            mod, "_enumerate_native_monitors", return_value=[mon]
+        ), patch.object(mod, "_screens", return_value=[]), patch.object(
+            mgr, "_render_monitor_surface", side_effect=_surface_stub
+        ), patch.object(
+            mod, "build_layered_dib", return_value=MagicMock()
+        ), patch.object(
+            mod, "composite_layered_window", return_value=True
+        ):
+            # The REAL resolver runs, so the name and the mark must survive
+            # the resolve step inside _do_paint.
+            result = mgr.paint(
+                _make_summary([item]), overlay_session_id=1, paint_generation=0,
+            )
+        assert result["state"] == "painted"
+        return mgr._windows[10].geom_phys
+
+    def test_paint_places_wide_row_badge_in_leading_gutter(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        item = WalkSnapshotSummaryItem(
+            item_id="uia-1", display_number=1, name="Save", role="MenuItem",
+            bounds=(300, 200, 600, 40), monitor_id=10,
+        )
+        geom = self._paint_one(mgr, mod, item)
+        # The surface is the union of the row and its badge plus the margin;
+        # a badge left of the row pulls the surface's left edge past it.
+        assert geom.left() < 300 - mod._SURFACE_MARGIN_PX
+
+    def test_paint_keeps_todays_placement_for_marked_row(self, overlay_mgr):
+        mgr, mod, _ = overlay_mgr
+        item = WalkSnapshotSummaryItem(
+            item_id="uia-1", display_number=1, name="Exit", role="MenuItem",
+            bounds=(300, 200, 600, 40), monitor_id=10, bounds_outside_menu=True,
+        )
+        geom = self._paint_one(mgr, mod, item)
+        # Today's badge sits past the right edge: the surface starts at the
+        # row's own left edge minus the margin and ends past the row.
+        assert geom.left() == 300 - mod._SURFACE_MARGIN_PX
+        assert geom.right() > 900

@@ -95,7 +95,11 @@ class TestCommandBeforeReplacement:
         Current bug: period inserts first, then backspace deletes it.
         """
         await running_harness.send_word("backspace", start_of_utterance=True)
-        await running_harness.send_word("period", start_of_utterance=False, delay_before_ms=50)
+        # The count wait on "backspace" ends at the end marker or the
+        # command timeout, never at the next word (backspace-count-wait,
+        # merge c27dbb92), so the last word carries the end marker as the
+        # shipped app sends it.
+        await running_harness.send_word("period", start_of_utterance=False, delay_before_ms=50, end_of_utterance=True)
         await running_harness.wait_for_timeout(500)
 
         outputs = running_harness.get_outputs()
@@ -124,7 +128,8 @@ class TestCommandBeforeReplacement:
     async def test_delete_comma_order(self, running_harness):
         """'delete comma' - delete MUST execute before comma."""
         await running_harness.send_word("delete", start_of_utterance=True)
-        await running_harness.send_word("comma", start_of_utterance=False, delay_before_ms=50)
+        # "delete" waits for a count exactly as "backspace" does above.
+        await running_harness.send_word("comma", start_of_utterance=False, delay_before_ms=50, end_of_utterance=True)
         await running_harness.wait_for_timeout(500)
 
         outputs = running_harness.get_outputs()
@@ -153,7 +158,8 @@ class TestCommandBeforeReplacement:
     async def test_enter_period_order(self, running_harness):
         """'enter period' - enter MUST execute before period."""
         await running_harness.send_word("enter", start_of_utterance=True)
-        await running_harness.send_word("period", start_of_utterance=False, delay_before_ms=50)
+        # "enter" waits for a count exactly as "backspace" does above.
+        await running_harness.send_word("period", start_of_utterance=False, delay_before_ms=50, end_of_utterance=True)
         await running_harness.wait_for_timeout(500)
 
         outputs = running_harness.get_outputs()
@@ -269,7 +275,10 @@ class TestBatchArrival:
     async def test_backspace_period_batch(self, running_harness):
         """'backspace period' arriving as batch - same order requirement."""
         await running_harness.send_word_batch(["backspace", "period"])
-        await running_harness.wait_for_timeout(500)
+        # A batch carries no end marker, so the count wait on "backspace"
+        # ends only at the 1000 ms command timeout (backspace-count-wait,
+        # merge c27dbb92); wait past it.
+        await running_harness.wait_for_timeout(1500)
 
         outputs = running_harness.get_outputs()
         actions = get_action_sequence(outputs)

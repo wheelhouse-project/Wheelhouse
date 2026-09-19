@@ -34,7 +34,7 @@ class TestMonitorResources:
 
     @pytest.fixture
     def mock_notification(self):
-        with patch("utils.monitors.notification") as m:
+        with patch("plyer.notification") as m:
             yield m
 
     def _make_fast_sleep(self, max_loops=10):

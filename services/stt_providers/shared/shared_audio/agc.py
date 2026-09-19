@@ -22,6 +22,8 @@ import struct
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -151,12 +153,18 @@ class SmartAGC:
         if len(pcm_bytes) < 2:
             return 0.0
 
-        # Unpack 16-bit signed samples
         n_samples = len(pcm_bytes) // 2
-        samples = struct.unpack(f'<{n_samples}h', pcm_bytes)
+        if memoryview(pcm_bytes).nbytes != n_samples * 2:
+            # Preserve struct's error for odd buffers and non-byte views.
+            struct.unpack(f'<{n_samples}h', pcm_bytes)
+        samples = np.frombuffer(pcm_bytes, dtype='<i2')
 
-        # Calculate RMS, normalize to 0.0-1.0
-        sum_squares = sum(s * s for s in samples)
+        # Integer accumulation preserves the scalar result exactly. Bounded
+        # blocks also avoid int64 overflow for inputs larger than audio frames.
+        sum_squares = sum(
+            int(np.square(samples[start:start + 2**20], dtype=np.int64).sum())
+            for start in range(0, n_samples, 2**20)
+        )
         rms = math.sqrt(sum_squares / n_samples) / 32768.0
 
         return rms
@@ -238,17 +246,24 @@ class SmartAGC:
             return pcm_bytes
 
         n_samples = len(pcm_bytes) // 2
-        samples = struct.unpack(f'<{n_samples}h', pcm_bytes)
-
-        # Apply gain with clipping prevention
-        adjusted = []
-        for s in samples:
-            new_val = int(s * gain)
-            # Clip to 16-bit range
-            new_val = max(-32768, min(32767, new_val))
-            adjusted.append(new_val)
-
-        return struct.pack(f'<{n_samples}h', *adjusted)
+        if type(gain) is not float:
+            # Non-float numeric callers retain their own multiplication rules
+            # (including arbitrary-size integers and narrower NumPy scalars).
+            samples = struct.unpack(f'<{n_samples}h', pcm_bytes)
+            return struct.pack(f'<{n_samples}h', *[
+                max(-32768, min(32767, int(s * gain))) for s in samples
+            ])
+        if memoryview(pcm_bytes).nbytes != n_samples * 2:
+            struct.unpack(f'<{n_samples}h', pcm_bytes)
+        samples = np.frombuffer(pcm_bytes, dtype='<i2')
+        with np.errstate(over='ignore', invalid='ignore'):
+            adjusted = np.multiply(samples, gain, dtype=np.float64)
+        finite = np.isfinite(adjusted)
+        if not finite.all():
+            # int() raised on the first nonfinite product before clipping.
+            int(adjusted[np.flatnonzero(~finite)[0]])
+        np.clip(adjusted, -32768, 32767, out=adjusted)
+        return adjusted.astype('<i2').tobytes()
 
     @property
     def current_gain(self) -> float:

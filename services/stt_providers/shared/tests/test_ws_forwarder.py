@@ -838,6 +838,190 @@ class TestSendFinalReason:
         assert received_reasons == reasons
 
 
+class TestSendFinalConfidence:
+    """wh-7ou.7.1.1: final messages may carry the optional "confidence"
+    measurement block (part A.1 of the calibration message contract)."""
+
+    CONFIDENCE = {
+        "min_word_probability": 0.85,
+        "max_no_speech_prob": 0.014,
+        "peak_avg_logprob": -0.63,
+        "word_count": 1,
+        "suppressed": False,
+        "rescued": True,
+    }
+
+    @pytest.mark.asyncio
+    async def test_send_final_with_confidence_includes_object(self):
+        """send_final with a confidence dict should carry it in the payload."""
+        import websockets
+        import json
+
+        received_messages = []
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    _frame = json.loads(message)
+                    # wh-nvyh: every (re)connect leads with a capabilities
+                    # frame; these tests assert on the payload frames.
+                    if _frame.get("type") != "capabilities":
+                        received_messages.append(_frame)
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59910)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59910,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        forwarder.send_final(
+            "comma",
+            utterance_id=9,
+            trace_id="T-17720345601",
+            confidence=dict(self.CONFIDENCE),
+        )
+        await asyncio.sleep(0.5)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert len(received_messages) >= 1
+        msg = received_messages[0]
+        assert msg["type"] == "final"
+        assert msg["text"] == "comma"
+        assert msg["confidence"] == self.CONFIDENCE
+
+    @pytest.mark.asyncio
+    async def test_send_final_without_confidence_omits_field(self):
+        """send_final without confidence must not include the field, keeping
+        non-Whisper providers payload-clean (same pattern as final_reason)."""
+        import websockets
+        import json
+
+        received_messages = []
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    _frame = json.loads(message)
+                    # wh-nvyh: every (re)connect leads with a capabilities
+                    # frame; these tests assert on the payload frames.
+                    if _frame.get("type") != "capabilities":
+                        received_messages.append(_frame)
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59911)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59911,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        forwarder.send_final("hello", utterance_id=10)
+        await asyncio.sleep(0.5)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert len(received_messages) >= 1
+        msg = received_messages[0]
+        assert msg["type"] == "final"
+        assert "confidence" not in msg
+
+    @pytest.mark.asyncio
+    async def test_confidence_null_fields_round_trip(self):
+        """None values (word-level data missing) serialize as JSON null and
+        arrive as None, per the contract's float|null fields."""
+        import websockets
+        import json
+
+        received_messages = []
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    _frame = json.loads(message)
+                    # wh-nvyh: every (re)connect leads with a capabilities
+                    # frame; these tests assert on the payload frames.
+                    if _frame.get("type") != "capabilities":
+                        received_messages.append(_frame)
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59912)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59912,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        block = {
+            "min_word_probability": None,
+            "max_no_speech_prob": None,
+            "peak_avg_logprob": None,
+            "word_count": 0,
+            "suppressed": True,
+            "rescued": False,
+        }
+        forwarder.send_final("", utterance_id=11, confidence=block)
+        await asyncio.sleep(0.5)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert len(received_messages) >= 1
+        msg = received_messages[0]
+        assert msg["confidence"]["min_word_probability"] is None
+        assert msg["confidence"]["max_no_speech_prob"] is None
+        assert msg["confidence"]["peak_avg_logprob"] is None
+        assert msg["confidence"]["word_count"] == 0
+        assert msg["confidence"]["suppressed"] is True
+        assert msg["confidence"]["rescued"] is False
+
+
 class TestTranscriptionStatusCommand:
     """Tests for the set_transcription_status command."""
 
@@ -1199,7 +1383,7 @@ class TestLogForwarding:
         forwarder.send_log(
             level="WARNING",
             message="Warning message",
-            source="Zipformer",
+            source="Parakeet",
             timestamp=test_timestamp
         )
         await asyncio.sleep(0.5)
@@ -2325,3 +2509,1032 @@ class TestSetLogLevelCommand:
         await server.wait_closed()
 
         # Test passes if no exception was raised
+
+
+class TestSetCalibrationModeCommand:
+    """wh-7ou.7.1.2 (contract part A.2): the set_calibration_mode command
+    drives a callback, and the safety reset -- callback(False) -- fires when
+    an established connection is lost, so a crashed Logic process can never
+    leave the hallucination filter disabled."""
+
+    @pytest.mark.asyncio
+    async def test_set_calibration_mode_true_fires_callback(self):
+        """{"type": "set_calibration_mode", "enabled": true} -> callback(True)."""
+        import websockets
+
+        callback_called = threading.Event()
+        calls = []
+
+        def on_set_calibration_mode(enabled: bool):
+            calls.append(enabled)
+            callback_called.set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59900)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59900,
+            transcription_enabled_event=event,
+            set_calibration_mode_callback=on_set_calibration_mode,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "set_calibration_mode", "enabled": true}'
+            )
+
+        callback_fired = callback_called.wait(timeout=3.0)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert callback_fired, "set_calibration_mode callback should fire"
+        assert calls == [True]
+
+    @pytest.mark.asyncio
+    async def test_set_calibration_mode_false_fires_callback(self):
+        """{"type": "set_calibration_mode", "enabled": false} -> callback(False)."""
+        import websockets
+
+        callback_called = threading.Event()
+        calls = []
+
+        def on_set_calibration_mode(enabled: bool):
+            calls.append(enabled)
+            callback_called.set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59901)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59901,
+            transcription_enabled_event=event,
+            set_calibration_mode_callback=on_set_calibration_mode,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "set_calibration_mode", "enabled": false}'
+            )
+
+        callback_fired = callback_called.wait(timeout=3.0)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert callback_fired, "set_calibration_mode callback should fire"
+        assert calls == [False]
+
+    @pytest.mark.asyncio
+    async def test_set_calibration_mode_no_callback_logged(self):
+        """set_calibration_mode with no callback registered should not crash."""
+        import websockets
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59902)
+
+        event = threading.Event()
+        event.set()
+
+        # No set_calibration_mode_callback provided
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59902,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "set_calibration_mode", "enabled": true}'
+            )
+
+        await asyncio.sleep(0.3)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        # Test passes if no exception was raised
+
+    @pytest.mark.asyncio
+    async def test_disconnect_resets_calibration_mode(self):
+        """Losing an established connection must invoke callback(False):
+        the mode can only have been enabled over that connection, and its
+        peer (the Logic process) is now gone."""
+        import websockets
+
+        callback_called = threading.Event()
+        calls = []
+
+        def on_set_calibration_mode(enabled: bool):
+            calls.append(enabled)
+            callback_called.set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59903)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59903,
+            transcription_enabled_event=event,
+            set_calibration_mode_callback=on_set_calibration_mode,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        # Forcibly close the websocket connection from server side
+        if connected_websocket:
+            await connected_websocket.close()
+
+        callback_fired = callback_called.wait(timeout=3.0)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert callback_fired, "calibration mode should reset on disconnect"
+        assert calls == [False]
+
+    def test_no_reset_on_initial_connection_failure(self):
+        """Failed initial connections (WheelHouse not yet running) must NOT
+        fire the reset: the mode cannot have been enabled without an
+        established connection, mirroring on_disconnect_callback semantics."""
+        callback_called = threading.Event()
+
+        def on_set_calibration_mode(enabled: bool):
+            callback_called.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59904,  # No server running
+            transcription_enabled_event=threading.Event(),
+            set_calibration_mode_callback=on_set_calibration_mode,
+            debug=False,
+        )
+        forwarder.start()
+
+        # Give time for multiple connection attempts (backoff starts at 0.5s)
+        time.sleep(1.5)
+
+        assert not callback_called.is_set(), (
+            "reset must not fire on initial connection failure"
+        )
+
+        forwarder.stop()
+
+
+class TestApplyEngineSettingsCommand:
+    """wh-7ou.7.1.3 (contract part A.3): the apply_engine_settings command
+    dispatches every key except "type" and "apply_id" to the callback;
+    validation is the provider handler's job, so unknown keys must arrive
+    intact for it to reject. The apply_id is transport correlation, not a
+    setting: it is stripped, passed alongside, and echoed in the reply
+    (wh-7ou.7.6.9)."""
+
+    @pytest.mark.asyncio
+    async def test_apply_engine_settings_fires_callback_with_settings(self):
+        """Both allowed keys arrive as a settings dict without "type"."""
+        import websockets
+
+        callback_called = threading.Event()
+        calls = []
+
+        def on_apply(settings: dict, apply_id=None):
+            calls.append((settings, apply_id))
+            callback_called.set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59905)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59905,
+            transcription_enabled_event=event,
+            apply_engine_settings_callback=on_apply,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "apply_engine_settings", '
+                '"single_word_min_probability": 0.15, '
+                '"single_word_max_no_speech_prob": 0.03}'
+            )
+
+        callback_fired = callback_called.wait(timeout=3.0)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert callback_fired, "apply_engine_settings callback should fire"
+        assert calls == [({
+            "single_word_min_probability": 0.15,
+            "single_word_max_no_speech_prob": 0.03,
+        }, None)]
+
+    @pytest.mark.asyncio
+    async def test_apply_engine_settings_single_key_write_or_keep(self):
+        """An absent key stays absent (write-or-keep), not defaulted."""
+        import websockets
+
+        callback_called = threading.Event()
+        calls = []
+
+        def on_apply(settings: dict, apply_id=None):
+            calls.append((settings, apply_id))
+            callback_called.set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59906)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59906,
+            transcription_enabled_event=event,
+            apply_engine_settings_callback=on_apply,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "apply_engine_settings", '
+                '"single_word_min_probability": 0.15}'
+            )
+
+        callback_fired = callback_called.wait(timeout=3.0)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert callback_fired
+        assert calls == [({"single_word_min_probability": 0.15}, None)]
+
+    @pytest.mark.asyncio
+    async def test_unknown_keys_passed_through_for_provider_validation(self):
+        """The forwarder strips only "type" and "apply_id"; an illegal
+        extra key must reach the provider handler so its allowed-list
+        validation can reject it."""
+        import websockets
+
+        callback_called = threading.Event()
+        calls = []
+
+        def on_apply(settings: dict, apply_id=None):
+            calls.append((settings, apply_id))
+            callback_called.set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59907)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59907,
+            transcription_enabled_event=event,
+            apply_engine_settings_callback=on_apply,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "apply_engine_settings", '
+                '"single_word_min_probability": 0.15, '
+                '"hallucination_logprob_threshold": -0.9}'
+            )
+
+        callback_fired = callback_called.wait(timeout=3.0)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert callback_fired
+        assert calls == [({
+            "single_word_min_probability": 0.15,
+            "hallucination_logprob_threshold": -0.9,
+        }, None)]
+
+    @pytest.mark.asyncio
+    async def test_apply_id_stripped_from_settings_and_passed_alongside(self):
+        """wh-7ou.7.6.9: the correlation id must not reach the provider's
+        key validation (it would be rejected as an unknown setting); it
+        arrives as the callback's second argument instead."""
+        import websockets
+
+        callback_called = threading.Event()
+        calls = []
+
+        def on_apply(settings: dict, apply_id=None):
+            calls.append((settings, apply_id))
+            callback_called.set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59909)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59909,
+            transcription_enabled_event=event,
+            apply_engine_settings_callback=on_apply,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "apply_engine_settings", '
+                '"apply_id": "op-42", '
+                '"single_word_min_probability": 0.15}'
+            )
+
+        callback_fired = callback_called.wait(timeout=3.0)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert callback_fired
+        assert calls == [({"single_word_min_probability": 0.15}, "op-42")]
+
+    @pytest.mark.asyncio
+    async def test_apply_engine_settings_no_callback_logged(self):
+        """apply_engine_settings with no callback registered must not crash."""
+        import websockets
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59908)
+
+        event = threading.Event()
+        event.set()
+
+        # No apply_engine_settings_callback provided
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59908,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        if connected_websocket:
+            await connected_websocket.send(
+                '{"type": "apply_engine_settings", '
+                '"single_word_min_probability": 0.15}'
+            )
+
+        await asyncio.sleep(0.3)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        # Test passes if no exception was raised
+
+
+class TestSendEngineSettingsResult:
+    """wh-7ou.7.1.3 (contract part A.4): the provider's reply to
+    apply_engine_settings carries exactly {"type", "ok", "error",
+    "apply_id"} -- the apply_id echoed from the command so WheelHouse
+    can correlate the reply to the exact apply it answers
+    (wh-7ou.7.6.9)."""
+
+    @pytest.mark.asyncio
+    async def test_ok_true_payload_exact_keys(self):
+        import websockets
+        import json
+
+        received_messages = []
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    _frame = json.loads(message)
+                    # wh-nvyh: every (re)connect leads with a capabilities
+                    # frame; these tests assert on the payload frames.
+                    if _frame.get("type") != "capabilities":
+                        received_messages.append(_frame)
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59913)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59913,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        forwarder.send_engine_settings_result(True, None, apply_id="op-42")
+        await asyncio.sleep(0.5)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert len(received_messages) >= 1
+        msg = received_messages[0]
+        assert set(msg.keys()) == {"type", "ok", "error", "apply_id"}
+        assert msg["type"] == "engine_settings_result"
+        assert msg["ok"] is True
+        assert msg["error"] is None
+        assert msg["apply_id"] == "op-42"
+
+    @pytest.mark.asyncio
+    async def test_ok_false_carries_error_text(self):
+        """The error text lands under the calibration window's "Show
+        details", so it must survive verbatim."""
+        import websockets
+        import json
+
+        received_messages = []
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    _frame = json.loads(message)
+                    # wh-nvyh: every (re)connect leads with a capabilities
+                    # frame; these tests assert on the payload frames.
+                    if _frame.get("type") != "capabilities":
+                        received_messages.append(_frame)
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59914)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59914,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        forwarder.send_engine_settings_result(
+            False, "[Errno 28] No space left on device"
+        )
+        await asyncio.sleep(0.5)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        assert len(received_messages) >= 1
+        msg = received_messages[0]
+        assert msg["type"] == "engine_settings_result"
+        assert msg["ok"] is False
+        assert msg["error"] == "[Errno 28] No space left on device"
+        # No id given: the reply carries an explicit null correlation id.
+        assert msg["apply_id"] is None
+
+    def test_noop_without_loop(self):
+        """send_engine_settings_result must not raise before start()."""
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59915,
+            transcription_enabled_event=threading.Event(),
+            debug=False,
+        )
+        # Do not call start() - no loop or queue
+        forwarder.send_engine_settings_result(True, None)
+        # Should not raise
+
+
+class TestStopDeliversQueuedFrames:
+    """wh-7ou.7.6.10: the apply_engine_settings success reply -- and the
+    notifications queued just before a restart -- are enqueued moments
+    before the provider begins shutdown. stop() must give already-queued
+    outbound frames a bounded chance to deliver instead of abandoning
+    them in the queue, otherwise WheelHouse never sees the reply and the
+    calibration session strands in restart_slow with the typing gate
+    held."""
+
+    @pytest.mark.asyncio
+    async def test_result_queued_just_before_stop_still_delivered(self):
+        import websockets
+        import json
+
+        received_messages = []
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    _frame = json.loads(message)
+                    if _frame.get("type") != "capabilities":
+                        received_messages.append(_frame)
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59916)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59916,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        # Mirror the real shutdown sequence: the apply handler's own log
+        # frames land in the queue ahead of the result frame, and stop()
+        # follows with NO delay in between. stop() blocks this thread
+        # while the forwarder's own thread does the delivering, so a
+        # synchronous call is exactly the production shape.
+        forwarder.send_notification("Distil Whisper", "Restarting to apply settings")
+        forwarder.send_log("INFO", "engine settings written", "Distil Whisper")
+        forwarder.send_engine_settings_result(True, None, apply_id="op-shutdown")
+        forwarder.stop()
+
+        # The frames reached the socket before stop() returned; give the
+        # server's coroutine a moment to read them off it.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if any(
+                m.get("type") == "engine_settings_result" for m in received_messages
+            ):
+                break
+            await asyncio.sleep(0.05)
+
+        server.close()
+        await server.wait_closed()
+
+        results = [
+            m for m in received_messages if m.get("type") == "engine_settings_result"
+        ]
+        assert results, (
+            "engine_settings_result was abandoned in the outbound queue at stop()"
+        )
+        assert results[0]["ok"] is True
+        assert results[0]["apply_id"] == "op-shutdown"
+
+
+class TestHardRestartCommandRemoved:
+    """The hard_restart_service command is gone from the whole system.
+
+    WheelHouse used to send it when the user chose "Restart Transcription
+    Service" or picked a Google Cloud key file from the menu. Both menu
+    items and the sender were deleted under
+    wh-remove-restart-credentials-items, so every receiver was deleted
+    with them: this forwarder's dispatch arm and its callback parameter,
+    and the handler in each of the three provider services.
+
+    The first test is the structural guard. Because the parameter is
+    gone, a provider that still passed the callback would raise
+    TypeError while building its forwarder, which is a startup failure
+    nobody can miss -- that is what makes a separate per-provider test
+    unnecessary. The restart FLAG machinery is untouched: distil and
+    parakeet still write the flag for hint and hotword changes, and
+    shared_stt.launcher still consumes it.
+    """
+
+    def test_the_forwarder_refuses_a_hard_restart_callback(self):
+        event = threading.Event()
+
+        with pytest.raises(TypeError):
+            WSForwarder(
+                host="localhost",
+                port=59995,
+                transcription_enabled_event=event,
+                hard_restart_callback=lambda: None,
+                debug=False,
+            )
+
+    def test_the_command_loop_has_no_hard_restart_branch(self):
+        """The dispatch arm is gone from the command loop's own source.
+
+        This is the check the message test below cannot make. A retained
+        arm that logged nothing, did nothing, or called some other
+        callback would still leave the forwarder able to handle a later
+        shutdown, so behaviour alone cannot prove the branch is absent.
+        Reading the source can.
+        """
+        import inspect
+
+        source = inspect.getsource(WSForwarder._listen_for_commands)
+
+        assert "hard_restart" not in source, (
+            "the command loop still mentions hard_restart; the dispatch "
+            "arm was supposed to be deleted with its sender"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_hard_restart_message_reaches_no_callback(self):
+        """The retired command must do nothing and cost nothing.
+
+        Every callback the forwarder accepts is recorded here. An old
+        WheelHouse build sending hard_restart_service must reach none of
+        them -- not the restart callback, not the shutdown callback, not
+        any other -- and the forwarder must still handle the commands
+        that remain, which the shutdown at the end proves.
+        """
+        import websockets
+
+        calls: list[str] = []
+        shutdown_called = threading.Event()
+        wake_word_seen = threading.Event()
+        log_level_seen = threading.Event()
+
+        def _record(name):
+            def _callback(*args):
+                calls.append(name)
+            return _callback
+
+        def _record_shutdown():
+            calls.append("shutdown")
+            shutdown_called.set()
+
+        def _record_wake_word(*args):
+            calls.append("wake_word_activate")
+            wake_word_seen.set()
+
+        def _record_log_level(*args):
+            calls.append("set_log_level")
+            log_level_seen.set()
+
+        async def _wait_for(flag, seconds):
+            """Wait without blocking this test's own event loop.
+
+            A blocking wait here stops the server side of the connection
+            from delivering what was just sent, so the callback under test
+            can never arrive. Measured on this machine: two sends followed
+            by a blocking wait deliver neither frame.
+            """
+            limit = time.monotonic() + seconds
+            while not flag.is_set() and time.monotonic() < limit:
+                await asyncio.sleep(0.02)
+            return flag.is_set()
+
+        connected_websocket = None
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            nonlocal connected_websocket
+            connected_websocket = websocket
+            await websocket.send(
+                '{"type": "status", "transcription_enabled": true}'
+            )
+            connection_established.set()
+            try:
+                await websocket.wait_closed()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "localhost", 59994)
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="localhost",
+            port=59994,
+            transcription_enabled_event=event,
+            add_hint_callback=_record("add_hint"),
+            restart_callback=_record("restart"),
+            shutdown_callback=_record_shutdown,
+            set_interim_results_callback=_record("set_interim_results"),
+            set_log_level_callback=_record_log_level,
+            set_calibration_mode_callback=_record("set_calibration_mode"),
+            apply_engine_settings_callback=_record("apply_engine_settings"),
+            wake_word_activate_callback=_record_wake_word,
+            debug=False,
+        )
+        forwarder.start()
+
+        # Everything from here runs under a try. A barrier that fails
+        # must still reach the stop and close below, or the forwarder's
+        # thread keeps running into the tests that follow.
+        try:
+            await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+            assert connected_websocket is not None
+
+            # Step one of the barrier: prove the forwarder is reading commands.
+            # A frame sent the instant the connection opens can reach no
+            # callback at all, so this repeats the frame until one is answered
+            # rather than waiting a fixed length of time and hoping.
+            deadline = time.monotonic() + 10.0
+            while not wake_word_seen.is_set() and time.monotonic() < deadline:
+                await connected_websocket.send(
+                    '{"type": "set_transcription_status", "enabled": true}'
+                )
+                await asyncio.sleep(0.05)
+            assert wake_word_seen.is_set(), (
+                "the forwarder never answered a command, so this test cannot "
+                "tell what the retired command did"
+            )
+
+            # Step two: one different command, sent once, on a connection that
+            # is now known to be reading. Every dispatch arm hands its callback
+            # to call_soon_threadsafe on the forwarder's own event loop, so the
+            # callbacks run in the order their frames arrived. When this one has
+            # run, every repeat from step one has run too, and the recording can
+            # be cleared with nothing left in flight.
+            await connected_websocket.send(
+                '{"type": "set_log_level", "level": "INFO"}'
+            )
+            assert await _wait_for(log_level_seen, 5.0), (
+                "the forwarder stopped answering commands before the retired "
+                "command was sent"
+            )
+            calls.clear()
+
+            # Both frames go out before anything is read back. Ordered delivery
+            # on one connection, and that same first-in-first-out callback
+            # queue, are what make the assertion below sound: a retained
+            # hard_restart_service arm would have to reach its callback BEFORE
+            # the shutdown callback runs, so by the time shutdown_called is set,
+            # any such call is already in the recording. A snapshot taken after
+            # a wait of a fixed length proves nothing, because the forwarder's
+            # thread may not have read the frame yet.
+            await connected_websocket.send('{"type": "hard_restart_service"}')
+            await connected_websocket.send('{"type": "shutdown"}')
+
+            callback_fired = await _wait_for(shutdown_called, 5.0)
+            recorded = list(calls)
+        finally:
+            forwarder.stop()
+            server.close()
+            await server.wait_closed()
+
+        assert callback_fired, (
+            "the retired hard_restart_service message stopped the command "
+            "loop from handling a later shutdown"
+        )
+        assert recorded == ["shutdown"], (
+            "the retired hard_restart_service message reached %s"
+            % ", ".join(name for name in recorded if name != "shutdown")
+        )
+
+
+class TestCapabilitiesWakeWordAvailable:
+    """wh-audio-suppression-control C3: the capabilities frame reports
+    whether this provider's wake-word detector loaded.
+
+    WheelHouse's sound-pause notice tells the user to say the wake word, so
+    it must not promise a wake word that cannot fire -- the openwakeword
+    import is guarded and the detector stays unloaded when it fails. A
+    provider builds its forwarder BEFORE it loads its detector (parakeet
+    main.py, distil main.py), so the value is set on the forwarder after
+    construction and read at the moment the frame is sent.
+    """
+
+    async def _capabilities_frame(self, wake_word_available):
+        """Return the capabilities frame the forwarder sends on connect.
+
+        `wake_word_available` of None leaves the forwarder's own default in
+        place instead of setting the field.
+        """
+        import json
+        import websockets
+
+        frames = []
+        capabilities_seen = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            try:
+                async for message in websocket:
+                    frame = json.loads(message)
+                    if frame.get("type") == "capabilities":
+                        frames.append(frame)
+                        capabilities_seen.set()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        event = threading.Event()
+        event.set()
+        forwarder = WSForwarder(
+            host="127.0.0.1",
+            port=port,
+            transcription_enabled_event=event,
+            debug=False,
+            provider_name="parakeet_tdt",
+            emits_eos=False,
+        )
+        if wake_word_available is not None:
+            forwarder.wake_word_available = wake_word_available
+        forwarder.start()
+        try:
+            await asyncio.wait_for(capabilities_seen.wait(), timeout=5.0)
+        finally:
+            forwarder.stop()
+            server.close()
+            await server.wait_closed()
+        return frames[0]
+
+    @pytest.mark.asyncio
+    async def test_frame_reports_a_loaded_detector(self):
+        frame = await self._capabilities_frame(True)
+        assert frame["wake_word_available"] is True
+
+    @pytest.mark.asyncio
+    async def test_frame_reports_a_detector_that_did_not_load(self):
+        frame = await self._capabilities_frame(False)
+        assert frame["wake_word_available"] is False
+
+    @pytest.mark.asyncio
+    async def test_default_declares_no_detector(self):
+        """A forwarder nobody set the field on declares False, so a
+        provider without the wake word can never promise one."""
+        frame = await self._capabilities_frame(None)
+        assert frame["wake_word_available"] is False

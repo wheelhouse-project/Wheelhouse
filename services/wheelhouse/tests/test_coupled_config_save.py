@@ -24,6 +24,60 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+def test_settings_ack_unrelated_save_cannot_persist_tentative_gui_value(tmp_path, monkeypatch):
+    """A save already queued ahead of a GUI write must not commit its preview."""
+    import tomllib
+    import tomli_w
+    from queue import Queue
+    from config_service import ConfigService
+    from state_manager import StateManager
+    path = tmp_path / 'config.toml'
+    path.write_text('FLOATING_BUTTON_SIZE = 50\n')
+    config = ConfigService(str(path))
+    dump = tomli_w.dump
+    writes = []
+    def fail_second_write(values, stream):
+        writes.append(dict(values))
+        if len(writes) == 2:
+            raise OSError('second write fails')
+        return dump(values, stream)
+    monkeypatch.setattr(tomli_w, 'dump', fail_second_write)
+    async def run():
+        manager = StateManager(config, MagicMock(), asyncio.get_running_loop(), Queue(), None)
+        await config._save_lock.acquire()
+        unrelated = asyncio.create_task(config.save())
+        await asyncio.sleep(0)
+        gui_write = asyncio.create_task(manager.set_config_value('FLOATING_BUTTON_SIZE', 80, request_id='race'))
+        await asyncio.sleep(0)
+        config._save_lock.release()
+        assert await unrelated is True
+        assert await gui_write is False
+        assert config.get('FLOATING_BUTTON_SIZE') == 50
+        assert tomllib.loads(path.read_text())['FLOATING_BUTTON_SIZE'] == 50
+    asyncio.run(run())
+
+
+def test_settings_ack_group_write_returns_one_matching_result(tmp_path):
+    from queue import Queue
+    from config_service import ConfigService
+    from state_manager import StateManager
+    path = tmp_path / 'config.toml'
+    path.write_text('FLOATING_BUTTON_SIZE = 50\nFLOATING_BUTTON_POS = [100, 100]\n')
+    config = ConfigService(str(path))
+    async def run():
+        queue = Queue()
+        manager = StateManager(config, MagicMock(), asyncio.get_running_loop(), queue, None)
+        values = {'FLOATING_BUTTON_SIZE': 80, 'FLOATING_BUTTON_POS': [85, 85]}
+        await manager.set_config_values(values, request_id='group-1')
+        messages = []
+        while not queue.empty():
+            messages.append(queue.get_nowait())
+        acks = [m for m in messages if m['action'] == 'config_write_result']
+        assert acks == [{'action': 'config_write_result', 'request_id': 'group-1',
+                         'saved': True, 'values': values}]
+    asyncio.run(run())
+
+
 class TestTheGuiSendsOneMessage:
     def test_a_finished_resize_sends_a_single_command(self):
         from PySide6.QtCore import QPoint
@@ -305,7 +359,7 @@ class TestAWriteRecordsTheSettingsAsTheyWereWhenItWasAsked:
         async def change_nested_during_the_write():
             writer = asyncio.create_task(config_service.save())
             await asyncio.to_thread(dump_started.wait, 2.0)
-            config_service.set("stt.mode", "in_process")
+            config_service.set("stt.mode", "written_during_the_save")
             await writer
 
         asyncio.run(change_nested_during_the_write())

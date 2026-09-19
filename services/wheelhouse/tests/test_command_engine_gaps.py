@@ -133,6 +133,38 @@ class TestAwaitsDone:
         assert parser.speech_handler.app.send_request.call_count == 1
         assert parser.speech_handler.app.send_command.call_count == 0
 
+    @pytest.mark.asyncio
+    async def test_awaits_done_defaults_absent_params_key(self, parser):
+        """wh-overlay-slow-uia-stale-badges.14.25: only an ABSENT params
+        key defaults to {} at the awaited funnel."""
+        match = re.fullmatch(r"test", "test")
+        parser.action_functions.get_functions = MagicMock(return_value={
+            "fake_ui": lambda: {"action": "click_element"},
+        })
+        steps = [{"function": "fake_ui", "params": [], "awaits_done": True}]
+
+        result = await parser._execute_rule(match, steps, validation_group=None)
+        assert result is True
+        call = parser.speech_handler.app.send_request.call_args_list[0]
+        assert call.args == ("click_element", {})
+
+    @pytest.mark.asyncio
+    async def test_awaits_done_passes_supplied_falsy_params_through(self, parser):
+        """wh-overlay-slow-uia-stale-badges.14.25: a supplied falsy
+        non-mapping params value is NOT rewritten to {} at the funnel --
+        it travels to send_request unchanged, so the input-side
+        _extract_params gate (.14.22) is the single validator."""
+        match = re.fullmatch(r"test", "test")
+        parser.action_functions.get_functions = MagicMock(return_value={
+            "fake_ui": lambda: {"action": "click_element", "params": []},
+        })
+        steps = [{"function": "fake_ui", "params": [], "awaits_done": True}]
+
+        result = await parser._execute_rule(match, steps, validation_group=None)
+        assert result is True
+        call = parser.speech_handler.app.send_request.call_args_list[0]
+        assert call.args == ("click_element", [])
+
 
 # ============================================================================
 # CONTEXT STORAGE FOR STRING RETURNS (lines 161-168)
@@ -161,6 +193,46 @@ class TestContextStorage:
         text = payload.get("params", {}).get("text", "")
         # Should be the year, not the literal string "date"
         assert text.isdigit() and len(text) == 4
+
+
+# ============================================================================
+# RESULT KEY NAMED AFTER A DICT-RETURNING ACTION (wh-review-pattern-fixes.20)
+# ============================================================================
+
+class TestResultKeyNamedAfterDictReturningAction:
+    """A result key may reuse the name of a dict-returning action.
+
+    The engine stores context[func_name] only when the step's return
+    value is a str (command_engine.py lines 342-343). A press step
+    returns a UI-action dict, so it never overwrites the string an
+    earlier step stored under the key 'press' via its ``result`` entry
+    (lines 346-347). The editor's collision check relies on this
+    runtime behavior (wh-review-pattern-fixes.20)."""
+
+    @pytest.mark.asyncio
+    async def test_press_step_does_not_overwrite_stored_result_key(self, parser):
+        match = re.fullmatch(r"test", "test")
+        steps = [
+            {"function": "date", "params": ["%Y"], "result": "press"},
+            {"function": "press", "params": ["tab"]},
+            {"function": "type_text", "params": ["press"]},
+        ]
+
+        result = await parser._execute_rule(match, steps, validation_group=None)
+        assert result is True
+
+        # Two UI commands: the press action, then type_text. The
+        # type_text payload proves context['press'] still held the
+        # year string AFTER the press step ran: an overwrite via the
+        # func_name store would have handed type_text the press step's
+        # dict (or left the literal 'press' untouched).
+        calls = parser.speech_handler.app.send_command.call_args_list
+        assert len(calls) == 2
+        assert calls[0][0][0].get("action") == "press_key_action"
+        text = calls[1][0][0].get("params", {}).get("text", "")
+        assert isinstance(text, str)
+        assert text.isdigit() and len(text) == 4
+        assert text != "press"
 
 
 # ============================================================================

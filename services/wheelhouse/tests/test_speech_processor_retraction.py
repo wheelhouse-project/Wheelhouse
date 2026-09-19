@@ -114,12 +114,6 @@ def make_processor(app=None, command_timeout_ms=1000, replacement_timeout_ms=700
         command_timeout_ms=command_timeout_ms,
         hotword="x-ray",
     )
-    # Mock context mirror
-    processor.context_mirror = MagicMock()
-    processor.context_mirror.read_context.return_value = {
-        "app_name": "test.exe",
-        "window_title": "Test Window",
-    }
     return processor
 
 
@@ -154,6 +148,20 @@ class TestCommandExecutedFlag:
         proc = make_processor()
         proc.text_parser.last_executed_pattern_type = "replacement"
         await proc._execute_command("period")
+        assert proc._command_executed_in_utterance is False
+
+    @pytest.mark.asyncio
+    async def test_flag_not_set_on_dictation_fallback_execution(self):
+        """wh-mouse-grid.1.27: a closed-grid fallback is plain dictation.
+
+        The bare grid words (mark / click / 1-9) match command patterns
+        but fall back to dictation when the grid is closed; the parser
+        records that parse as 'dictation_fallback'. It must NOT block
+        retraction -- an STT revision of the typed words ('mark' ->
+        'march') has to replay like any other dictation."""
+        proc = make_processor()
+        proc.text_parser.last_executed_pattern_type = "dictation_fallback"
+        await proc._execute_command("mark")
         assert proc._command_executed_in_utterance is False
 
     @pytest.mark.asyncio
@@ -387,3 +395,142 @@ class TestRetractTerminalReasons:
         assert len(insert_calls) == 0, (
             f"Expected no replay on reason={reason}"
         )
+
+
+# ============================================================================
+# TESTS: nothing_to_retract with a buffered command replays the final
+# ============================================================================
+#
+# wh-click-number-dictation: when every word of the utterance was held in
+# the Logic-side command buffer (e.g. "click three" buffering toward
+# ^click\s+(.+)$), nothing was ever pasted, so the Input process answers
+# the retract IPC with nothing_to_retract. The old code treated that as
+# terminal and dropped the corrected final -- a Whisper FINAL rewrite
+# ("click three" -> "click 3") therefore silently killed the command
+# (wheelhouse.log 2026-08-08 13:39, UTT-14/15). The Input side already
+# has the mirror rule for its own letter buffer (wh-j3mgc: buffered
+# letters + no paste -> report retracted so the final replays); this is
+# the Logic-buffer analog. nothing_to_retract stays terminal when the
+# buffer was empty, and every OTHER reason stays terminal even with a
+# buffered command.
+
+
+class TestBufferedCommandRetraction:
+    """nothing_to_retract + a non-empty command buffer must replay."""
+
+    def _marker(self, text="click 3"):
+        return WordEvent(
+            word="",
+            start_of_utterance=False,
+            end_of_utterance=False,
+            utterance_id=7,
+            is_retraction_marker=True,
+            retraction_full_text=text,
+        )
+
+    def _track_router(self, proc):
+        processed = []
+        def tracking_decide(word_event, *args, **kwargs):
+            processed.append(word_event)
+            return Decision(action=Action.DICTATE, payload=word_event.word)
+        proc.router.decide = tracking_decide
+        return processed
+
+    @pytest.mark.asyncio
+    async def test_replays_final_when_buffer_held_words(self):
+        app = MockApp()
+        app._retract_response = {
+            "status": "not_retracted", "reason": "nothing_to_retract",
+        }
+        proc = make_processor(app=app)
+        proc.mode = ProcessingMode.COMMAND_BUFFERING
+        proc.buffer = ["click", "three"]
+        processed = self._track_router(proc)
+
+        await proc.process_word_event(self._marker("click 3"))
+
+        retract_calls = [a for a in app.actions if a.get("action") == "retract"]
+        assert len(retract_calls) == 1
+        assert [w.word for w in processed] == ["click", "3"], (
+            "The corrected final must replay through the router when the "
+            "utterance's words were held in the command buffer (nothing "
+            "was ever pasted, so the screen shows none of them)."
+        )
+        assert processed[0].start_of_utterance is True
+        assert processed[1].start_of_utterance is False
+
+    @pytest.mark.asyncio
+    async def test_no_replay_when_buffer_was_empty(self):
+        """Empty buffer + nothing pasted stays terminal (old contract)."""
+        app = MockApp()
+        app._retract_response = {
+            "status": "not_retracted", "reason": "nothing_to_retract",
+        }
+        proc = make_processor(app=app)
+        processed = self._track_router(proc)
+
+        await proc.process_word_event(self._marker())
+
+        assert processed == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reason",
+        ["user_interacted", "focus_drifted", "simple_paste", "paste_unverified"],
+    )
+    async def test_other_reasons_stay_terminal_with_buffered_words(self, reason):
+        """Only nothing_to_retract earns the buffered-command replay."""
+        app = MockApp()
+        app._retract_response = {"status": "not_retracted", "reason": reason}
+        proc = make_processor(app=app)
+        proc.mode = ProcessingMode.COMMAND_BUFFERING
+        proc.buffer = ["click", "three"]
+        processed = self._track_router(proc)
+
+        await proc.process_word_event(self._marker())
+
+        assert processed == [], f"reason={reason} must not replay"
+
+    @pytest.mark.asyncio
+    async def test_replays_buffered_words_when_final_has_fewer(self):
+        """A final that SHRINKS the buffered command replays the buffer.
+
+        Live case (wheelhouse.log 2026-08-08 14:21, UTT-21): 'click 136'
+        fully buffered, the provider's final arrived as just '1'. Replaying
+        the final loses the command and types a stray '1'; the buffered
+        words are the fuller transcript. The word-count rule keeps the
+        wanted rewrites ('click three' -> 'click 3', equal count -> final
+        wins) while surviving the truncation.
+        """
+        app = MockApp()
+        app._retract_response = {
+            "status": "not_retracted", "reason": "nothing_to_retract",
+        }
+        proc = make_processor(app=app)
+        proc.mode = ProcessingMode.COMMAND_BUFFERING
+        proc.buffer = ["click", "136"]
+        processed = self._track_router(proc)
+
+        await proc.process_word_event(self._marker("1"))
+
+        assert [w.word for w in processed] == ["click", "136"], (
+            "The truncated final ('1') must not replace the fuller "
+            "buffered command ('click 136')."
+        )
+        assert processed[0].start_of_utterance is True
+
+    @pytest.mark.asyncio
+    async def test_replays_final_when_word_counts_are_equal(self):
+        """Equal word count trusts the final (the number-rewrite case)."""
+        app = MockApp()
+        app._retract_response = {
+            "status": "not_retracted", "reason": "nothing_to_retract",
+        }
+        proc = make_processor(app=app)
+        proc.mode = ProcessingMode.COMMAND_BUFFERING
+        proc.buffer = ["click", "three"]
+        processed = self._track_router(proc)
+
+        await proc.process_word_event(self._marker("click 3"))
+
+        assert [w.word for w in processed] == ["click", "3"]

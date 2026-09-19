@@ -63,13 +63,13 @@ The installer is a standard Windows setup wizard. Download it and run it -- noth
 
 https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe
 
-If Windows shows a "Windows protected your PC" screen, see [Security warnings](#security-warnings) below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 1 GB in total). The wizard:
+If Windows shows a "Windows protected your PC" screen, see [Security warnings](#security-warnings) below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 3 GB in total). The wizard:
 
 1. Asks its questions up front: which speech engine to use (the pre-selected answer suits most installations -- see [Speech Engines](#speech-engines)), whether to set up the optional AI helper (the wizard offers one AI choice, a cloud model from Google, and skipping; the model that runs on your own machine is set up from the command line instead, described below), and whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected). It also asks you to turn on microphone access for desktop apps, but only when that Windows setting is currently off; when it is already on, setup says nothing about it.
 2. Checks the requirements listed under [What you need](#what-you-need). Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and the memory floor. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count and a connected microphone -- produce a notice and setup continues.
 3. Installs uv, the environment manager Wheelhouse uses, into the user profile. Nothing is installed system-wide.
 4. Downloads the Wheelhouse application, verifies the download against its published fingerprint, and creates Wheelhouse's own Python environments. Those environments are self-contained and separate from any other Python installation on the computer.
-5. Downloads the offline speech model if the default engine was kept (650 MB; this is the longest step).
+5. Downloads the offline speech model if the default engine was kept (2.5 GB; this is the longest step).
 6. Creates Start-menu and desktop shortcuts.
 7. Reports anything worth knowing on its final page. Setup can complete and still have had to change something -- installing Parakeet because the graphics card cannot run Distil-Whisper, for example -- and those notices appear there rather than only in the setup log.
 
@@ -103,12 +103,12 @@ Installer failure messages contain no personal data and can be included in a hel
 - **"Wheelhouse appears to be running"** (during an update): the installer refuses to replace an application that is running. Exit Wheelhouse first (right-click the floating button or the tray icon -- both open the same menu -- and choose Exit), then run the installer again. If it reports that it could not check, restart the computer and try again.
 - **"This computer has N GB of memory"**: your machine is below the 8 GB minimum. This check stops the install for every speech engine, including the cloud one, so adding memory is the only fix.
 - **"Not enough free disk space"**: free up 10 GB on the Windows drive and run the installer again.
-- **"Unpacking the speech model failed"**: the extraction stopped, and the message includes the extractor's own error text. Run the installer again -- the downloaded archive is kept and the download does not repeat. If it fails the same way twice, include the message in a help request.
+- **"Putting the speech model in place failed"**: the step that assembles the model stopped, and the message includes its exit code and the last lines it printed. Run the installer again -- the downloads themselves are kept and do not repeat. If it fails the same way twice, include the message in a help request.
 - **"Could not install uv"**: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.
 - **"... failed its integrity check"**: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; a changed release asset is the other. Add an exception or try a different network, and if it keeps failing, file an issue on the GitHub page.
 - **"Downloading ... failed twice"**: network trouble. Run the installer again -- downloads resume where they left off.
 - **"Setting up services/... failed"**: a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again. If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.
-- **"An incomplete speech model was found"**: informational, not an error. A previous unpacking was interrupted; the installer removes the incomplete files and unpacks again from the archive it already has. The 650 MB download only repeats if the archive itself is damaged.
+- **"An incomplete speech model was found"**: informational, not an error. A previous run was interrupted before the model was complete; the installer removes the incomplete files and puts the model together again from the files it has already downloaded. The 2.5 GB download only repeats for a file that is damaged or missing.
 - **"The spoken-hint vocabulary ..."**: informational, not an error; the install finishes. The word list the offline engine reads before it can favour a boosted word is absent, failed its checksum, or could not be copied. That biasing is off by default, so nothing else changes. Re-running the installer replaces the file.
 - **No Wheelhouse entry in the Start menu**: check Start > All apps under W first -- new entries are not pinned to the front page. If it is truly absent, the desktop shortcut works the same; the installer log records a "Shortcut created" or "Could not create" line for a help request.
 
@@ -130,7 +130,7 @@ An update replaces the application and preserves user data:
 - Personal voice patterns
 - Approved and declined dictation targets
 - Saved speech hints
-- The downloaded speech model -- it is stored outside the part an update replaces, so the 650 MB download does not repeat
+- The downloaded speech model -- it is stored outside the part an update replaces, so the 2.5 GB download does not repeat. An update that renames the model folder is the exception, and this release renames it: the model downloads once more, and the previous copy is removed only after the new one is verified
 
 **If an update is interrupted** -- a power cut, a closed window, a crash -- user files are preserved. Before replacing anything, the installer copies them into a holding folder next to the application, and the next run restores whatever it finds there. Recovery is running the same command again; no manual step is required.
 
@@ -172,7 +172,7 @@ What each answer does:
 - **Keeping personal data:** the application, all its shortcuts, and its bookkeeping folder are removed. The settings file, personal voice patterns, and the speech model remain in `%LOCALAPPDATA%\Wheelhouse`, with the settings and patterns gathered into a subfolder there named preserved-user-data. On a machine where the local AI helper was set up, the AI model and the program that runs it -- several gigabytes -- also remain there. A later reinstall starts from defaults; copy files back from that folder to restore the previous settings and patterns.
 - **Keeping nothing:** the entire `%LOCALAPPDATA%\Wheelhouse` folder, the `%APPDATA%\Wheelhouse` folder, and all shortcuts (Start menu, desktop, and the start-at-login entry) are removed. A configured cloud AI access key is also cleared from the user environment.
 
-Those two folders, plus a small `WheelhouseSetup` folder used by the graphical installer's uninstaller, hold everything Wheelhouse itself stores. Setup writes in three further places. It removes two of them: the shortcuts it created and the start-at-login entry. The third it leaves, deliberately -- uv, the environment manager, installed in the user profile, which other programs may also be using. The graphical installer additionally leaves its own log in the Windows temporary folder. `%APPDATA%\Wheelhouse` holds no personal data -- only bookkeeping such as helper-process ID files -- and is removed under either answer. Run from the command line, the uninstaller prints both folder paths when it finishes; removed through Windows, it runs hidden and prints nothing you can see.
+Those two folders, plus a small `WheelhouseSetup` folder used by the graphical installer's uninstaller, hold everything Wheelhouse itself stores. Setup writes in three further places. It removes two of them: the shortcuts it created and the start-at-login entry. The third it leaves, deliberately -- uv, the environment manager, installed in the user profile, which other programs may also be using. The graphical installer additionally leaves its own log in the Windows temporary folder. `%APPDATA%\Wheelhouse` holds no personal data -- only bookkeeping such as helper-process ID files -- and is removed under either answer. Run from the command line, the uninstaller prints both folder paths when it finishes; removed through Windows, it runs hidden, so those paths never reach the screen. A removal through Windows shows a message only when something went wrong, and several different ones are possible. Three of them concern the saved AI key. Two say that the key could not be cleared, or that setup could not read the removal step's output at all; both of those ask you to check WHEELHOUSE_AI_API_KEY yourself in Windows Environment Variables. The third says the key changed but running programs could not be told, and its remedy is different: sign out of Windows and back in once. Two further messages report a removal that could not run as intended. Setup stops with "Wheelhouse could not be fully removed" when the removal step fails, most often because Wheelhouse is still running; close it and run the uninstall again. Setup finishes but asks you to delete the `%LOCALAPPDATA%\Wheelhouse` folder by hand when the removal helper itself is missing.
 
 <!-- install-doc:end -->
 
@@ -187,7 +187,7 @@ One Windows rule follows from this. Windows does not allow a program to send key
 - **Programs running as administrator.** A program started with "Run as administrator", or one that elevated itself as some system tools do, cannot receive typed text, key presses, or clicks from Wheelhouse.
 - **UAC prompts.** The dimmed "Do you want to allow this app to make changes to your device?" screen is more restricted still: Windows displays it on a separate secure desktop that no ordinary program can reach or observe.
 
-**Observed behavior:** dictation into an administrator window is detected before any keystroke is sent, and a notice appears in the corner of the screen: "Wheelhouse can't type into administrator apps." Nothing is typed. The same notice appears for a terminal running as administrator. Click commands produce their own notice: the contents of a protected window are not visible to Wheelhouse, so "x-ray click cancel" reports no match. Spoken key presses such as "press enter" produce no notice -- Windows discards them silently.
+**Observed behavior:** dictation into an administrator window is detected before any keystroke is sent, and a notice appears in the corner of the screen: "Wheelhouse can't type into administrator apps." Repeating the same attempt within a minute shows no second notice. Nothing is typed either way. The same notice appears for a terminal running as administrator. Click commands produce their own notice: the contents of a protected window are not visible to Wheelhouse, so "x-ray click cancel" reports no match. Spoken key presses such as "press enter" produce no notice -- Windows discards them silently.
 
 **Available options:**
 
@@ -213,7 +213,7 @@ Confirm Windows itself receives audio before diagnosing recognition problems. Th
 
 ### The hotword ("x-ray")
 
-Commands that would have destructive effects if they fired during dictation -- closing a window, for example -- run only when the utterance begins with "x-ray": "close window" is transcribed as ordinary dictation, "x-ray close window" closes the active window. Common commands such as "undo", "copy", and "select all" need no hotword. Throughout this document a command that requires it is written with the "x-ray" prefix; the command reference states the requirement for every command.
+The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands run only when the utterance begins with "x-ray": "close window" is transcribed as ordinary dictation, "x-ray close window" closes the active window. Common commands such as "undo", "copy", and "select all" need no hotword. Throughout this document a command that requires it is written with the "x-ray" prefix; the command reference states the requirement for every command.
 
 ### The wake word ("computer")
 
@@ -292,5 +292,5 @@ Each installer failure message and its action is listed under [Installation fail
 
 ---
 
-Generated: 2026-07-31 for the v1.0.7 release
-Wheelhouse version: 1.0.7
+Generated: 2026-09-18 for the v1.0.8 release
+Wheelhouse version: 1.0.8

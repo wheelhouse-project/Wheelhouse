@@ -29,7 +29,7 @@ num_threads = 4
 # Chunked re-inference streaming parameters
 # Parakeet is ~400ms per inference on CPU, so use a longer interval
 re_inference_interval_ms = 600
-endpoint_silence_ms = 800
+endpoint_silence_ms = 600
 silence_rms_threshold = 0.01
 
 [hotwords]
@@ -41,6 +41,11 @@ silence_rms_threshold = 0.01
 # (greedy ignores hotwords), which measured +25% mean inference latency on
 # the reference CPU (30-utterance corpus sample, 127 hotwords, 2026-07-06).
 # Turn on if you rely on proper-noun hints and accept the latency cost.
+#
+# Boosting also needs the sentencepiece vocabulary file bpe.vocab beside the
+# model's ONNX files; the installer copies it there from model_assets/. The
+# model's tokens.txt is an id table, not that vocabulary. Without a usable
+# bpe.vocab the service turns boosting off and the ready notice says why.
 enabled = false
 
 # Biasing strength. sherpa-onnx typical range 1.0-5.0; higher values cause
@@ -61,3 +66,14 @@ noise_floor_alpha = 0.02
 min_gain = 0.1
 max_gain = 10.0
 initial_noise_floor = 0.01
+
+[debug]
+# wh-stt-load-metrics. Adds one [load-diag] window= line every ten
+# seconds, reporting capture queue depth, lost input frames, and
+# consumer-loop stalls, and (wh-audit13-preengine-load-review.1) the
+# ten-second [load-diag] work_scope=silence and work_scope=wake_word
+# lines. Turn it on for a load test, off afterwards; the per-utterance
+# [load-diag] line and the one-per-event onset, reset and detection
+# lines are always on and are not affected by this flag. Mirrors
+# [debug] log_overflow_diagnostics in the google provider.
+log_load_diagnostics = false

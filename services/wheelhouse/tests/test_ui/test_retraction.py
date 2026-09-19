@@ -353,6 +353,78 @@ class TestRetractFocusVerification:
         assert result["chars"] == 9
         mock_bs.assert_called_once_with(9)
 
+class TestNothingPastedShortCircuitsSafetyGates:
+    """With zero pasted characters and no buffered letters there is no
+    backspace side effect for the safety gates to protect, so retract must
+    answer nothing_to_retract FIRST -- before the interaction and focus
+    gates (wh-click-number-dictation).
+
+    Live failure (wheelhouse.log 2026-08-08 14:19-14:21, UTT-13/16/19): a
+    command-buffered utterance typed nothing, but the remembered paste
+    target window survived from a PREVIOUS utterance and the foreground had
+    legitimately changed (the previous voice click switched windows), so
+    retract answered focus_drifted. SpeechProcessor treats focus_drifted as
+    terminal, so the corrected final was dropped and the click command
+    died. nothing_to_retract is the truthful answer -- and the one the
+    SpeechProcessor buffered-command replay keys on.
+    """
+
+    @patch("ui.ui_action_handler.win32gui")
+    def test_focus_drift_with_nothing_pasted_reports_nothing_to_retract(
+        self, mock_win32gui, handler
+    ):
+        handler._user_interacted_during_utterance = False
+        handler._used_simple_paste = False
+        handler.clipboard.accumulated_paste_chars = 0
+        handler.clipboard.accumulated_paste_clusters = 0
+        handler._letter_buffer = []
+        handler.window_manager._last_target_hwnd = 0xAAA1
+        mock_win32gui.GetForegroundWindow.return_value = 0xBBB2
+
+        result = handler.retract()
+
+        assert result["status"] == "not_retracted"
+        assert result["reason"] == "nothing_to_retract", (
+            f"Nothing was pasted, so the focus gate has nothing to protect; "
+            f"got {result['reason']!r}. focus_drifted here drops a "
+            f"command-buffered utterance's corrected final."
+        )
+
+    def test_user_interaction_with_nothing_pasted_reports_nothing_to_retract(
+        self, handler
+    ):
+        handler._user_interacted_during_utterance = True
+        handler._used_simple_paste = False
+        handler.clipboard.accumulated_paste_chars = 0
+        handler.clipboard.accumulated_paste_clusters = 0
+        handler._letter_buffer = []
+
+        result = handler.retract()
+
+        assert result["status"] == "not_retracted"
+        assert result["reason"] == "nothing_to_retract"
+
+    @patch("ui.ui_action_handler.win32gui")
+    def test_buffered_letters_do_not_short_circuit_the_gates(
+        self, mock_win32gui, handler
+    ):
+        """Letters pending paste still go through the gates: the wh-j3mgc
+        letter-drop path reports 'retracted' (triggering a replay), so the
+        gates legitimately guard it."""
+        handler._user_interacted_during_utterance = False
+        handler._used_simple_paste = False
+        handler.clipboard.accumulated_paste_chars = 0
+        handler.clipboard.accumulated_paste_clusters = 0
+        handler._letter_buffer = ["a"]
+        handler.window_manager._last_target_hwnd = 0xAAA1
+        mock_win32gui.GetForegroundWindow.return_value = 0xBBB2
+
+        result = handler.retract()
+
+        assert result["status"] == "not_retracted"
+        assert result["reason"] == "focus_drifted"
+
+
 class TestRetractPartialSendInput:
     """retract() must refuse to claim success when SendInput reports
     partial delivery -- there is no way to know how much of the editor's

@@ -642,7 +642,7 @@ class TestEosWarningGatedByProvider:
     @pytest.mark.asyncio
     async def test_warning_skipped_for_parakeet(self, manager, caplog):
         ws = FakeWebsocket([
-            capabilities_message("sherpa_offline_parakeet", False),
+            capabilities_message("parakeet_tdt", False),
             stable_message("a", 1),
             final_message("a", 1),
             stable_message("b", 2),
@@ -854,3 +854,216 @@ class TestCapabilitiesActiveClientGate:
         assert manager._utterances_with_final_in_stream == 0
         assert manager._eos_warning_emitted is False
         assert manager._eos_observed_in_stream is False
+
+
+# ===========================================================================
+# No audio-suppression recovery window (wh-audio-suppression-auto)
+#
+# A wake word spoken during a sound pause used to open a 15-second window in
+# StateManager, and two gates here dropped every transcript inside it except
+# the audio-suppression-off command. That command was removed in stage 1 and
+# the window in stage 2, so both gates are gone and the transcript path no
+# longer asks StateManager about a window at all.
+# ===========================================================================
+
+class TestNoRecoveryWindowGate:
+    """No transcript gate reads a recovery window (wh-audio-suppression-auto).
+
+    The window existed to carry one command out of a sound pause, and the
+    command is gone. A state manager that still answers the old property --
+    a stale process, a test double -- must change nothing here: the
+    transcript path no longer asks.
+    """
+
+    @staticmethod
+    def _manager_with_a_window(manager):
+        """The window_state_manager mock, inlined now that the helper is gone.
+
+        make_manager's bare MagicMock is not usable: every attribute of a
+        MagicMock is a truthy Mock, so the removed gate would have read every
+        state manager in this file as an open window.
+        """
+        sm = MagicMock()
+        sm.config_service = MagicMock()
+        sm.config_service.get = MagicMock(return_value=False)
+        sm._get_current_stt_provider = MagicMock(return_value="google_stt")
+        sm.audio_recovery_window_open = True
+        manager.state_manager = sm
+        manager.speech_handler = None
+        return sm
+
+    @pytest.mark.asyncio
+    async def test_a_final_reaches_the_pipeline_when_the_manager_reports_a_window(
+        self, manager
+    ):
+        self._manager_with_a_window(manager)
+        ws = FakeWebsocket([final_message("play the next track", 1)])
+        await manager.handle_connection(ws)
+        words = [e.word for e in await drain_word_queue(manager) if e.word]
+        assert words == ["play", "the", "next", "track"], (
+            "A final must flow whatever the state manager says about a window"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_stable_reaches_the_pipeline_when_the_manager_reports_a_window(
+        self, manager
+    ):
+        self._manager_with_a_window(manager)
+        ws = FakeWebsocket([stable_message("hello there", 1)])
+        await manager.handle_connection(ws)
+        words = [e.word for e in await drain_word_queue(manager) if e.word]
+        assert words == ["hello", "there"], (
+            "A stable must flow whatever the state manager says about a window"
+        )
+
+    def test_the_websocket_manager_has_no_recovery_gate_helpers(self):
+        from integrations.websocket_manager import WebSocketManager
+
+        assert not hasattr(WebSocketManager, "_audio_recovery_window_open")
+        assert not hasattr(
+            WebSocketManager, "_final_switches_audio_suppression_off"
+        )
+
+
+class TestWakeWordAvailableCapability:
+    """The capabilities frame's wake_word_available reaches StateManager.
+
+    One of the sound-pause notices tells the user to say the wake word.
+    That text must never appear on a machine whose detector never loaded.
+    """
+
+    @pytest.mark.asyncio
+    async def test_declared_true_reaches_the_state_manager(self, manager):
+        ws = FakeWebsocket([])
+        await manager.add_client(ws)
+        # The stream boundary itself clears the value, so these tests read
+        # only what the capabilities frame does.
+        manager.state_manager.set_wake_word_available.reset_mock()
+        manager._apply_capabilities(
+            ws,
+            {
+                "provider": "google_stt",
+                "emits_eos": True,
+                "wake_word_available": True,
+            },
+        )
+        manager.state_manager.set_wake_word_available.assert_called_once_with(
+            True
+        )
+
+    @pytest.mark.asyncio
+    async def test_declared_false_reaches_the_state_manager(self, manager):
+        ws = FakeWebsocket([])
+        await manager.add_client(ws)
+        manager.state_manager.set_wake_word_available.reset_mock()
+        manager._apply_capabilities(
+            ws,
+            {
+                "provider": "google_stt",
+                "emits_eos": True,
+                "wake_word_available": False,
+            },
+        )
+        manager.state_manager.set_wake_word_available.assert_called_once_with(
+            False
+        )
+
+    @pytest.mark.asyncio
+    async def test_frame_without_the_field_leaves_it_alone(self, manager):
+        """An older provider declares nothing; the last answer must stand."""
+        ws = FakeWebsocket([])
+        await manager.add_client(ws)
+        manager.state_manager.set_wake_word_available.reset_mock()
+        manager._apply_capabilities(
+            ws, {"provider": "google_stt", "emits_eos": True}
+        )
+        manager.state_manager.set_wake_word_available.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_client_declaration_is_ignored(self, manager):
+        """Same active-client gate every other capability field sits behind."""
+        client_a = FakeWebsocket([])
+        client_b = FakeWebsocket([])
+        await manager.add_client(client_a)
+        await manager.add_client(client_b)  # B is now the active stream.
+        manager.state_manager.set_wake_word_available.reset_mock()
+        manager._apply_capabilities(
+            client_a,
+            {
+                "provider": "google_stt",
+                "emits_eos": True,
+                "wake_word_available": False,
+            },
+        )
+        manager.state_manager.set_wake_word_available.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_state_manager_is_survivable(self, manager):
+        manager.state_manager = None
+        ws = FakeWebsocket([])
+        await manager.add_client(ws)
+        manager._apply_capabilities(
+            ws,
+            {
+                "provider": "google_stt",
+                "emits_eos": True,
+                "wake_word_available": True,
+            },
+        )
+        assert manager._provider_emits_eos is True
+
+    @pytest.mark.asyncio
+    async def test_the_last_client_leaving_clears_the_declaration(self, manager):
+        """A provider that disconnects and never returns leaves no stale True.
+
+        The sound-pause notice names the wake word only while this value is
+        True. With the provider gone no process can hear that word, so the
+        notice must fall back to the one naming the tray menu item.
+        """
+        ws = FakeWebsocket([])
+        await manager.add_client(ws)
+        manager._apply_capabilities(
+            ws,
+            {
+                "provider": "google_stt",
+                "emits_eos": True,
+                "wake_word_available": True,
+            },
+        )
+        manager.state_manager.set_wake_word_available.reset_mock()
+
+        manager.remove_client(ws)
+
+        # The last client leaving runs the stream reset twice, once for the
+        # departed active client and once for the empty client set, so the
+        # count is not the subject here: every call must clear the value.
+        cleared = manager.state_manager.set_wake_word_available.call_args_list
+        assert cleared, "the last client leaving must clear the declaration"
+        assert all(args == (False,) for args, _kwargs in cleared)
+
+    @pytest.mark.asyncio
+    async def test_a_new_active_client_starts_with_no_detector(self, manager):
+        """The next provider must declare for itself.
+
+        A provider built without openWakeWord can replace one that had it, so
+        the value clears on the stream boundary and waits for the new frame,
+        exactly as _provider_emits_eos does.
+        """
+        client_a = FakeWebsocket([])
+        await manager.add_client(client_a)
+        manager._apply_capabilities(
+            client_a,
+            {
+                "provider": "google_stt",
+                "emits_eos": True,
+                "wake_word_available": True,
+            },
+        )
+        manager.state_manager.set_wake_word_available.reset_mock()
+
+        client_b = FakeWebsocket([])
+        await manager.add_client(client_b)
+
+        manager.state_manager.set_wake_word_available.assert_called_once_with(
+            False
+        )

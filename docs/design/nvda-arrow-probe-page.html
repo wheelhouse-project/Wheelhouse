@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WHTEST2 k=none n=0 f=BODY</title>
+<style>
+  body { font-family: Segoe UI, sans-serif; font-size: 18px; padding: 24px; }
+  button { font-size: 20px; padding: 10px 18px; margin: 8px; }
+  #status { margin-top: 20px; font-family: Consolas, monospace; font-size: 16px; }
+</style>
+</head>
+<body>
+<h1>Wheelhouse arrow key and browse mode probe</h1>
+<p>This page writes the last key it received, how many keys it has received,
+   and which element has focus, into its own title.</p>
+
+<button id="focusbtn" onclick="document.getElementById('tb').focus()">Focus Text Field</button>
+
+<p><label for="tb">Text field</label>
+<input id="tb" type="text" size="50" value="the quick brown fox jumps over the lazy dog"></p>
+
+<p id="para">A first paragraph of ordinary text, so browse mode has something to
+   move through.</p>
+<p>A second paragraph of ordinary text.</p>
+<p>A third paragraph of ordinary text.</p>
+
+<div id="status">k=none n=0 f=BODY</div>
+
+<script>
+  var lastKey = 'none', keyCount = 0;
+  function refresh() {
+    var el = document.activeElement;
+    var who = (el && el.id) ? el.id : (el ? el.tagName : 'none');
+    var s = 'k=' + lastKey + ' n=' + keyCount + ' f=' + who;
+    document.title = 'WHTEST2 ' + s;
+    document.getElementById('status').textContent = s;
+  }
+  document.addEventListener('keydown', function (e) {
+    lastKey = e.key.replace(/ /g, '_');
+    keyCount += 1;
+    refresh();
+  }, true);
+  document.addEventListener('focusin', refresh, true);
+  setInterval(refresh, 400);
+</script>
+</body>
+</html>

@@ -9,9 +9,27 @@ import os
 import re
 import shutil
 import tomllib
-from typing import Any
+from collections import Counter
+from typing import Any, Optional
 
+from .pattern_block_text import (
+    PATTERN_HEADER_RE,
+    is_pattern_header,
+    locate_pattern_block,
+)
+from .pattern_buildable import slot_identity
+from .pattern_identity import (
+    DOC_ID_KEY,
+    ORIGIN_KEY,
+    ORIGIN_OWN,
+    Identity,
+    entry_text_candidates,
+    is_valid_doc_id,
+    legacy_candidates,
+    normalized_text_key,
+)
 from .phrase_expression import generate_expression, normalize_phrases
+from .pattern_expression_budget import MAX_EXPRESSION_LENGTH, EXPRESSION_LENGTH_ERROR
 from .pattern_transform import transform_pattern
 from .safe_regex import RegexTimeout, match_bounded
 
@@ -40,6 +58,23 @@ class PatternManager:
         "a" * 30 + "!",
         ("word " * 8).strip() + "!",
         "the quick brown fox jumps over the lazy dog!!",
+        # A digit run, because a numeric capture is widened to a body that
+        # accepts digits and spoken number words and NOTHING else
+        # (wh-number-words-one-parser). The three probes above are letters,
+        # so they now fail that body on the first character and leave a
+        # nested numeric quantifier -- ^(\d+)+$, the shape this probe set
+        # exists to stop -- looking well behaved. The digit run is the
+        # input that still makes it backtrack.
+        #
+        # There is deliberately no spoken-number-word probe beside it.
+        # The exponential blow-up these probes rely on needs a long run
+        # of interchangeable pieces, which is why the letter and digit
+        # probes are thirty characters of one repeated character. The
+        # widened body's word half cannot supply that: a number phrase
+        # is at most five tokens, so a nested quantifier over it splits
+        # a spoken corpus a few hundred ways, not a billion. A word
+        # probe would cost a probe run per save and catch nothing.
+        "1" * 30 + "!",
     )
     _BACKTRACK_ERROR = (
         "This pattern takes too long to match and could freeze Wheelhouse, "
@@ -68,8 +103,77 @@ class PatternManager:
 
     @staticmethod
     def _trigger_key(raw_pattern: str) -> str:
-        """Normalize a pattern string for override comparison (strip+casefold)."""
-        return raw_pattern.strip().casefold()
+        """Normalize a pattern string for TEXT comparison (strip+casefold).
+
+        This is the *expression* key, not the override key. Two blocks with
+        the same key resolve to the same expression, so they would share a
+        SHA-256 row id and the editor could no longer tell them apart -- that
+        is what ``validate_pattern`` and ``_find_user_trigger_collision``
+        reject with it. Which built-in a saved override belongs to is a
+        different question, answered by ``_override_key`` below.
+
+        The normalization itself is not defined here: it comes from
+        ``speech.pattern_identity`` so the collision check and the merge can
+        never drift apart about what "the same text" means.
+        """
+        return normalized_text_key(raw_pattern)
+
+    @staticmethod
+    def _override_key(pat_data: dict[str, Any]) -> Optional[Identity]:
+        """Return what this raw entry overrides, from the one shared rule.
+
+        Delegates to ``speech.pattern_buildable.slot_identity`` and adds
+        nothing, so the manager's ``overrides_builtin`` badge answers exactly
+        the question the runtime merge answers -- including the refusal of
+        an entry whose expression the build would reject, which used to be
+        badged as overriding a built-in that had stopped answering
+        (wh-pattern-override-doc-id.3.4).
+
+        The listing used to hold its own copy of the text key. That made the
+        badge wrong in precisely the case this bead is about: a release
+        rewrote a built-in's regex, the runtime stopped applying the saved
+        override, and the manager stopped showing the badge -- so the window
+        offered no sign that anything had been lost
+        (wh-pattern-override-doc-id).
+        """
+        return slot_identity(pat_data)
+
+    def _claimed_builtin(
+        self,
+        pat_data: dict[str, Any],
+        system_keys: set[Identity],
+        system_candidates: dict[str, list[Identity]],
+    ) -> tuple[Optional[Identity], bool]:
+        """The built-in this user entry replaces, and whether it is ambiguous.
+
+        Returns ``(identity, unresolved)``. The identity is what the entry
+        actually takes the slot of, which is NOT always its own key: a
+        pre-doc_id override carries a text key, and the merge migrates it to
+        the built-in that carries that text when exactly one does. Returning
+        the resolved built-in rather than a yes-or-no is what lets the caller
+        count the rows claiming the SAME built-in.
+
+        ``unresolved`` is the A4 case: more than one built-in carries the
+        text, the merge refuses to pick, and both keep answering. Such a row
+        replaces nothing, so it is neither a claimant nor counted against one.
+
+        This is the badge rule that was already inline in
+        ``get_all_patterns_structured``, moved here unchanged so the count and
+        the badge cannot disagree about what a row claims
+        (wh-pattern-override-doc-id.3.6).
+        """
+        user_key = self._override_key(pat_data)
+        if user_key is not None and user_key in system_keys:
+            return user_key, False
+        # The merge's legacy resolution, asked here so the badge cannot
+        # disagree with what the runtime actually does
+        # (wh-pattern-override-doc-id A4). One candidate is an unambiguous
+        # association the merge migrates; more than one it leaves alone, and
+        # so does the badge.
+        matches = legacy_candidates(pat_data, user_key, system_candidates)
+        if len(matches) == 1:
+            return matches[0], False
+        return None, len(matches) > 1
 
     @staticmethod
     def generate_regex(trigger: str, pattern_type: str) -> str:
@@ -118,15 +222,16 @@ class PatternManager:
         """Compute stable SHA-256 ID from a pattern's regex string."""
         return hashlib.sha256(pattern_string.encode()).hexdigest()
 
-    # A [[pattern]] header as tomllib accepts it: whitespace inside the
-    # brackets and a trailing comment are both valid TOML that hand-edits
-    # produce. The raw-text walks must count exactly what tomllib parses,
-    # or delete/update locate the wrong block (wh-pattern-editor-r8.3).
-    _PATTERN_HEADER_RE = re.compile(r"^\s*\[\[\s*pattern\s*\]\]\s*(?:#.*)?$")
+    # The header expression and the block walk live in
+    # ``speech.pattern_block_text`` so the load-time legacy-id migration
+    # counts blocks exactly as delete and update do
+    # (wh-pattern-override-doc-id.3.1). These two names stay because they
+    # are what this class's own callers and tests use.
+    _PATTERN_HEADER_RE = PATTERN_HEADER_RE
 
     @classmethod
     def _is_pattern_header(cls, line: str) -> bool:
-        return cls._PATTERN_HEADER_RE.match(line) is not None
+        return is_pattern_header(line)
 
     def _located_block_matches(
         self, block_text: str, pattern_id_hex: str,
@@ -191,6 +296,51 @@ class PatternManager:
             phrases.append(candidate)
         return phrases or None
 
+    @classmethod
+    def _save_trigger_key(cls, pattern: str) -> str:
+        """Compare triggers across the editor's two literal serializers.
+
+        The phrase builder wraps even one literal in a noncapturing group;
+        generate_regex does not. Reuse the strict phrase parser and the
+        trigger builder so an action-only simple-mode save does not detach
+        its origin. General regex expressions still compare by text.
+        """
+        phrases = cls._phrases_from_expression(pattern)
+        if phrases is not None and len(phrases) == 1:
+            pattern = cls.generate_regex(
+                phrases[0], "command" if pattern.startswith("^") else "replacement",
+            )
+        return cls._trigger_key(pattern)
+
+    @classmethod
+    def _doc_id_for_save(
+        cls,
+        doc_id: object,
+        pattern: str,
+        system_entries: list[dict[str, Any]],
+        previous_pattern: str | None = None,
+    ) -> str | None:
+        """Keep the origin unless this save moves its trigger away from it.
+
+        Unchanged-trigger edits keep their association across shipped regex
+        rewrites. Missing or ambiguous shipped ids are also left alone:
+        they do not establish an origin to restore safely. Dropping the id
+        changes neither ``origin`` nor any other block; the existing load
+        path resolves the destination, including legacy text associations.
+        The Try-it preview calls this same save decision.
+        """
+        if not is_valid_doc_id(doc_id):
+            return None
+        key = cls._save_trigger_key(pattern)
+        if previous_pattern is not None and key == cls._save_trigger_key(previous_pattern):
+            return doc_id
+        origins = [entry for entry in system_entries if entry.get(DOC_ID_KEY) == doc_id]
+        if len(origins) == 1:
+            original = origins[0].get("pattern")
+            if isinstance(original, str) and key != cls._save_trigger_key(original):
+                return None
+        return doc_id
+
     @staticmethod
     def _format_phrase_display(phrases: list[str]) -> str:
         """One display line for a phrase list: 'a' or 'a (or b, c)'."""
@@ -246,6 +396,8 @@ class PatternManager:
         pat_data: dict[str, Any],
         is_user_created: bool,
         overrides_builtin: bool,
+        unresolved_override: bool = False,
+        other_claimants: int = 0,
     ) -> dict[str, Any]:
         """Build one UI pattern entry from a raw TOML pattern table."""
         raw_pattern: str = pat_data.get("pattern", "")
@@ -260,6 +412,33 @@ class PatternManager:
             "raw_pattern": raw_pattern,
             "raw_actions": raw_actions,
         }
+        # Carry the pattern's durable name so Customize can write it back
+        # (wh-pattern-override-doc-id A2). Reopening a built-in and saving it
+        # produces a user block, and that block keeps its association with the
+        # built-in only if it carries this id. Absent, never None: the dialog
+        # reads the key's presence as "this rule has an identity to keep", the
+        # same contract phrases and whole_utterance_only already follow. A
+        # malformed id is omitted rather than carried -- the merge falls back
+        # to the pattern text for it, so handing it to the dialog would let a
+        # save write back an id nothing merges on.
+        doc_id = pat_data.get(DOC_ID_KEY)
+        if is_valid_doc_id(doc_id):
+            entry[DOC_ID_KEY] = doc_id
+        # An override saved before doc_ids existed whose expression more
+        # than one built-in carries (wh-pattern-override-doc-id A4). It
+        # replaces none of them, so the override badge would lie, and it
+        # is not an ordinary user rule either, because a built-in it may
+        # have been replacing is answering again. Absent, never False, so
+        # the reader tests presence like every other optional key here.
+        if unresolved_override:
+            entry["unresolved_override"] = True
+        # How many OTHER saved rules replace the same built-in. Removing this
+        # one leaves those in place, so the built-in does not come back and
+        # the window must not promise that it will
+        # (wh-pattern-override-doc-id.3.6). Absent, never 0, the same contract
+        # the two keys above follow: the reader tests presence.
+        if other_claimants > 0:
+            entry["other_claimants"] = other_claimants
         # Carry the phrase list to the manager window so the editor dialog
         # can round-trip it (wh-pattern-editor-phrases). Only a non-empty
         # list of strings qualifies; a hand-edited garbage value is omitted,
@@ -301,15 +480,21 @@ class PatternManager:
         Built-in patterns come from the shipped system file and are grouped by
         their category comment headers. User patterns come from the writable
         user file and are grouped under "User Patterns"; each is flagged
-        ``overrides_builtin`` when its trigger matches a built-in. The reported
-        hotword is the user override when set, otherwise the system value.
+        ``overrides_builtin`` when its trigger matches a built-in, and carries
+        ``other_claimants`` when further saved rules replace that same built-in
+        (absent when none do). The reported hotword is the user override when
+        set, otherwise the system value.
 
         Returns a dict with:
             - ``categories``: mapping of category name to ``{"patterns": [...]}``
             - ``hotword``: the effective command hotword string
         """
         categories: dict[str, dict[str, list]] = {}
-        system_keys: set[str] = set()
+        system_keys: set[Identity] = set()
+        # Normalized expression text -> the built-ins carrying it, the
+        # lookup a pre-doc_id override needs; see the merge's own use of
+        # it in PatternCatalog._merge_entries.
+        system_candidates: dict[str, list[Identity]] = {}
         system_hotword = ""
 
         # --- System file (read-only, categorized by comment headers) ---
@@ -319,6 +504,7 @@ class PatternManager:
             data = tomllib.loads(raw_text)
             system_hotword = data.get("COMMAND_HOTWORD", "")
             toml_patterns: list[dict[str, Any]] = data.get("pattern", [])
+            system_candidates = entry_text_candidates(toml_patterns)
 
             lines = raw_text.splitlines()
             category_markers: list[tuple[int, str]] = []
@@ -345,7 +531,9 @@ class PatternManager:
 
             for idx, pat_data in enumerate(toml_patterns):
                 raw_pattern: str = pat_data.get("pattern", "")
-                system_keys.add(self._trigger_key(raw_pattern))
+                system_key = self._override_key(pat_data)
+                if system_key is not None:
+                    system_keys.add(system_key)
 
                 cat = (
                     _category_for_line(pattern_lines[idx])
@@ -399,6 +587,14 @@ class PatternManager:
                 if len(stripped_hw.split()) == 1:
                     effective_hotword = stripped_hw
 
+            # Which built-in each listed user row replaces, resolved BEFORE
+            # any entry is built. Several user rows may replace one built-in,
+            # and this branch keeps them all, so removing one of them does not
+            # bring the built-in back. The dialog can only say that if it is
+            # told how many others there are, and a row cannot know that until
+            # every row has been resolved (wh-pattern-override-doc-id.3.6).
+            claims: list[tuple[dict[str, Any], Optional[Identity], bool]] = []
+            claim_counts: Counter[Identity] = Counter()
             for pat_data in udata.get("pattern", []):
                 # Skip non-table entries so a hand-edited `pattern = [1, 2, 3]`
                 # degrades to listing the valid entries instead of crashing the
@@ -408,13 +604,25 @@ class PatternManager:
                 raw_pattern = pat_data.get("pattern", "")
                 # A valid TOML table can still carry a non-string value
                 # (`pattern = 5`). The catalog skips it, so the manager UI skips
-                # it too instead of crashing on _trigger_key(5) / pattern_id(5)
+                # it too instead of crashing on pattern_id(5)
                 # (wh-user-patterns-split.11.1).
                 if not isinstance(raw_pattern, str):
                     continue
-                overrides = self._trigger_key(raw_pattern) in system_keys
+                claimed, unresolved = self._claimed_builtin(
+                    pat_data, system_keys, system_candidates,
+                )
+                claims.append((pat_data, claimed, unresolved))
+                if claimed is not None:
+                    claim_counts[claimed] += 1
+
+            for pat_data, claimed, unresolved in claims:
                 entry = self._build_entry(
-                    pat_data, is_user_created=True, overrides_builtin=overrides,
+                    pat_data, is_user_created=True,
+                    overrides_builtin=claimed is not None,
+                    unresolved_override=unresolved,
+                    other_claimants=(
+                        claim_counts[claimed] - 1 if claimed is not None else 0
+                    ),
                 )
                 categories.setdefault(
                     "User Patterns", {"patterns": []},
@@ -593,15 +801,17 @@ class PatternManager:
         """Reject expressions that blow up on the adversarial probe corpus.
 
         The probe runs against the TRANSFORMED pattern -- the catalog
-        compiles ``transform_pattern(regex)``, which rewrites numeric
-        ``(\\d+)`` groups to ``(\\w+)``, and the two can behave completely
-        differently: raw ``^(\\d+)+$`` fails the corpus instantly while
-        the transformed ``^(\\w+)+$`` backtracks catastrophically.
+        compiles ``transform_pattern(regex)``, which rewrites a numeric
+        ``(\\d+)`` group to the spoken-count body (digits or a number
+        phrase; it was ``(\\w+)`` before wh-number-words-one-parser), and
+        the two can behave completely differently: raw ``^(\\d+)+$``
+        fails a letters-only corpus instantly while its transformed form
+        backtracks catastrophically on a digit run.
         Probing the raw expression would let that save through and the
         runaway pattern into the live catalog on reload
         (wh-pattern-editor-r4.1).
 
-        Each probe runs in the safe_regex worker with the default 0.25s
+        Each probe runs in the safe_regex worker with the default 1s
         budget, fullmatch for '^'-anchored expressions and search otherwise
         (the runtime's anchor-driven strategy split), compiled IGNORECASE
         like the catalog compiles patterns. Returns the standard error
@@ -730,6 +940,8 @@ class PatternManager:
         """
         if not isinstance(expression, str) or not expression.strip():
             raise ValueError("Expression cannot be empty")
+        if len(expression) > MAX_EXPRESSION_LENGTH:
+            raise ValueError(EXPRESSION_LENGTH_ERROR)
         if "'''" in expression or "\n" in expression or "\r" in expression:
             # The block writer stores the expression in a TOML literal
             # multi-line-incapable string; refuse up front with a clear
@@ -912,6 +1124,8 @@ class PatternManager:
         explicit_type: str | None = None,
         position: str | None = None,
         whole_utterance_only: bool = False,
+        doc_id: str | None = None,
+        own_rule: bool = False,
     ) -> list[str]:
         """Render one ``[[pattern]]`` block as a list of lines.
 
@@ -928,12 +1142,46 @@ class PatternManager:
         regular one (wh-pattern-editor-r3.1). ``whole_utterance_only``
         is the punctuation-alias safety flag, carried the same way so a
         Customize/edit does not turn an alias into an eager command
-        (wh-int8-punctuation-mishears.1.1).
+        (wh-int8-punctuation-mishears.1.1). ``doc_id`` is the built-in's
+        durable name, written so a customised copy keeps its association
+        with the built-in when a later release rewrites the built-in's
+        expression -- without it the block is identified by that
+        expression alone, which is the association this bead removes
+        (wh-pattern-override-doc-id A2). ``own_rule`` writes
+        ``origin = "user"``, which says the block is a rule the person
+        created rather than a customization saved before ids existed, so
+        the merge never hands it a built-in by expression text
+        (wh-pattern-override-doc-id.3.3). ``create_pattern`` always sets
+        it. ``update_pattern`` sets it only when the block on disk already
+        carried it: adding it to an older customization would tell the
+        merge that rule never replaced anything, and the person's
+        customization would stop working the moment they edited it.
+
+        The block also carries ``source = "pattern_manager"``, which is a
+        different statement -- which program wrote the block -- and has
+        been written since 2026-03-16, so a customization saved before ids
+        existed carries it too and it cannot do ``own_rule``'s job.
+
+        Only a well-formed id is accepted. The callers validate and
+        return a user-readable error; the check here is the last line of
+        defence for a caller that forgets, and it raises rather than
+        dropping the value silently -- a block written without the id it
+        was asked to carry is the orphaned override this bead is about.
         """
+        if doc_id is not None and not is_valid_doc_id(doc_id):
+            raise ValueError(
+                f"malformed doc_id reached the block writer: {doc_id!r}"
+            )
         lines = [
             "[[pattern]]",
             f"pattern = '''{regex}'''",
         ]
+        if doc_id is not None:
+            lines.append(f"doc_id = {cls._format_toml_value(doc_id)}")
+        if own_rule:
+            lines.append(
+                f"{ORIGIN_KEY} = {cls._format_toml_value(ORIGIN_OWN)}"
+            )
         if phrases:
             lines.append(f"phrases = {cls._format_toml_value(list(phrases))}")
         if explicit_type:
@@ -960,6 +1208,7 @@ class PatternManager:
         actions: list[dict] | None = None,
         position: str | None = None,
         whole_utterance_only: bool = False,
+        doc_id: Any = None,
     ) -> dict[str, Any]:
         """Create a new pattern in the writable user file.
 
@@ -979,12 +1228,33 @@ class PatternManager:
         non-None ``actions`` list of ``{function, params}`` steps is written
         verbatim instead of generating from ``action_type``/``action_params``.
 
+        ``doc_id`` is the durable name of the built-in this rule replaces.
+        Customize passes the built-in's id so the copy keeps the
+        association when a later release rewrites the built-in's
+        expression; Duplicate passes nothing, because a duplicate is a
+        rule of its own and two rules claiming one built-in would fight
+        over it with the file order deciding (wh-pattern-override-doc-id
+        A2). Typed ``Any`` because it arrives over IPC from the editor:
+        a malformed or wrong-typed value is refused with a user-readable
+        error rather than written, since the merge would fall back to the
+        pattern text for it and the id would sit in the file meaning
+        nothing.
+
         Returns:
             ``{"success": True, "pattern_id": hash}`` on success,
             ``{"success": False, "error": message}`` on failure.
         """
         if not self.user_patterns_file:
             return {"success": False, "error": self._NO_USER_FILE_ERROR}
+        if doc_id is not None and not is_valid_doc_id(doc_id):
+            return {
+                "success": False,
+                "error": (
+                    f"Invalid doc_id {doc_id!r}: a pattern's durable name "
+                    f"is lowercase letters and digits in hyphen-separated "
+                    f"groups"
+                ),
+            }
         try:
             # Resolve regex and actions from the simple or raw shape
             regex, stored_phrases, action_steps, explicit_type = (
@@ -1051,6 +1321,16 @@ class PatternManager:
                 whole_utterance_only=(
                     whole_utterance_only is True and regex.startswith("^")
                 ),
+                doc_id=self._doc_id_for_save(
+                    doc_id, regex, self._load_pattern_dicts(self.patterns_file),
+                ),
+                # Every block this method writes is one the person just
+                # created, whichever button they pressed. Duplicate is the
+                # case that needs it: without the key the merge reads a
+                # missing doc_id as "saved before ids existed" and hands
+                # the duplicate the built-in whose words it copied
+                # (wh-pattern-override-doc-id.3.3).
+                own_rule=True,
             )
             block = "\n" + "\n".join(block_lines) + "\n"
 
@@ -1142,33 +1422,15 @@ class PatternManager:
                 }
 
             # Remove the target_index-th [[pattern]] block from the raw text by
-            # counting headers, not by matching the pattern string.
+            # counting headers, not by matching the pattern string. Same
+            # shared walk as update_pattern and the load-time legacy-id
+            # migration; delete then consumes the blank lines that trail the
+            # block, so removing one does not leave a growing gap.
             lines = content.splitlines(keepends=True)
-            block_start: int | None = None
-            block_end: int | None = None
-
-            header_count = -1
-            i = 0
-            while i < len(lines):
-                if self._is_pattern_header(lines[i]):
-                    header_count += 1
-                    if header_count == target_index:
-                        block_start = i
-                        j = i + 1
-                        while j < len(lines):
-                            s = lines[j].strip()
-                            if self._is_pattern_header(lines[j]) or (
-                                s.startswith("#") and "=====" in s
-                            ):
-                                break
-                            j += 1
-                        block_end = j
-                        # Also consume any blank lines between this block and
-                        # the next content.
-                        while block_end < len(lines) and lines[block_end].strip() == "":
-                            block_end += 1
-                        break
-                i += 1
+            block_start, block_end = locate_pattern_block(lines, target_index)
+            if block_end is not None:
+                while block_end < len(lines) and lines[block_end].strip() == "":
+                    block_end += 1
 
             if block_start is None or not self._located_block_matches(
                 "".join(lines[block_start:block_end]), pattern_id_hex,
@@ -1313,31 +1575,12 @@ class PatternManager:
                 return probe_error
 
             # Locate the target_index-th [[pattern]] block in the raw text by
-            # counting headers (same walk as delete_pattern).
+            # counting headers (the shared walk delete_pattern and the
+            # load-time legacy-id migration also use).
             lines = content.splitlines(keepends=True)
-            block_start: int | None = None
-            block_end: int | None = None
+            block_start, block_end = locate_pattern_block(lines, target_index)
 
-            header_count = -1
-            i = 0
-            while i < len(lines):
-                if self._is_pattern_header(lines[i]):
-                    header_count += 1
-                    if header_count == target_index:
-                        block_start = i
-                        j = i + 1
-                        while j < len(lines):
-                            s = lines[j].strip()
-                            if self._is_pattern_header(lines[j]) or (
-                                s.startswith("#") and "=====" in s
-                            ):
-                                break
-                            j += 1
-                        block_end = j
-                        break
-                i += 1
-
-            if block_start is None:
+            if block_start is None or block_end is None:
                 return {
                     "success": False,
                     "error": "Could not locate pattern block in file text",
@@ -1374,6 +1617,19 @@ class PatternManager:
             original_whole_utterance = toml_patterns[target_index].get(
                 "whole_utterance_only"
             )
+            # The stored id, never a draft-supplied id, names the origin.
+            # A trigger move can drop it; an unchanged-trigger edit keeps
+            # it even after a release rewrites the shipped expression.
+            original_doc_id = toml_patterns[target_index].get(DOC_ID_KEY)
+            # Preserved, never added. A customization saved before ids
+            # existed carries neither key, and it still needs the merge to
+            # find its built-in by expression text. Writing the key here
+            # would say that rule never replaced anything, so an ordinary
+            # edit would take the person's customization away
+            # (wh-pattern-override-doc-id.3.3). A hand-written value other
+            # than the one the editor writes is dropped rather than
+            # rewritten, the same treatment position and doc_id get.
+            original_origin = toml_patterns[target_index].get(ORIGIN_KEY)
             block_lines = self._build_block_lines(
                 regex, action_steps, data.get("requires_hotword", False),
                 stored_phrases, explicit_type,
@@ -1385,6 +1641,12 @@ class PatternManager:
                     original_whole_utterance is True
                     and regex.startswith("^")
                 ),
+                doc_id=self._doc_id_for_save(
+                    original_doc_id, regex,
+                    self._load_pattern_dicts(self.patterns_file),
+                    toml_patterns[target_index]["pattern"],
+                ),
+                own_rule=original_origin == ORIGIN_OWN,
             )
             block = "\n".join(block_lines) + "\n"
 

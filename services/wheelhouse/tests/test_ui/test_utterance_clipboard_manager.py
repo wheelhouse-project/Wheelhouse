@@ -345,10 +345,43 @@ class TestSkipRestore:
         mgr.clear_skip_flag()
         assert mgr._skip_restore is False
 
-    def test_skip_clipboard_restore_sets_flag(self):
+    def test_skip_clipboard_restore_sets_flag(self, mock_deps):
         mgr = _make_manager()
+        mgr.start_utterance(100)
         mgr.skip_clipboard_restore()
         assert mgr._skip_restore is True
+
+    def test_skip_with_no_active_utterance_is_refused(self):
+        """A skip that arrives with no active utterance must not persist.
+
+        wh-overlay-slow-uia-stale-badges.14.15: a late-delivered
+        skip_clipboard_restore used to set the unscoped flag after its
+        utterance had already ended (safety timeout, lifecycle failure),
+        and the NEXT utterance then silently kept WheelHouse's clipboard
+        write instead of restoring the user's.
+        """
+        mgr = _make_manager()
+        mgr.skip_clipboard_restore()
+        assert mgr._skip_restore is False
+
+    def test_late_skip_does_not_leak_into_next_utterance(self, mock_deps):
+        """A skip delivered after its utterance ended must not affect the next one."""
+        mock_pp, _, _ = mock_deps
+        mock_pp.paste.return_value = "original clipboard"
+
+        mgr = _make_manager()
+        mgr.start_utterance(100)
+        mgr.end_utterance(100)
+        # The copy utterance's skip request arrives only now (late delivery).
+        mgr.skip_clipboard_restore()
+
+        mgr.start_utterance(101)
+        mgr.mark_clipboard_dirty()
+        mgr.end_utterance(101)
+        mgr.fire_pending_restore_now()
+
+        mock_pp.copy.assert_called_with("original clipboard")
+        assert mgr._skip_restore is False
 
     def test_skip_flag_resets_state_fully(self, mock_deps):
         mgr = _make_manager()

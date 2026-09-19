@@ -81,6 +81,43 @@ def _update_data(trigger, action_type="hotkey", action_params=None,
 class TestUpdatePattern:
     """update_pattern rewrites one user block in place."""
 
+    def test_raw_expression_length_budget_create_rejected(self, system_file, user_file):
+        pm = PatternManager(system_file, user_file)
+        result = pm.create_pattern(
+            expression="^" + "a" * 499 + "$", pattern_type="command",
+            actions=[{"function": "hk", "params": ["ctrl", "d"]}],
+        )
+        assert result["success"] is False
+        assert "500 characters" in result["error"]
+        assert not os.path.exists(user_file)
+
+    @pytest.mark.parametrize("size", [500, 501])
+    def test_raw_expression_length_budget(self, system_file, user_file, size):
+        expression = "^" + "a" * (size - 2) + "$"
+        if size == 501:
+            with pytest.raises(ValueError, match="500 characters"):
+                PatternManager._resolve_raw_expression(expression, "command")
+        else:
+            try:
+                resolved = PatternManager._resolve_raw_expression(expression, "command")
+            except ValueError as exc:
+                resolved = exc
+            assert resolved == expression
+        pm = PatternManager(system_file, user_file)
+        created = pm.create_pattern(**_update_data("original"))
+        before = open(user_file, encoding="utf-8").read()
+        result = pm.update_pattern(created["pattern_id"], {
+            "expression": expression, "pattern_type": "command",
+            "actions": [{"function": "hk", "params": ["ctrl", "d"]}],
+        })
+        assert result["success"] is (size == 500)
+        after = open(user_file, encoding="utf-8").read()
+        if size == 501:
+            assert "500 characters" in result["error"]
+            assert after == before
+        else:
+            assert tomllib.loads(after)["pattern"][0]["pattern"] == expression
+
     def test_round_trip_create_update_reload(self, system_file, user_file):
         pm = PatternManager(system_file, user_file)
         created = pm.create_pattern(

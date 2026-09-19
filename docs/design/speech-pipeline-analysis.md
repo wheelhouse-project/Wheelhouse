@@ -180,7 +180,6 @@ The WebSocket is bidirectional. WheelHouse sends control messages back to provid
 | `set_transcription_status` | Enable/disable transcription (with reason: "audio", "sonos", "idle") |
 | `add_hint` | Add a word to the recognition vocabulary |
 | `restart_service` | Reload configuration without restarting process |
-| `hard_restart_service` | Exit process (launcher restarts it) |
 | `set_interim_results` | Toggle stable message delivery |
 | `set_log_level` | Change provider logging verbosity |
 | `shutdown` | Graceful process exit |
@@ -642,10 +641,6 @@ last_provider = "google_stt"    # Persisted after runtime switch
 
 [stt.google]
 boost_words = []                # Phrase bias list for recognition
-
-[stt.azure]
-subscription_key = ""           # Azure Cognitive Services key
-region = "eastus"
 ```
 
 ### 8.3 Local STT Provider (`stt_providers/vulkan_small/config.toml`)

@@ -255,8 +255,22 @@ class TestFinalMessageFlow:
         for _ in range(17):
             processor.process_chunk(make_pcm_silence(30))
 
-        # Final should have been sent
-        mock_forwarder.send_final.assert_called_once_with("delete", 0, trace_id=ANY)
+        # Final should have been sent, carrying the wh-7ou.7.1.1 measurement
+        # block (attached to every Whisper final; make_mock_segment defaults:
+        # avg_logprob -0.2, no_speech_prob 0.01, words=None).
+        mock_forwarder.send_final.assert_called_once_with(
+            "delete",
+            0,
+            trace_id=ANY,
+            confidence={
+                "min_word_probability": None,
+                "max_no_speech_prob": 0.01,
+                "peak_avg_logprob": -0.2,
+                "word_count": 1,
+                "suppressed": False,
+                "rescued": False,
+            },
+        )
 
     @patch("shared_stt.whisper_engine.WhisperModel")
     def test_reset_after_final(self, mock_model_class, mock_forwarder):

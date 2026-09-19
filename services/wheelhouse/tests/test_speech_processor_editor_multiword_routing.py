@@ -68,14 +68,6 @@ class _MockApp:
         return {"status": "success"}
 
 
-class _MockContextMirror:
-    def init_reader(self) -> None:
-        return None
-
-    def read_context(self) -> dict:
-        return {"app_name": "Term", "window_title": "T", "timestamp": 0.0}
-
-
 class _ScriptedPolicy:
     """Policy stub that returns scripted ``should_redirect`` decisions.
 
@@ -132,7 +124,6 @@ def _build_processor(
         focus_redirect_policy=policy,
         focused_hwnd_provider=lambda: 0x1234,
     )
-    proc.context_mirror = _MockContextMirror()
     return proc, app, logic_controller, policy
 
 

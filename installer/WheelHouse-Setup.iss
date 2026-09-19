@@ -698,13 +698,33 @@ begin
     RunEngine;
 end;
 
+procedure UninstallEngineLog(const S: String; const Error, FirstLine: Boolean);
+var
+  msg: string;
+begin
+  { The install callback touches WizardForm, which does not exist during
+    uninstall. Keep the same notice collector without the install controls. }
+  Log('uninstall engine: ' + S);
+  if Error then begin
+    AddNotice('The removal helper output could not be read. Some removal notes '
+      + 'may be missing. Check WHEELHOUSE_AI_API_KEY in Windows Environment '
+      + 'Variables if you chose to remove everything, and sign out of Windows '
+      + 'before using a reinstalled copy.', EngineNotices, EngineNoticesDropped);
+    Exit;
+  end;
+  if TagPayload(Trim(S), 'NOTICE', msg) then
+    AddNotice(msg, EngineNotices, EngineNoticesDropped);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  Params, enginePath: string;
+  Params, enginePath, noticeText: string;
   ResultCode, answer: Integer;
   execOk: Boolean;
 begin
   if CurUninstallStep = usUninstall then begin
+    EngineNotices := '';
+    EngineNoticesDropped := 0;
     enginePath := ExpandConstant('{app}\' + ENGINE);
     if not FileExists(enginePath) then begin
       // The removal helper is gone (a user hand-deleted it, or an antivirus
@@ -727,11 +747,11 @@ begin
         mbConfirmation, MB_YESNO);
       // -Force skips the engine's interactive confirmation; the wizard cannot
       // answer it. -KeepData preserves personal data when the user asked.
-      Params := '-NoProfile -ExecutionPolicy Bypass -File "' + enginePath + '" -Uninstall -Force';
+      Params := '-NoProfile -ExecutionPolicy Bypass -File "' + enginePath + '" -Uninstall -Force -TaggedOutput';
       if answer = IDYES then
         Params := Params + ' -KeepData';
-      execOk := Exec(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
-        Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      execOk := ExecAndLogOutput(ExpandConstant('{sysnative}\WindowsPowerShell\v1.0\powershell.exe'),
+        Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode, @UninstallEngineLog);
       // If the engine could not finish (commonly: Wheelhouse is still running, so
       // its verified-stopped check throws and it exits non-zero), abort the
       // uninstall. usUninstall runs BEFORE Inno deletes the files and the Add/Remove
@@ -747,5 +767,12 @@ begin
           + 'Close Wheelhouse and try the uninstall again.');
       end;
     end;
+  end;
+  if CurUninstallStep = usPostUninstall then begin
+    { Inno has now removed its own files and registration too. A quiet removal
+      has no extra dialog, including KeepData with nothing to report. }
+    noticeText := NoticeBlockText(EngineNotices, EngineNoticesDropped, '');
+    if noticeText <> '' then
+      MsgBox(noticeText, mbInformation, MB_OK);
   end;
 end;

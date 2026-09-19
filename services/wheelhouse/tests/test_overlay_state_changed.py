@@ -81,11 +81,21 @@ def test_defaults():
 
 
 def test_all_allowed_states_round_trip():
-    for state in ("painted", "failed", "cleared"):
+    for state in ("painted", "failed", "cleared", "expired"):
         evt = OverlayStateChangedEvent(
             state=state, overlay_session_id=1, paint_generation=1
         )
         assert OverlayStateChangedEvent.from_dict(evt.to_dict()) == evt
+
+
+def test_expired_state_round_trips():
+    # wh-overlay-slow-uia-stale-badges.9: "expired" is the GUI's report that
+    # its badge lease ran out and it tore the windows down itself. It is a
+    # distinct wire value from "cleared" because a late cleared ack is
+    # legitimate bookkeeping while expired at the live pair is a fault.
+    payload = _payload(state="expired")
+    restored = OverlayStateChangedEvent.from_dict(payload)
+    assert restored.state == "expired"
 
 
 def test_monitor_ids_normalizes_from_tuple_payload():

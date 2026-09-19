@@ -183,3 +183,110 @@ class TestCapitalizationAfterNewline:
         assert "World" not in result, (
             f"Mid-sentence word must not be capitalized, got {result!r}"
         )
+
+
+class TestBackslashTextIsNotEscapeDecoded:
+    """wh-insert-text-backslash-escape: a backslash in the inserted text
+    is a literal backslash.
+
+    TextPerfector used to look for the two-character sequences \\n, \\t
+    and \\r in the insertion string and replace each one with the
+    control character it names. The run_capture action feeds Windows
+    paths into insert_text, so the path C:\\Windows\\System32\\notepad.exe
+    was split into two lines at the backslash before 'notepad'. The
+    escape table and its detector are removed; a backslash now reaches
+    the target unchanged, and text that starts with a backslash gets the
+    same spacing and case treatment as any other text.
+    """
+
+    def test_windows_path_with_backslash_n_survives(self, perfector):
+        path = "C:\\Windows\\System32\\notepad.exe"
+        result = perfector.perfected_string(
+            insertion_string=path,
+            preceding_chars="",
+            has_selection=False,
+        )
+        assert result == path, (
+            f"Expected the path to survive unchanged, got {result!r}"
+        )
+        assert "\n" not in result, (
+            f"A real newline appeared in the path: {result!r}"
+        )
+
+    def test_windows_path_with_backslash_t_survives(self, perfector):
+        path = "C:\\temp\\output.log"
+        result = perfector.perfected_string(
+            insertion_string=path,
+            preceding_chars="",
+            has_selection=False,
+        )
+        assert result == path, (
+            f"Expected the path to survive unchanged, got {result!r}"
+        )
+        assert "\t" not in result, (
+            f"A real tab appeared in the path: {result!r}"
+        )
+
+    def test_windows_path_with_backslash_r_survives(self, perfector):
+        path = "C:\\Users\\Public\\reports\\q3.csv"
+        result = perfector.perfected_string(
+            insertion_string=path,
+            preceding_chars="",
+            has_selection=False,
+        )
+        assert result == path, (
+            f"Expected the path to survive unchanged, got {result!r}"
+        )
+        assert "\r" not in result, (
+            f"A real carriage return appeared in the path: {result!r}"
+        )
+
+    def test_double_backslash_survives(self, perfector):
+        unc = "\\\\server\\share\\file.txt"
+        result = perfector.perfected_string(
+            insertion_string=unc,
+            preceding_chars="",
+            has_selection=False,
+        )
+        assert result == unc, (
+            f"Expected the UNC path to survive unchanged, got {result!r}"
+        )
+
+    def test_leading_backslash_text_gets_spacing_treatment(self, perfector):
+        """Text that starts with a backslash must still receive the
+        normal leading space after a word. The old detector treated a
+        leading backslash as a reason to skip all spacing work."""
+        result = perfector.perfected_string(
+            insertion_string="\\section",
+            preceding_chars="hello",
+            has_selection=False,
+        )
+        assert result == " \\section", (
+            f"Expected a leading space before the backslash text, got {result!r}"
+        )
+
+    def test_leading_backslash_text_gets_case_treatment(self, perfector):
+        """The acronym-case repair is part of the normal treatment that
+        the old detector skipped for any text starting with a
+        backslash."""
+        result = perfector.perfected_string(
+            insertion_string="\\path gPU",
+            preceding_chars="",
+            has_selection=False,
+        )
+        assert result == "\\path GPU", (
+            f"Expected the acronym repair to run, got {result!r}"
+        )
+
+    def test_newline_in_preceding_chars_still_suppresses_space(self, perfector):
+        """Regression guard: removing the escape table must not disturb
+        the real-newline case. A newline before the insertion point still
+        suppresses the leading space."""
+        result = perfector.perfected_string(
+            insertion_string="hello",
+            preceding_chars="prior text\n",
+            has_selection=False,
+        )
+        assert not result.startswith(" "), (
+            f"Expected no leading space after a real newline, got {result!r}"
+        )

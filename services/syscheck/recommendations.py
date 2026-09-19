@@ -186,23 +186,29 @@ def get_stt_recommendation(syscheck: dict) -> dict:
         })
 
     # CPU provider: Parakeet-TDT v3 via sherpa-ONNX. AVX2 still gated because
-    # quantized sherpa kernels lean heavily on it; AVX2-less systems fall
-    # through to cloud per test_cpu_without_avx2_recommends_cloud.
+    # sherpa's CPU kernels lean heavily on it; AVX2-less systems fall
+    # through to cloud per test_cpu_without_avx2_recommends_cloud. The gate
+    # itself is unchanged by the 2026-09-07 move to the full-precision model
+    # (wh-parakeet-fp32-shipped-model): nothing has measured what that model
+    # does on an AVX2-less processor, so the conservative gate stands.
     if has_avx2 and total_ram >= RAM_8GB:
         options.append({
+            # 2,549,800,429 bytes over five files, the set
+            # install-wheelhouse.ps1 pins for Parakeet TDT 0.6b v3 at full
+            # precision. It was 600 while the shipped model was int8.
             "id": "sherpa_offline_parakeet_stt_server",
             "name": "Parakeet TDT (CPU)",
             "variant": "cpu",
             "pros": ["Best open-source English WER", "No GPU needed"],
-            "cons": ["~600MB download", "Higher latency than GPU"],
-            "size_mb": 600,
+            "cons": ["~2.5GB download", "Higher latency than GPU"],
+            "size_mb": 2550,
             "suitable": True,
         })
 
     if not has_avx2:
         warnings.append(
-            "AVX2 not detected - local CPU inference (int8 quantization) "
-            "will be very slow. Cloud STT recommended."
+            "AVX2 not detected - local CPU inference will be very slow. "
+            "Cloud STT recommended."
         )
 
     # Cloud fallback: always available

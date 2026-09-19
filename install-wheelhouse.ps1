@@ -103,25 +103,93 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.7"
+$AppVersion = "1.0.8"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
-# Parakeet TDT 0.6b v3 int8 -- the default offline STT model. URL + SHA256
-# verified against the upstream GitHub release asset digest (2026-07-11).
-$ModelUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
-$ModelSha256 = "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf"
-$ModelDirName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
+# Parakeet TDT 0.6b v3 at FULL PRECISION -- the default offline STT model.
+# It replaced the int8 build on 2026-09-07 by the project owner's decision.
+#
+# Five loose files, not one archive, because no full-precision archive
+# exists to download: upstream k2-fsa/sherpa-onnx publishes only the int8
+# and the v2 fp16 tarballs on its asr-models release, and Wheelhouse cannot
+# host one itself either -- a GitHub release asset stops at 2 GiB and
+# encoder.weights alone is 2.32 GiB. So the model comes from the Hugging
+# Face repository that carries it, pinned to one commit, with a SHA-256 per
+# file. $ModelUrl is the resolve base for that commit; each file's own URL
+# is $ModelUrl plus its name.
+#
+# Every digest below was read from the Hugging Face tree API at this commit
+# (the lfs.oid field, which is the file's SHA-256) and confirmed by hashing
+# a local copy of the same five files. tokens.txt is not stored in LFS, so
+# its listed oid is a git blob SHA-1, not a SHA-256; that one digest was
+# measured by downloading the file and hashing it.
+$ModelUrl = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3/resolve/1a468a35cbba69418f126de829e75261dea4a4e4"
+$ModelDirName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3"
+$ModelFiles = @(
+    @{ Name = "encoder.onnx"; Sha256 = "3eed7ce424bf8339ad09233533c687e2dbd07e74ccf5027b5e7344019ea373b0" },
+    # The encoder's parameters, kept outside encoder.onnx as ONNX external
+    # data. encoder.onnx is only the 41 MB graph that points at this file.
+    @{ Name = "encoder.weights"; Sha256 = "3af3f51af5f2d01dbbf5af47d42c7962a2c205f11004254bb4f2b979862f39a8" },
+    @{ Name = "decoder.onnx"; Sha256 = "d593cdb0e571f5a457ec2219af9968cbf6b0e8198e8f7839b40a8754593bf68c" },
+    @{ Name = "joiner.onnx"; Sha256 = "b9b0bcf88ac571902e69a6536223ed2d94885e981b85045410f1403d53121a63" },
+    @{ Name = "tokens.txt"; Sha256 = "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d" }
+)
+
+# The directory name the PREVIOUS release used. Every glob in
+# Remove-ModelResidue is built from $ModelDirName, so renaming the model
+# ends the sweep of everything the old name left behind: the old names
+# carry "-int8" where the new ones stop at "v3", and no new glob can match
+# them. Without this constant an upgrading machine keeps the 465 MB
+# archive, the 640 MB installed model tree, the per-run download working
+# files, and a crashed run's extraction tree forever -- including the
+# machines the old cleanup told "it will be removed on the next run".
+# The INSTALLED tree is swept too since 2026-09-07 (QUESTIONS item 96),
+# and only once the new model is verified in place. The earlier rule that
+# kept it for a hand-written stt_model_overrides.toml entry was reversed
+# by David the same day.
+# crewcut: this is a bridge for one release. Remove it, and the three
+# places in Remove-ModelResidue that read it, once no supported machine
+# can still be carrying 1.0.6 leftovers. Renaming the model again means
+# setting this to the name being replaced, not adding a third.
+$PreviousModelDirName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 
 # Hardware floor for the default Parakeet CPU tier. The RAM floor is a hard
 # stop (the model plus the app cannot run usefully below it); the CPU floor
 # only warns, because it is extrapolated from a fast development machine and
 # has never been validated on a genuinely slow core -- hard-stopping on an
 # unvalidated heuristic would be the worse failure for this audience.
+#
+# The RAM floor kept its 2026-07-11 value when the shipped model changed to
+# full precision on 2026-09-07, and this is the measurement behind that
+# decision, taken at branch sha 3f0b6827. The provider was started once from
+# a local copy of the parakeet-tdt-0.6b-v3 model on the CPU provider, and its
+# peak working set was 2,369,888,256 bytes (2.21 GiB), reached within four
+# seconds of the recognizer load and flat afterwards. Three caveats, all of
+# them load the number down rather than up: the measuring machine had no
+# audio output device, so audio capture never started and NO inference
+# memory is in that figure; it is a CPU run; and no int8 measurement was
+# ever recorded, so there is no earlier footprint to compare it against.
+# The judgement that keeps 7.5 GB is an allowance of 3.5 GB for Windows and
+# Wheelhouse's own three other processes, plus the measured 2.37 GB, plus
+# 1.5 GB left free for the user's own work: 7.37 GB, just under this floor.
+# Raising the floor would refuse machines that install today, so it stays.
 $RamFloorBytes = 75 * 100MB      # nominal 8 GB, measured physical is less
 $RamRecommendedBytes = 15 * 1GB  # nominal 16 GB
 $CpuWarnCores = 4
-$DiskFloorBytes = 10GB           # app + venvs + model archive + extraction
+# The disk floor's derivation, in binary megabytes, measured on Ikon at
+# branch sha e352eeed: the service virtual environments are at most
+# 1,584 MB, the source tree 25 MB, and the full-precision model 2,432 MB,
+# so a finished install occupies 4,041 MB. A clean install PEAKS higher,
+# because Copy-ModelFiles copies rather than moves and the 2,432 MB of
+# downloaded files are still there while the model tree is built:
+# 6,473 MB. An UPGRADE peaks higher again, because the previous release's
+# 640 MB installed tree and its 465 MB archive are removed only after the
+# new model is verified: 7,578 MB. The 10,240 MB floor clears that worst
+# case by 2,662 MB. The 640 MB came from a copy that also holds test_wavs,
+# so it is an upper bound and the upgrade peak is one too -- the safe
+# direction for a floor.
+$DiskFloorBytes = 10GB           # app + venvs + model download + staged copy
 
 # NVIDIA PCI vendor id, for the CUDA provider offer.
 $NvidiaVendorId = 4318
@@ -1510,10 +1578,10 @@ function Select-SttProvider {
 function Get-ModelFileState {
     param([string]$Path)
     # A required model entry counts only as a regular file with at least one
-    # byte. Existence alone is not proof: opening an archive member creates
-    # its filename before any bytes are written, so a disk-full or killed
-    # extraction can leave a required name present and empty, and antivirus
-    # can do the same after the fact. Three answers, because 'the entry is
+    # byte. Existence alone is not proof: a file's name appears before any
+    # bytes are written to it, so a disk-full or killed copy can leave a
+    # required name present and empty, and antivirus can do the same after
+    # the fact. Three answers, because 'the entry is
     # proven unusable' ('bad': absent, empty, or a directory) and 'the
     # entry could not be READ' ('unreadable': access denied, a filter
     # driver holding it, a transient I/O failure) must not collapse into
@@ -1532,12 +1600,16 @@ function Get-ModelFileState {
 
 function Get-ModelState {
     param([string]$ModelDir)
-    # Mirrors sherpa_engine.py's required-file check: tokens.txt plus the
-    # encoder/decoder/joiner trio in either int8 or full-precision naming.
-    # tokens.txt alone is NOT proof of a finished extraction -- an
-    # interrupted extraction can leave it behind without the much larger
-    # ONNX files, and the app then fails at startup with nothing to repair
-    # it. Returns 'complete', 'incomplete' (every gap is a PROVEN bad
+    # Follows sherpa_engine.py's required-file check -- tokens.txt plus the
+    # encoder/decoder/joiner trio in either int8 or full-precision naming --
+    # and adds encoder.weights to the full-precision set, which the engine
+    # does not check because it only chdirs when the file is there and lets
+    # onnxruntime report the loss. This side of it has to be stricter: what
+    # it calls complete is what gets promoted and kept.
+    # tokens.txt alone is NOT proof of a finished install -- an interrupted
+    # one can leave it behind without the much larger ONNX files, and the
+    # app then fails at startup with nothing to repair it.
+    # Returns 'complete', 'incomplete' (every gap is a PROVEN bad
     # entry), or 'unreadable' (at least one required entry could not be
     # read, so incompleteness is not proven). Only 'incomplete' ever
     # authorizes deleting a tree.
@@ -1546,9 +1618,21 @@ function Get-ModelState {
     if ($tokens -eq 'unreadable') { $sawUnreadable = $true }
     if ($tokens -eq 'ok') {
         foreach ($suffix in @(".int8.onnx", ".onnx")) {
+            $required = @("encoder$suffix", "decoder$suffix", "joiner$suffix")
+            if ($suffix -eq ".onnx") {
+                # The full-precision build keeps the encoder's parameters
+                # outside the graph as ONNX external data, so encoder.onnx
+                # is a 41 MB file that is useless on its own and the load
+                # fails deep inside onnxruntime. Without this entry a tree
+                # holding the four small files reads as complete, gets
+                # promoted, and cannot be repaired by re-running the
+                # installer. The int8 build has no external data, which is
+                # why its branch above must NOT require the file.
+                $required += "encoder.weights"
+            }
             $allPresent = $true
-            foreach ($part in @("encoder", "decoder", "joiner")) {
-                $state = Get-ModelFileState -Path (Join-Path $ModelDir "$part$suffix")
+            foreach ($name in $required) {
+                $state = Get-ModelFileState -Path (Join-Path $ModelDir $name)
                 if ($state -eq 'unreadable') { $sawUnreadable = $true }
                 if ($state -ne 'ok') {
                     $allPresent = $false
@@ -1570,36 +1654,57 @@ function Test-ModelComplete {
     return ((Get-ModelState -ModelDir $ModelDir) -eq 'complete')
 }
 
-function Expand-ModelArchive {
-    param([string]$Python, [string]$Archive, [string]$Destination)
-    # NOT tar.exe: Windows 10's bundled bsdtar (libarchive 3.3.2) is built
-    # with zlib only -- no bz2lib -- so it cannot decompress this .tar.bz2
-    # and exits 1 instantly on an otherwise healthy machine (observed on
-    # build 19045; Windows 11's build does link bz2lib, which is why the
-    # failure never showed in testing). The app venv's Python is guaranteed
-    # by the earlier fatal uv sync, and its tarfile module decompresses
-    # bzip2 on every supported Windows build. filter="data" refuses
-    # absolute paths and parent-directory escapes inside the archive.
-    # Through Invoke-Native like every other native call: anything the
-    # child writes to stderr is a landmine under $ErrorActionPreference =
-    # 'Stop' whenever the process stderr is redirected.
-    # Single-quoted Python strings on purpose: PowerShell 5.1 does not
-    # escape double quotes inside a native-process argument, so a " in
-    # this code would be stripped in transit and break the Python syntax.
-    $code = @'
-import sys, tarfile
-with tarfile.open(sys.argv[1], 'r:bz2') as tf:
-    tf.extractall(sys.argv[2], filter='data')
-'@
-    Invoke-Native -Exe $Python -Arguments @("-c", $code, $Archive, $Destination)
+function Copy-ModelFiles {
+    param([string]$Source, [string]$Destination)
+    # Builds the model tree from the five verified downloads. It replaced an
+    # archive extraction when the shipped model became the full-precision
+    # build, which upstream publishes only as loose files; it keeps that
+    # step's @{ Output; ExitCode } shape so the caller's failure path and
+    # its message are unchanged.
+    #
+    # A copy, not a move: the downloads stay where Invoke-VerifiedDownload
+    # put them until the promotion succeeds, so a run killed anywhere in
+    # this function still leaves a next run 2.5 GB it does not have to
+    # fetch again. Remove-ModelResidue is what clears them afterwards.
+    #
+    # Each destination's length is compared with its source's. Copy-Item
+    # throws on a full disk, but a file that arrives short without an
+    # exception would otherwise pass the completeness check, which only
+    # asks for a non-empty regular file, and produce a model that fails at
+    # load. Nothing here re-hashes: the digest was checked when the file
+    # was downloaded, and re-reading 2.5 GB to catch a case NTFS does not
+    # produce is not worth the wait on an installer's slowest step.
+    $problems = @()
+    try {
+        New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    } catch {
+        return @{ Output = @("could not create the model folder: $($_.Exception.Message)"); ExitCode = 1 }
+    }
+    foreach ($file in $ModelFiles) {
+        $from = Join-Path $Source "$ModelDirName.$($file.Name)"
+        $to = Join-Path $Destination $file.Name
+        try {
+            Copy-Item -LiteralPath $from -Destination $to -Force -ErrorAction Stop
+        } catch {
+            $problems += "$($file.Name): $($_.Exception.Message)"
+            continue
+        }
+        $sourceLength = (Get-Item -LiteralPath $from -ErrorAction SilentlyContinue).Length
+        $copiedLength = (Get-Item -LiteralPath $to -ErrorAction SilentlyContinue).Length
+        if ($null -eq $copiedLength -or $copiedLength -ne $sourceLength) {
+            $problems += "$($file.Name): copied $copiedLength of $sourceLength bytes"
+        }
+    }
+    if ($problems.Count -gt 0) { return @{ Output = $problems; ExitCode = 1 } }
+    return @{ Output = @(); ExitCode = 0 }
 }
 
 function Remove-ModelResidue {
     # Best-effort cleanup of extraction leftovers: every working directory
-    # under the models directory and the cached archive. Called after a
+    # under the models directory and the cached downloads. Called after a
     # successful promotion AND on the already-installed path, so an
-    # interruption between promotion and cleanup cannot strand the 650 MB
-    # archive forever -- the next run retries. A failure here (a file held
+    # interruption between promotion and cleanup cannot strand the 2.5 GB
+    # of downloads forever -- the next run retries. A failure here (a file held
     # open by antivirus or indexing) must not turn a correct install into a
     # false failure: warn and continue.
     # Trees and files named with a LIVE process id are another run's work
@@ -1619,11 +1724,87 @@ function Remove-ModelResidue {
                 Write-Warn "Could not remove a leftover working folder ($($item.Name)); it will be removed on the next run."
             }
         }
+        # The same sweep for the PREVIOUS release's working trees. The glob
+        # above is built from $ModelDirName and the old name is different,
+        # so nothing else here can reach them.
+        foreach ($item in @(Get-ChildItem -LiteralPath $ModelsDir -Filter "$PreviousModelDirName.extracting*" -ErrorAction SilentlyContinue)) {
+            if (Test-ResidueOwnerAlive -Name $item.Name) { continue }
+            try {
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Warn "Could not remove a leftover working folder ($($item.Name)); it will be removed on the next run."
+            }
+        }
+        # The previous release's INSTALLED model, which this release
+        # replaces. It is 640 MB of int8 weights that nothing reads once
+        # the full-precision model is in place. An earlier version of this
+        # sweep kept it on purpose, because a hand-written
+        # stt_model_overrides.toml entry could still point at it; David
+        # reversed that on 2026-09-07 (QUESTIONS item 96), so the
+        # installer removes it and the status line below is what tells the
+        # user their old model is gone.
+        #
+        # The completeness check is the ORDER the ruling requires: nothing
+        # is removed before the new model is in place. It is read here
+        # rather than assumed from the caller, so a call site added later
+        # cannot delete the only model on the machine. Every caller today
+        # already reaches this function with a complete new model.
+        #
+        # No Test-ResidueOwnerAlive call. That helper reads a trailing
+        # "-<process id>" off a working-file name; this is a fixed
+        # directory name ending in "-int8" and carries no process id, so
+        # the check could only ever answer false. The realistic failure is
+        # a running Wheelhouse holding the old encoder open, and it lands
+        # in the catch below: best effort, because failing a correct
+        # install to reclaim 640 MB would be the worse outcome.
+        # The emptiness guard is not defensive habit. Join-Path with an
+        # empty or null child path returns the PARENT, "...\models\", so
+        # without it the removal below aims Remove-Item -Recurse at the
+        # whole models directory and takes every model on the machine,
+        # including the one just installed. The shipped constant above is
+        # never empty; a caller that loads these functions without the
+        # script's top-level constants reaches this state, which is what
+        # the test harness does.
+        if (-not [string]::IsNullOrWhiteSpace($PreviousModelDirName)) {
+            $previousInstalled = Join-Path $ModelsDir $PreviousModelDirName
+            # -and short-circuits, so the directory probe still runs first
+            # and an absent previous model costs no completeness read.
+            if ([System.IO.Directory]::Exists($previousInstalled) -and
+                    (Test-ModelComplete -ModelDir (Join-Path $ModelsDir $ModelDirName))) {
+                try {
+                    Remove-Item -LiteralPath $previousInstalled -Recurse -Force -ErrorAction Stop
+                    Write-Status "The previous speech model was removed; the new one replaces it."
+                } catch {
+                    Write-Warn "Could not remove the previous speech model ($PreviousModelDirName); it will be removed on the next run."
+                }
+            }
+        }
     }
-    # The archive glob also catches the per-run download working files
-    # (<archive>.partial-<pid>, .invalid-<pid>) a crashed run left behind.
+    # One glob per downloaded file rather than one "$ModelDirName.*" glob:
+    # the model working directories above live under $ModelsDir and share
+    # that prefix, and a broad pattern here would be one directory rename
+    # away from sweeping something it was never meant to reach. Each glob
+    # also catches that file's per-run download working files
+    # (<name>.partial-<pid>, .invalid-<pid>) a crashed run left behind.
     if ([System.IO.Directory]::Exists($DownloadsDir)) {
-        foreach ($item in @(Get-ChildItem -LiteralPath $DownloadsDir -Filter "$ModelDirName.tar.bz2*" -ErrorAction SilentlyContinue)) {
+        foreach ($file in $ModelFiles) {
+            foreach ($item in @(Get-ChildItem -LiteralPath $DownloadsDir -Filter "$ModelDirName.$($file.Name)*" -ErrorAction SilentlyContinue)) {
+                if (Test-ResidueOwnerAlive -Name $item.Name) { continue }
+                try {
+                    # -Recurse: a moved-aside occupier can be a folder.
+                    Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+                } catch {
+                    Write-Warn "Could not remove a leftover download file ($($item.Name)); it will be removed on the next run."
+                }
+            }
+        }
+        # The PREVIOUS release's archive, and the .partial-<pid> and
+        # .invalid-<pid> working files a killed download left beside it.
+        # One literal glob is enough and carries none of the over-deletion
+        # risk the per-file design above exists to avoid: the old name is
+        # not in $ModelFiles, and every glob above is built from
+        # $ModelDirName, so nothing else reaches these.
+        foreach ($item in @(Get-ChildItem -LiteralPath $DownloadsDir -Filter "$PreviousModelDirName.tar.bz2*" -ErrorAction SilentlyContinue)) {
             if (Test-ResidueOwnerAlive -Name $item.Name) { continue }
             try {
                 # -Recurse: a moved-aside occupier can be a folder.
@@ -1636,14 +1817,10 @@ function Remove-ModelResidue {
 }
 
 function Install-ParakeetModel {
-    $python = Join-Path $AppDir "services\wheelhouse\.venv\Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $python)) {
-        # Unreachable in a normal run (the services\wheelhouse sync is fatal
-        # and runs first); antivirus quarantine or a hand-deleted venv gets
-        # a clear stop instead of a confusing extraction error.
-        Stop-Install "The application environment needed to unpack the speech model is missing." `
-            "Run the installer again (it repairs the application environment)."
-    }
+    # No Python check here any more: the model arrives as five loose files
+    # and is assembled by Copy-ModelFiles, so nothing in this path needs the
+    # app venv's interpreter. The archive extraction that did need it is
+    # gone with the archive.
     $extractedDir = Join-Path $ModelsDir $ModelDirName
     $modelState = Get-ModelState -ModelDir $extractedDir
     if ($modelState -eq 'complete') {
@@ -1742,38 +1919,51 @@ function Install-ParakeetModel {
     }
     New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
     New-Item -ItemType Directory -Force -Path $DownloadsDir | Out-Null
-    $archive = Join-Path $DownloadsDir "$ModelDirName.tar.bz2"
-    Write-Status "Downloading the speech model (about 650 MB; this is the longest step)..."
-    Invoke-VerifiedDownload -Url $ModelUrl -Destination $archive -ExpectedSha256 $ModelSha256 -Description "the speech model"
+    Write-Status "Downloading the speech model (about 2.5 GB; this is the longest step)..."
+    # One verified download per file. Each carries its own SHA-256, because
+    # with no archive to check as a whole there is nothing else standing
+    # between a truncated or altered file and a promoted model. The
+    # destinations sit in $DownloadsDir under the model directory's name, so
+    # Invoke-VerifiedDownload's resume and its adoption of a dead run's
+    # partial work for each file exactly as they did for the archive.
+    $fileNumber = 0
+    foreach ($file in $ModelFiles) {
+        $fileNumber++
+        Invoke-VerifiedDownload -Url "$ModelUrl/$($file.Name)" `
+            -Destination (Join-Path $DownloadsDir "$ModelDirName.$($file.Name)") `
+            -ExpectedSha256 $file.Sha256 `
+            -Description "the speech model (file $fileNumber of $($ModelFiles.Count))"
+    }
 
-    Write-Status "Unpacking the speech model..."
-    # Extract into a per-run working directory and promote only a verified
-    # tree, so the final directory exists only when a completed extraction
-    # put it there. Extracting straight into $ModelsDir would leave a
-    # partial tree at the exact path the entry gate above reads on the next
-    # run, and a disk-full or killed extraction can leave every required
-    # filename present there with the last one incomplete. The process id
-    # in the name keeps two overlapping installer runs (the script takes no
-    # lock) out of each other's working trees.
+    Write-Status "Putting the speech model in place..."
+    # Assemble into a per-run working directory and promote only a verified
+    # tree, so the final directory exists only when a completed assembly put
+    # it there. Copying straight into $ModelsDir would leave a partial tree
+    # at the exact path the entry gate above reads on the next run, and a
+    # disk-full or killed copy can leave every required filename present
+    # there with the last one incomplete. The process id in the name keeps
+    # two overlapping installer runs (the script takes no lock) out of each
+    # other's working trees.
     $stagingRoot = Join-Path $ModelsDir "$ModelDirName.extracting-$PID"
     if (Test-Path -LiteralPath $stagingRoot) {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
-    $extract = Expand-ModelArchive -Python $python -Archive $archive -Destination $stagingRoot
     $stagedDir = Join-Path $stagingRoot $ModelDirName
+    $extract = Copy-ModelFiles -Source $DownloadsDir -Destination $stagedDir
     if ($extract.ExitCode -ne 0 -or -not (Test-ModelComplete -ModelDir $stagedDir)) {
         if (Test-ModelComplete -ModelDir $extractedDir) {
             # Another installer running at the same time finished the model
-            # while this extraction failed (it may even have removed this
+            # while this assembly failed (it may even have removed this
             # run's working tree as residue). The machine has what it needs.
             Write-Status "The speech model was installed by another setup running at the same time."
             Remove-ModelResidue
             return
         }
-        # The extractor's own last lines go into the message: the shipped
-        # 'tar exit code 1' failure left the setup log with no diagnosis.
-        Stop-Install "Unpacking the speech model failed (exit code $($extract.ExitCode)): $((@($extract.Output) | Select-Object -Last 3) -join ' / ')" `
-            "Run the installer again; the download itself is kept and will not repeat."
+        # The assembly step's own last lines go into the message: the
+        # shipped 'tar exit code 1' failure this replaced left the setup log
+        # with no diagnosis at all.
+        Stop-Install "Putting the speech model in place failed (exit code $($extract.ExitCode)): $((@($extract.Output) | Select-Object -Last 3) -join ' / ')" `
+            "Run the installer again; the downloads themselves are kept and will not repeat."
     }
     # A rename that refuses an existing destination. Move-Item would treat a
     # directory that reappeared here (a second installer run, or restore
@@ -1789,11 +1979,101 @@ function Install-ParakeetModel {
             Remove-ModelResidue
             return
         }
-        Stop-Install "Placing the unpacked speech model failed: $($_.Exception.Message)" `
-            "Run the installer again; the download itself is kept and will not repeat."
+        Stop-Install "Placing the assembled speech model failed: $($_.Exception.Message)" `
+            "Run the installer again; the downloads themselves are kept and will not repeat."
     }
     Remove-ModelResidue
     Write-Status "Speech model installed."
+}
+
+function Install-ModelVocabulary {
+    param([string]$ModelDir)
+    # The spoken-hint vocabulary, delivered by COPY and never by download.
+    #
+    # sherpa-onnx's Parakeet release carries no bpe.vocab, so hint boosting
+    # has no BPE vocabulary to load and the engine turns it off. The file is
+    # generated once from the checkpoint's own tokenizer and committed under
+    # the provider's model_assets directory, so it travels inside the
+    # application archive: this step is a 117 KB file copy that costs an
+    # already-installed machine nothing. docs/vendoring/SECURITY.md records
+    # where the file comes from and how it was checked.
+    #
+    # Deliberately NOT part of Get-ModelState's required set. A model tree
+    # without this file is still complete. Requiring it there would make
+    # every model installed before this release read as 'incomplete', and
+    # the incomplete path deletes the tree and downloads 2.5 GB again --
+    # which is exactly the cost this design exists to avoid.
+    #
+    # Every failure below is a warning and a return, never a stop. Hint
+    # boosting is an enhancement: without it the engine transcribes normally
+    # and reports boosting as unavailable, so a missing or damaged
+    # vocabulary must never cost the user their installation.
+    $source = Join-Path $AppDir "services\stt_providers\sherpa_offline_parakeet_stt_server\model_assets\bpe.vocab"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        Write-Warn "The spoken-hint vocabulary is not part of this release; spoken hints will not be boosted."
+        return
+    }
+    # Item 1 of the vendoring discipline: the committed sidecar is the trust
+    # anchor and is verified before the file is used.
+    $expected = $null
+    $sidecar = "$source.sha256"
+    if (Test-Path -LiteralPath $sidecar -PathType Leaf) {
+        # .NET read for the same reason every other read here uses one:
+        # Get-Content without -Encoding decodes BOM-less UTF-8 as ANSI on
+        # PowerShell 5.1.
+        # Guarded for the same reason Get-FileSha256IfReadable exists two
+        # lines below: a lock, not an edit, is enough to break this read.
+        # Test-Path stats the sidecar without opening it, so an antivirus
+        # scan or a search indexer holding it open passes the existence
+        # check and then fails here. Unguarded, the exception left this
+        # function, left Invoke-MainInstall, which has no handler around
+        # the model block, and ended an install that had already spent
+        # 2.5 GB -- the one outcome this function's header forbids.
+        try {
+            $expected = ([System.IO.File]::ReadAllText($sidecar)).Trim()
+        } catch {
+            $expected = $null
+        }
+    }
+    $actual = Get-FileSha256IfReadable -Path $source
+    # -ine, not -ne: the sidecar holds a lowercase hash and Get-FileHash
+    # returns an uppercase one. PowerShell's -ne would compare these
+    # case-insensitively anyway; naming it leaves nothing for a reader to
+    # infer.
+    if (-not $expected -or -not $actual -or ($actual -ine $expected)) {
+        Write-Warn "The spoken-hint vocabulary did not match its recorded checksum, so it was not installed; spoken hints will not be boosted."
+        return
+    }
+    $destination = Join-Path $ModelDir "bpe.vocab"
+    if ((Get-FileSha256IfReadable -Path $destination) -ieq $actual) {
+        # Already this release's vocabulary. An older one falls through and
+        # is replaced, or an upgrade would leave the previous file forever.
+        return
+    }
+    # Working files carry this run's process id, so two overlapping installer
+    # runs cannot share one, and a killed run's leaving is swept by the next
+    # run whose owner check finds the id dead.
+    foreach ($item in @(Get-ChildItem -LiteralPath $ModelDir -Filter "bpe.vocab.installing-*" -ErrorAction SilentlyContinue)) {
+        if (Test-ResidueOwnerAlive -Name $item.Name) { continue }
+        try { Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop } catch { }
+    }
+    $staging = Join-Path $ModelDir "bpe.vocab.installing-$PID"
+    try {
+        # Copy-Item moves bytes, not lines. The committed file is LF and the
+        # checksum recorded for it is of those exact bytes, so a text-mode
+        # write here would rewrite every line ending and break the record.
+        Copy-Item -LiteralPath $source -Destination $staging -Force -ErrorAction Stop
+        # Promote by replacing rename, so an interrupted copy can never leave
+        # a truncated vocabulary at the name the engine reads.
+        Move-Item -LiteralPath $staging -Destination $destination -Force -ErrorAction Stop
+    } catch {
+        Write-Warn "The spoken-hint vocabulary could not be installed: $($_.Exception.Message)"
+        if (Test-Path -LiteralPath $staging) {
+            try { Remove-Item -LiteralPath $staging -Force -ErrorAction Stop } catch { }
+        }
+        return
+    }
+    Write-Status "Spoken-hint vocabulary installed."
 }
 
 # --- Config writing (step f) ----------------------------------------------------------
@@ -2384,20 +2664,78 @@ function Install-LocalAiRuntime {
     return $modelPath
 }
 
+function Disable-ParakeetWithoutModel {
+    param([string]$ConfigPath, [string[]]$SyncedProviders)
+    # Parakeet's environment is set up on EVERY install, chosen or not, so
+    # the loop that disables providers -- which only reaches ones that did
+    # not sync -- leaves Parakeet enabled on a Google Cloud or
+    # Distil-Whisper install. The model, though, downloads only for the
+    # engine the user chose. Such a machine offered Parakeet in the engine
+    # menu and then failed at startup with "Model directory not found".
+    # David ruled on 2026-09-07 (QUESTIONS item 103) that it offers no
+    # Parakeet at all and tells the user how to get one.
+    #
+    # A Parakeet that did NOT sync is not this function's business: the
+    # unsynced-provider loop already disabled it, disabling it twice would
+    # rewrite a config this step has no reason to touch, and the message
+    # would name a missing model when the real problem is a missing
+    # environment.
+    #
+    # Completeness, not folder-exists: an interrupted earlier run can leave
+    # a partial tree that Test-Path accepts and onnxruntime then rejects,
+    # which is a failure the user cannot read or repair.
+    #
+    # A separate function rather than inline code in Invoke-MainInstall,
+    # because the test harness cannot run Invoke-MainInstall: every test
+    # that reaches into it reads the source text, and a source-structure
+    # test cannot fail when the behaviour breaks.
+    if ($SyncedProviders -notcontains "parakeet_tdt") { return }
+    if (Test-ModelComplete -ModelDir (Join-Path $ModelsDir $ModelDirName)) { return }
+    Set-TomlProviderDisabled -ConfigPath $ConfigPath
+    # Write-InstallNotice, not Write-Status: the graphical wizard runs
+    # this script hidden and only a NOTICE line reaches its finish page.
+    # A [+] host line would leave a wizard user with Parakeet gone from
+    # the engine menu and no way to learn how to get it back -- the same
+    # harm as wh-wizard-distil-fallback. The two comparable provider
+    # instructions (Google Cloud credentials, the Distil-Whisper
+    # first-launch download) already go out on this tag.
+    Write-InstallNotice "Parakeet has no speech model on this computer, so it is turned off. Run the installer again and choose Parakeet to install its model."
+}
+
 function Write-ModelOverrideFile {
     # The per-machine model-path channel: the provider resolves
     # [parakeet_tdt].model_path from this file ahead of its tracked config.
+    #
+    # The section is written only when a complete model is at the path, for
+    # the reason above: an install that did not choose Parakeet downloads
+    # no model, and naming the directory it never created is what made
+    # selecting Parakeet fail.
+    #
+    # The file is still WRITTEN in that case, with no [parakeet_tdt]
+    # section. Writing nothing would leave a previous install's entry
+    # standing, which is the same failure one run later. With no section
+    # the provider falls through to its tracked config and then to
+    # DEFAULT_MODEL_DIRNAME, which is what a machine that never ran an
+    # installer already does.
+    #
+    # Completeness is read here rather than taken from
+    # Disable-ParakeetWithoutModel: two independent checks cost five file
+    # probes each, and a shared parameter would let one mutation change
+    # both the disable and this file at once.
     $modelPath = (Join-Path $ModelsDir $ModelDirName) -replace '\\', '/'
     $lines = @(
         "# Written by install-wheelhouse.ps1. Per-machine speech-model paths;",
-        "# safe to edit. Sections are keyed by provider name.",
-        "",
-        "[parakeet_tdt]",
-        "model_path = `"$modelPath`""
+        "# safe to edit. Sections are keyed by provider name."
     )
+    if (Test-ModelComplete -ModelDir (Join-Path $ModelsDir $ModelDirName)) {
+        $lines += @(
+            "",
+            "[parakeet_tdt]",
+            "model_path = `"$modelPath`""
+        )
+    }
     Write-TomlFile -Path $OverrideFile -Lines $lines
 }
-
 # --- Shortcuts (step g) -------------------------------------------------------------------
 
 function New-AppShortcut {
@@ -2583,9 +2921,19 @@ function Invoke-MainInstall {
 
     if ($provider -eq "parakeet_tdt") {
         Write-InstallProgress 80 "Downloading the speech model"
-        Write-InstallHeartbeat "Downloading and unpacking the speech model (this can take a few minutes)"
+        Write-InstallHeartbeat "Downloading and setting up the speech model (this can take a while: it is about 2.5 GB)"
         Install-ParakeetModel
+        # After, not inside: Install-ParakeetModel leaves a usable model at
+        # this path by seven routes -- the already-installed gate, five
+        # returns for a concurrent installer run that got there first, and
+        # the fresh-install end. One call here reaches all seven, and an
+        # eighth route added later cannot slip past it.
+        Install-ModelVocabulary -ModelDir (Join-Path $ModelsDir $ModelDirName)
     }
+    # Before the override file, so the two agree: both read the same
+    # completeness rule, and a disable that ran afterwards would still
+    # have written a model path for an engine it had just turned off.
+    Disable-ParakeetWithoutModel -ConfigPath (Join-Path $AppDir (Join-Path $providerDirs["parakeet_tdt"] "config.toml")) -SyncedProviders $syncedProviders
     Write-ModelOverrideFile
     # Fresh-vs-update signal for the AI "keep" default below: config.toml exists
     # here ONLY if Restore-PreservedFiles brought it back from a prior install

@@ -40,10 +40,10 @@ class TestStateManagerProviderDiscovery:
                 "service_dir": Path("/mock/google_stt_server"),
             },
             {
-                "name": "zipformer",
-                "display_name": "Zipformer (Local)",
+                "name": "parakeet_tdt",
+                "display_name": "Parakeet v3 (GPU)",
                 "launcher": "launcher.py",
-                "service_dir": Path("/mock/sherpa_zipformer"),
+                "service_dir": Path("/mock/parakeet_server"),
             },
         ]
         launcher.get_providers.return_value = providers
@@ -94,10 +94,8 @@ class TestStateManagerProviderDiscovery:
         providers = state_manager._get_available_stt_providers()
 
         # Assert: should return provider names from discover_providers
-        # Note: zipformer is expanded into CPU and GPU variants
         assert "google_stt" in providers
-        assert "zipformer_cpu" in providers
-        assert "zipformer_gpu" in providers
+        assert "parakeet_tdt" in providers
         # Should NOT return hardcoded names like "google_remote"
         assert "google_remote" not in providers
 
@@ -132,15 +130,12 @@ class TestStateManagerProviderDiscovery:
         assert "stt_providers_available" in msg
         assert msg["stt_provider"] == "google_stt"
         assert "google_stt" in msg["stt_providers_available"]
-        # Note: zipformer is expanded into CPU and GPU variants
-        assert "zipformer_cpu" in msg["stt_providers_available"]
-        assert "zipformer_gpu" in msg["stt_providers_available"]
+        assert "parakeet_tdt" in msg["stt_providers_available"]
 
         # Assert: should include display name mapping
         assert "stt_provider_display_names" in msg
         assert msg["stt_provider_display_names"]["google_stt"] == "Google Cloud STT"
-        assert msg["stt_provider_display_names"]["zipformer_cpu"] == "Zipformer CPU"
-        assert msg["stt_provider_display_names"]["zipformer_gpu"] == "Zipformer GPU"
+        assert msg["stt_provider_display_names"]["parakeet_tdt"] == "Parakeet v3 (GPU)"
 
 
 class TestRemoteProviderSwitching:
@@ -161,8 +156,8 @@ class TestRemoteProviderSwitching:
         remote_launcher.stop_provider = AsyncMock(return_value=True)
         remote_launcher.start_provider = MagicMock(return_value=True)
         remote_launcher.get_provider_by_name.return_value = {
-            "name": "zipformer",
-            "display_name": "Zipformer (Local)",
+            "name": "parakeet_tdt",
+            "display_name": "Parakeet v3 (GPU)",
         }
 
         service_manager = MagicMock()
@@ -171,6 +166,9 @@ class TestRemoteProviderSwitching:
         state_manager = MagicMock()
         state_manager.state_to_gui_queue = Queue()
         state_manager.send_state_update = MagicMock()
+        # The tray's read path: runtime record first, config as fallback.
+        # _switch_stt_provider shares it (provider-removal review .1.9).
+        state_manager._get_current_stt_provider.return_value = "google_stt"
 
         return {
             "config_service": config_service,
@@ -204,16 +202,16 @@ class TestRemoteProviderSwitching:
 
         # Bind the actual method to our mock controller
         switch_method = LC._switch_stt_provider
-        await switch_method(controller, "zipformer")
+        await switch_method(controller, "parakeet_tdt")
 
         # Assert: should stop current provider
         remote_launcher.stop_provider.assert_called_once_with("google_stt")
 
         # Assert: should start new provider
-        remote_launcher.start_provider.assert_called_once_with("zipformer")
+        remote_launcher.start_provider.assert_called_once_with("parakeet_tdt")
 
         # Assert: should update config
-        config_service.set.assert_any_call("stt.last_provider", "zipformer")
+        config_service.set.assert_any_call("stt.last_provider", "parakeet_tdt")
         config_service.save.assert_called()
 
         # Assert: should notify GUI
@@ -246,6 +244,98 @@ class TestRemoteProviderSwitching:
         remote_launcher.start_provider.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_switch_stops_the_actually_running_provider(self, mock_dependencies):
+        """The switch must stop the engine that runs, not the config value.
+
+        After a fallback with an unrepairable config, the stored value
+        names an engine that never started while the runtime record names
+        the one that did. Stopping by the stored value leaves the running
+        engine alive next to the new one (provider-removal review .1.9).
+        """
+        from main import LogicController
+
+        config_service = mock_dependencies["config_service"]
+        service_manager = mock_dependencies["service_manager"]
+        state_manager = mock_dependencies["state_manager"]
+        remote_launcher = mock_dependencies["remote_launcher"]
+
+        # Config still names the default; the record knows google_stt runs.
+        config_service.get.side_effect = lambda key, default=None: {
+            "stt.mode": "remote",
+            "stt.last_provider": "parakeet_tdt",
+        }.get(key, default)
+        state_manager._get_current_stt_provider.return_value = "google_stt"
+
+        controller = MagicMock(spec=LogicController)
+        controller.config_service = config_service
+        controller.service_manager = service_manager
+        controller.state_manager = state_manager
+        controller.shutdown_event = MagicMock()
+        controller.shutdown_event.is_set.return_value = False
+
+        from main import LogicController as LC
+
+        await LC._switch_stt_provider(controller, "distil_medium_en")
+
+        remote_launcher.stop_provider.assert_called_once_with("google_stt")
+        remote_launcher.start_provider.assert_called_once_with("distil_medium_en")
+
+    @pytest.mark.asyncio
+    async def test_an_undiscovered_provider_reports_a_failed_start(
+        self, mock_dependencies, monkeypatch
+    ):
+        """A name no launcher knows fails the start; nothing is written.
+
+        wh-in-process-capture-removal deleted the mode-change branch that
+        used to take this name. That branch treated an undiscovered
+        provider as an in-process one: it wrote stt.mode = "in_process"
+        and stt.provider into the settings file and restarted the
+        program -- into a mode the program no longer has, which would
+        then warn at startup and run remote anyway. The name now reaches
+        the same remote start as every other name, and the failure arm
+        that was always there is what the user gets.
+        """
+        import main as main_module
+        from main import LogicController
+
+        config_service = mock_dependencies["config_service"]
+        service_manager = mock_dependencies["service_manager"]
+        state_manager = mock_dependencies["state_manager"]
+        remote_launcher = mock_dependencies["remote_launcher"]
+
+        # The launcher does not know this provider and cannot start it.
+        remote_launcher.get_provider_by_name.return_value = None
+        remote_launcher.start_provider.return_value = False
+        # The old engine is still running, which is the arm that tells the
+        # user. Zero wait so the poll answers once instead of running its
+        # full ten seconds (the pattern test_launch_generation.py uses).
+        remote_launcher.is_running = MagicMock(return_value=True)
+        monkeypatch.setattr(main_module, "_PROVIDER_EXIT_WAIT_S", 0.0)
+
+        controller = MagicMock(spec=LogicController)
+        controller.config_service = config_service
+        controller.service_manager = service_manager
+        controller.state_manager = state_manager
+        controller.shutdown_event = MagicMock()
+        controller.shutdown_event.is_set.return_value = False
+
+        await LogicController._switch_stt_provider(controller, "whisper_small")
+
+        remote_launcher.start_provider.assert_called_once_with("whisper_small")
+
+        messages = []
+        while not state_manager.state_to_gui_queue.empty():
+            message = state_manager.state_to_gui_queue.get_nowait()
+            if message.get("action") == "show_notification":
+                messages.append(message["message"])
+        assert any("could not start" in m for m in messages), messages
+
+        # No setting was written, and nothing restarted the program.
+        config_service.set.assert_not_called()
+        config_service.save.assert_not_called()
+        controller.restart_program.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_switch_handles_stop_failure_gracefully(self, mock_dependencies):
         """If stopping old provider fails, still try to start new one."""
         from main import LogicController
@@ -268,10 +358,10 @@ class TestRemoteProviderSwitching:
         from main import LogicController as LC
 
         # Should not raise, should continue to start new provider
-        await LC._switch_stt_provider(controller, "zipformer")
+        await LC._switch_stt_provider(controller, "parakeet_tdt")
 
         # Still should try to start new provider
-        remote_launcher.start_provider.assert_called_once_with("zipformer")
+        remote_launcher.start_provider.assert_called_once_with("parakeet_tdt")
 
 
 class TestGuiProviderDisplay:
@@ -300,11 +390,11 @@ class TestGuiProviderDisplay:
     def test_gui_uses_display_names_from_state_update(self, gui_manager):
         """GUI should use display_names dict from state update."""
         # Simulate receiving state update with display names
-        gui_manager.stt_providers_available = ["google_stt", "zipformer"]
+        gui_manager.stt_providers_available = ["google_stt", "parakeet_tdt"]
         gui_manager.stt_provider = "google_stt"
         gui_manager.stt_provider_display_names = {
             "google_stt": "Google Cloud STT",
-            "zipformer": "Zipformer (Local)",
+            "parakeet_tdt": "Parakeet v3 (GPU)",
         }
 
         # Get display name
@@ -355,9 +445,9 @@ class TestProviderSwitchCommand:
                         )
 
         # Call switch
-        manager.switch_stt_provider("zipformer")
+        manager.switch_stt_provider("parakeet_tdt")
 
         # Check queue
         cmd = commands_queue.get_nowait()
         assert cmd["action"] == "switch_stt_provider"
-        assert cmd["provider"] == "zipformer"
+        assert cmd["provider"] == "parakeet_tdt"

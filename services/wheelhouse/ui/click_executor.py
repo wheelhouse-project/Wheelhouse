@@ -56,8 +56,43 @@ Reason-tag contract (must match exactly -- the notice-wording slice keys off
 these literal strings): ``disabled``, ``bounds_invalid``,
 ``foreground_changed``, ``foreground_verification_failed``,
 ``invoke_com_error``, ``invoke_then_sendinput_failed``, ``sendinput_short``,
-``target_moved_offscreen``, ``popup_closed``, ``bounds_stale``,
-``click_point_obstructed``.
+``sendinput_nothing_sent``, ``target_moved_offscreen``, ``popup_closed``,
+``taskbar_closed``,
+``bounds_stale``, ``click_point_obstructed``, ``gesture_not_eligible``,
+``gesture_sendinput_failed``, ``verification_timeout``.
+
+``verification_timeout`` (wh-overlay-slow-uia-stale-badges.6) is a pre-click
+verification reason: the cumulative wall-clock budget for the verification
+block (``verification_budget_ms``, captured as a monotonic deadline at
+``click()`` entry) expired before verification finished. The deadline is
+checked BETWEEN verification steps, so the budget bounds when a NEW step may
+start; it cannot interrupt a step already blocked inside a COM or Win32 call
+(COM calls cannot be safely aborted mid-call), so a single hung read can
+still overrun the budget. Once the budget has expired the executor refuses
+and sends no input -- the _verify re-run inside ``_coordinate_fallback``
+shares the SAME deadline (per click() call, never reset), and the coordinate
+tail re-checks it after that re-verify returns and again after the two
+hit-test layers, immediately before the input seam
+(wh-overlay-slow-uia-stale-badges.20.2), so an expired budget stops the
+coordinate path before any mouse event goes out. Neither tail check diverts
+to ``no_input_fallback``: a programmatic press after expiry would itself be
+input after expiry.
+
+Gesture parameter (wh-click-gesture-param):
+===========================================
+``ElementQuery.gesture`` selects the click. The DEFAULT,
+``ClickGesture.INVOKE``, is byte-for-byte today's behaviour: the InvokePattern
+path with every fallback and every guard described below. A non-default gesture
+(``RIGHT_CLICK`` / ``DOUBLE_CLICK``) cannot be expressed through Invoke -- the
+pattern has no button and no click count -- so ``click()`` SKIPS Invoke
+entirely and takes the existing guarded coordinate path: the same
+``_coord_eligible`` gate, the same full re-verification inside
+``_coordinate_fallback``, and the same two occlusion hit-test layers, differing
+only in which button is pressed and how many times. It never degrades to an
+Invoke the user did not ask for: a match that fails the eligibility gate fails
+closed under ``gesture_not_eligible``, and a gesture click that does not land
+reports ``gesture_sendinput_failed`` (a partial send is still
+``sendinput_short``, measured against two events per click).
 
 ``click_point_obstructed`` (wh-explorer-navpane-click.1.1 / .1.4) is the
 coordinate-fallback pre-send hit-test reason, produced by either of two
@@ -105,29 +140,79 @@ click itself failed to land -- the delivery-failure analogue of
 (wh-explorer-navpane-click: both press patterns structurally absent, the
 knob-free coordinate fallback fired, but the click did not land -- note the
 PLAIN ``dda_unavailable`` / ``dda_no_default_action`` reasons now mean the
-match ALSO failed the coordinate eligibility gate). The
+match ALSO failed the coordinate eligibility gate), and the Expand / Collapse
+pair ``dda_expand_collapse`` / ``dda_expand_collapse_then_sendinput_failed``
+(wh-treeitem-dda-wrong-action: the control's default action means Expand or
+Collapse, in English or in the display language, so it is never fired -- it
+would toggle a tree node where a click navigates -- and the same knob-free
+coordinate fallback runs instead; the plain tag means the match failed the
+coordinate eligibility gate, the chain tag means the click did not land). The
 success path emits no reason (``ok``); the ``dda_ok``,
-``dda_no_side_effect_then_coord``, ``dda_unavailable_then_coord``, and
-``dda_no_default_action_then_coord`` tags are telemetry markers on the log,
-not ClickResult.reason values (``ok`` carries ``reason=None``).
+``dda_no_side_effect_then_coord``, ``dda_unavailable_then_coord``,
+``dda_no_default_action_then_coord``, and ``dda_expand_collapse_then_coord``
+tags are telemetry markers on the log, not ClickResult.reason values (``ok``
+carries ``reason=None``).
 
 The ``invoke_pattern_unavailable`` tag was retired in wh-l4h.1.17: the
 ``InvokePatternUnavailable`` branch now enters the DoDefaultAction fallback
 above instead of failing under that tag, so no path emits it. It is omitted
 from the contract list above for that reason (readers chasing old logs will
 still find it in pre-wh-l4h.1.17 history).
+
+Badge coordinate-first ordering (wh-electron-dda-noop): for a numbered-badge
+pick (``click(..., badge_pick=True)``, set only by the ``click_snapshot_item``
+handler) the InvokePatternUnavailable branch attempts the guarded coordinate
+click BEFORE DoDefaultAction -- ``accDoDefaultAction`` can return success
+without firing anything (live case: an Electron sidebar button reported
+``dda_ok`` while no menu opened), and a badge pick is literally "click the
+thing at that spot". Every existing guard stays: the ``_coord_eligible`` gate,
+the full re-verification, and both hit-test layers. DoDefaultAction remains
+the fallback, but ONLY for a refusal that both provably sent no input AND
+left the world verified unchanged (eligibility failure routes straight to
+DDA; a hit-test refusal or a SendInput report of zero events falls back).
+A re-verification FAILURE never falls back: the world moved, so a DDA press
+on the stale ``control_ref`` would act on a target verification just
+rejected -- it surfaces the verification reason instead
+(wh-review-click-numbers.3). After a partial send (``sendinput_short``) or
+a raising coordinate seam a DDA press could double-fire, so those fail
+closed with no DDA attempt. The tag
+``badge_coord_first_sendinput_failed`` is the delivery-failure reason for a
+badge-first coordinate click whose seam raised or reported not-landed with
+events out; the log-only telemetry marker for entering the path is
+``badge_coord_first``. By-name clicks (``badge_pick`` False) keep the
+DDA-first order unchanged.
+
+Shell-owned badge coordinate-first (wh-tray-invoke-noop): a badge pick whose
+winner is shell-owned (``ElementMatch.source_window_is_shell`` -- taskbar and
+tray controls, wh-overlay-taskbar-numbers) goes coordinate-first even though
+its Invoke pattern IS present, because the Win11 taskbar accepts the Invoke,
+returns success, and only moves keyboard focus -- the tray app never sees a
+click. Same guards, same honesty boundary, same no-fallback rule for a
+re-verification failure; the fallback on a no-input mechanism refusal
+(hit-test or zero-event send) is the normal Invoke path (telemetry marker
+``badge_shell_coord_first``), which deliberately does NOT re-enter the badge
+reorder if Invoke then turns out structurally unavailable. Non-shell badge
+picks with a present Invoke pattern, and all by-name clicks, keep Invoke-first.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Optional
 
-from ui.element_types import ElementMatch, ElementQuery
+from ui.element_types import (
+    DEFAULT_GESTURE,
+    ClickGesture,
+    ElementMatch,
+    ElementQuery,
+)
 from ui.invoke_error_codes import is_no_side_effect_hresult
 from ui.uia_walker import (
     NAME_TO_CONTROL_TYPE_ID,
+    TASKBAR_WINDOW_CLASSES,
+    DefaultActionIsExpandCollapse,
     DoDefaultActionUnavailable,
     InvokePatternUnavailable,
     NoDefaultAction,
@@ -224,6 +309,22 @@ _DEFAULT_ENABLE_COORDINATE_CLICK_ON_COM_ERROR = False
 # should have refused.
 _DEFAULT_OVERLAY_BOUNDS_TOLERANCE_PHYSICAL_PX = 8
 
+# Pre-click verification budget default (wh-overlay-slow-uia-stale-badges.6),
+# mirrored as a constructor default so this module reads no config. The real
+# value is threaded in from the validated ``ClickConfig.verification_budget_ms``
+# (MAIN validation track, _is_int_at_least(100)) at the construction site in
+# ui_action_handler.py. Matches the ClickConfig default so an un-wired executor
+# behaves identically to the production wiring.
+_DEFAULT_VERIFICATION_BUDGET_MS = 2000
+
+# Which mouse button, and how many clicks, each non-default gesture sends
+# (wh-click-gesture-param). ``ClickGesture.INVOKE`` is deliberately absent: it
+# is not a physical gesture at all, so it never reaches the gesture seam.
+_GESTURE_MOUSE_PARAMS: dict[ClickGesture, tuple[str, int]] = {
+    ClickGesture.RIGHT_CLICK: ("right", 1),
+    ClickGesture.DOUBLE_CLICK: ("left", 2),
+}
+
 
 def _placeholder_coordinate_click(_x: int, _y: int) -> tuple[bool, int]:
     """No-op-or-raise default for the coordinate-click seam.
@@ -237,6 +338,24 @@ def _placeholder_coordinate_click(_x: int, _y: int) -> tuple[bool, int]:
     raise RuntimeError(
         "coordinate_click_fn was not injected; the production-wiring slice "
         "must supply a real SendInput-backed coordinate click"
+    )
+
+
+def _placeholder_gesture_click(
+    _x: int, _y: int, _button: str, _click_count: int
+) -> tuple[bool, int]:
+    """Raise-placeholder default for the gesture coordinate-click seam.
+
+    Same contract as ``_placeholder_coordinate_click``: the production wiring
+    (``UIActionHandler._get_click_executor``) injects the real SendInput-backed
+    gesture click. A non-default gesture reaching an un-wired executor raises
+    here, which ``_coordinate_fallback`` maps to its fail-closed reason -- no
+    silent "success", and no fall-through to Invoke (Invoke cannot honour a
+    button or a click count).
+    """
+    raise RuntimeError(
+        "gesture_click_fn was not injected; the production-wiring slice "
+        "must supply a real SendInput-backed gesture click"
     )
 
 
@@ -337,10 +456,15 @@ class ClickExecutor:
     value is mirrored as a constructor default so this module reads no config.
 
     Constructor seams:
-        coordinate_click_fn: ``(x, y) -> (succeeded, events_sent)``. The
+        coordinate_click_fn: ``(x, y) -> (succeeded, events_sent)`` or the
+            widened ``(succeeded, events_sent, reason)`` (wh-mouse-grid.1.5;
+            both shapes are accepted so existing injectors keep working). The
             production SendInput-backed click; ``events_sent`` lets the caller
-            detect a short send (``sendinput_short``). Defaults to a
-            raise-placeholder so an un-wired fallback fails closed.
+            detect a short send (``sendinput_short``), and a ``reason`` of
+            ``"release_failed"`` marks a partial batch whose compensating
+            release was refused too (surfaced as ``button_release_failed``).
+            Defaults to a raise-placeholder so an un-wired fallback fails
+            closed.
         foreground_probe: ``() -> ForegroundProbe`` -- samples the CURRENT
             foreground identity at verification time.
         on_screen_fn: ``(x, y) -> bool`` -- True when the physical point is on
@@ -358,7 +482,9 @@ class ClickExecutor:
             ``InvokePatternUnavailable`` (InvokePattern structurally
             unavailable). Returns normally on a successful press; raises
             ``DoDefaultActionUnavailable`` (no Legacy/DoDefaultAction path),
-            ``NoDefaultAction`` (pattern present, no default action), or a COM
+            ``NoDefaultAction`` (pattern present, no default action),
+            ``DefaultActionIsExpandCollapse`` (the default action would toggle
+            a tree node; not fired), or a COM
             error carrying ``.hresult`` (the call ran and failed). Defaults to
             the real MSAA press ``do_default_action_via_legacy_pattern``
             (wh-click-dda-wiring), exactly as ``invoke_fn`` defaults to the real
@@ -373,6 +499,24 @@ class ClickExecutor:
             freshly-read BoundingRectangle that step 5 will still accept; any
             dimension moving MORE than this returns ``bounds_stale``. Threaded in
             from the validated ``ClickConfig.overlay_bounds_tolerance_physical_px``.
+        verification_budget_ms: pre-click verification wall-clock budget
+            (wh-overlay-slow-uia-stale-badges.6, default 2000). At ``click()``
+            entry the executor captures ``monotonic_fn() + budget`` as a
+            deadline and checks it between the verification steps (the seams
+            around the foreground probe, the popup/shell liveness probes, the
+            IsEnabled and BoundingRectangle re-reads, and the on-screen
+            check), and again in ``_coordinate_fallback`` after its _verify
+            re-run returns and after the two hit-test layers, immediately
+            before the input seam (wh-overlay-slow-uia-stale-badges.20.2);
+            an expired deadline refuses with ``verification_timeout`` and no
+            click is sent. The budget is CUMULATIVE per click() call: the
+            _verify re-run inside ``_coordinate_fallback`` shares the same
+            deadline. The budget bounds when a new step may START -- a
+            single hung COM call can still overrun it, because COM cannot be
+            safely aborted mid-call. Threaded in from the validated
+            ``ClickConfig.verification_budget_ms``.
+        monotonic_fn: ``() -> float`` -- the monotonic clock the budget reads.
+            Defaults to ``time.monotonic``; tests inject a fake clock.
         popup_visible_fn: ``(popup_hwnd) -> bool`` -- True when the owning popup
             window is still visible. Consulted by the popup-closed probe ONLY
             for a popup-owned winner (wh-n29v.45). Default None (Phase 1
@@ -388,7 +532,7 @@ class ClickExecutor:
     def __init__(
         self,
         *,
-        coordinate_click_fn: Callable[[int, int], tuple[bool, int]] = (
+        coordinate_click_fn: Callable[[int, int], tuple] = (
             _placeholder_coordinate_click
         ),
         foreground_probe: Callable[[], ForegroundProbe],
@@ -404,16 +548,31 @@ class ClickExecutor:
         overlay_bounds_tolerance_physical_px: int = (
             _DEFAULT_OVERLAY_BOUNDS_TOLERANCE_PHYSICAL_PX
         ),
+        verification_budget_ms: int = _DEFAULT_VERIFICATION_BUDGET_MS,
+        monotonic_fn: Callable[[], float] = time.monotonic,
         popup_visible_fn: Optional[Callable[[int], bool]] = None,
         popup_owner_fn: Optional[Callable[[int], int]] = None,
+        shell_class_fn: Optional[Callable[[int], str]] = None,
         window_at_point_fn: Callable[[int, int], int] = (
             _placeholder_window_at_point
         ),
         point_hits_winner_fn: Callable[["ElementMatch", int, int], bool] = (
             _placeholder_point_hits_winner
         ),
+        gesture_click_fn: Callable[
+            [int, int, str, int], tuple
+        ] = _placeholder_gesture_click,
     ) -> None:
         self._coordinate_click_fn = coordinate_click_fn
+        # Non-default-gesture coordinate-click seam (wh-click-gesture-param).
+        # ``(x, y, button, click_count) -> (succeeded, events_sent)``. It is a
+        # SEPARATE seam from ``coordinate_click_fn`` on purpose: the default
+        # gesture keeps calling the two-argument seam with the identical
+        # argument list it always used, so no default-path behaviour (and no
+        # existing injection site) changes shape. Production injects a
+        # SendInput-backed click that presses the named button ``click_count``
+        # times; the raising placeholder makes an un-wired gesture fail closed.
+        self._gesture_click_fn = gesture_click_fn
         self._foreground_probe = foreground_probe
         self._on_screen_fn = on_screen_fn
         self._com_error_predicate = com_error_predicate
@@ -454,6 +613,14 @@ class ClickExecutor:
         # in from the validated ClickConfig at the construction site; defaults to
         # the same value as the ClickConfig default.
         self._bounds_tolerance = overlay_bounds_tolerance_physical_px
+        # Pre-click verification budget (wh-overlay-slow-uia-stale-badges.6).
+        # ``click()`` captures ``monotonic_fn() + budget`` into
+        # ``_verify_deadline`` on entry; ``_verify`` checks it between steps
+        # and refuses with ``verification_timeout`` once it has passed. None
+        # until the first click() (a direct _verify call runs unbudgeted).
+        self._verification_budget_ms = verification_budget_ms
+        self._monotonic_fn = monotonic_fn
+        self._verify_deadline: Optional[float] = None
         # Popup-closed probe seams (wh-n29v.45). Consulted by ``_verify`` ONLY
         # for a popup-owned winner (``winner.source_window_hwnd != 0``): before
         # invoking a control that was walked from a classic Win32 #32768 /
@@ -469,6 +636,16 @@ class ClickExecutor:
         # IsWindowVisible / GetWindow(GW_OWNER) seams; tests inject fakes.
         self._popup_visible_fn = popup_visible_fn
         self._popup_owner_fn = popup_owner_fn
+        # Shell-window class re-read seam (codex finding
+        # wh-overlay-taskbar-numbers.5.3). Consulted by
+        # ``_shell_window_still_visible`` for a shell winner
+        # (``source_window_is_shell``): HWNDs are recycled, so after an
+        # explorer restart the walked handle can name a live unrelated
+        # window that the visibility check alone would pass. The probe
+        # additionally requires the CURRENT class name to still be one of
+        # TASKBAR_WINDOW_CLASSES. Same None-fails-closed discipline as the
+        # popup seams. Production injects uia_walker._default_class_name_of.
+        self._shell_class_fn = shell_class_fn
         # Number of input events a single coordinate click is expected to
         # synthesise (mouse-down + mouse-up). A seam reporting fewer than this
         # is a short send (``sendinput_short``). The production seam returns the
@@ -485,6 +662,8 @@ class ClickExecutor:
         winner: ElementMatch,
         snapshot_foreground: SnapshotForeground,
         query: ElementQuery,
+        *,
+        badge_pick: bool = False,
     ) -> ClickResult:
         """Verify, then click ``winner``; return a fail-closed ClickResult.
 
@@ -492,7 +671,10 @@ class ClickExecutor:
         its ``control_ref`` is a live COM handle. ``snapshot_foreground`` is the
         walk-time foreground identity the click must still match.  ``query`` is
         the original ElementQuery, used only by the stronger coordinate-click
-        eligibility check.
+        eligibility check. ``badge_pick`` marks a numbered-badge pick
+        (``click_snapshot_item``); it reorders coordinate-vs-DoDefaultAction
+        in the InvokePatternUnavailable branch (wh-electron-dda-noop, see the
+        module docstring) and changes nothing else.
 
         CALLER KEEPALIVE OBLIGATION (reviewer_0 finding wh-9f3t.27.2): the
         ``winner.control_ref`` COM proxy is pinned ONLY by the ElementFinder's
@@ -510,6 +692,16 @@ class ClickExecutor:
         proxy. See ``ui/element_finder.py`` FindResult / ``get_snapshot``
         COM-lifetime caveats.
         """
+        # --- Verification budget (wh-overlay-slow-uia-stale-badges.6). -------
+        # One cumulative wall-clock deadline for the WHOLE click() call,
+        # captured here and never reset: the _verify re-run inside
+        # _coordinate_fallback shares it, so a slow application cannot spend
+        # the budget twice. _verify checks it between steps; it bounds when a
+        # new step may start, not a step already blocked inside a COM call.
+        self._verify_deadline = (
+            self._monotonic_fn() + self._verification_budget_ms / 1000.0
+        )
+
         # --- Pre-click verification (v5 order). ------------------------------
         verdict = self._verify(winner, snapshot_foreground)
         if verdict is not None:
@@ -518,12 +710,125 @@ class ClickExecutor:
         # coordinate fallback (if reached) reads it there. The happy Invoke path
         # below needs no rect.
 
-        # --- InvokePattern execution path. -----------------------------------
+        # --- Non-default gesture (wh-click-gesture-param). -------------------
+        # "right click X" / "double click X" cannot go through Invoke at all:
+        # InvokePattern has no concept of a button or a click count, and on the
+        # controls that motivate the feature (a File Explorer item needing a
+        # double click to open) Invoke is not even equivalent to a left click.
+        # So a non-default gesture SKIPS Invoke entirely and takes the existing
+        # guarded coordinate path -- the same ``_coord_eligible`` gate, the same
+        # full re-verification inside ``_coordinate_fallback``, and the same two
+        # occlusion hit-test layers -- differing only in which button is pressed
+        # and how many times. This branch runs BEFORE the badge reorder below:
+        # the reorder's fallback is the Invoke path, which cannot serve a
+        # gesture. A match that fails the eligibility gate fails CLOSED under
+        # ``gesture_not_eligible`` rather than quietly degrading to an Invoke
+        # the user did not ask for.
+        gesture = self._resolve_gesture(query)
+        if gesture is not ClickGesture.INVOKE:
+            if not self._coord_eligible(winner, query):
+                logger.info(
+                    "click_element %s refused: match fails the stronger "
+                    "coordinate-click eligibility check "
+                    "(gesture_not_eligible): matched=%r",
+                    gesture.value,
+                    winner.name,
+                )
+                return self._fail(winner, "gesture_not_eligible")
+            return self._coordinate_fallback(
+                winner,
+                snapshot_foreground,
+                fail_reason="gesture_sendinput_failed",
+                gesture=gesture,
+            )
+
+        # --- Shell-owned badge coordinate-first (wh-tray-invoke-noop). -------
+        # The Win11 taskbar tray accepts a UIA Invoke on a tray icon, RETURNS
+        # SUCCESS, and only moves keyboard focus -- the tray app never sees a
+        # click (live case: the Hot Virtual Keyboard icon drew a focus
+        # rectangle and never opened). The Invoke pattern is structurally
+        # present, so the InvokePatternUnavailable reorder in
+        # _handle_invoke_error never engages. For a badge pick whose winner is
+        # shell-owned, go coordinate-first even though Invoke exists; the
+        # normal Invoke path is the fallback ONLY when the coordinate attempt
+        # provably sent no input AND the world re-verified unchanged (the
+        # no_input_fallback honesty boundary -- a re-verification failure
+        # surfaces its own reason instead, wh-review-click-numbers.3).
+        if (
+            badge_pick
+            and winner.source_window_is_shell
+            and self._coord_eligible(winner, query)
+        ):
+            logger.info(
+                "click_element badge pick on a shell-owned control, trying "
+                "guarded coordinate click before Invoke "
+                "(badge_shell_coord_first): matched=%r",
+                winner.name,
+            )
+
+            def _invoke_after_no_input(refusal_reason: str) -> ClickResult:
+                logger.info(
+                    "click_element badge_shell_coord_first refused before "
+                    "any input (%s), falling back to the Invoke path: "
+                    "matched=%r",
+                    refusal_reason,
+                    winner.name,
+                )
+                # badge_pick=False on purpose: if Invoke then turns out
+                # structurally unavailable, _handle_invoke_error must go
+                # straight to DoDefaultAction -- the badge coordinate-first
+                # reorder would only repeat the attempt that was just
+                # refused with no input.
+                return self._invoke_path(
+                    winner, snapshot_foreground, query, badge_pick=False
+                )
+
+            return self._coordinate_fallback(
+                winner,
+                snapshot_foreground,
+                fail_reason="badge_coord_first_sendinput_failed",
+                no_input_fallback=_invoke_after_no_input,
+            )
+
+        return self._invoke_path(
+            winner, snapshot_foreground, query, badge_pick=badge_pick
+        )
+
+    @staticmethod
+    def _resolve_gesture(query: ElementQuery) -> ClickGesture:
+        """Read the requested gesture off the query, degrading to the default.
+
+        The query crosses a process boundary, and an older Logic build (or a
+        direct caller predating the field) may present no ``gesture`` at all.
+        Anything unrecognised degrades to ``ClickGesture.INVOKE`` -- today's
+        behaviour, which sends no synthetic mouse input -- rather than guessing
+        a physical gesture the user may not have asked for.
+        """
+        raw = getattr(query, "gesture", DEFAULT_GESTURE)
+        try:
+            return ClickGesture(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "click_element unrecognised gesture %r; using the default "
+                "Invoke behaviour",
+                raw,
+            )
+            return ClickGesture.INVOKE
+
+    def _invoke_path(
+        self,
+        winner: ElementMatch,
+        snap: SnapshotForeground,
+        query: ElementQuery,
+        *,
+        badge_pick: bool = False,
+    ) -> ClickResult:
+        """The InvokePattern execution path (pre-click verification done)."""
         try:
             self._invoke_fn(winner.control_ref)
         except Exception as exc:  # noqa: BLE001 -- COM raises broad exceptions
             return self._handle_invoke_error(
-                exc, winner, snapshot_foreground, query
+                exc, winner, snap, query, badge_pick=badge_pick
             )
         return ClickResult(
             outcome="ok",
@@ -550,8 +855,20 @@ class ClickExecutor:
         round-trip) is compared per dimension against the cached
         ``winner.bounds``; a drift exceeding ``self._bounds_tolerance`` (physical
         UIA pixels) in any of x/y/w/h returns ``bounds_stale``.
+
+        Verification budget (wh-overlay-slow-uia-stale-badges.6): the deadline
+        ``click()`` captured is checked BETWEEN the steps that can block on a
+        COM or Win32 call (the foreground probe, the popup/shell liveness
+        probes, the IsEnabled and BoundingRectangle re-reads, and the
+        on-screen check). An expired deadline returns
+        ``verification_timeout`` so no further step starts and no click is
+        sent. The budget bounds when a NEW step may start; a single hung COM
+        call can still overrun it, because COM cannot be safely aborted
+        mid-call.
         """
         probe = self._foreground_probe()
+        if self._verification_budget_expired("foreground probe"):
+            return "verification_timeout"
 
         # Step 1: foreground HWND vs the snapshot.
         if probe.window != snap.window:
@@ -597,6 +914,9 @@ class ClickExecutor:
             # HWND + PID + name all matched, only creation-time was denied ->
             # accept (this is the admin-elevated foreground case) and continue.
 
+        if self._verification_budget_expired("foreground identity checks"):
+            return "verification_timeout"
+
         # Popup-closed probe (wh-n29v.45, design line 396). Only for a
         # popup-owned winner: a control walked from a classic Win32 #32768 /
         # UIA-Menu owned popup carries that popup's HWND in
@@ -608,9 +928,27 @@ class ClickExecutor:
         # could click 'X'"). A primary-window match (source_window_hwnd == 0)
         # skips this entirely, so the probe adds no Win32 round-trip to the
         # Phase 1 path.
+        #
+        # A taskbar-shell winner (wh-overlay-taskbar-numbers.3,
+        # ``source_window_is_shell``) takes the shell branch instead: shell
+        # windows (Shell_TrayWnd / Shell_SecondaryTrayWnd / the tray-overflow
+        # windows) are UNOWNED always-on-top top-levels, so the popup owner
+        # check would refuse every taskbar click. The shell probe requires
+        # only that the shell window is still visible; failure ->
+        # ``taskbar_closed``.
         if winner.source_window_hwnd:
-            if not self._popup_still_open(winner.source_window_hwnd, snap.window):
+            if winner.source_window_is_shell:
+                if not self._shell_window_still_visible(
+                    winner.source_window_hwnd
+                ):
+                    return "taskbar_closed"
+            elif not self._popup_still_open(
+                winner.source_window_hwnd, snap.window
+            ):
                 return "popup_closed"
+
+        if self._verification_budget_expired("popup/shell liveness probes"):
+            return "verification_timeout"
 
         # Step 4: re-read IsEnabled on control_ref.
         try:
@@ -619,6 +957,9 @@ class ClickExecutor:
             return "bounds_invalid"
         if not enabled:
             return "disabled"
+
+        if self._verification_budget_expired("IsEnabled re-read"):
+            return "verification_timeout"
 
         # Step 5: re-read BoundingRectangle on control_ref.
         try:
@@ -631,10 +972,17 @@ class ClickExecutor:
         x, y, w, h = parsed
         if w <= 0 or h <= 0:
             return "bounds_invalid"
+
+        if self._verification_budget_expired("BoundingRectangle re-read"):
+            return "verification_timeout"
+
         centre_x = x + w // 2
         centre_y = y + h // 2
         if not self._on_screen_fn(centre_x, centre_y):
             return "target_moved_offscreen"
+
+        if self._verification_budget_expired("on-screen check"):
+            return "verification_timeout"
 
         # Phase 1.5 bounds-tolerance check (design r1c.6). The fresh rect read
         # above is reused -- NO second BoundingRectangle round-trip. Both the
@@ -671,6 +1019,30 @@ class ClickExecutor:
         self._last_rect = (centre_x, centre_y)
         return None
 
+    def _verification_budget_expired(self, completed_step: str) -> bool:
+        """True (with a log) when the click's verification deadline passed.
+
+        Consulted between _verify steps (wh-overlay-slow-uia-stale-badges.6).
+        ``completed_step`` names the step that just finished, for the log. A
+        ``None`` deadline means no click() captured one (a direct _verify
+        call, e.g. from a test); such a run is unbudgeted, matching the
+        pre-budget behaviour.
+        """
+        deadline = self._verify_deadline
+        if deadline is None:
+            return False
+        now = self._monotonic_fn()
+        if now < deadline:
+            return False
+        logger.warning(
+            "click_element pre-click verification exceeded its %dms budget "
+            "after the %s (%.0fms over); refusing (verification_timeout)",
+            self._verification_budget_ms,
+            completed_step,
+            (now - deadline) * 1000.0,
+        )
+        return True
+
     def _popup_still_open(self, popup_hwnd: int, focused_hwnd: int) -> bool:
         """True when the owning popup is still visible AND owned by the focus.
 
@@ -698,6 +1070,41 @@ class ClickExecutor:
                 return False
             return self._popup_owner_fn(popup_hwnd) == focused_hwnd
         except Exception:  # noqa: BLE001 -- popup raced closed -> fail closed
+            return False
+
+    def _shell_window_still_visible(self, shell_hwnd: int) -> bool:
+        """True when the HWND is still a visible taskbar shell window.
+
+        The shell-window probe for a taskbar winner
+        (wh-overlay-taskbar-numbers.3). Shell windows are UNOWNED, so unlike
+        ``_popup_still_open`` there is no owner check. Two conditions must
+        hold:
+
+        * ``popup_visible_fn(shell_hwnd)`` is truthy -- the window is still
+          on screen. Catches an explorer restart destroying the walked
+          Shell_TrayWnd HWND (IsWindowVisible on a dead HWND is falsy) and a
+          closed tray-overflow flyout (hidden, not destroyed).
+        * ``shell_class_fn(shell_hwnd)`` is still one of
+          TASKBAR_WINDOW_CLASSES -- the handle still names a SHELL window.
+          HWNDs are recycled, so after an explorer restart the handle can
+          come back naming a live unrelated window that visibility alone
+          would pass; invoking a walked control_ref against it could fire
+          into that window (codex finding wh-overlay-taskbar-numbers.5.3).
+          The popup branch needs no analogue: its owner check already fails
+          a recycled handle.
+
+        Fails CLOSED (returns False, caller surfaces ``taskbar_closed``)
+        when either seam is not wired or raises -- a shell match with no way
+        to confirm its window is alive must not be clicked, the same
+        discipline as the popup probe.
+        """
+        if self._popup_visible_fn is None or self._shell_class_fn is None:
+            return False
+        try:
+            if not self._popup_visible_fn(shell_hwnd):
+                return False
+            return self._shell_class_fn(shell_hwnd) in TASKBAR_WINDOW_CLASSES
+        except Exception:  # noqa: BLE001 -- shell window raced away -> fail closed
             return False
 
     @staticmethod
@@ -772,6 +1179,8 @@ class ClickExecutor:
         winner: ElementMatch,
         snap: SnapshotForeground,
         query: ElementQuery,
+        *,
+        badge_pick: bool = False,
     ) -> ClickResult:
         """Map an Invoke() exception to a ClickResult, fail-closed.
 
@@ -817,6 +1226,41 @@ class ClickExecutor:
             # double-fire. The clear-winner rule only selects controls whose
             # cached Invoke pattern was present, so reaching here is off the
             # happy path; the fallback never fakes a press.
+            #
+            # Badge coordinate-first (wh-electron-dda-noop): for a badge pick,
+            # try the guarded coordinate click BEFORE DoDefaultAction --
+            # accDoDefaultAction can report success without firing anything,
+            # and a badge pick is literally "click the thing at that spot".
+            # DDA stays the fallback for a mechanism refusal that provably
+            # sent no input on a still-verified target (hit-test, zero-event
+            # send); _coordinate_fallback's no_input_fallback hook draws that
+            # honesty boundary (a re-verification failure surfaces its own
+            # reason with no DDA press, and a partial or ambiguous send
+            # fails closed there, never double-firing through DDA).
+            if badge_pick and self._coord_eligible(winner, query):
+                logger.info(
+                    "click_element badge pick with Invoke structurally "
+                    "unavailable, trying guarded coordinate click before "
+                    "DoDefaultAction (badge_coord_first): matched=%r",
+                    winner.name,
+                )
+
+                def _dda_after_no_input(refusal_reason: str) -> ClickResult:
+                    logger.info(
+                        "click_element badge_coord_first refused before any "
+                        "input (%s), falling back to DoDefaultAction: "
+                        "matched=%r",
+                        refusal_reason,
+                        winner.name,
+                    )
+                    return self._attempt_do_default_action(winner, snap, query)
+
+                return self._coordinate_fallback(
+                    winner,
+                    snap,
+                    fail_reason="badge_coord_first_sendinput_failed",
+                    no_input_fallback=_dda_after_no_input,
+                )
             return self._attempt_do_default_action(winner, snap, query)
 
         if not self._com_error_predicate(exc):
@@ -901,6 +1345,16 @@ class ClickExecutor:
           .Select() was verified live to move the tree highlight WITHOUT
           navigating (Win11 WinUI tree), leaving the coordinate click as the
           only honest press path.
+        * ``DefaultActionIsExpandCollapse`` (wh-treeitem-dda-wrong-action: the
+          default action means Expand or Collapse, in English or in the
+          display language) -> the SAME structural coordinate fallback under
+          ``dda_expand_collapse``. It is raised BEFORE ``accDoDefaultAction``
+          is called, so nothing has fired. Pressing it would toggle the node
+          (File Explorer's navigation pane: This PC, Desktop, the drives)
+          where a mouse click navigates. Telemetry tag
+          ``dda_expand_collapse_then_coord``; a click that does not land
+          reports ``dda_expand_collapse_then_sendinput_failed``; an ineligible
+          match refuses under ``dda_expand_collapse`` and presses nothing.
         * A COM error whose HRESULT is on the no-side-effect allowlist AND that
           passes the stronger ``_coord_eligible`` check -> gated coordinate
           fallback. Telemetry tag ``dda_no_side_effect_then_coord``. It is
@@ -942,6 +1396,16 @@ class ClickExecutor:
             )
             return self._structural_absence_coordinate_fallback(
                 winner, snap, query, structural_reason="dda_no_default_action"
+            )
+        except DefaultActionIsExpandCollapse as exc:
+            logger.warning(
+                "click_element MSAA default action is Expand/Collapse, not "
+                "pressing it: matched=%r default_action=%r",
+                winner.name,
+                exc.default_action,
+            )
+            return self._structural_absence_coordinate_fallback(
+                winner, snap, query, structural_reason="dda_expand_collapse"
             )
         except Exception as exc:  # noqa: BLE001 -- MSAA raises broad exceptions
             logger.warning(
@@ -1011,12 +1475,15 @@ class ClickExecutor:
     ) -> ClickResult:
         """Coordinate-click when BOTH press patterns are structurally absent.
 
-        Reached only from ``_attempt_do_default_action``'s two structural
+        Reached only from ``_attempt_do_default_action``'s three structural
         branches (wh-explorer-navpane-click): InvokePattern was structurally
         unavailable AND the MSAA path either never resolved
-        (``dda_unavailable``) or resolved with an EMPTY default action, raised
-        BEFORE ``accDoDefaultAction`` was called (``dda_no_default_action``).
-        In both states nothing has fired, so a coordinate click cannot
+        (``dda_unavailable``), resolved with an EMPTY default action, raised
+        BEFORE ``accDoDefaultAction`` was called (``dda_no_default_action``),
+        or resolved with an Expand / Collapse default action that is never
+        fired because it would toggle a tree node (``dda_expand_collapse``,
+        wh-treeitem-dda-wrong-action; also raised before the call).
+        In all three states nothing has fired, so a coordinate click cannot
         double-press -- these are provably side-effect-free, strictly safer
         than the allowlisted-HRESULT paths that already coordinate-click.
         Hence NO ``enable_coordinate_click_on_com_error`` knob: that knob
@@ -1049,14 +1516,34 @@ class ClickExecutor:
         snap: SnapshotForeground,
         *,
         fail_reason: str,
+        no_input_fallback: Optional[Callable[[str], ClickResult]] = None,
+        gesture: ClickGesture = ClickGesture.INVOKE,
     ) -> ClickResult:
         """Re-verify, hit-test the click point, then coordinate-click it.
 
         Per v5 branches 2/3: re-run the FULL pre-click verification block; if
         it fails, return ITS reason (not the Invoke reason) -- the world moved
         between the Invoke attempt and the fallback. If verification passes,
-        coordinate-click the fresh centre; a short send -> ``sendinput_short``,
+        coordinate-click the fresh centre; a zero-event send ->
+        ``sendinput_nothing_sent``, a short send -> ``sendinput_short``,
         any other coordinate-click failure -> ``fail_reason``.
+
+        ``no_input_fallback`` (wh-electron-dda-noop, badge coordinate-first):
+        when provided, it is invoked -- with the refusal reason, returning its
+        ClickResult instead of failing -- at exactly the refusal points where
+        NO input has provably been sent AND the re-verification above them
+        passed: either hit-test layer refusing (including a raising hit-test
+        seam), or the coordinate seam reporting ZERO events sent (the
+        production seam returns ``(False, 0)`` when the cursor landed wrong
+        BEFORE any button event was synthesised). A re-verification FAILURE
+        deliberately does NOT divert (wh-review-click-numbers.3): the world
+        moved, so the fallback's programmatic press on the same stale
+        ``control_ref`` would act on a target verification just rejected --
+        the verification reason is returned instead, exactly as on the
+        callers with no fallback installed. Also deliberately NOT invoked
+        after a raising coordinate seam (input may have gone out mid-call) or
+        a partial/not-landed send with events out -- a fallback press there
+        could double-fire, so those keep the fail-closed returns.
 
         Click-point hit-test (wh-explorer-navpane-click.1.1): none of the five
         verification steps can detect an always-on-top window overlapping the
@@ -1092,10 +1579,40 @@ class ClickExecutor:
         ``click_point_obstructed``; the check runs AFTER the root comparison
         so the cheap Win32 query short-circuits cross-root occluders without
         a COM call.
+
+        ``gesture`` (wh-click-gesture-param) selects WHICH click is sent once
+        every guard above has passed. ``ClickGesture.INVOKE`` -- the default and
+        the value every pre-existing caller uses -- sends today's single left
+        click through ``coordinate_click_fn`` and expects the usual two events.
+        A non-default gesture sends through the separate ``gesture_click_fn``
+        seam with the mapped button and click count, and expects two events per
+        click (a double click is two down/up pairs). Nothing else about this
+        method changes with the gesture: the re-verification, both hit-test
+        layers, the short-send classification, and the no-input fallback
+        boundary are shared.
         """
+        # Mechanism refusals below the verification block have provably sent
+        # no input ON A STILL-VERIFIED TARGET, so each may divert to
+        # no_input_fallback when provided.
+        def _refuse(reason: str) -> ClickResult:
+            if no_input_fallback is not None:
+                return no_input_fallback(reason)
+            return self._fail(winner, reason)
+
+        # A verification failure never diverts (wh-review-click-numbers.3):
+        # the world moved, and the fallback would press the SAME stale
+        # control_ref the verification just rejected.
         verdict = self._verify(winner, snap)
         if verdict is not None:
             return self._fail(winner, verdict)
+        # wh-overlay-slow-uia-stale-badges.20.2: _verify's last intra-step
+        # check sits before its pure-Python tail, so re-check the shared
+        # deadline before the hit-test layers start -- layer 2 below is a
+        # cross-process COM call that must not be handed to an expired
+        # click. Uses _fail, never no_input_fallback: a DDA/Invoke press
+        # after expiry would itself be input after expiry.
+        if self._verification_budget_expired("coordinate re-verification"):
+            return self._fail(winner, "verification_timeout")
         centre_x, centre_y = self._last_rect
         expected_root = winner.source_window_hwnd or snap.window
         try:
@@ -1110,7 +1627,7 @@ class ClickExecutor:
                 centre_y,
                 repr(exc),
             )
-            return self._fail(winner, "click_point_obstructed")
+            return _refuse("click_point_obstructed")
         if root_at_point != expected_root:
             logger.warning(
                 "click_element click point belongs to another window, "
@@ -1122,7 +1639,7 @@ class ClickExecutor:
                 expected_root,
                 root_at_point,
             )
-            return self._fail(winner, "click_point_obstructed")
+            return _refuse("click_point_obstructed")
         # Second layer (wh-explorer-navpane-click.1.4): the root comparison
         # above cannot see a SAME-ROOT occluder -- an in-window overlay (a
         # Chromium in-page modal, a same-process floating panel) shares the
@@ -1144,7 +1661,7 @@ class ClickExecutor:
                 centre_y,
                 repr(exc),
             )
-            return self._fail(winner, "click_point_obstructed")
+            return _refuse("click_point_obstructed")
         if not point_hits_winner:
             logger.warning(
                 "click_element element at click point is not the winner or "
@@ -1154,7 +1671,16 @@ class ClickExecutor:
                 centre_x,
                 centre_y,
             )
-            return self._fail(winner, "click_point_obstructed")
+            return _refuse("click_point_obstructed")
+        # wh-overlay-slow-uia-stale-badges.20.2: the hit-test layers above
+        # can block -- layer 2 is ElementFromPoint, a cross-process COM call
+        # to the same slow provider the budget exists to bound. This is the
+        # last refusal point before real input: an expired budget must end
+        # the click HERE, with no mouse event and no no_input_fallback
+        # diversion (a DDA/Invoke press after expiry would itself be input
+        # after expiry), so it uses _fail like the verification refusals.
+        if self._verification_budget_expired("coordinate hit-tests"):
+            return self._fail(winner, "verification_timeout")
         # The coordinate-click seam is a real SendInput/Win32 call in production;
         # it can raise (OSError, RuntimeError, a ctypes error) instead of
         # returning (succeeded, events_sent). An uncaught raise here would
@@ -1162,17 +1688,61 @@ class ClickExecutor:
         # dropping the user-visible failure notice (reviewer_1 finding
         # wh-9f3t.28.2). Map any seam exception to fail_reason so click() always
         # returns a ClickResult.
+        # The default gesture calls the long-standing two-argument seam with
+        # exactly the arguments it always received; only a non-default gesture
+        # takes the button/count seam (wh-click-gesture-param).
+        expected_events = self._expected_click_events
         try:
-            succeeded, events_sent = self._coordinate_click_fn(centre_x, centre_y)
+            if gesture is ClickGesture.INVOKE:
+                seam_result = self._coordinate_click_fn(
+                    centre_x, centre_y
+                )
+            else:
+                button, click_count = _GESTURE_MOUSE_PARAMS[gesture]
+                expected_events = self._expected_click_events * click_count
+                seam_result = self._gesture_click_fn(
+                    centre_x, centre_y, button, click_count
+                )
+            # Both seams may return the legacy (succeeded, events_sent) or
+            # the widened (succeeded, events_sent, reason) shape
+            # (wh-mouse-grid.1.5); a legacy injector reads as reason None.
+            succeeded, events_sent = bool(seam_result[0]), int(seam_result[1])
+            seam_reason = seam_result[2] if len(seam_result) > 2 else None
         except Exception:  # noqa: BLE001 -- a real SendInput/Win32 seam can raise
+            # Ambiguous: input may have gone out mid-call. Never divert to
+            # no_input_fallback here -- a fallback press could double-fire.
             return self._fail(winner, fail_reason)
+        # ZERO events sent is a provably-nothing-fired refusal (the production
+        # seam returns (False, 0) when the cursor landed wrong BEFORE any
+        # button event was synthesised), so it may still divert -- and it
+        # carries its own ``sendinput_nothing_sent`` tag either way: nothing
+        # went out, so it is safe to retry and must not share a
+        # classification with the partial send below, which may have left a
+        # button DOWN and whose notice copy blames the control
+        # (wh-review-click-numbers.2). Checked before the short-send test.
+        if events_sent == 0:
+            return _refuse("sendinput_nothing_sent")
         # A short send is its OWN reason (v5 ``sendinput_short``), distinct from
         # a generic coordinate-click failure. SendInput reports how many events
         # it injected; fewer than the expected mouse-down+mouse-up pair means
         # the OS dropped part of the click, which is checked BEFORE the generic
         # failure so a partial click never masquerades as
-        # ``invoke_then_sendinput_failed``.
-        if events_sent < self._expected_click_events:
+        # ``invoke_then_sendinput_failed``. Within the short sends, a seam
+        # reason of release_failed means the partial batch left a button DOWN
+        # and the seam's compensating release was refused too -- the one state
+        # where a button may still be held, so it gets its own tag instead of
+        # collapsing onto sendinput_short (wh-mouse-grid.1.5).
+        if events_sent < expected_events:
+            if seam_reason == "release_failed":
+                # wh-mouse-grid.1.19: preserve WHICH button may still be
+                # held. The recovery toast prescribes a grid cell click, and
+                # a plain (left) click cannot release a stuck RIGHT button.
+                # The gesture in hand names the button, so no schema change:
+                # the reason tag carries the identity (reason is an open
+                # string end-to-end).
+                if gesture is ClickGesture.RIGHT_CLICK:
+                    return self._fail(winner, "right_button_release_failed")
+                return self._fail(winner, "button_release_failed")
             return self._fail(winner, "sendinput_short")
         if not succeeded:
             return self._fail(winner, fail_reason)
@@ -1249,6 +1819,7 @@ class ClickExecutor:
 __all__ = [
     "ClickExecutor",
     "ClickResult",
+    "DefaultActionIsExpandCollapse",
     "DoDefaultActionUnavailable",
     "ForegroundProbe",
     "NoDefaultAction",

@@ -528,6 +528,14 @@ class TestRouterSoftRejectMapping:
         reason='default_reject_paste_capable_class' ->
         RejectedInsertionStrategy (toast + Try-it-anyway override).
 
+    wh-paste-when-unverified.2 then merged the reject side into the
+    paste side: EVERY reject reason routes to ClipboardOnlyStrategy
+    when that strategy is wired, so the words are pasted rather than
+    dropped. RejectedInsertionStrategy survives for the elevated
+    refusal (a separate branch above the predicate, covered in
+    test_insertion_router.py) and for routers built without a
+    ClipboardOnlyStrategy.
+
     Hard rejects (default_reject, denylists, etc.) continue to route to
     RejectedInsertionStrategy unchanged.
     """
@@ -587,10 +595,13 @@ class TestRouterSoftRejectMapping:
         ctx = _focusable_ctx(process="zed.exe", class_name="Zed::Window")
         assert router.get_strategy(ctx, "x" * 200) is strategies["clipboard_only"]
 
-    def test_unknown_soft_reject_routes_to_rejected(self, strategies):
-        # The bug the wh-prio bead surfaced: an unknown soft-reject must
-        # NOT silently paste. It routes to RejectedInsertionStrategy so
-        # the toast and Try-it-anyway button fire.
+    def test_unknown_soft_reject_routes_to_clipboard_only(self, strategies):
+        # wh-paste-when-unverified.2: an unknown soft-reject pastes with
+        # Ctrl+V instead of dropping the words. It previously routed to
+        # RejectedInsertionStrategy to front the toast and the
+        # Try-it-anyway button; every rejection notice is switched off
+        # (wh-dictation-gate-ux interim disable), so that route dropped
+        # the words silently.
         verdict = TextTargetVerdict(
             verdict=False,
             reason="default_reject_paste_capable_class",
@@ -599,14 +610,21 @@ class TestRouterSoftRejectMapping:
         )
         router = self._router(strategies, self._stub_predicate(verdict))
         ctx = _focusable_ctx(process="zed.exe", class_name="Zed::Window")
-        assert router.get_strategy(ctx, "hello") is strategies["rejected"]
-        # Long text takes the same path -- the soft-reject reason
+        assert (
+            router.get_strategy(ctx, "hello") is strategies["clipboard_only"]
+        )
+        # Long text takes the same path -- the reject still
         # short-circuits the length branch.
-        assert router.get_strategy(ctx, "x" * 200) is strategies["rejected"]
+        assert (
+            router.get_strategy(ctx, "x" * 200)
+            is strategies["clipboard_only"]
+        )
 
-    def test_default_reject_still_routes_to_rejected(self, strategies):
-        # Browser-empty trap returns reason='default_reject', and that
-        # must NOT route to ClipboardOnly.
+    def test_default_reject_routes_to_clipboard_only(self, strategies):
+        # Browser-empty trap returns reason='default_reject'. Ctrl+V is
+        # what it now gets: the recorded harm for a browser page body is
+        # KEYSTROKES (wh-fc1x.1, one page scroll per word in Brave), and
+        # ClipboardOnly sends none.
         verdict = TextTargetVerdict(
             verdict=False, reason="default_reject",
             control_type="DocumentControl", class_name="",
@@ -614,9 +632,17 @@ class TestRouterSoftRejectMapping:
         )
         router = self._router(strategies, self._stub_predicate(verdict))
         ctx = _focusable_ctx(process="brave.exe", class_name="")
-        assert router.get_strategy(ctx, "hello") is strategies["rejected"]
+        assert (
+            router.get_strategy(ctx, "hello") is strategies["clipboard_only"]
+        )
+        # It must not reach the default length-based branch, which is
+        # the one that sends keystrokes for short text.
+        assert (
+            router.get_strategy(ctx, "hello")
+            is not strategies["verified_unicode"]
+        )
 
-    def test_denylist_reject_still_routes_to_rejected(self, strategies):
+    def test_denylist_reject_routes_to_clipboard_only(self, strategies):
         verdict = TextTargetVerdict(
             verdict=False, reason="denylist_control_type",
             control_type="ButtonControl", class_name="Button",
@@ -624,7 +650,9 @@ class TestRouterSoftRejectMapping:
         )
         router = self._router(strategies, self._stub_predicate(verdict))
         ctx = _focusable_ctx(process="myapp.exe", class_name="Button")
-        assert router.get_strategy(ctx, "hello") is strategies["rejected"]
+        assert (
+            router.get_strategy(ctx, "hello") is strategies["clipboard_only"]
+        )
 
     def test_router_without_clipboard_only_falls_back_to_default(self, strategies):
         # Backwards-compatibility branch: an older fixture that builds
@@ -705,6 +733,9 @@ class _FakeClipboard:
         self.last_paste_was_sent = False
         self.last_paste_was_optimistic = False
         self.calls.append(text)
+        # .1.18: record the kwargs so forwarding tests can assert
+        # the strategy handed expected_provenance through.
+        self.last_call_kwargs = dict(_kwargs)
         if self._keystroke_fires:
             self.last_paste_was_sent = True
         if self._verified_paste_returns:
@@ -757,6 +788,41 @@ class TestClipboardOnlyStrategy:
         assert result.success is True
         assert result.retry_outcome == "verified"
         assert result.clipboard_dirty is True
+
+    def test_retry_identity_forwarded_to_verified_paste(self):
+        # wh-ensure-focused-same-process-fallback.1.18 (codex round
+        # 11): the retry handler verifies the cached provenance marker
+        # before dispatch, but this strategy re-resolves its paste
+        # target from the captured control and the clipboard verify
+        # loop runs before the Ctrl+V. The strategy must forward the
+        # cached identity so verified_paste can re-read the marker
+        # immediately before the keystroke.
+        clipboard = _FakeClipboard(
+            verified_paste_returns=True, optimistic=False,
+        )
+        strategy = ClipboardOnlyStrategy(
+            clipboard, MagicMock(), text_perfector=None,
+        )
+        strategy.insert(
+            "hello", self._ctx(), retry_identity=(0x12345, 7),
+        )
+        assert clipboard.last_call_kwargs.get(
+            "expected_provenance"
+        ) == (0x12345, 7)
+
+    def test_no_retry_identity_forwards_none(self):
+        # Ordinary soft-allow pastes have no rejection-time identity;
+        # the recheck must stay off for them.
+        clipboard = _FakeClipboard(
+            verified_paste_returns=True, optimistic=False,
+        )
+        strategy = ClipboardOnlyStrategy(
+            clipboard, MagicMock(), text_perfector=None,
+        )
+        strategy.insert("hello", self._ctx())
+        assert clipboard.last_call_kwargs.get(
+            "expected_provenance"
+        ) is None
 
     def test_verified_paste_optimistic_returns_unverified(self):
         # verified_paste returns True but it took the optimistic path

@@ -24,10 +24,16 @@ from ui.uia_walker import (
     UIA_BUTTON,
     UIA_MENU,
     UIA_MENUITEM,
+    WINUI_POPUP_CLASS_NAME,
     WalkResult,
     enumerate_owned_popups,
     walk_owned_popups,
 )
+
+# UIA_PaneControlTypeId. A WinUI 3 popup host window reports this, not Menu --
+# measured against a live Notepad File menu on 2026-08-14. Defined locally
+# because the walker has no reason to name a control type it does not filter on.
+UIA_PANE_CONTROL_TYPE = 50033
 
 # Reuse the established fakes.
 from tests.test_uia_walker import (
@@ -144,6 +150,105 @@ def test_enumerate_matches_uia_menu_control_type_even_without_class():
         control_type_fn=desktop.control_type_of,
     )
     assert popups == [2002]
+
+
+def test_enumerate_matches_winui_popup_host_class_reporting_pane():
+    """wh-winui-menu-click-refused.1: a WinUI 3 menu is drawn by an owned
+    top-level window whose class is ``Microsoft.UI.Content.PopupWindowSiteBridge``
+    and whose UIA control type is Pane, NOT Menu.
+
+    Measured 2026-08-14 against a live Notepad File menu: the window reported
+    control type 50033 (Pane), so neither pre-existing arm matched it and the
+    menu was never walked, while walking it directly returned 13 MenuItem
+    matches with 12 exposing a working Invoke pattern. The class name is
+    therefore matched directly, on the cheap comparison, with no added COM read.
+    """
+    desktop = FakeDesktop([
+        FakeWindow(2008, owner=FOCUSED_HWND,
+                   class_name=WINUI_POPUP_CLASS_NAME,
+                   control_type=UIA_PANE_CONTROL_TYPE),
+    ])
+    popups = enumerate_owned_popups(
+        FOCUSED_HWND,
+        enumerator=desktop.enumerate,
+        owner_fn=desktop.owner_of,
+        class_name_fn=desktop.class_name_of,
+        visible_fn=desktop.is_visible,
+        control_type_fn=desktop.control_type_of,
+    )
+    assert popups == [2008]
+
+
+def test_enumerate_skips_hidden_winui_popup_host():
+    """A closed WinUI menu keeps its popup host window alive but hidden.
+
+    Notepad held three ``PopupWindowSiteBridge`` windows on 2026-08-14, two of
+    them hidden leftovers parked at -32000. The visibility check must still
+    reject those, or every leftover host would be walked.
+    """
+    desktop = FakeDesktop([
+        FakeWindow(2009, owner=FOCUSED_HWND,
+                   class_name=WINUI_POPUP_CLASS_NAME,
+                   control_type=UIA_PANE_CONTROL_TYPE,
+                   visible=False),
+    ])
+    popups = enumerate_owned_popups(
+        FOCUSED_HWND,
+        enumerator=desktop.enumerate,
+        owner_fn=desktop.owner_of,
+        class_name_fn=desktop.class_name_of,
+        visible_fn=desktop.is_visible,
+        control_type_fn=desktop.control_type_of,
+    )
+    assert popups == []
+
+
+def test_enumerate_skips_winui_popup_host_owned_by_another_window():
+    """The owner check still applies: another application's menu is not ours."""
+    desktop = FakeDesktop([
+        FakeWindow(2010, owner=9999,
+                   class_name=WINUI_POPUP_CLASS_NAME,
+                   control_type=UIA_PANE_CONTROL_TYPE),
+    ])
+    popups = enumerate_owned_popups(
+        FOCUSED_HWND,
+        enumerator=desktop.enumerate,
+        owner_fn=desktop.owner_of,
+        class_name_fn=desktop.class_name_of,
+        visible_fn=desktop.is_visible,
+        control_type_fn=desktop.control_type_of,
+    )
+    assert popups == []
+
+
+def test_enumerate_winui_popup_host_costs_no_control_type_probe():
+    """The WinUI class matches on the cheap string comparison.
+
+    The live control-type lookup is a COM round trip per candidate window. The
+    classic ``#32768`` arm avoids it and the WinUI arm must too, otherwise every
+    open menu adds a COM read to the walk.
+    """
+    probed: list[int] = []
+
+    def counting_control_type(hwnd):
+        probed.append(hwnd)
+        return UIA_PANE_CONTROL_TYPE
+
+    desktop = FakeDesktop([
+        FakeWindow(2011, owner=FOCUSED_HWND,
+                   class_name=WINUI_POPUP_CLASS_NAME,
+                   control_type=UIA_PANE_CONTROL_TYPE),
+    ])
+    popups = enumerate_owned_popups(
+        FOCUSED_HWND,
+        enumerator=desktop.enumerate,
+        owner_fn=desktop.owner_of,
+        class_name_fn=desktop.class_name_of,
+        visible_fn=desktop.is_visible,
+        control_type_fn=counting_control_type,
+    )
+    assert popups == [2011]
+    assert probed == []
 
 
 def test_enumerate_skips_not_owned_by_focused():

@@ -35,6 +35,8 @@ class TerminalEditorProxy:
         clears ``_submit_in_progress`` if the GUI never closes the
         session out via an ack.
       - force_cleanup(): reset all proxy state (recovery).
+      - cancelled_by_gui(): GUI-originated cancellation, fenced by the
+        session request_id (wh-overlay-slow-uia-stale-badges.14.17).
       - on_event_ack(): consumes the editor's lifecycle acks
         (submit_complete / submit_failed / show / focus_*). The
         submit-lifecycle branch is the editor-close path used by the
@@ -63,10 +65,18 @@ class TerminalEditorProxy:
         self._submit_in_progress = threading.Event()
         self._submit_timer: threading.Timer | None = None
         self._editor_hwnd: Optional[int] = None
+        # wh-overlay-slow-uia-stale-badges.14.17: the request_id minted
+        # by show() identifies the active editor session. Control
+        # messages (lifecycle acks, GUI cancellation) are consumed only
+        # when their rid matches, so a message delivered late from an
+        # older session cannot reset the current one.
+        self._session_request_id: str = ""
         # Serialize state mutation against the _submit_timeout
-        # timer-thread callback. The input process is not asyncio
-        # based, so a threading.Lock guards the small scalar block.
-        self._state_lock = threading.Lock()
+        # timer-thread callback. Reentrant because _submit_timeout
+        # holds it across its rid check and then calls
+        # _reset_session_state, which acquires it again
+        # (wh-overlay-slow-uia-stale-badges.14.21).
+        self._state_lock = threading.RLock()
 
     @property
     def is_active(self) -> bool:
@@ -115,6 +125,8 @@ class TerminalEditorProxy:
         if not sent:
             return None
 
+        with self._state_lock:
+            self._session_request_id = request_id
         self._is_active.set()
         log.debug(
             "Sent te_event:show (rid=%s, hwnd=%d)",
@@ -135,8 +147,17 @@ class TerminalEditorProxy:
 
         self._submit_in_progress.set()
         self._cancel_submit_timer()
+        # The timer carries the session it was started for
+        # (wh-overlay-slow-uia-stale-badges.14.21): Timer.cancel()
+        # cannot stop a callback that has already started, so a
+        # session-A timer can fire after session B opened.
+        # _submit_timeout no-ops unless the rid still names the
+        # active session.
+        with self._state_lock:
+            timer_rid = self._session_request_id
         self._submit_timer = threading.Timer(
             self._SUBMIT_TIMEOUT_S, self._submit_timeout,
+            args=(timer_rid,),
         )
         self._submit_timer.daemon = True
         self._submit_timer.start()
@@ -180,6 +201,17 @@ class TerminalEditorProxy:
         ``main._handle_te_event_ack``.
         """
         if op == "submit_complete" or op.startswith("submit_failed"):
+            if request_id != self._session_request_id:
+                # wh-overlay-slow-uia-stale-badges.14.17: a durable
+                # _te_event_ack can be delivered long after its session
+                # ended; clearing state here would close the CURRENT
+                # session.
+                log.warning(
+                    "on_event_ack: ignoring submit-lifecycle ack from "
+                    "another session (op=%s rid=%s active=%s)",
+                    op, request_id, self._session_request_id,
+                )
+                return
             log.debug(
                 "on_event_ack: submit-lifecycle ack op=%s rid=%s; "
                 "clearing proxy state",
@@ -192,6 +224,13 @@ class TerminalEditorProxy:
             return
 
         if op == "show" and editor_hwnd is not None:
+            if request_id != self._session_request_id:
+                log.warning(
+                    "show ack: ignoring HWND from another session "
+                    "(rid=%s active=%s)",
+                    request_id, self._session_request_id,
+                )
+                return
             self._editor_hwnd = editor_hwnd
             log.debug(
                 "show ack: recorded editor_hwnd=%s (rid=%s)",
@@ -214,16 +253,54 @@ class TerminalEditorProxy:
         self._submit_in_progress.clear()
         self._reset_session_state()
 
-    def _submit_timeout(self):
-        """Safety timeout: clear submit flags if no lifecycle ack arrived."""
-        log.warning(
-            "Submit safety timeout (%.0fs): clearing _submit_in_progress. "
-            "The GUI lifecycle ack may have been lost.",
-            self._SUBMIT_TIMEOUT_S,
-        )
-        self._submit_in_progress.clear()
-        self._is_active.clear()
-        self._reset_session_state()
+    def cancelled_by_gui(self, request_id: str):
+        """Handle a GUI-originated cancellation, fenced by session id.
+
+        wh-overlay-slow-uia-stale-badges.14.17: the
+        terminal_editor_cancelled IPC command is durable, so it can be
+        delivered after its session ended and a NEW session opened.
+        Clean up only when the cancellation names the active session.
+        An empty rid is a recovery signal (the chain lost the id or a
+        legacy sender): refuse it and a lost rid would wedge the proxy
+        active forever, so it cleans unconditionally.
+        """
+        if request_id and request_id != self._session_request_id:
+            log.warning(
+                "cancelled_by_gui: ignoring cancellation from another "
+                "session (rid=%s active=%s)",
+                request_id, self._session_request_id,
+            )
+            return
+        self.force_cleanup()
+
+    def _submit_timeout(self, request_id: str):
+        """Safety timeout: clear submit flags if no lifecycle ack arrived.
+
+        wh-overlay-slow-uia-stale-badges.14.21: ``request_id`` is the
+        session the timer was started for. Timer.cancel() cannot stop a
+        callback that has already started, so this can run after the
+        session ended and a NEW session opened; without the fence it
+        would clear the new session. The rid check and the clear run
+        under ``_state_lock`` so the timer thread cannot race a
+        concurrent show() between them.
+        """
+        with self._state_lock:
+            if request_id != self._session_request_id:
+                log.warning(
+                    "Submit safety timeout: ignoring stale timer from "
+                    "another session (rid=%s active=%s)",
+                    request_id, self._session_request_id,
+                )
+                return
+            log.warning(
+                "Submit safety timeout (%.0fs): clearing "
+                "_submit_in_progress. The GUI lifecycle ack may have "
+                "been lost.",
+                self._SUBMIT_TIMEOUT_S,
+            )
+            self._submit_in_progress.clear()
+            self._is_active.clear()
+            self._reset_session_state()
 
     def _cancel_submit_timer(self):
         if self._submit_timer is not None:
@@ -245,6 +322,7 @@ class TerminalEditorProxy:
         """
         with self._state_lock:
             self._editor_hwnd = None
+            self._session_request_id = ""
 
     def _send_event(self, event: str, **kwargs) -> bool:
         """Put an unsolicited event on the response queue.

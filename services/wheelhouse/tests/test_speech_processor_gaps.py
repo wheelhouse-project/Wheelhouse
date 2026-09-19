@@ -61,19 +61,6 @@ class MockApp:
         self.call_count = 0
 
 
-class MockContextMirror:
-    """Mock context mirror that doesn't use shared memory."""
-
-    def __init__(self):
-        self._context = {"app_name": "TestApp", "window_title": "Test Window", "timestamp": 0.0}
-
-    def init_reader(self):
-        pass
-
-    def read_context(self) -> dict:
-        return self._context
-
-
 # ============================================================================
 # FIXTURES
 # ============================================================================
@@ -105,7 +92,6 @@ def processor(catalog, text_parser, mock_app):
         replacement_timeout_ms=400,
         command_timeout_ms=1000,
     )
-    proc.context_mirror = MockContextMirror()
     return proc
 
 

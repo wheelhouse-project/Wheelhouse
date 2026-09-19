@@ -101,32 +101,30 @@ def write_text_marker(wav_path: Path, source_text: str) -> None:
 
 
 def category_dir(category: str) -> str:
-    """Map category to subdirectory name."""
-    return {
-        "single_word": "single_word",
-        "multi_word": "multi_word",
-        "parameterized": "parameterized",
-        "punctuation": "punctuation",
-        "dictation": "dictation",
-        "discontinuous": "discontinuous",
-        "itn": "itn",
-        "litmus": "litmus",
-    }[category]
+    """Map category to subdirectory name.
+
+    The subdirectory is the category name. This was previously a literal
+    dict of eight entries, each mapping a category to a string equal to
+    itself, plus a second hand-maintained list of the same eight names in
+    ensure_output_dirs. Adding a category to vocabulary.py without editing
+    both places raised KeyError here partway through a run -- which is what
+    happened on 2026-08-24, when the nine va_* Voice Access categories
+    reached this function after 303 of 853 files had been synthesized.
+    Deriving both from the vocabulary removes that failure mode instead of
+    lengthening the two lists.
+    """
+    return category
 
 
-def ensure_output_dirs() -> None:
-    """Create corpus directory structure."""
-    for subdir in [
-        "single_word",
-        "multi_word",
-        "parameterized",
-        "punctuation",
-        "dictation",
-        "discontinuous",
-        "itn",
-        "litmus",
-    ]:
-        (CORPUS_DIR / subdir).mkdir(parents=True, exist_ok=True)
+def ensure_output_dirs(vocabulary: list[Utterance]) -> None:
+    """Create one corpus subdirectory per category present in the vocabulary.
+
+    Takes the vocabulary rather than a fixed list so a new category needs no
+    edit here. Category names are Python-identifier style, so they are valid
+    directory names as they stand.
+    """
+    for category in sorted({u.category for u in vocabulary}):
+        (CORPUS_DIR / category_dir(category)).mkdir(parents=True, exist_ok=True)
 
 
 async def synthesize_to_mp3(text: str, voice: str, rate: str = "+0%") -> bytes:
@@ -188,6 +186,13 @@ async def generate_standard_utterance(
             write_text_marker(abs_path, utterance.text)
 
         return {
+            # crewcut: the two-character prefix collapses every va_*
+            # category to "va", so two utterances with the same sanitized
+            # text in DIFFERENT va categories would collide on this id
+            # (wh-voice-access-parity.3.4). No collision exists today
+            # because test_no_utterance_text_is_duplicated_across_categories
+            # forbids duplicate texts outright; fold the full subdir into
+            # the id if that rule is ever relaxed.
             "id": f"{subdir[:2]}_{sanitized}_{voice_short}",
             "text": utterance.text,
             "expected_transcription": utterance.expected_transcription,
@@ -265,7 +270,7 @@ async def generate_all() -> tuple[list[dict], int]:
     Returns (manifest_entries, failure_count).
     """
     vocabulary = build_vocabulary()
-    ensure_output_dirs()
+    ensure_output_dirs(vocabulary)
 
     manifest_entries: list[dict] = []
     failures = 0

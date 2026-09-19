@@ -556,3 +556,62 @@ class TestEditorEnterSubmit:
 
         assert captured["text"] == "a\nb"
         assert "\\n" not in captured["text"]
+
+
+class TestEditorSessionIdentity:
+    """wh-overlay-slow-uia-stale-badges.14.17: the window carries its
+    session's show request_id on the cancel signal and on submit
+    lifecycle acks, so the input-process proxy can ignore control
+    messages from an older session.
+    """
+
+    def test_cancel_signal_carries_session_request_id(self, editor_window, qtbot):
+        editor_window.show_editor(
+            "", hwnd=1, rect=(0, 0, 800, 600), request_id="rid-s",
+        )
+        with qtbot.waitSignal(
+            editor_window.editor_cancelled, timeout=1000,
+        ) as blocker:
+            editor_window.do_cancel()
+        assert blocker.args == ["rid-s"]
+
+    def test_cancel_signal_carries_empty_id_without_request_id(
+        self, editor_window, qtbot,
+    ):
+        editor_window.show_editor("", hwnd=1, rect=(0, 0, 800, 600))
+        with qtbot.waitSignal(
+            editor_window.editor_cancelled, timeout=1000,
+        ) as blocker:
+            editor_window.do_cancel()
+        assert blocker.args == [""]
+
+    def test_submit_acks_carry_session_request_id(self, editor_window):
+        from utils.gui_terminal_paste import PasteOutcome
+        editor_window._paste_helper = lambda text, hwnd: PasteOutcome.SUCCESS
+        editor_window.show_editor(
+            "", hwnd=1, rect=(0, 0, 800, 600), request_id="rid-s",
+        )
+        received = []
+        editor_window.editor_event_acked.connect(
+            lambda rid, op, hwnd: received.append((rid, op)),
+        )
+        editor_window.do_submit()
+        rids = {op: rid for rid, op in received}
+        assert rids["submit_started"] == "rid-s"
+        assert rids["submit_complete"] == "rid-s"
+
+    def test_submit_failed_ack_carries_session_request_id(self, editor_window):
+        from utils.gui_terminal_paste import PasteOutcome
+        editor_window._paste_helper = (
+            lambda text, hwnd: PasteOutcome.FOREGROUND_FAILED
+        )
+        editor_window.show_editor(
+            "", hwnd=1, rect=(0, 0, 800, 600), request_id="rid-s",
+        )
+        received = []
+        editor_window.editor_event_acked.connect(
+            lambda rid, op, hwnd: received.append((rid, op)),
+        )
+        editor_window.do_submit()
+        failed = [rid for rid, op in received if op.startswith("submit_failed")]
+        assert failed == ["rid-s"]

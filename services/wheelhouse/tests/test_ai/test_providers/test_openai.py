@@ -554,6 +554,47 @@ class TestListModels:
         assert url == "https://api.openai.com/v1/models"
 
     @pytest.mark.asyncio
+    async def test_list_models_dual_key_payload_reports_each_model_once(self, provider):
+        """llama.cpp answers /v1/models with the same model under BOTH the
+        OpenAI-style "data" key and the Ollama-style "models" key (its Ollama
+        API compatibility). The parser reads both keys, so without duplicate
+        removal the one loaded model is reported twice -- which is how the
+        same file appeared twice in the AI Model tray menu
+        (wh-ai-models-dedupe). Payload shape verified against a live
+        llama.cpp b10107 server on 2026-08-07.
+        """
+        path = "D:\\llm-eval\\models\\gemma-4-E4B_q4_0-it.gguf"
+        mock_resp = make_mock_response(
+            status=200,
+            json_data={
+                "models": [{"name": path, "model": path}],
+                "object": "list",
+                "data": [{"id": path}],
+            },
+        )
+        session = _get_session(mock_resp)
+        with patch.object(provider, "_get_session", return_value=session):
+            models = await provider.list_models()
+        assert models == [path]
+
+    @pytest.mark.asyncio
+    async def test_list_models_dual_key_payload_keeps_distinct_models(self, provider):
+        """Duplicate removal must not become "read only one key": distinct
+        models under "data" and "models" are all kept, in payload order.
+        """
+        mock_resp = make_mock_response(
+            status=200,
+            json_data={
+                "data": [{"id": "model-a"}],
+                "models": [{"name": "model-b"}],
+            },
+        )
+        session = _get_session(mock_resp)
+        with patch.object(provider, "_get_session", return_value=session):
+            models = await provider.list_models()
+        assert models == ["model-a", "model-b"]
+
+    @pytest.mark.asyncio
     async def test_list_models_url_no_double_v1(self):
         """A /v1-terminated base composes exactly <base>/models (no double /v1)."""
         p = OpenAIProvider(api_key="k", model="m", base_url="http://host:11434/v1")

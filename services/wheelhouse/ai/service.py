@@ -7,6 +7,7 @@ action functions call into.
 
 import asyncio
 import logging
+import math
 import re
 import time
 from pathlib import Path
@@ -22,13 +23,14 @@ from ai.prompts import (
 )
 from ai.providers.openai_compat import ChatResult, ChatStatus, OpenAIProvider
 from ai.server_kind import CLOUD, LOCAL, normalize_server_kind
-from ai.speech_output import SpeechOutput
 
 log = logging.getLogger(__name__)
 
 # Default interval (seconds) for the periodic readiness probe and model-list
 # refresh background loops added in Phase A (design 5.2).
 _REFRESH_INTERVAL_S = 60
+_ASK_AI_MAX_TOKENS = 800
+_ASK_AI_SYSTEM = "You are a helpful assistant. Answer the user's question directly."
 
 
 def _legacy_to_result(raw) -> ChatResult:
@@ -102,7 +104,6 @@ class AIService:
         self._config = config_service
         self._provider = None
         self._knowledge_base: Optional[str] = None
-        self._speech = SpeechOutput()
         self._processing_lock = asyncio.Lock()
         self.cancel_requested: bool = False
         self._help_session: Optional[HelpChatSession] = None
@@ -282,26 +283,11 @@ class AIService:
                     except Exception:
                         log.warning("provider.close() raised during stop", exc_info=True)
         finally:
-            # speech.shutdown() always runs regardless of provider teardown
-            # failures -- skipping it leaks the TTS ThreadPoolExecutor
-            # (wh-ay6h.22.6). Its own failure is logged at WARNING to match the
-            # provider-cleanup handling (wh-ay6h.22.12). Cleanup exceptions are
-            # swallowed and logged, never chained onto the re-raised bg-task
-            # exception, so pending_exc.__context__ is None by design
-            # (wh-ay6h.22.10).
-            try:
-                await self._speech.shutdown()
-            except Exception:
-                log.warning("speech.shutdown() raised during stop", exc_info=True)
-            finally:
-                # "AIService stopped" is always logged (even if speech.shutdown
-                # raised) as the signal that stop() ran to completion
-                # (wh-ay6h.22.12). The recorded bg-task exception (the root
-                # cause) is re-raised last, inside this finally, so a secondary
-                # teardown failure cannot silently discard it (wh-ay6h.22.1).
-                log.info("AIService stopped")
-                if pending_exc is not None:
-                    raise pending_exc
+            # Keep the completion signal and the original background failure
+            # even when provider teardown raises (wh-ay6h.22.1).
+            log.info("AIService stopped")
+            if pending_exc is not None:
+                raise pending_exc
 
     # -- Thin-client coordinator API (design 5.2) --
     #
@@ -354,6 +340,35 @@ class AIService:
     def is_processing(self) -> bool:
         """True while the processing lock is held (a fix/help call is in flight)."""
         return self._processing_lock.locked()
+
+    def get_request_timeout_s(self) -> float:
+        """Return the configured chat-request timeout for action callers.
+
+        The action layer applies its own 60-second ceiling. This accessor keeps
+        the raw ``[ai.server]`` setting in the service that owns provider
+        configuration while giving malformed values a safe default.
+        """
+        raw_timeout = self._config.get("ai.server.timeout_s", 60)
+        if isinstance(raw_timeout, bool) or not isinstance(
+            raw_timeout, (int, float)
+        ):
+            log.warning(
+                "Invalid ai.server.timeout_s for action request; using 60 seconds"
+            )
+            return 60.0
+        try:
+            timeout_s = float(raw_timeout)
+        except (OverflowError, ValueError):
+            log.warning(
+                "Invalid ai.server.timeout_s for action request; using 60 seconds"
+            )
+            return 60.0
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            log.warning(
+                "Invalid ai.server.timeout_s for action request; using 60 seconds"
+            )
+            return 60.0
+        return timeout_s
 
     def cached_models(self) -> list[str]:
         """The model list from the most recent refresh_models() call (no network)."""
@@ -649,6 +664,41 @@ class AIService:
             what="rewrite_text",
         )
 
+    async def ask(self, prompt: str) -> ChatResult:
+        """Send one independent user prompt through the configured provider.
+
+        The caller owns ``_processing_lock``. This method intentionally does
+        not acquire it, matching ``fix_text`` and ``rewrite_text`` so a
+        caller can serialize every AI operation without a re-entrant lock.
+        """
+        if not prompt or not prompt.strip():
+            return ChatResult(status=ChatStatus.EMPTY)
+        if self._provider is None:
+            log.warning("ask called with no provider loaded")
+            return ChatResult(status=ChatStatus.TRANSPORT_ERROR)
+
+        # Check cancellation before starting.
+        if self.cancel_requested:
+            self.cancel_requested = False
+            return ChatResult(status=ChatStatus.CANCELLED)
+
+        messages = [
+            {"role": "system", "content": _ASK_AI_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        raw = await self._provider.chat(messages, max_tokens=_ASK_AI_MAX_TOKENS)
+        result = _legacy_to_result(raw)
+
+        # Check cancellation after AI response BEFORE surfacing any non-OK
+        # result: a cancel that races a transport/HTTP error must consume the
+        # flag and return CANCELLED; otherwise the flag leaks and silently
+        # cancels the next fix_text() call.  chat_help() uses the same order.
+        if self.cancel_requested:
+            self.cancel_requested = False
+            return ChatResult(status=ChatStatus.CANCELLED)
+
+        return result
+
     async def _transform_text(
         self, text: str, *, system: str, user: str, what: str
     ) -> ChatResult:
@@ -834,14 +884,6 @@ class AIService:
         """Public entry point to reset help conversation history."""
         if self._help_session:
             self._help_session.reset()
-
-    async def speak(self, text: str) -> None:
-        """Speak text via TTS. Falls back to toast notification."""
-        await self._speech.speak(text)
-
-    async def speak_brief(self, text: str) -> None:
-        """Speak a short status message (fire-and-forget)."""
-        await self._speech.speak_brief(text)
 
     # -- Internal --
 

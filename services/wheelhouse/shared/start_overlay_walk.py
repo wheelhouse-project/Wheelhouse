@@ -74,6 +74,36 @@ Field meanings:
     verbatim for the generation/supersession check.
   * ``paint_generation`` -- the paint generation within the session, echoed
     verbatim for the generation/supersession check.
+  * ``foreground_window`` / ``foreground_pid`` / ``foreground_process_name``
+    / ``foreground_window_creation_time`` -- the FULL four-field identity of
+    the window this handler ACTUALLY READ, copied from the
+    ``ForegroundContext`` the walk ran against (same field names). See
+    "Which window the reply describes" below.
+
+Which window the reply describes (wh-overlay-slow-uia-stale-badges.2.2.1)
+========================================================================
+The reply used to say WHAT was read and never WHICH WINDOW it was read from,
+so Logic could not tell a reply describing the window still in front from one
+describing a window the user has since left. That matters for the post-click
+settle read, which deliberately spans a period in which the foreground is
+ALLOWED to move (a click that opens a dialog is the common case), so the
+``post_click_settling`` state ignores FOCUS_CHANGE and the numbers can be for
+the wrong window by the time they arrive.
+
+The four identity fields are the same ones ``ForegroundContext``,
+``WalkSnapshot`` and ``overlay_focus_hooks.ForegroundIdentity`` carry, so
+Logic can feed them straight to ``identity_matches`` (the full four-field
+rule: HWND alone misses HWND reuse). They name the window the handler read,
+NOT the window that happens to be in front when the reply is parsed -- a
+Logic-side sample would reject every settle reply for the dialog case the
+feature exists to serve.
+
+They are REQUIRED on the wire, like every other field in this schema: Input
+and Logic ship together, and ``_capture_click_foreground`` already degrades
+an unreadable foreground to per-field sentinels (0 / "" / 0) rather than
+failing, so the handler always has four values to send. A sentinel identity
+needs no special case at either end -- it simply matches no real foreground,
+which is the fail-closed answer.
 """
 
 from __future__ import annotations
@@ -123,6 +153,15 @@ class StartOverlayWalkResponse:
     trace_id: str
     overlay_session_id: int
     paint_generation: int
+    # The window the walk ACTUALLY READ (wh-overlay-slow-uia-stale-badges.2.2.1).
+    # Defaults are the same per-field sentinels ``_capture_click_foreground``
+    # degrades to, so a construction that predates this field is a readable
+    # "no window reported" rather than a TypeError; the wire format requires
+    # all four, and ``to_dict`` always writes them.
+    foreground_window: int = 0
+    foreground_pid: int = 0
+    foreground_process_name: str = ""
+    foreground_window_creation_time: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the wire-format dict.
@@ -140,6 +179,12 @@ class StartOverlayWalkResponse:
             "trace_id": self.trace_id,
             "overlay_session_id": self.overlay_session_id,
             "paint_generation": self.paint_generation,
+            "foreground_window": self.foreground_window,
+            "foreground_pid": self.foreground_pid,
+            "foreground_process_name": self.foreground_process_name,
+            "foreground_window_creation_time": (
+                self.foreground_window_creation_time
+            ),
         }
 
     @classmethod
@@ -180,6 +225,14 @@ class StartOverlayWalkResponse:
         trace_id = _require_str(payload, "trace_id")
         overlay_session_id = _require_int(payload, "overlay_session_id")
         paint_generation = _require_int(payload, "paint_generation")
+        foreground_window = _require_int(payload, "foreground_window")
+        foreground_pid = _require_int(payload, "foreground_pid")
+        foreground_process_name = _require_str(
+            payload, "foreground_process_name"
+        )
+        foreground_window_creation_time = _require_int(
+            payload, "foreground_window_creation_time"
+        )
 
         _validate_cross_field(
             status=status,
@@ -197,6 +250,10 @@ class StartOverlayWalkResponse:
             trace_id=trace_id,
             overlay_session_id=overlay_session_id,
             paint_generation=paint_generation,
+            foreground_window=foreground_window,
+            foreground_pid=foreground_pid,
+            foreground_process_name=foreground_process_name,
+            foreground_window_creation_time=foreground_window_creation_time,
         )
 
 

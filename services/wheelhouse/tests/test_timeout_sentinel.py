@@ -39,7 +39,6 @@ from test_speech_processor_gaps import (
     text_parser,
     mock_app,
     MockApp,
-    MockContextMirror,
 )
 from speech.pattern_catalog import PatternCatalog
 
@@ -54,7 +53,6 @@ def processor(catalog, text_parser, mock_app):
         replacement_timeout_ms=400,
         command_timeout_ms=1000,
     )
-    proc.context_mirror = MockContextMirror()
     return proc
 
 

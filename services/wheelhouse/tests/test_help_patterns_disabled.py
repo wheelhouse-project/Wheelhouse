@@ -14,6 +14,7 @@ accident. The wheelhouse_help action function and the help window code stay in
 the tree on purpose, so a future help path can reuse them.
 """
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -49,3 +50,12 @@ def test_local_help_pattern_disabled(active_action_functions):
 def test_online_help_pattern_kept(active_action_functions):
     # The online/browser help path is intentionally retained.
     assert "wheelhouse_help_online" in active_action_functions
+
+
+def test_advertised_online_help_command_matches_without_a_hotword():
+    with PATTERNS_PATH.open("rb") as stream:
+        patterns = tomllib.load(stream)["pattern"]
+    online_help = next(p for p in patterns if p.get("doc_id") == "help-online")
+    assert re.fullmatch(online_help["pattern"], "open voice access help")
+    assert not online_help.get("requires_hotword", False)
+    assert online_help["actions"] == [{"function": "wheelhouse_help_online"}]

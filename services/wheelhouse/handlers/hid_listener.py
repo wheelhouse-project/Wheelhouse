@@ -92,11 +92,15 @@ class HIDListener:
         self.last_batch_time = time.time()
         self.batch_interval = 0.05  # 50ms batching window
         self._batch_lock = threading.Lock()
+        # wh-mouse-wheel-sensitivity: the timer that flushes the ticks held
+        # after a roll's last send. Loop-thread only: armed, replaced, and
+        # cancelled from callbacks scheduled through call_soon_threadsafe.
+        self._tail_flush_handle: Optional[asyncio.TimerHandle] = None
 
         logger.info(
             f"HIDListener initialized for VID={target_vid:#06x}, PIDs={{{', '.join(f'{pid:#06x}' for pid in target_pids)}}}, with {self.batch_interval*1000:.0f}ms batching")
 
-    def _safe_enqueue_event(self, event: Dict[str, Union[str, int]]):
+    def _safe_enqueue_event(self, event: Dict[str, Union[str, int, float]]):
         """Attempt to enqueue without allowing QueueFull to propagate to the loop handler.
         If full, evict one oldest item and retry once; otherwise drop silently.
         This function must run on the event loop thread; schedule it via call_soon_threadsafe.
@@ -118,28 +122,92 @@ class HIDListener:
                 logger.debug("hid_event_queue saturated; dropping event")
 
     def _accumulate_and_maybe_send(self, delta: int):
-        """Accumulate delta and send batched event if batch interval has elapsed."""
+        """Accumulate delta and send batched event if batch interval has elapsed.
+
+        Runs on the HID callback thread. When the window has elapsed the sum
+        goes out at once. Otherwise a flush for the rest of the window is
+        armed on the event loop (wh-mouse-wheel-sensitivity): before that,
+        the ticks after a roll's last send stayed in the accumulator until the
+        next roll's first report, which then went out carrying them -- the
+        end of one roll was lost and the first touch of the next one jumped.
+        The docstring at step 2 below always described a timer flush; this is
+        it.
+
+        Accepted trade-off: the send branch does not cancel an armed flush
+        (a TimerHandle may be cancelled only on the loop thread). A flush
+        that fires after a normal send finds either nothing or the first ticks
+        of the next window and sends them a little early; the batch is
+        smaller, never lost or duplicated.
+        """
         current_time = time.time()
         should_send = False
         accumulated_delta = 0
-        
+        window_remaining = None
+
         with self._batch_lock:
             self.delta_accumulator += delta
-            
+
             # Check if batch interval has elapsed
-            if current_time - self.last_batch_time >= self.batch_interval:
+            elapsed = current_time - self.last_batch_time
+            if elapsed >= self.batch_interval:
                 accumulated_delta = self.delta_accumulator
                 self.delta_accumulator = 0
                 self.last_batch_time = current_time
                 should_send = (accumulated_delta != 0)
-        
+            else:
+                window_remaining = self.batch_interval - elapsed
+
         if should_send:
-            event: Dict[str, Union[str, int]] = {
+            # "at" is the arrival stamp the consumer's filter measures the
+            # gesture gap from, so a batch that waits in the queue behind a
+            # slow zone action still reads as part of the roll
+            # (wh-mouse-wheel-sensitivity.1.1). monotonic, like the filter.
+            event: Dict[str, Union[str, int, float]] = {
                 "type": "thumb_wheel",
                 "delta": accumulated_delta,
+                "at": time.monotonic(),
             }
             self.loop.call_soon_threadsafe(self._safe_enqueue_event, event)
             logger.debug(f"  >>> Queued batched thumb_wheel event: delta={accumulated_delta} (batched from multiple events)")
+        elif window_remaining is not None:
+            self._request_tail_flush(window_remaining)
+
+    def _request_tail_flush(self, delay: float) -> None:
+        """Ask the loop to arm the tail flush; HID thread side."""
+        try:
+            self.loop.call_soon_threadsafe(self._arm_tail_flush, delay)
+        except RuntimeError:
+            # The loop is closed: the Logic process is shutting down and the
+            # HID thread outlived it by a moment. The held ticks go with the
+            # process, which is what shutdown wants.
+            logger.debug("Tail flush not armed: event loop closed")
+
+    def _arm_tail_flush(self, delay: float) -> None:
+        """Replace any armed flush with one for ``delay`` seconds; loop thread."""
+        if self._tail_flush_handle is not None:
+            self._tail_flush_handle.cancel()
+        self._tail_flush_handle = self.loop.call_later(delay, self._flush_tail)
+
+    def _flush_tail(self) -> None:
+        """Send whatever the accumulator holds and start a new window; loop thread."""
+        self._tail_flush_handle = None
+        with self._batch_lock:
+            accumulated_delta = self.delta_accumulator
+            self.delta_accumulator = 0
+            self.last_batch_time = time.time()
+        if accumulated_delta != 0:
+            self._safe_enqueue_event({
+                "type": "thumb_wheel",
+                "delta": accumulated_delta,
+                "at": time.monotonic(),
+            })
+            logger.debug(f"  >>> Queued tail thumb_wheel event: delta={accumulated_delta} (window ended without a further report)")
+
+    def _cancel_tail_flush(self) -> None:
+        """Drop an armed flush; loop thread."""
+        if self._tail_flush_handle is not None:
+            self._tail_flush_handle.cancel()
+            self._tail_flush_handle = None
 
     def _find_and_open_devices(self) -> bool:
         """Find and open all matching Logitech HID device interfaces.
@@ -356,4 +424,8 @@ class HIDListener:
             logger.info("HID listener thread not running or already stopped.")
 
         self._close_all_devices()
+        try:
+            self.loop.call_soon_threadsafe(self._cancel_tail_flush)
+        except RuntimeError:
+            pass  # Loop closed: no timer can fire any more.
         logger.info("HID listener stop sequence completed.")

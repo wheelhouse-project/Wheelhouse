@@ -33,6 +33,7 @@ class FakeDebugConfig:
     log_stream_responses: bool = False
     log_frame_stats: bool = False
     log_overflow_diagnostics: bool = False
+    log_load_diagnostics: bool = False
 
 
 @dataclass
@@ -52,21 +53,10 @@ class FakeAGCConfig:
 
 
 @dataclass
-class FakeOverflowConfig:
-    enabled: bool = False
-    overflow_threshold: int = 5
-    window_seconds: float = 30.0
-    restart_cooldown_seconds: float = 60.0
-    max_restart_attempts: int = 3
-    stable_reset_seconds: float = 300.0
-
-
-@dataclass
 class FakeAppConfig:
     latency: FakeLatencyConfig = field(default_factory=FakeLatencyConfig)
     debug: FakeDebugConfig = field(default_factory=FakeDebugConfig)
     agc: FakeAGCConfig = field(default_factory=FakeAGCConfig)
-    overflow_detection: FakeOverflowConfig = field(default_factory=FakeOverflowConfig)
     silence_finalize_ms: int = 2000
     max_no_text_seconds: float = 5.0
     forward_ws: bool = True
@@ -931,7 +921,6 @@ class TestMainHandlers:
 
     @patch("main.load_config")
     @patch("main.get_audio_provider")
-    @patch("main.get_available_providers", return_value=["sounddevice"])
     @patch("main.SileroVAD")
     @patch("main.SmartAGC")
     @patch("main.UsageMetrics")
@@ -940,14 +929,13 @@ class TestMainHandlers:
     @patch("main.logger")
     def test_main_list_devices(self, mock_logger, mock_banner, mock_ws_class,
                                 mock_metrics, mock_agc, mock_vad,
-                                mock_providers, mock_audio, mock_load_config):
+                                mock_audio, mock_load_config):
         """main() with --list-devices should list devices and return 0."""
         args = MagicMock()
         args.list_devices = True
         args.ws_host = None
         args.ws_port = None
         cfg = make_config()
-        cfg.overflow_detection.enabled = False
         mock_load_config.return_value = (args, cfg)
 
         mock_mic = MagicMock()
@@ -963,10 +951,9 @@ class TestMainHandlers:
 
     @patch("main.load_config")
     @patch("main.get_audio_provider")
-    @patch("main.get_available_providers", return_value=["sounddevice"])
     @patch("main.run_mic_check", return_value=0)
     @patch("main.logger")
-    def test_main_mic_check(self, mock_logger, mock_mic_check, mock_providers,
+    def test_main_mic_check(self, mock_logger, mock_mic_check,
                              mock_audio, mock_load_config):
         """main() with mic_check_seconds > 0 should run mic check and return."""
         args = MagicMock()
@@ -974,7 +961,6 @@ class TestMainHandlers:
         args.ws_host = None
         args.ws_port = None
         cfg = make_config(mic_check_seconds=5.0)
-        cfg.overflow_detection.enabled = False
         mock_load_config.return_value = (args, cfg)
 
         mock_mic = MagicMock()
@@ -991,7 +977,6 @@ class TestHandleAddHint:
 
     @patch("main.load_config")
     @patch("main.get_audio_provider")
-    @patch("main.get_available_providers", return_value=["sounddevice"])
     @patch("main.SileroVAD")
     @patch("main.SmartAGC")
     @patch("main.UsageMetrics")
@@ -1000,7 +985,7 @@ class TestHandleAddHint:
     @patch("main.logger")
     def test_add_hint_triggers_restart(self, mock_logger, mock_banner, mock_ws_class,
                                         mock_metrics, mock_agc,
-                                        mock_vad, mock_providers, mock_audio,
+                                        mock_vad, mock_audio,
                                         mock_load_config):
         """Adding a hint should trigger a service restart."""
         # This test verifies the add_hint flow by checking the restart event
@@ -1010,7 +995,6 @@ class TestHandleAddHint:
         args.ws_host = None
         args.ws_port = None
         cfg = make_config(mic_check_seconds=0.0)
-        cfg.overflow_detection.enabled = False
 
         # On first call return normal config, on second (restart reload) return same
         mock_load_config.return_value = (args, cfg)
@@ -1428,3 +1412,147 @@ class TestBuildStreamer:
         assert kwargs["model"] == "latest_short"
         assert kwargs["sample_rate"] == 16000
         assert kwargs["credentials_file"] == ""
+
+
+class TestTheOverflowCallbackNamesTheBackend:
+    """The google callback said PortAudio whichever backend was running.
+
+    WinRT has no PortAudio in its capture path at all, so the line named
+    a component that was not in the process. The provider cannot read the
+    monitor to find out: the deleted PortAudio adapter built its
+    MicrophoneStream lazily inside start(), so there was no monitor to ask
+    when the callback was set up, and WinRTAudioCapture builds its own
+    monitor no earlier. It reads the backend's own OVERFLOW_SOURCE instead
+    (bead wh-stt-overflow-config-and-wording, criterion 4). WinRT is the
+    only capture path left (wh-portaudio-capture-removal).
+
+    The callback is a closure inside main(), so the only way to reach it
+    is the way TestHandleAddHint reaches its own: run main() with the
+    provider factory patched, keep the kwargs it was called with, and call
+    the callback afterwards. main.logger is deliberately NOT patched here,
+    because the log line is the subject -- and caplog cannot read it
+    either, because main() sets logger.propagate = False on "GoogleSTT"
+    (main.py:1366) so the WebSocket handler owns the records. The lines are
+    collected from a handler attached to that logger directly.
+    """
+
+    def _run_main_and_capture_callback(self, mock_audio, mock_ws_class,
+                                       mock_load_config, source):
+        args = MagicMock()
+        args.list_devices = False
+        args.ws_host = None
+        args.ws_port = None
+        cfg = make_config(mic_check_seconds=0.0)
+        mock_load_config.return_value = (args, cfg)
+
+        mock_mic = MagicMock()
+        mock_mic.OVERFLOW_SOURCE = source
+
+        read_count = 0
+
+        def mock_read(timeout=None):
+            nonlocal read_count
+            read_count += 1
+            if read_count > 2:
+                raise KeyboardInterrupt()
+            return None
+
+        mock_mic.read.side_effect = mock_read
+
+        captured = {}
+
+        def capture_provider(**kwargs):
+            captured.update(kwargs)
+            return mock_mic
+
+        mock_audio.side_effect = capture_provider
+        mock_ws_class.return_value = make_forwarder()
+
+        from main import main
+        try:
+            main()
+        except (KeyboardInterrupt, SystemExit):
+            pass
+
+        assert "overflow_callback" in captured
+        return captured["overflow_callback"]
+
+    def _overflow_lines(self, callback):
+        """Every line the callback writes, read off the GoogleSTT logger."""
+        import logging
+
+        messages = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record):
+                messages.append(record.getMessage())
+
+        log = logging.getLogger("GoogleSTT")
+        handler = _Collect()
+        previous_level = log.level
+        log.addHandler(handler)
+        log.setLevel(logging.DEBUG)
+        try:
+            callback()
+        finally:
+            log.removeHandler(handler)
+            log.setLevel(previous_level)
+        return messages
+
+    @patch("main.load_config")
+    @patch("main.get_audio_provider")
+    @patch("main.SileroVAD")
+    @patch("main.SmartAGC")
+    @patch("main.UsageMetrics")
+    @patch("main.WSForwarder")
+    @patch("main.get_startup_banner", return_value="Test v1.0")
+    def test_the_line_names_the_queue_on_the_winrt_backend(
+            self, mock_banner, mock_ws_class, mock_metrics, mock_agc,
+            mock_vad, mock_audio, mock_load_config):
+        callback = self._run_main_and_capture_callback(
+            mock_audio, mock_ws_class, mock_load_config,
+            "the queue between capture and the forwarder")
+        assert self._overflow_lines(callback) == [
+            "[overflow] audio input overflow at the queue between capture "
+            "and the forwarder; frames may be dropped"
+        ]
+
+    @patch("main.load_config")
+    @patch("main.get_audio_provider")
+    @patch("main.SileroVAD")
+    @patch("main.SmartAGC")
+    @patch("main.UsageMetrics")
+    @patch("main.WSForwarder")
+    @patch("main.get_startup_banner", return_value="Test v1.0")
+    def test_the_line_names_whatever_source_the_provider_publishes(
+            self, mock_banner, mock_ws_class, mock_metrics, mock_agc,
+            mock_vad, mock_audio, mock_load_config):
+        callback = self._run_main_and_capture_callback(
+            mock_audio, mock_ws_class, mock_load_config, "PortAudio")
+        assert self._overflow_lines(callback) == [
+            "[overflow] audio input overflow at PortAudio; frames may be "
+            "dropped"
+        ]
+
+    @patch("main.load_config")
+    @patch("main.get_audio_provider")
+    @patch("main.SileroVAD")
+    @patch("main.SmartAGC")
+    @patch("main.UsageMetrics")
+    @patch("main.WSForwarder")
+    @patch("main.get_startup_banner", return_value="Test v1.0")
+    def test_the_line_does_not_name_a_restart(
+            self, mock_banner, mock_ws_class, mock_metrics, mock_agc,
+            mock_vad, mock_audio, mock_load_config):
+        """No restart follows this callback; it only writes the line.
+
+        The count is asserted first so an empty capture cannot pass this
+        by writing nothing at all.
+        """
+        callback = self._run_main_and_capture_callback(
+            mock_audio, mock_ws_class, mock_load_config,
+            "the queue between capture and the forwarder")
+        lines = self._overflow_lines(callback)
+        assert len(lines) == 1, lines
+        assert "restart" not in lines[0].lower()
+        assert "PortAudio" not in lines[0]

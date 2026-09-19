@@ -86,9 +86,10 @@ the message will not be sent: when ChatGPT shows the draft in a card with a
 Send button, that button really does send it.
 
 Match your depth to the question. If an answer could depend on the Wheelhouse
-version, say which release the documentation describes -- the "Wheelhouse
-version" line at the end of the guide, and the command reference's own
-"Generated" footer line.
+version, say which release the documentation describes -- read it from each
+document's "Generated" footer line ("for the vX.Y.Z release"). Ignore the
+guide's "Wheelhouse version" line; in development copies it holds an internal
+build identifier.
 
 If you have fetched all three documents and none answers a question about
 Wheelhouse itself, search the Wheelhouse GitHub repository

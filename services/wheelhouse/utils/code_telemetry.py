@@ -79,19 +79,22 @@ def track_execution(
 def _show_notification(code_path: str, context: Optional[Dict[str, Any]]) -> None:
     """Show a Windows notification that code path was executed."""
     try:
-        from plyer import notification
-        
+        # wh-notice-length-guard: a telemetry notice carries a code path
+        # and two context values, so it is one of the notices most
+        # likely to overrun plyer's fixed field. send_notice measures it.
+        from utils.notice_text import send_notice
+
         context_str = ""
         if context:
             # Show first 2 context items
             items = list(context.items())[:2]
             context_str = "\n" + ", ".join(f"{k}={v}" for k, v in items)
-        
-        notification.notify(
-            title="Code Path Executed",
-            message=f"Path: {code_path}{context_str}",
+
+        send_notice(
+            "Code Path Executed",
+            f"Path: {code_path}{context_str}",
             app_name="Wheelhouse Telemetry",
-            timeout=10
+            timeout=10,
         )
     except Exception as e:
         logger.debug(f"Could not show notification: {e}")

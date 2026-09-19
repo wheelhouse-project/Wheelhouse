@@ -94,7 +94,7 @@ def match_bounded(
     pattern: str,
     text: str,
     flags: int = 0,
-    timeout: float = 0.25,
+    timeout: float = 1.0,
     mode: str = "search",
 ) -> Optional[dict[str, Any]]:
     """Match ``pattern`` against ``text`` in the worker, bounded by ``timeout``.
@@ -104,6 +104,14 @@ def match_bounded(
         text: Text to match against.
         flags: ``re`` flags for the worker's compile (e.g. ``re.IGNORECASE``).
         timeout: Seconds to wait before declaring the match runaway.
+            Defaults to 1.0 s (wh-safe-regex-budget, David 2026-09-03
+            QUESTIONS-2026-09-02 item 40). The earlier 0.25 s was tight
+            enough that a healthy pattern's worker round-trip could
+            exceed it on a slow or heavily loaded machine and be
+            reported to the user as pathological. Only the Pattern
+            Manager's save-time probe and the pattern tester spend this
+            budget; the per-utterance speech path does not, so the
+            larger value cannot slow dictation.
         mode: ``"search"`` or ``"fullmatch"`` -- mirrors the runtime's
             anchor-driven strategy split (commands fullmatch, replacements
             search).

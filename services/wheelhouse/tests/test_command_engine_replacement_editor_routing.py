@@ -61,14 +61,6 @@ class _MockApp:
         return {"status": "success"}
 
 
-class _MockContextMirror:
-    def init_reader(self) -> None:
-        return None
-
-    def read_context(self) -> dict:
-        return {"app_name": "TestApp", "window_title": "Test", "timestamp": 0.0}
-
-
 def _build_processor(
     *,
     detector_return: bool,
@@ -132,7 +124,6 @@ def _build_processor(
         focus_redirect_policy=policy,
         focused_hwnd_provider=lambda: 0x1234,
     )
-    proc.context_mirror = _MockContextMirror()
 
     # Link the stub speech_handler back to the real processor so the
     # command_engine intercept can call processor.maybe_route_to_editor.

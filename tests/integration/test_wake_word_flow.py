@@ -22,9 +22,9 @@ _service_dir = _project_root / "services" / "wheelhouse"
 # use absolute intra-package imports like "from shared_stt.redact import
 # ..."), and it must NOT stay on sys.path: it carries a regular "tests"
 # package (tests/__init__.py) that would shadow the repo-root "tests"
-# namespace package and break tests/speech/conftest.py's
-# "import tests.speech". The detector fixture below adds it, imports, and
-# removes it again.
+# namespace package, so any repo-root suite that imports itself as
+# "tests.<something>" would break. The detector fixture below adds it,
+# imports, and removes it again.
 _stt_shared_dir = _project_root / "services" / "stt_providers" / "shared"
 for _p in (_project_root, _service_dir):
     _s = str(_p)
@@ -37,6 +37,22 @@ from services.wheelhouse.events import (
     SystemIdleStateChangedEvent,
 )
 from services.wheelhouse.state_manager import StateManager
+
+
+@pytest.fixture(autouse=True)
+def _no_real_notices(monkeypatch):
+    """Keep this file's toggles from delivering real Windows notices.
+
+    ``toggle_speech_enabled_state`` tells the user "Speech is off. You
+    switched it off." through ``SpeechNotifier._send_notification``
+    (wh-audio-suppression-control), which reaches plyer. The wheelhouse
+    suite has the same guard in ``services/wheelhouse/tests/conftest.py``;
+    this file sits under the repo-root ``tests/`` tree, which that conftest
+    does not cover.
+    """
+    import services.wheelhouse.utils.speech_notifier as notifier_module
+
+    monkeypatch.setattr(notifier_module, "send_notice", Mock(return_value=True))
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +190,15 @@ class TestWakeWordModeFiltering:
 
     @pytest.mark.asyncio
     async def test_wake_word_does_not_clear_audio_suppression(self):
-        """Wake word only clears idle suppression, not audio suppression."""
+        """A wake word leaves the sound pause exactly as it found it.
+
+        wh-audio-suppression-auto: the audio monitor owns
+        ``_speech_suppressed_by_audio`` and the sound really is still
+        playing, so the wake word neither writes that field nor overrides
+        it. The recovery window that used to override it carried one
+        command out of the pause, and that command is gone, so listening
+        stays off until the sound stops.
+        """
         ws = _make_ws_manager()
         sm, bus, gui_queue, loop = _make_state_manager(ws_manager=ws)
         try:

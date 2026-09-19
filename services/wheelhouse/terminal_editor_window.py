@@ -21,7 +21,6 @@ through SUBMITTING and SUBMIT_COMPLETE (or ERROR).
 """
 import ctypes
 import logging
-import uuid
 import winreg
 from dataclasses import dataclass
 
@@ -247,7 +246,11 @@ class TerminalDictationEditorWindow(QDialog):
     """
 
     # Signals for IPC (connected by GuiManager)
-    editor_cancelled = Signal()
+    # wh-overlay-slow-uia-stale-badges.14.17: carries the session's show
+    # request_id (empty when the editor was shown without one) so the
+    # input-process proxy can ignore a cancellation delivered late from
+    # an older session.
+    editor_cancelled = Signal(str)  # (session request_id)
     # wh-t81d9.2: ack a previously enqueued show/append te_event so the
     # input-process proxy can advance the retract accounting counter and
     # record the editor HWND. editor_hwnd is 0 for non-show ops.
@@ -287,6 +290,13 @@ class TerminalDictationEditorWindow(QDialog):
         # id. Cleared when the editor is hidden so a stale request_id
         # from a previous session cannot leak into the next ack.
         self._pending_focus_request_id: str = ""
+        # wh-overlay-slow-uia-stale-badges.14.17: the show request_id
+        # kept for the whole session (unlike _pending_focus_request_id,
+        # which the focus poll clears once its ack fires). Stamped onto
+        # the cancel signal and the submit lifecycle acks so the
+        # input-process proxy can fence out messages from an older
+        # session. Cleared by hide_editor.
+        self._session_request_id: str = ""
         # wh-redirect-late-cache-and-fg-poll: remaining budget for the
         # focus-confirmed poll. Seeded on each show; decremented each
         # time ``_focus_text_edit`` re-runs without a foreground match.
@@ -439,6 +449,7 @@ class TerminalDictationEditorWindow(QDialog):
         # requires Qt focus AND foreground-HWND match, neither of
         # which has been verified at this point.
         self._pending_focus_request_id = request_id or ""
+        self._session_request_id = request_id or ""
         self._focus_poll_remaining_ms = _FOCUS_POLL_BUDGET_MS
         # wh-redirect-late-cache-and-fg-poll: claim Qt focus + foreground
         # ONCE at show time. The poll body that follows is observation-
@@ -488,10 +499,12 @@ class TerminalDictationEditorWindow(QDialog):
 
         wh-eolas. Steps:
 
-        1. Generate a fresh ``submit_request_id`` for this submit attempt
-           so Logic can correlate the started / complete / failed acks
-           with each other and with the LogicMirror's transition
-           sequence.
+        1. Stamp the session's show request_id onto the acks
+           (wh-overlay-slow-uia-stale-badges.14.17) so the
+           input-process proxy consumes them only for the session that
+           emitted them; the started / complete / failed acks of one
+           attempt stay mutually correlated through it. Captured before
+           ``hide_editor`` clears it.
         2. Emit ``submit_started`` BEFORE the SendInput call. The
            legacy proxy's safety timeout fires at 5.0 s on the
            Input-process side; the lifecycle's SUBMITTING state has the
@@ -504,7 +517,7 @@ class TerminalDictationEditorWindow(QDialog):
            the reason into a content-neutral toast (the bead's safety
            constraint 4).
         """
-        submit_request_id = uuid.uuid4().hex
+        submit_request_id = self._session_request_id
         self.editor_event_acked.emit(
             submit_request_id, "submit_started", int(self._terminal_hwnd),
         )
@@ -543,11 +556,14 @@ class TerminalDictationEditorWindow(QDialog):
             )
 
     def do_cancel(self):
-        """Hide window, emit editor_cancelled signal."""
+        """Hide window, emit editor_cancelled with the session's rid."""
         if not self.isVisible():
             return
+        # Capture before hide_editor clears it
+        # (wh-overlay-slow-uia-stale-badges.14.17).
+        rid = self._session_request_id
         self.hide_editor()
-        self.editor_cancelled.emit()
+        self.editor_cancelled.emit(rid)
 
     def hide_editor(self):
         """Hide and reset editor state."""
@@ -558,6 +574,9 @@ class TerminalDictationEditorWindow(QDialog):
         # from this session cannot leak into the next session's
         # focus_text_edit timer.
         self._pending_focus_request_id = ""
+        # wh-overlay-slow-uia-stale-badges.14.17: the session identity
+        # ends with the session.
+        self._session_request_id = ""
         # wh-g2-refactor.18 (Section 3 reset table): clear the credit
         # ledger so a late retract from the previous session cannot
         # match an empty document. ``cancel`` matches the spirit of

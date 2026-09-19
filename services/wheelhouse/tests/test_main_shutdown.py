@@ -96,3 +96,23 @@ class TestShutdownOrdering:
 
         # Should NOT have called app.stop() directly
         controller.app.stop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_clear_ack_watchdog(self, controller):
+        """wh-overlay-slow-uia-stale-badges.18.9: an armed clear-ack
+        deadline must not survive into the slow service teardown -- a
+        5000 ms fire during an intentional exit would report a false
+        user-visible overlay clear fault. shutdown() cancels the timer,
+        clears the pending slot, and reports nothing.
+        """
+        timer = MagicMock()
+        controller._overlay_pending_clear_timer = timer
+        controller._overlay_pending_clear = (2, 3)
+        controller._report_overlay_clear_fault = MagicMock()  # type: ignore[method-assign]
+
+        await controller.shutdown()
+
+        timer.cancel.assert_called_once()
+        assert controller._overlay_pending_clear_timer is None
+        assert controller._overlay_pending_clear is None
+        controller._report_overlay_clear_fault.assert_not_called()

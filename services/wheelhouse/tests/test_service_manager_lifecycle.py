@@ -2,20 +2,19 @@
 
 Extends the existing shutdown tests (test_service_manager_shutdown.py) with
 lifecycle coverage: construction, initialize_services, start_services,
-start_remote_stt, start_stt_manager, and _build_stt_provider_kwargs.
+and start_remote_stt.
 
 Key behaviors tested:
 - Constructor stores all dependencies
 - set_logic_controller breaks circular dependency
 - initialize_services creates all service instances
 - initialize_services handles dimmer type config variants
-- initialize_services handles in_process vs remote STT modes
+- initialize_services builds the remote STT launcher
 - start_services starts all services and returns tasks
 - start_remote_stt provider discovery and fallback logic
-- _build_stt_provider_kwargs for google/azure/unknown providers
-- start_stt_manager wires transcript handler and starts STT
 """
-import asyncio
+from contextlib import closing
+from inspect import CORO_CLOSED, getcoroutinestate
 from unittest.mock import Mock, AsyncMock, MagicMock, patch
 
 import pytest
@@ -35,20 +34,26 @@ def mock_deps():
     config_service.get_config.return_value = config_data
 
     event_bus = MagicMock()
-    loop = asyncio.new_event_loop()
+    loop = MagicMock()
 
     app = MagicMock()
     app.get_screen_dimensions.return_value = (1920, 1080)
 
     state_manager = MagicMock()
 
-    return {
-        "config_service": config_service,
-        "event_bus": event_bus,
-        "loop": loop,
-        "app": app,
-        "state_manager": state_manager,
-    }
+    try:
+        yield {
+            "config_service": config_service,
+            "event_bus": event_bus,
+            "loop": loop,
+            "app": app,
+            "state_manager": state_manager,
+        }
+    finally:
+        # The mocked loop never runs these coroutines; dispose every submission
+        # even when a test assertion fails before reaching its own cleanup.
+        for call in loop.create_task.call_args_list:
+            call.args[0].close()
 
 
 @pytest.fixture
@@ -56,6 +61,38 @@ def service_manager(mock_deps):
     """Create a ServiceManager instance with mocked dependencies."""
     from service_manager import ServiceManager
     return ServiceManager(**mock_deps)
+
+
+@pytest.mark.parametrize("assertion_fails", [False, True])
+def test_mock_deps_disposes_every_startup_coroutine(assertion_fails):
+    """Fixture teardown closes every submission, even after an assertion fails."""
+    from service_manager import ServiceManager
+
+    coroutines = []
+    try:
+        try:
+            with closing(mock_deps.__wrapped__()) as dependencies:
+                manager = ServiceManager(**next(dependencies))
+                manager.ai_service = MagicMock()
+                manager.plugin_registry = MagicMock()
+                manager.start_services()
+                coroutines = [
+                    call.args[0] for call in manager.loop.create_task.call_args_list
+                ]
+                assert len(coroutines) == 2
+                if assertion_fails:
+                    raise AssertionError("simulated test failure")
+        except AssertionError as error:
+            if str(error) != "simulated test failure":
+                raise
+
+        assert [getcoroutinestate(coro) for coro in coroutines] == [
+            CORO_CLOSED, CORO_CLOSED,
+        ]
+    finally:
+        # Keep the regression's own failure path free of leaked coroutines.
+        for coroutine in coroutines:
+            coroutine.close()
 
 
 def _config_get_side_effect(overrides=None):
@@ -96,7 +133,6 @@ class TestConstructor:
         assert service_manager.audio_monitor is None
         assert service_manager.mouse_handler is None
         assert service_manager.speech_handler is None
-        assert service_manager.stt_manager is None
         assert service_manager.plugin_registry is None
         assert service_manager.remote_stt_launcher is None
 
@@ -209,6 +245,13 @@ class TestInitializeServices:
             service_manager.event_bus,
         )
 
+    @pytest.mark.parametrize(
+        "dimmer_value",
+        [
+            pytest.param("software_dimmer", id="software-dimmer"),
+            pytest.param("overlay", id="overlay"),
+        ],
+    )
     @patch("service_manager.SoftwareDimmer")
     @patch("service_manager.BraviaControl")
     @patch("service_manager.AudioMonitor")
@@ -219,11 +262,12 @@ class TestInitializeServices:
     def test_dimmer_type_overlay(
         self, mock_launcher_cls, mock_plugin_cls, mock_speech_cls,
         mock_mouse_cls, mock_audio_cls, mock_bravia_cls,
-        mock_dimmer_cls, service_manager
+        mock_dimmer_cls, service_manager, dimmer_value
     ):
-        """initialize_services creates SoftwareDimmer for 'overlay' config."""
+        """initialize_services creates SoftwareDimmer for 'software_dimmer'
+        and for 'overlay'."""
         service_manager.config_service.get.side_effect = _config_get_side_effect({
-            "brightness_coordinator.software_dimmer": "software_dimmer",
+            "brightness_coordinator.software_dimmer": dimmer_value,
             "stt.mode": "remote",
         })
         mock_launcher = MagicMock()
@@ -235,19 +279,57 @@ class TestInitializeServices:
         mock_dimmer_cls.assert_called_once_with(service_manager.loop)
         assert service_manager.software_dimmer is mock_dimmer_cls.return_value
 
+    @patch("services.wheelhouse.handlers.gamma_dimmer.GammaDimmer")
     @patch("service_manager.BraviaControl")
     @patch("service_manager.AudioMonitor")
     @patch("service_manager.MouseHandler")
     @patch("service_manager.SpeechHandler")
     @patch("service_manager.PluginRegistry")
     @patch("service_manager.RemoteSTTLauncher")
-    def test_dimmer_type_flux_sets_none(
+    def test_dimmer_type_unrecognised_builds_gamma_dimmer_without_warning(
         self, mock_launcher_cls, mock_plugin_cls, mock_speech_cls,
-        mock_mouse_cls, mock_audio_cls, mock_bravia_cls, service_manager
+        mock_mouse_cls, mock_audio_cls, mock_bravia_cls,
+        mock_gamma_cls, service_manager, caplog
     ):
-        """initialize_services sets software_dimmer=None for 'flux' config."""
+        """An unrecognised value builds GammaDimmer, the same object as the
+        default. BrightnessCoordinator logs the one WARNING for the value, so
+        service_manager logs none of its own."""
+        import logging
+
+        import service_manager as service_manager_module
+
         service_manager.config_service.get.side_effect = _config_get_side_effect({
-            "brightness_coordinator.software_dimmer": "flux",
+            "brightness_coordinator.software_dimmer": "nonsense",
+            "stt.mode": "remote",
+        })
+        mock_launcher = MagicMock()
+        mock_launcher.discover_providers.return_value = []
+        mock_launcher_cls.return_value = mock_launcher
+
+        with caplog.at_level(logging.DEBUG):
+            service_manager.initialize_services()
+
+        mock_gamma_cls.assert_called_once_with(service_manager.loop)
+        assert service_manager.software_dimmer is mock_gamma_cls.return_value
+        sm_logger = service_manager_module.log.name
+        sm_warnings = [r.getMessage() for r in caplog.records
+                       if r.name == sm_logger and r.levelno >= logging.WARNING]
+        assert sm_warnings == []
+
+    @patch("services.wheelhouse.handlers.gamma_dimmer.GammaDimmer")
+    @patch("service_manager.BraviaControl")
+    @patch("service_manager.AudioMonitor")
+    @patch("service_manager.MouseHandler")
+    @patch("service_manager.SpeechHandler")
+    @patch("service_manager.PluginRegistry")
+    @patch("service_manager.RemoteSTTLauncher")
+    def test_dimmer_type_default_builds_gamma_dimmer(
+        self, mock_launcher_cls, mock_plugin_cls, mock_speech_cls,
+        mock_mouse_cls, mock_audio_cls, mock_bravia_cls,
+        mock_gamma_cls, service_manager
+    ):
+        """With no software_dimmer key, initialize_services builds GammaDimmer."""
+        service_manager.config_service.get.side_effect = _config_get_side_effect({
             "stt.mode": "remote",
         })
         mock_launcher = MagicMock()
@@ -256,7 +338,8 @@ class TestInitializeServices:
 
         service_manager.initialize_services()
 
-        assert service_manager.software_dimmer is None
+        mock_gamma_cls.assert_called_once_with(service_manager.loop)
+        assert service_manager.software_dimmer is mock_gamma_cls.return_value
 
     @patch("service_manager.BraviaControl")
     @patch("service_manager.AudioMonitor")
@@ -446,61 +529,6 @@ class TestStartPlugins:
 
 
 # ---------------------------------------------------------------------------
-# _build_stt_provider_kwargs
-# ---------------------------------------------------------------------------
-
-class TestBuildSttProviderKwargs:
-    """Test STT provider configuration building."""
-
-    def test_google_provider_kwargs(self, service_manager):
-        """Returns language and boost_words for google provider."""
-        service_manager.config_service.get.side_effect = _config_get_side_effect({
-            "stt.google.language": "en-US",
-            "stt.google.boost_words": ["hello", "world"],
-        })
-
-        result = service_manager._build_stt_provider_kwargs("google")
-
-        assert result["language"] == "en-US"
-        assert result["boost_words"] == ["hello", "world"]
-
-    def test_google_provider_defaults(self, service_manager):
-        """Returns defaults when google config not set."""
-        service_manager.config_service.get.side_effect = _config_get_side_effect({})
-
-        result = service_manager._build_stt_provider_kwargs("google")
-
-        assert result["language"] == "en-US"
-        assert result["boost_words"] == []
-
-    def test_azure_provider_kwargs(self, service_manager):
-        """Returns subscription_key and region for azure provider."""
-        service_manager.config_service.get.side_effect = _config_get_side_effect({
-            "stt.azure.subscription_key": "my-key",
-            "stt.azure.region": "westus",
-        })
-
-        result = service_manager._build_stt_provider_kwargs("azure")
-
-        assert result["subscription_key"] == "my-key"
-        assert result["region"] == "westus"
-
-    def test_azure_provider_defaults(self, service_manager):
-        """Returns defaults when azure config not set."""
-        service_manager.config_service.get.side_effect = _config_get_side_effect({})
-
-        result = service_manager._build_stt_provider_kwargs("azure")
-
-        assert result["subscription_key"] == ""
-        assert result["region"] == "eastus"
-
-    def test_unknown_provider_returns_empty(self, service_manager):
-        """Returns empty dict for unknown provider types."""
-        result = service_manager._build_stt_provider_kwargs("whisper")
-        assert result == {}
-
-
-# ---------------------------------------------------------------------------
 # start_remote_stt
 # ---------------------------------------------------------------------------
 
@@ -526,44 +554,87 @@ class TestStartRemoteStt:
         mock_launcher = MagicMock()
         mock_launcher.discover_providers.return_value = [
             {"name": "google_stt"},
-            {"name": "zipformer"},
+            {"name": "parakeet_tdt"},
         ]
         mock_launcher.start_provider.return_value = True
         service_manager.remote_stt_launcher = mock_launcher
         service_manager.config_service.get.side_effect = _config_get_side_effect({
-            "stt.last_provider": "zipformer",
+            "stt.last_provider": "parakeet_tdt",
         })
 
         result = service_manager.start_remote_stt()
 
         assert result is True
-        mock_launcher.start_provider.assert_called_once_with("zipformer")
+        mock_launcher.start_provider.assert_called_once_with("parakeet_tdt")
+        service_manager.state_manager.set_running_remote_stt_provider.assert_called_once_with(
+            "parakeet_tdt"
+        )
 
-    def test_falls_back_to_first_provider(self, service_manager):
-        """Falls back to first provider when last_provider fails."""
+    def test_falls_back_to_default_provider_and_repairs_config(self, service_manager):
+        """A stale stored name falls back to the default provider and repairs config.
+
+        The repair write is what stops a removed provider name (for example a
+        stale stt.last_provider from an uninstalled engine) from being retried
+        and error-logged on every launch forever. The fallback prefers
+        DEFAULT_STT_PROVIDER over discovery order: discovery is unsorted
+        filesystem iteration, so providers[0] can be an engine that needs
+        credentials the machine does not have. The state update after the
+        repair is what marks the running engine in the tray now instead of
+        after the next periodic update.
+        """
         mock_launcher = MagicMock()
         mock_launcher.discover_providers.return_value = [
             {"name": "google_stt"},
-            {"name": "zipformer"},
+            {"name": "parakeet_tdt"},
         ]
-        # First call (last_provider) fails, second call (first) succeeds
+        # First call (stale last_provider) fails, fallback succeeds
         mock_launcher.start_provider.side_effect = [False, True]
         service_manager.remote_stt_launcher = mock_launcher
         service_manager.config_service.get.side_effect = _config_get_side_effect({
-            "stt.last_provider": "zipformer",
+            "stt.last_provider": "removed_provider",
         })
 
         result = service_manager.start_remote_stt()
 
         assert result is True
         assert mock_launcher.start_provider.call_count == 2
-        mock_launcher.start_provider.assert_called_with("google_stt")
+        mock_launcher.start_provider.assert_called_with("parakeet_tdt")
+        service_manager.config_service.set.assert_called_once_with(
+            "stt.last_provider", "parakeet_tdt"
+        )
+        assert service_manager.loop.create_task.called
+        service_manager.state_manager.set_running_remote_stt_provider.assert_called_once_with(
+            "parakeet_tdt"
+        )
+        service_manager.state_manager.send_state_update.assert_called_once_with()
 
-    def test_uses_first_provider_when_no_last(self, service_manager):
-        """Uses first discovered provider when no last_provider set."""
+    def test_falls_back_to_first_provider_when_default_absent(self, service_manager):
+        """Falls back to discovery order when the default provider is not discovered."""
         mock_launcher = MagicMock()
         mock_launcher.discover_providers.return_value = [
             {"name": "google_stt"},
+            {"name": "distil_medium_en"},
+        ]
+        mock_launcher.start_provider.side_effect = [False, True]
+        service_manager.remote_stt_launcher = mock_launcher
+        service_manager.config_service.get.side_effect = _config_get_side_effect({
+            "stt.last_provider": "removed_provider",
+        })
+
+        result = service_manager.start_remote_stt()
+
+        assert result is True
+        mock_launcher.start_provider.assert_called_with("google_stt")
+        service_manager.config_service.set.assert_called_once_with(
+            "stt.last_provider", "google_stt"
+        )
+
+    def test_uses_default_provider_when_no_last(self, service_manager):
+        """With no stored provider, starts the default provider and records it."""
+        mock_launcher = MagicMock()
+        mock_launcher.discover_providers.return_value = [
+            {"name": "google_stt"},
+            {"name": "parakeet_tdt"},
         ]
         mock_launcher.start_provider.return_value = True
         service_manager.remote_stt_launcher = mock_launcher
@@ -572,7 +643,45 @@ class TestStartRemoteStt:
         result = service_manager.start_remote_stt()
 
         assert result is True
-        mock_launcher.start_provider.assert_called_once_with("google_stt")
+        mock_launcher.start_provider.assert_called_once_with("parakeet_tdt")
+        service_manager.config_service.set.assert_called_once_with(
+            "stt.last_provider", "parakeet_tdt"
+        )
+        assert service_manager.loop.create_task.called
+
+    def test_repair_write_failure_is_nonfatal(self, service_manager):
+        """A config write failure must not take down a successful fallback start.
+
+        A user config can hold a valid TOML scalar such as stt = "legacy";
+        ConfigService.get reads through it as missing, but ConfigService.set
+        raises TypeError on it. The engine is already running at that point,
+        so the repair is best-effort: log and return True, never crash the
+        startup path into shutdown. The GUI must still learn which engine
+        runs: the running-provider record and the state update happen even
+        when the config write fails (provider-removal review .1.6), with a
+        non-default engine so the record carries real information.
+        """
+        mock_launcher = MagicMock()
+        mock_launcher.discover_providers.return_value = [
+            {"name": "google_stt"},
+        ]
+        mock_launcher.start_provider.side_effect = [False, True]
+        service_manager.remote_stt_launcher = mock_launcher
+        service_manager.config_service.get.side_effect = _config_get_side_effect({
+            "stt.last_provider": "removed_provider",
+        })
+        service_manager.config_service.set.side_effect = TypeError(
+            "'str' object does not support item assignment"
+        )
+
+        result = service_manager.start_remote_stt()
+
+        assert result is True
+        assert not service_manager.loop.create_task.called
+        service_manager.state_manager.set_running_remote_stt_provider.assert_called_once_with(
+            "google_stt"
+        )
+        service_manager.state_manager.send_state_update.assert_called_once_with()
 
     def test_returns_false_when_all_providers_fail(self, service_manager):
         """Returns False when all provider starts fail."""
@@ -589,56 +698,6 @@ class TestStartRemoteStt:
         result = service_manager.start_remote_stt()
 
         assert result is False
-
-
-# ---------------------------------------------------------------------------
-# start_stt_manager
-# ---------------------------------------------------------------------------
-
-class TestStartSttManager:
-    """Test in-process STT manager startup."""
-
-    @pytest.mark.asyncio
-    async def test_noop_when_no_stt_manager(self, service_manager):
-        """start_stt_manager returns early when stt_manager is None."""
-        service_manager.stt_manager = None
-
-        # Should not raise
-        await service_manager.start_stt_manager(Mock())
-
-    @pytest.mark.asyncio
-    async def test_registers_transcript_handler(self, service_manager):
-        """start_stt_manager registers the transcript handler callback."""
-        mock_stt = MagicMock()
-        mock_stt.start = AsyncMock()
-        service_manager.stt_manager = mock_stt
-        service_manager._stt_provider_type = "google"
-        service_manager._stt_provider_kwargs = {"language": "en-US"}
-
-        handler = Mock()
-        await service_manager.start_stt_manager(handler)
-
-        mock_stt.on_transcript.assert_called_once_with(handler)
-
-    @pytest.mark.asyncio
-    async def test_starts_with_provider_config(self, service_manager):
-        """start_stt_manager starts STT with provider type and kwargs."""
-        mock_stt = MagicMock()
-        mock_stt.start = AsyncMock()
-        service_manager.stt_manager = mock_stt
-        service_manager._stt_provider_type = "azure"
-        service_manager._stt_provider_kwargs = {
-            "subscription_key": "key",
-            "region": "eastus",
-        }
-
-        await service_manager.start_stt_manager(Mock())
-
-        mock_stt.start.assert_awaited_once_with(
-            "azure",
-            subscription_key="key",
-            region="eastus",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +818,6 @@ class TestShutdownPartiallyInitialized:
         assert service_manager.mouse_handler is None
         assert service_manager.software_dimmer is None
         assert service_manager.plugin_registry is None
-        assert service_manager.stt_manager is None
         assert service_manager.brightness_coordinator is None
         assert service_manager.remote_stt_launcher is None
 
@@ -779,7 +837,6 @@ class TestShutdownPartiallyInitialized:
         service_manager.mouse_handler = mock_mouse
 
         service_manager.software_dimmer = None
-        service_manager.stt_manager = None
         service_manager.brightness_coordinator = None
         service_manager.remote_stt_launcher = None
 
@@ -788,27 +845,6 @@ class TestShutdownPartiallyInitialized:
 
         # Mouse handler still gets stopped
         mock_mouse.stop_listeners.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_shutdown_when_stt_manager_stop_raises(self, service_manager):
-        """shutdown_services continues if stt_manager.stop() raises."""
-        mock_stt = MagicMock()
-        mock_stt.stop = AsyncMock(side_effect=ConnectionError("socket closed"))
-        service_manager.stt_manager = mock_stt
-
-        mock_dimmer = MagicMock()
-        service_manager.software_dimmer = mock_dimmer
-
-        service_manager.mouse_handler = None
-        service_manager.plugin_registry = None
-        service_manager.brightness_coordinator = None
-        service_manager.remote_stt_launcher = None
-
-        # Should not raise despite STT crash
-        await service_manager.shutdown_services()
-
-        # Dimmer still gets stopped
-        mock_dimmer.stop.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_shutdown_when_remote_launcher_raises(self, service_manager):
@@ -825,7 +861,6 @@ class TestShutdownPartiallyInitialized:
         service_manager.mouse_handler = None
         service_manager.software_dimmer = None
         service_manager.plugin_registry = None
-        service_manager.stt_manager = None
 
         # Should not raise despite launcher crash
         await service_manager.shutdown_services()
@@ -845,7 +880,6 @@ class TestShutdownPartiallyInitialized:
 
         service_manager.software_dimmer = None
         service_manager.plugin_registry = None
-        service_manager.stt_manager = None
         service_manager.remote_stt_launcher = None
 
         # Should not raise - brightness coordinator stop error is caught
@@ -866,10 +900,6 @@ class TestShutdownPartiallyInitialized:
         mock_registry = MagicMock()
         mock_registry.stop_all = AsyncMock(side_effect=RuntimeError("plugin crash"))
         service_manager.plugin_registry = mock_registry
-
-        mock_stt = MagicMock()
-        mock_stt.stop = AsyncMock(side_effect=RuntimeError("stt crash"))
-        service_manager.stt_manager = mock_stt
 
         mock_coord = MagicMock()
         mock_coord.stop.side_effect = RuntimeError("coord crash")
@@ -1020,7 +1050,6 @@ class TestAIServiceIntegration:
         service_manager.mouse_handler = None
         service_manager.software_dimmer = None
         service_manager.plugin_registry = None
-        service_manager.stt_manager = None
         service_manager.brightness_coordinator = None
         service_manager.remote_stt_launcher = None
 
@@ -1038,7 +1067,6 @@ class TestAIServiceIntegration:
         service_manager.mouse_handler = None
         service_manager.software_dimmer = None
         service_manager.plugin_registry = None
-        service_manager.stt_manager = None
         service_manager.brightness_coordinator = None
         service_manager.remote_stt_launcher = None
 
@@ -1053,7 +1081,6 @@ class TestAIServiceIntegration:
         service_manager.mouse_handler = None
         service_manager.software_dimmer = None
         service_manager.plugin_registry = None
-        service_manager.stt_manager = None
         service_manager.brightness_coordinator = None
         service_manager.remote_stt_launcher = None
 

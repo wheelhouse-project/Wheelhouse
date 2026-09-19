@@ -46,7 +46,7 @@ log = logging.getLogger(__name__)
 class SherpaAdapter:
     """Benchmark adapter for sherpa-onnx transducer models.
 
-    Supports both OnlineRecognizer (streaming zipformer) and OfflineRecognizer
+    Supports both OnlineRecognizer (streaming transducers) and OfflineRecognizer
     (NeMo Parakeet TDT/CTC, other full-utterance transducers). Call-site can
     pass recognizer_kind explicitly; otherwise we infer from the model
     directory name using the csukuangfj/ naming convention.
@@ -90,7 +90,7 @@ class SherpaAdapter:
             )
         else:
             # Streaming online recognizer. Decoding method depends on the
-            # model family: zipformer transducers support modified_beam_search
+            # model family: streaming transducers support modified_beam_search
             # (better accuracy), NeMo streaming transducers support only
             # greedy_search (sherpa-onnx's NeMo online impl explicitly rejects
             # modified_beam_search at load time).

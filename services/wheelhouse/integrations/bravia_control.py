@@ -303,6 +303,24 @@ class BraviaControl(DisplayControl):
                     self.base_url, headers=self.headers, data=json.dumps(payload), timeout=5
                 )
                 response.raise_for_status()
+                # Sony reports application errors inside an HTTP 200 body:
+                # {"error": [code, message], "id": 12}.
+                try:
+                    body = response.json()
+                except ValueError:
+                    logger.error(f"Bravia: TV brightness response to {level}% was not JSON.")
+                    return False
+                if isinstance(body, dict) and "error" in body:
+                    error = body["error"]
+                    code, message = (error[0], error[1]) if isinstance(error, list) and len(error) >= 2 else (error, "")
+                    logger.error(
+                        f"Bravia: TV rejected brightness {level}% (hardware: {hardware_brightness}/50). "
+                        f"Error code {code}: {message}"
+                    )
+                    return False
+                if not isinstance(body, dict) or "result" not in body:
+                    logger.error(f"Bravia: TV brightness response to {level}% had no 'result': {body!r}")
+                    return False
                 logger.info(f"Bravia: Successfully set TV brightness to {level}% (hardware: {hardware_brightness}/50)")
                 return True
             except requests.exceptions.RequestException as e:
