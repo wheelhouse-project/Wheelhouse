@@ -215,3 +215,54 @@ def test_capabilities_send_failure_reconnects_cleanly(monkeypatch):
         "emits_eos": True,
         "wake_word_available": False,
     }, "reconnect after a failed capabilities send must declare again"
+
+
+# wh-boost-engine-qualification: whether the running engine applies a saved
+# hint. Tri-state on the Logic side: True, False, or unknown. Unknown is
+# carried by leaving the key OUT of the frame, so a forwarder whose provider
+# never sets the attribute sends the same frame an older build sends.
+
+
+def _first_frame_with_applies_hints(monkeypatch, value):
+    stop_evt = threading.Event()
+    ws = _FakeWS(stop_evt, after_first_send="stop")
+    _install_fake_websockets(monkeypatch, [ws])
+
+    fwd = WSForwarder(
+        "127.0.0.1",
+        9999,
+        threading.Event(),
+        provider_name="parakeet_tdt",
+        emits_eos=False,
+    )
+    if value != "unset":
+        fwd.applies_hints = value
+    fwd._stop_evt = stop_evt
+    _run_sender_loop(fwd)
+    return ws.sent[0]
+
+
+def test_applies_hints_true_is_declared(monkeypatch):
+    frame = _first_frame_with_applies_hints(monkeypatch, True)
+    assert frame["applies_hints"] is True
+
+
+def test_applies_hints_false_is_declared(monkeypatch):
+    """False must reach the wire as False, not be dropped as falsy."""
+    frame = _first_frame_with_applies_hints(monkeypatch, False)
+    assert "applies_hints" in frame
+    assert frame["applies_hints"] is False
+
+
+def test_applies_hints_defaults_to_not_declared(monkeypatch):
+    """A provider that never sets the attribute declares nothing, so the
+    Logic process keeps the value unknown and the command works as before."""
+    fwd = WSForwarder("127.0.0.1", 9999, threading.Event())
+    assert fwd.applies_hints is None
+    frame = _first_frame_with_applies_hints(monkeypatch, "unset")
+    assert "applies_hints" not in frame
+
+
+def test_applies_hints_none_is_not_declared(monkeypatch):
+    frame = _first_frame_with_applies_hints(monkeypatch, None)
+    assert "applies_hints" not in frame

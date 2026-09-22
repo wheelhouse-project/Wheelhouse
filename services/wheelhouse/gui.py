@@ -26,6 +26,24 @@ Typical Usage:
   from gui import start_gui_process
   start_gui_process(state_queue, gui_ready_event)
 """
+
+# Wheelhouse: put the owned Microsoft Visual C++ runtime folder on this
+# process's library search path BEFORE any extension module loads. The order
+# is the whole fix -- os.add_dll_directory cannot displace a library the
+# process already holds. services/runtime_dll_directory.py explains it.
+import os.path
+import sys
+
+_services_dir = os.path.abspath(__file__)
+while (os.path.basename(_services_dir) != "services"
+       and os.path.dirname(_services_dir) != _services_dir):
+    _services_dir = os.path.dirname(_services_dir)
+if _services_dir not in sys.path:
+    sys.path.append(_services_dir)
+from runtime_dll_directory import add_runtime_dll_directory
+
+add_runtime_dll_directory()
+
 import multiprocessing
 from multiprocessing import Queue, shared_memory
 from multiprocessing.synchronize import Event
@@ -37,6 +55,7 @@ from utils.app_version import get_app_version
 from floating_button_geometry import (
     MAX_BUTTON_SIZE,
     MIN_BUTTON_SIZE,
+    correct_onto_any_screen,
     correct_onto_screen,
     is_in_resize_ring,
     resize_from_pointer,
@@ -56,7 +75,7 @@ from functools import partial
 # --- Qt and PySide6 Imports ---
 from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame, QMessageBox
 from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject
-from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QAction, QFont, QPixmap
+from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QAction, QFont, QPixmap, QGuiApplication
 
 # --- System Tray Imports ---
 import pystray
@@ -203,6 +222,15 @@ _OVERLAY_LEASE_DEFAULT_MS = 90000
 # unbounded until the sweep ends clean -- a repeated no-op is cheap.
 _OVERLAY_TEARDOWN_RETRY_MS = 2000
 
+# How long after a screen-layout signal the floating button's position is
+# checked once more. Probe 4 (2026-09-20, wh-floating-button-offscreen)
+# measured why one delayed check is needed: a single resolution change
+# produced four signals, and the first three all read the screen at the OLD
+# device pixel ratio and found nothing wrong. The signal that saw the new
+# ratio arrived 809 ms after the first one going down in resolution, and
+# 725 ms coming back up, so this covers both with room to spare.
+_FORCED_REAPPLY_DELAY_MS = 1500
+
 # wh-dictation-gate-ux: the uncertain-category rejection notice
 # ("Wheelhouse isn't sure it can type here", the only notice with the
 # Try-it-anyway button) is disabled until the dictation-gate UX
@@ -215,6 +243,34 @@ _OVERLAY_TEARDOWN_RETRY_MS = 2000
 # by flipping this one constant. The elevated (administrator boundary)
 # notice is unaffected.
 SUPPRESS_UNCERTAIN_REJECTION_NOTICE = True
+
+
+def _screen_bounds(exclude=None):
+    """Return every connected screen as ``(x, y, width, height)``.
+
+    The one place the floating button's stored position meets Qt's screen
+    list, so tests replace this rather than a display (the same seam
+    ``overlay_paint_window._screens`` uses). The rectangles are ``geometry``,
+    the whole screen, and not ``availableGeometry``: the button is an
+    always-on-top frameless window, so it stays visible and clickable over
+    the taskbar and over every docked appbar strip, and a user may park it
+    there on purpose. Measuring it against the area reserved for ordinary
+    windows would move a button the user can see. The rectangles are already
+    in the logical pixels ``QWidget.move`` takes, so no DPI arithmetic
+    belongs here.
+
+    ``exclude`` drops one screen object. ``screenRemoved`` hands over the
+    screen Qt is about to drop, and whether ``screens()`` still lists it at
+    that moment is Qt's business; excluding the object by identity means the
+    correction never depends on the answer.
+    """
+    bounds = []
+    for screen in QGuiApplication.screens():
+        if exclude is not None and screen is exclude:
+            continue
+        rect = screen.geometry()
+        bounds.append((rect.x(), rect.y(), rect.width(), rect.height()))
+    return bounds
 
 
 class FloatingButton(QWidget):
@@ -734,16 +790,31 @@ class FloatingButton(QWidget):
         return is_in_resize_ring(local_pos.x(), local_pos.y(), self.width())
 
     def _current_screen_bounds(self):
-        """Return the usable bounds of the screen the button is on right now."""
+        """Return the whole screen the button is on right now.
+
+        ``geometry``, not ``availableGeometry``, for the same reason as
+        ``_screen_bounds``: the button is an always-on-top frameless window,
+        so it stays visible and clickable over the taskbar and over every
+        docked appbar strip, and a user may park it there on purpose. These
+        bounds and those ones are the two rules that decide where the button
+        may sit -- this one corrects an edge-drag resize, that one corrects a
+        stored position -- so they must measure the same rectangle. While
+        this method asked for the usable area they disagreed: growing a
+        button parked on the taskbar pulled it up off the strip, and the next
+        apply put it straight back.
+
+        None when Qt reports no screen for the button, which leaves the
+        resize uncorrected rather than correcting against a guess.
+        """
         screen = self.screen()
         if screen is None:
             return None
-        available = screen.availableGeometry()
+        whole = screen.geometry()
         return (
-            available.x(),
-            available.y(),
-            available.width(),
-            available.height(),
+            whole.x(),
+            whole.y(),
+            whole.width(),
+            whole.height(),
         )
 
     def _apply_resize_to(self, global_pos):
@@ -1509,6 +1580,28 @@ class GuiManager(QObject):
         # nothing is waiting.
         self._deferred_geometry = None
 
+        # Whether the screen layout changed while the user was mid-gesture.
+        # A flag of its own, and not a second use of _deferred_geometry,
+        # because the gesture's own completion clears that one: moved and
+        # resize_finished reach send_pos_change_command and
+        # send_resize_commit_command BEFORE gesture_ended fires, so a layout
+        # correction parked there is discarded a moment before anything can
+        # apply it (wh-floating-button-offscreen.1.2).
+        self._layout_changed_during_gesture = False
+
+        # The one timer that carries every delayed re-check of the button's
+        # position. One resolution change fires several layout signals, and
+        # without a single timer each of them would leave its own
+        # (wh-floating-button-offscreen, criterion B4). It is built on the
+        # first display change and started again on every one after that.
+        self._delayed_reapply_timer = None
+
+        # A stored position outlives the screens it was stored on, and nothing
+        # in the button noticed when they changed, so the button could come
+        # back where no screen is (wh-floating-button-offscreen). Connected
+        # after _deferred_geometry exists, because the slot reads it.
+        self._watch_the_screen_layout()
+
         self.queue_timer = QTimer(self)
         self.queue_timer.timeout.connect(self._check_queues_and_events)
         self.icon_thread = threading.Thread(target=self.icon.run, daemon=True)
@@ -1960,6 +2053,11 @@ class GuiManager(QObject):
                     self._show_declined_write_failed_toast(message)
                 elif action == "open_pattern_manager":
                     self._open_pattern_manager()
+                elif action == "open_help_explainer":
+                    # The Logic process decided the user needs the
+                    # explanation before the browser opens. It holds the
+                    # settings; this process holds the windows.
+                    self._open_help_explainer()
                 elif action == "open_calibration":
                     # wh-7ou.7.3.1: voice-command path ("learn my voice").
                     # Logic asks the GUI to open the voice-teaching window.
@@ -3102,8 +3200,13 @@ class GuiManager(QObject):
         try:
             self.commands_to_logic_queue.put_nowait(dict(command, request_id=request_id))
         except (Full, OSError, ValueError):
+            # save_correction=False: this runs because the queue refused the
+            # write. Saving a correction would send another command down the
+            # same queue, fail again, and roll back again without end. The
+            # button still comes back on screen; only the write waits.
             self._apply_geometry((self._settings_confirmed.get('FLOATING_BUTTON_SIZE', 50),
-                                  self._settings_confirmed.get('FLOATING_BUTTON_POS', [100, 100])))
+                                  self._settings_confirmed.get('FLOATING_BUTTON_POS', [100, 100])),
+                                 save_correction=False)
             self._settings_show_status("Couldn't send settings. Restored the confirmed values.", failure=True)
             return
         self._settings_requests[request_id] = {
@@ -3232,17 +3335,337 @@ class GuiManager(QObject):
         self._deferred_geometry = None
         self.send_command({'action': 'set_config_value', 'key': 'FLOATING_BUTTON_POS', 'value': [new_pos.x(), new_pos.y()]})
 
-    def _apply_geometry(self, geometry):
-        """Put a size and a position from the settings onto the button."""
+    def _apply_geometry(self, geometry, save_correction=True, screens=None):
+        """Put a size and a position from the settings onto the button.
+
+        Every route that applies a stored position goes through here -- the
+        first message from the Logic process, a settings acknowledgement, the
+        apply held back during a gesture, and the rollback when the command
+        queue refuses a write. So this is where a position that no longer
+        lands on a screen gets corrected, and one correction covers them all
+        (wh-floating-button-offscreen).
+
+        ``save_correction`` decides whether a correction is written back to
+        the settings as well as shown. It is true everywhere except the
+        rollback: that path runs BECAUSE the command queue refused a write,
+        and sending another command down the same queue would fail, roll back,
+        correct and send again without end. The button still comes back on
+        screen there; only the write waits for a queue that works.
+
+        ``screens`` is for the callers that already hold a screen list, and
+        for tests. None means ask Qt now.
+        """
         size, pos = geometry
         self._deferred_geometry = None
+        if screens is None:
+            screens = _screen_bounds()
+        corrected = correct_onto_any_screen(pos[0], pos[1], size, screens)
         self.button.set_size(size)
-        self.button.move(QPoint(*pos))
+        self.button.move(QPoint(*corrected))
+        if save_correction and list(corrected) != list(pos):
+            # Without this the button comes back, but the settings keep the
+            # position that lost its screen, and the correction has to run
+            # again on every start.
+            self.send_pos_change_command(QPoint(*corrected))
+
+    def _native_button_rect(self):
+        """The button's window rectangle in PHYSICAL pixels, or None.
+
+        Qt's own geometry is logical, and it can disagree with what Windows
+        holds. Probe 4 measured the disagreement: after a resolution change
+        the native rectangle stayed at the old physical position and the old
+        physical size, wholly outside the new desktop, while Qt still
+        reported the stored logical position (wh-floating-button-offscreen).
+        """
+        try:
+            import win32gui
+            return win32gui.GetWindowRect(int(self.button.winId()))
+        except Exception as exc:
+            # Criterion B7: a reading that fails leaves the button exactly as
+            # it is today, and says so at debug level.
+            logger.debug('Floating button: could not read the window rectangle: %s', exc)
+            return None
+
+    def _screen_pixel_ratio(self):
+        """The device pixel ratio of the SCREEN the button is on, or None.
+
+        The WINDOW's own ratio must not be used here. Probe 4 measured it lag
+        behind: three display signals in a row read the window at 3.0 while
+        the screen already read 2.0, so a comparison against the window's
+        ratio reports agreement at the exact moment the fault exists.
+        """
+        try:
+            handle = self.button.windowHandle()
+            screen = handle.screen() if handle is not None else None
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            return float(screen.devicePixelRatio()) if screen is not None else None
+        except Exception as exc:
+            logger.debug('Floating button: could not read the screen scale: %s', exc)
+            return None
+
+    def _native_geometry_disagrees(self, native):
+        """Does the window rectangle contradict the Qt geometry and the scale?
+
+        crewcut: the wanted rectangle is the logical position multiplied by
+        the scale, which is the screen origin only on a desktop whose screens
+        share one origin and one scale. On a multiple-monitor desktop where a
+        screen's logical origin is not its physical origin divided by that
+        screen's ratio, this can report a disagreement that is not one. The
+        cost of that mistake is one re-apply of the same logical geometry, so
+        the button does not move; removing it needs a physical-origin reading
+        per screen, which Qt does not publish.
+        """
+        ratio = self._screen_pixel_ratio()
+        if native is None or ratio is None:
+            return False
+        left, top, right, bottom = native
+        pos = self.button.pos()
+        wanted_left = int(round(pos.x() * ratio))
+        wanted_top = int(round(pos.y() * ratio))
+        wanted_size = int(round(self.button.width() * ratio))
+        # One pixel of rounding either way, the tolerance criterion B1 names.
+        position_disagrees = (abs(left - wanted_left) > 1
+                              or abs(top - wanted_top) > 1)
+        size_disagrees = (abs((right - left) - wanted_size) > 1
+                          or abs((bottom - top) - wanted_size) > 1)
+        return position_disagrees or size_disagrees
+
+    def _force_native_geometry(self):
+        """Put the button's WINDOW where its Qt geometry says it is.
+
+        Qt sends nothing to Windows when a move() or a setGeometry() carries
+        the geometry it has already cached, so the correction in
+        _apply_geometry cannot repair this case by itself: after a resolution
+        change correct_onto_any_screen returns the stored position unchanged,
+        and the move to that same position never reaches Windows. Probe 4
+        measured the remedy on 2026-09-20. A move to a DIFFERENT position
+        reaches Windows, and the setGeometry after it differs from THAT, so
+        it reaches Windows too and carries the size with it. Both calls are
+        needed: the move alone leaves the window one pixel off and the old
+        size, and the setGeometry alone is the call Qt drops.
+        """
+        before = self._native_button_rect()
+        forced = False
+        if before is not None and self._native_geometry_disagrees(before):
+            pos = self.button.pos()
+            size = self.button.width()
+            try:
+                self.button.move(QPoint(pos.x() + 1, pos.y() + 1))
+                self.button.setGeometry(pos.x(), pos.y(), size, size)
+                forced = True
+            except Exception as exc:
+                # Criterion B7: a forcing call that fails leaves the button
+                # with the behaviour it has today.
+                logger.debug('Floating button: could not force the window back: %s', exc)
+        after = self._native_button_rect()
+        logger.debug(
+            'Floating button: window rectangle %s before, %s after, forced=%s',
+            before, after, forced)
+        return forced
+
+    def _schedule_one_delayed_reapply(self):
+        """Check the position once more after the display change settles.
+
+        Probe 4 measured why this is needed. One resolution change produced
+        four layout signals, and the first three read the screen at the OLD
+        device pixel ratio, found agreement, and rightly did nothing. Only
+        the fourth saw the new ratio. When no later signal arrives after the
+        ratio updates, this single-shot check is the only thing that catches
+        it.
+
+        One timer serves every display change, so one re-check is waiting at
+        any moment (criterion B4), and it is single-shot, never a repeating
+        timer (criterion B3). Starting it again moves its deadline instead of
+        adding a second one. The deadline has to move: a second, independent
+        display change that lands near the end of the first delay would
+        otherwise inherit whatever was left of it, and its re-check would read
+        the screen before that change's own ratio updated
+        (wh-floating-button-offscreen.4.2).
+        """
+        if self._delayed_reapply_timer is None:
+            timer = QTimer(self.button)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._reapply_after_the_layout_settled)
+            self._delayed_reapply_timer = timer
+        self._delayed_reapply_timer.start(_FORCED_REAPPLY_DELAY_MS)
+
+    def _reapply_after_the_layout_settled(self):
+        """The delayed check itself. It schedules nothing further."""
+        self._on_screens_changed(
+            signal_name='the delayed re-check', schedule_delayed=False)
 
     def _on_gesture_ended(self):
-        """Apply whatever was held back while the gesture was running."""
+        """Apply whatever was held back while the gesture was running.
+
+        Two things can be held back, and only one of them survives the
+        gesture's own completion. A state message or a settings
+        acknowledgement parks its geometry in _deferred_geometry, and that is
+        applied here exactly as it always was. A screen-layout change parks a
+        flag as well, because moved and resize_finished reach
+        send_pos_change_command and send_resize_commit_command before
+        gesture_ended fires, and both of those clear _deferred_geometry
+        (wh-floating-button-offscreen.1.2).
+
+        What the flag applies is the button as the user has just left it --
+        its current width and current corner -- not the confirmed settings,
+        which the gesture has just made a moment out of date. Correcting
+        after every gesture instead would take away a position a user parked
+        on purpose, over the taskbar or past an edge, so the flag fires only
+        for a gesture a layout change really ran into.
+
+        It does not save. The gesture's own write is already in flight, and
+        its acknowledgement corrects and saves the result at the apply in
+        _handle_settings_result. A second saved write from here would be two
+        writes in the queue racing for the last word.
+
+        Whichever apply runs, a gesture that a layout change ran into also
+        owes the forcing and the one delayed re-check that an unheld display
+        change gets (wh-floating-button-offscreen.4.1). A gesture no layout
+        change ran into owes neither.
+        """
+        layout_changed = self._layout_changed_during_gesture
+        self._layout_changed_during_gesture = False
         if self._deferred_geometry is not None:
             self._apply_geometry(self._deferred_geometry)
+        elif layout_changed:
+            corner = self.button.pos()
+            self._apply_geometry(
+                (self.button.width(), [corner.x(), corner.y()]),
+                save_correction=False,
+            )
+        if layout_changed:
+            # _begin_press sets _gesture_running on any press, so this is the
+            # release of a hold that can have lasted as long as the user
+            # talked. The apply above re-sends the geometry Qt already holds,
+            # and that is exactly the call Qt drops, so without this the
+            # window keeps the rectangle the old scale gave it. Forcing here
+            # carries whatever geometry the apply settled on, which on the
+            # flag's path is the button the user has just dragged, so the
+            # move the user just made survives.
+            self._force_native_geometry()
+            self._schedule_one_delayed_reapply()
+
+    def _on_screens_changed(self, screens=None, signal_name='a screen layout change',
+                            schedule_delayed=True):
+        """Re-check the stored position when the screen layout changes.
+
+        A monitor unplugged, a resolution changed, or a Remote Desktop session
+        reconnecting at another size can all leave a position that was fine
+        when it was stored on no screen at all. Nothing in the button reacts
+        to any of that by itself, so the floating button used to simply
+        disappear (wh-floating-button-offscreen).
+
+        The confirmed settings are re-applied, not some new position, so a
+        layout change that needs no correction changes nothing.
+
+        ``signal_name`` names the signal that arrived, for the log.
+        ``schedule_delayed`` is false for the delayed re-check itself, so
+        that one check never starts another.
+        """
+        logger.debug(
+            'Floating button: %s arrived; re-checking the stored position',
+            signal_name)
+        geometry = (
+            self._settings_confirmed.get('FLOATING_BUTTON_SIZE', 50),
+            self._settings_confirmed.get('FLOATING_BUTTON_POS', [100, 100]),
+        )
+        if self.button._gesture_running:
+            # Correcting mid-gesture would fight the pointer the user is
+            # holding. The apply waits for the gesture, exactly as an
+            # arriving state message does.
+            self._deferred_geometry = geometry
+            # The flag is what survives the gesture. The geometry above does
+            # not: the gesture's completion clears it before gesture_ended.
+            self._layout_changed_during_gesture = True
+            return
+        self._apply_geometry(geometry, screens=screens)
+        # Re-applying the stored position is not enough by itself: Qt drops a
+        # move whose value it has already cached, so the window Windows holds
+        # can stay where the old scale put it (wh-floating-button-offscreen).
+        self._force_native_geometry()
+        if schedule_delayed:
+            self._schedule_one_delayed_reapply()
+
+    def _on_screen_layout_signal(self, signal_name='a screen layout signal', *args):
+        """Qt slot for the layout signals whose argument this does not use.
+
+        primaryScreenChanged carries a QScreen, geometryChanged and
+        availableGeometryChanged carry a QRect, and logicalDotsPerInchChanged
+        carries a float. Connecting any of them straight to
+        _on_screens_changed would hand that object to its ``screens``
+        parameter, and the correction would read a screen, a rectangle or a
+        number as a list of screens.
+
+        Each connection binds the signal's own name as the first argument,
+        so the log names the signal that arrived (criterion B5).
+        """
+        self._on_screens_changed(signal_name=signal_name)
+
+    def _on_screen_added(self, screen):
+        """Watch the new screen for size changes, then re-check the position."""
+        self._watch_screen(screen)
+        self._on_screens_changed(signal_name='QGuiApplication.screenAdded')
+
+    def _on_screen_removed(self, screen):
+        """Re-check the position with the screen Qt is dropping left out."""
+        self._on_screens_changed(
+            screens=_screen_bounds(exclude=screen),
+            signal_name='QGuiApplication.screenRemoved')
+
+    def _watch_screen(self, screen):
+        """Report a single screen changing size, usable area, or scale.
+
+        Qt has no application-level signal for one screen being resized. The
+        case this guards against is a Remote Desktop reconnect that brings
+        the same screen back at a different size, with none added and none
+        removed. Whether Windows and Qt report a reconnect that way, rather
+        than as one screen removed and another added, is not measured, so
+        each screen is watched on its own rather than left to the
+        application-level signals.
+
+        logicalDotsPerInchChanged is the third of them because a stored
+        position is in logical pixels, and a change of scale can redefine
+        them: the same monitor is fewer logical pixels across at 150 per
+        cent than at 125, so a position near the right edge can end up past
+        the new one. Whether Windows also fires one of the two geometry
+        signals on a change of scale is not measured, so the third signal is
+        connected rather than assumed to be covered by them. A repeated
+        signal computes the same correction from the same stored position,
+        so the button ends where the first one put it.
+        """
+        try:
+            screen.geometryChanged.connect(
+                partial(self._on_screen_layout_signal, 'QScreen.geometryChanged'))
+            screen.availableGeometryChanged.connect(
+                partial(self._on_screen_layout_signal,
+                        'QScreen.availableGeometryChanged'))
+            screen.logicalDotsPerInchChanged.connect(
+                partial(self._on_screen_layout_signal,
+                        'QScreen.logicalDotsPerInchChanged'))
+        except (AttributeError, RuntimeError):
+            # A screen already being destroyed, or a Qt build without the
+            # signals. The layout-level signals still cover adding and
+            # removing a monitor, so this is worth a log and no more.
+            logger.exception('Could not watch a screen for size changes')
+
+    def _watch_the_screen_layout(self):
+        """Connect every signal that can invalidate a stored position."""
+        app = QGuiApplication.instance()
+        if app is None:
+            # No Qt application yet. Nothing can be showing a button either,
+            # so there is no position to protect.
+            return
+        try:
+            app.screenAdded.connect(self._on_screen_added)
+            app.screenRemoved.connect(self._on_screen_removed)
+            app.primaryScreenChanged.connect(
+                partial(self._on_screen_layout_signal,
+                        'QGuiApplication.primaryScreenChanged'))
+            for screen in QGuiApplication.screens():
+                self._watch_screen(screen)
+        except (AttributeError, RuntimeError):
+            logger.exception('Could not watch the screen layout')
 
     def send_resize_commit_command(self, new_size: int, new_pos: QPoint):
         """Send the button's new size and position to Logic as one change.
@@ -3753,6 +4176,52 @@ class GuiManager(QObject):
     def _send_pm_command(self, command: dict):
         """Forward Pattern Manager commands to Logic process."""
         self.commands_to_logic_queue.put_nowait(command)
+
+    def _open_help_explainer(self):
+        """Show the window that explains the Wheelhouse Assistant.
+
+        One window only: a second Help while it is open raises the one
+        already there. The window is modeless, so this method returns at
+        once and the queue this call came from keeps being read.
+        """
+        from help_explainer_window import HelpExplainerWindow
+        if getattr(self, '_help_explainer', None) is None:
+            self._help_explainer = HelpExplainerWindow(parent=None)
+            self._help_explainer.assistant_chosen.connect(
+                self._on_help_explainer_choice
+            )
+        # The same window comes back, so a check box left ticked by an
+        # earlier reading must not travel with this one.
+        self._help_explainer.prepare_to_show()
+        self._help_explainer.show()
+        self._help_explainer.raise_()
+        self._help_explainer.activateWindow()
+
+    def _on_help_explainer_choice(self, do_not_show_again: bool):
+        """Act on the window's Assistant button.
+
+        The Logic process opens the browser, as it does for the menu entry;
+        ``explained`` tells it the user has already read the explanation, so
+        it does not ask for the window again. The check box writes the
+        setting through the acknowledged settings path, in the Logic
+        process, which is the only process that writes the settings file.
+        Cancel and the Escape key never reach here, so backing out of the
+        window changes nothing.
+        """
+        self.send_command({
+            "action": "open_help_online",
+            "explained": True,
+            # Naming the window as the source keeps the Logic process log
+            # honest: this run began at the Assistant button, not at the
+            # menu entry or the spoken command that produced the window.
+            "source": "window",
+        })
+        if do_not_show_again:
+            self.send_command({
+                'action': 'set_config_value',
+                'key': 'ai.help.explain_before_open',
+                'value': False,
+            })
 
     def _open_calibration(self):
         """Open the voice-teaching (calibration) window (wh-7ou.7.3.1)."""

@@ -204,6 +204,12 @@ class AudioMonitor:
                     # hold-off; a start is reported on the first loud poll.
                     report_change = is_playing != self._previous_audio_state
                     if is_playing or not report_change:
+                        # Sound that returns inside the hold-off is reported
+                        # as playing again, so a sound pause that the user
+                        # toggle cleared during the sound starts again
+                        # (wh-sound-pause-returns-after-toggle).
+                        if is_playing and quiet_since is not None:
+                            report_change = True
                         quiet_since = None
                     else:
                         now = monotonic()
@@ -222,7 +228,7 @@ class AudioMonitor:
                         :description: Publishes audio state change event when playback starts/stops
                         :data_in: Boolean is_playing state change
                         :data_out: AudioStateChangedEvent published to EventBus
-                        :notes: Event publishing handoff from monitor to decoupled eventing system. Only publishes on state transitions (not every poll). Event consumed by StateManager._handle_audio_state_changed() in step 3. This decoupling allows multiple subscribers to react to audio state without AudioMonitor knowing about them.
+                        :notes: Event publishing handoff from monitor to decoupled eventing system. Only publishes on state transitions (not every poll), plus one repeated 'playing' event when sound returns inside the stop hold-off. Event consumed by StateManager._handle_audio_state_changed() in step 3. This decoupling allows multiple subscribers to react to audio state without AudioMonitor knowing about them.
                         """
                         logger.debug(f"Audio state changed to {'playing' if is_playing else 'not playing'}. Publishing event.")
                         await self.event_bus.publish(AudioStateChangedEvent(is_playing=is_playing))

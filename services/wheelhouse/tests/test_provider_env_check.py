@@ -344,6 +344,12 @@ def test_startup_starts_the_check_before_first_launch_and_submits_one_notice(pro
         began.set()
         return recorder(cmd, **kwargs)
     monkeypatch.setattr(check, "_run_uv", runner, raising=False)
+    # This test owns the provider environment notices only. The runtime
+    # notice leads the same list whenever the computer's Microsoft Visual
+    # C++ runtime cannot serve, so without this line the first payload --
+    # and the count below it -- would depend on the computer running the
+    # test. tests/test_runtime_dll_directory.py owns that behaviour.
+    monkeypatch.setattr(sm, "runtime_version_notice", lambda: None)
     events = []
     def launch(name):
         # The launch no longer waits for the answer, but the check must

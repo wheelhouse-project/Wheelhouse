@@ -30,6 +30,24 @@ RESULT: Sub-400ms latency with high accuracy, simplified message protocol.
 Typical Usage:
   python main.py --config config.toml --device-index 1
 """
+
+# Wheelhouse: put the owned Microsoft Visual C++ runtime folder on this
+# process's library search path BEFORE any extension module loads. The order
+# is the whole fix -- os.add_dll_directory cannot displace a library the
+# process already holds. services/runtime_dll_directory.py explains it.
+import os.path
+import sys
+
+_services_dir = os.path.abspath(__file__)
+while (os.path.basename(_services_dir) != "services"
+       and os.path.dirname(_services_dir) != _services_dir):
+    _services_dir = os.path.dirname(_services_dir)
+if _services_dir not in sys.path:
+    sys.path.append(_services_dir)
+from runtime_dll_directory import add_runtime_dll_directory
+
+add_runtime_dll_directory()
+
 import logging
 import os
 import signal
@@ -1636,6 +1654,11 @@ def main(argv=None):
             forwarder.wake_word_available = bool(
                 wake_word_detector and wake_word_detector.is_loaded
             )
+            # Google applies a saved hint always: phrase adaptation has no
+            # [hotwords] gate (config_loader.py). WheelHouse accepts the
+            # "boost" command only when the engine says it applies hints
+            # (wh-boost-engine-qualification).
+            forwarder.applies_hints = True
             forwarder.start()
             # Enable log forwarding to WheelHouse via the standard Python logging
             # pipeline (wh-6wp). A record written while WheelHouse is unreachable

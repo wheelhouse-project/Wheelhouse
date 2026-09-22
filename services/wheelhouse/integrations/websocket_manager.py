@@ -150,6 +150,12 @@ class WebSocketManager:
         # message on connect (wh-nvyh). Defaults to False (silent gate)
         # for providers that never declare.
         self._provider_emits_eos: bool = False
+        # Whether the active provider's engine applies a saved hint: True,
+        # False, or None for unknown -- no frame yet, a provider build
+        # without the field, or a stream boundary
+        # (wh-boost-engine-qualification). Pushed to the matcher path
+        # through speech_handler.apply_hint_engine.
+        self.provider_applies_hints: Optional[bool] = None
         # The newest connected client -- the one whose transcripts drive
         # the pipeline (older clients stay connected but DISABLED). Only
         # this client's capabilities declaration is honored (wh-nvyh.1.1).
@@ -600,6 +606,31 @@ class WebSocketManager:
                 f"wake_word_available={declared_wake_word}"
             )
             self.state_manager.set_wake_word_available(declared_wake_word)
+
+        # wh-boost-engine-qualification: whether the running engine applies
+        # a saved hint. Same key-presence rule as wake_word_available: a
+        # provider build from before the field declares nothing, and the
+        # value then stays unknown (None), which keeps the "boost" command
+        # working. Only a declared False makes the matcher refuse a pattern
+        # whose actions save a hint, so the word is typed as dictation.
+        if "applies_hints" in data:
+            declared_applies_hints = bool(data.get("applies_hints"))
+            logger.info(
+                f"[CAPABILITIES] provider={declared_provider} "
+                f"applies_hints={declared_applies_hints}"
+            )
+            self._set_provider_applies_hints(declared_applies_hints)
+
+    def _set_provider_applies_hints(self, value: Optional[bool]) -> None:
+        """Store the tri-state hint capability and push it to the matcher.
+
+        The push goes through SpeechHandler.apply_hint_engine, which keeps
+        the value for a speech processor that does not exist yet.
+        """
+        self.provider_applies_hints = value
+        apply = getattr(self.speech_handler, "apply_hint_engine", None)
+        if apply is not None:
+            apply(value)
 
     def _rebind_launch_stamp(self, websocket: Any, provider_name: Any) -> None:
         """Replace a connection's provisional stamp with its own launch.
@@ -1197,9 +1228,10 @@ class WebSocketManager:
                         continue
 
                     # Handle "capabilities" messages -- the provider declares
-                    # what it can do right after connecting (wh-nvyh). Today
-                    # the only consumed capability is emits_eos, which gates
-                    # the EOS_NOT_RECEIVED diagnostic warning. The flag is
+                    # what it can do right after connecting (wh-nvyh). The
+                    # consumed capabilities are emits_eos, which gates the
+                    # EOS_NOT_RECEIVED diagnostic warning, wake_word_available,
+                    # and applies_hints (see _apply_capabilities). Each is
                     # per-stream: add_client resets it when a new client
                     # becomes the active stream, and the provider's forwarder
                     # re-sends the declaration on every (re)connect.
@@ -1705,6 +1737,11 @@ class WebSocketManager:
             self.state_manager, "set_wake_word_available"
         ):
             self.state_manager.set_wake_word_available(False)
+        # Whether the engine applies hints is per-stream too, but the
+        # boundary resets it to None (unknown), not False: during an engine
+        # switch the gap before the new provider's frame must not refuse
+        # the "boost" command (wh-boost-engine-qualification).
+        self._set_provider_applies_hints(None)
 
     async def add_client(self, websocket: Any):
         """Registers a new client connection, disabling existing clients.

@@ -100,6 +100,12 @@ class SpeechHandler:
         
         # Speech processor will be initialized after word_queue is available
         self.speech_processor: Optional[SpeechProcessor] = None
+        # Whether the running speech engine applies a saved hint: True,
+        # False, or None for unknown (wh-boost-engine-qualification). Kept
+        # here as well as on the processor because a provider's
+        # capabilities frame can arrive before initialize_speech_processor
+        # runs; the new processor receives the kept value.
+        self.hint_engine: Optional[bool] = None
 
     def _resolve_user_patterns_file(self) -> str:
         """Resolve the writable user patterns file path.
@@ -213,6 +219,22 @@ class SpeechHandler:
             focus_redirect_policy=focus_redirect_policy,
             focused_hwnd_provider=focused_hwnd_provider,
         )
+        self.speech_processor.apply_hint_engine(self.hint_engine)
+
+    def apply_hint_engine(self, value: Optional[bool]) -> None:
+        """Push whether the running speech engine applies a saved hint.
+
+        Called by WebSocketManager when the active provider's capabilities
+        frame declares ``applies_hints`` and at every stream boundary
+        (value None, unknown). A pattern whose actions save a hint is
+        refused while the value is False, so "boost" is typed as dictation
+        under an engine that would not use the hint
+        (wh-boost-engine-qualification). Same shape as apply_hotword, except
+        that the value is also kept for a processor created later.
+        """
+        self.hint_engine = value
+        if self.speech_processor is not None:
+            self.speech_processor.apply_hint_engine(value)
 
     def apply_hotword(self, hotword: str) -> None:
         """Push a changed command hotword onto the running speech processor.

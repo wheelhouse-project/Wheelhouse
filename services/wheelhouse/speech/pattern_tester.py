@@ -80,7 +80,12 @@ from .pattern_identity import (
     runtime_text_candidates,
 )
 from .pattern_manager import PatternManager
-from .pattern_matcher import _MATCHER_PUNCT_STRIP, _normalize_first_word_in_text
+from .pattern_catalog import _actions_need_hint_engine
+from .pattern_matcher import (
+    _MATCHER_PUNCT_STRIP,
+    _normalize_first_word_in_text,
+    _refused_for_hint_engine,
+)
 from .pattern_transform import transform_pattern
 from .safe_regex import RegexTimeout, match_bounded
 
@@ -162,7 +167,12 @@ def _command_match_candidates(text: str) -> List[str]:
     return candidates
 
 
-def _match_entry(text: str, entry: Dict[str, Any], matcher):
+def _match_entry(
+    text: str,
+    entry: Dict[str, Any],
+    matcher,
+    hint_engine: Optional[bool] = None,
+):
     """Match one catalog entry the way the runtime would, or return None.
 
     Mirrors ``match_single_pattern``'s semantics -- anchor-driven
@@ -173,9 +183,17 @@ def _match_entry(text: str, entry: Dict[str, Any], matcher):
     (wh-pattern-editor-r0.4). The numeric validation skip mirrors
     ``match_complete``'s router gate.
 
+    ``hint_engine`` is the running engine's hint support
+    (``TextParser.hint_engine``). A pattern whose actions save a hint is
+    refused when it is False, by the runtime matcher's own rule
+    (``_refused_for_hint_engine``), so the try-it box answers "no command"
+    exactly when the runtime types the words (wh-boost-engine-qualification.1.1).
+
     Raises:
         RegexTimeout: The entry's pattern exceeded the match budget.
     """
+    if _refused_for_hint_engine(entry, hint_engine):
+        return None
     compiled = entry["compiled_pattern"]
     found = None
     if compiled.pattern.startswith("^"):
@@ -259,7 +277,11 @@ def _resolve_steps(
 
 
 def run_test_phrase(
-    text: str, patterns: List[Dict[str, Any]], matcher,
+    text: str,
+    patterns: List[Dict[str, Any]],
+    matcher,
+    *,
+    hint_engine: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Answer pm_test_phrase: which pattern responds to ``text`` right now.
 
@@ -267,6 +289,9 @@ def run_test_phrase(
         text: What the user typed into the try-it box.
         patterns: The live merged pattern list (``TextParser.patterns``).
         matcher: The live ``PatternMatcher``.
+        hint_engine: The live ``TextParser.hint_engine``. False skips every
+            pattern whose actions save a hint, as the runtime does; None
+            and True match as before.
 
     Returns:
         ``{"success": True, "match": None}`` when nothing responds, else
@@ -279,7 +304,7 @@ def run_test_phrase(
     """
     for entry in patterns:
         try:
-            result = _match_entry(text, entry, matcher)
+            result = _match_entry(text, entry, matcher, hint_engine)
         except RegexTimeout:
             return _saved_pattern_timeout_error(entry)
         if result is None:
@@ -396,6 +421,9 @@ def _build_draft_entry(draft: Dict[str, Any]):
         "is_greedy": meta.get("is_greedy", False),
         "raw_pattern": regex,
         "is_user": True,
+        # The flag _build_structures derives from the same actions, so the
+        # catalog-free path refuses a hint draft by the runtime rule too.
+        "requires_hint_engine": _actions_need_hint_engine(actions),
     }
     # A Customize draft carries the built-in's doc_id, and the merge keys on
     # it, so the simulation needs it to place the draft where the save will
@@ -668,6 +696,7 @@ def run_test_draft(
     matcher,
     *,
     catalog,
+    hint_engine: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Answer pm_test_draft: for ``text``, does the draft respond first?
 
@@ -692,6 +721,9 @@ def run_test_draft(
             nothing at the call site to show it; an explicit ``None``
             written at every call site is that sign. Only the test files
             pass None today.
+        hint_engine: The live ``TextParser.hint_engine``, with the same
+            meaning as in ``run_test_phrase``: False refuses the draft and
+            every saved pattern whose actions save a hint.
 
     Returns:
         ``{success, draft_error, draft_matches, winner, shadowed_by,
@@ -754,7 +786,7 @@ def run_test_draft(
 
     for entry in simulated:
         try:
-            result = _match_entry(text, entry, matcher)
+            result = _match_entry(text, entry, matcher, hint_engine)
         except RegexTimeout:
             if entry is draft_entry:
                 return _draft_timeout_response(response)
@@ -773,7 +805,8 @@ def run_test_draft(
             response["shadowed_by"] = _entry_identity(entry)
             try:
                 response["draft_matches"] = (
-                    _match_entry(text, draft_entry, matcher) is not None
+                    _match_entry(text, draft_entry, matcher, hint_engine)
+                    is not None
                 )
             except RegexTimeout:
                 return _draft_timeout_response(response)

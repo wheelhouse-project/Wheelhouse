@@ -440,6 +440,35 @@ def hwnd_is_invisible_or_toolwindow(hwnd: Optional[int]) -> bool:
         return False
 
 
+def hwnd_no_longer_exists(hwnd: Optional[int]) -> bool:
+    """True only when ``hwnd`` is proven to name no window any more.
+
+    wh-paste-target-window-vanished: the one question the paste path
+    could not ask. ``normalize_hwnd_for_foreground_compare`` answers
+    None for a destroyed handle, but it answers None for three other
+    reasons as well -- a falsy handle, GetAncestor returning 0, and any
+    other exception -- so None cannot decide whether the window is gone
+    or the comparison merely failed. ``IsWindow`` answers that one
+    question directly.
+
+    Fail closed, in the direction that keeps today's behaviour: a falsy
+    handle or any probe failure answers False, meaning "not proven
+    gone". The caller then refuses its recovery and the word fails as
+    it did before. Windows also recycles handle numbers, so ``IsWindow``
+    can answer True for a different window that took the number; that
+    too reads as "not proven gone" and refuses.
+    """
+    if not hwnd:
+        return False
+    try:
+        return not win32gui.IsWindow(hwnd)
+    except Exception as e:
+        logger.debug(
+            "hwnd_no_longer_exists(%s) probe failed: %s", hwnd, e,
+        )
+        return False
+
+
 def hwnds_match_for_foreground_compare(
     expected_hwnd: Optional[int],
     observed_hwnd: Optional[int],

@@ -50,7 +50,9 @@ single_utterance = false
 # ------------------------------
 [adaptation]
 
-# hints: list of phrases to boost. Keep focused; avoid long sentences.
+# hints: list of phrases to boost. Google always applies hints, so the
+# spoken command "boost" works with this engine. Keep focused; avoid
+# long sentences.
 # Note that this does not work for capitalization, only for recognition.
 # This is a starter list - add the names and jargon YOU dictate often,
 # and remove anything you never say.
@@ -89,6 +91,7 @@ hints = [
 ]
 
 # hints_boost: numeric strength (e.g., 5.0 - 20.0). Higher = stronger bias.
+# Applies to Google only; the other engines ignore this setting.
 # Use with care; very high boosts can hurt general accuracy.
 hints_boost = 10.0
 

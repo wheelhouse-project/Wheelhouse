@@ -164,6 +164,10 @@ class TextParser:
         self.pattern_catalog = pattern_catalog
         self.action_functions = ActionFunctions(speech_handler)
         self.matcher = PatternMatcher(pattern_catalog)
+        # Whether the running speech engine applies a saved hint: True,
+        # False, or None for unknown. Set by SpeechProcessor.apply_hint_engine
+        # (wh-boost-engine-qualification); read by parse_and_execute.
+        self.hint_engine: Optional[bool] = None
 
         # Get patterns from catalog (no file loading needed)
         self.patterns = self.pattern_catalog.get_all_patterns()
@@ -670,6 +674,11 @@ class TextParser:
                 hotword-required command sitting in a replacement remainder
                 cannot fire (wh-qj70s).
 
+        A pattern whose actions save a hint is refused while
+        ``self.hint_engine`` is False; SpeechProcessor.apply_hint_engine
+        sets it to the value the router uses, so both layers refuse the
+        same pattern (wh-boost-engine-qualification).
+
         Returns:
             If return_remainder=False: bool indicating if pattern matched
             If return_remainder=True: (bool, str) tuple with (matched, remainder)
@@ -686,6 +695,7 @@ class TextParser:
             # Use PatternMatcher for fullmatch vs search decision
             result = self.matcher.match_single_pattern(
                 text, pattern_data, authorized_command=authorized_command,
+                hint_engine=self.hint_engine,
             )
 
             if result and result.matched:

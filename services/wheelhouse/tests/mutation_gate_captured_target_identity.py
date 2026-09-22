@@ -60,9 +60,18 @@ add("drop-unicode-foreground-guard", "ui/target_identity.py",
     "            if require_foreground and normalize_hwnd_for_foreground_compare(",
     "            if False and normalize_hwnd_for_foreground_compare(",
     "test_unicode_rechecks_focus_after_modifier_snapshot_before_send")
+# Re-anchored under wh-lost-word-neighbour-paths. That branch added
+# delivered_nothing=True to this refusal and reflowed the return across
+# four lines, so the old pattern -- which carried the return statement --
+# stopped matching and the gate reported an error instead of applying the
+# mutation. The condition line ALONE is unique in specific.py (verified:
+# one match, at any indent), and it carries no comment text, so rewording
+# the reason comment underneath it cannot make this pattern stale again.
+# The mutation is unchanged in intent: disable the last identity recheck
+# before the send, and the body below it still parses under "if False:".
 add("drop-last-unicode-check", "ui/strategies/specific.py",
-    "        if identity is not None and not identity.is_current():\n            return InsertionResult(success=False, clipboard_dirty=False)",
-    "        if False:\n            return InsertionResult(success=False, clipboard_dirty=False)",
+    "        if identity is not None and not identity.is_current():\n",
+    "        if False:\n",
     "test_unicode_rechecks_focus_after_modifier_snapshot_before_send")
 add("drop-last-paste-check", "ui/clipboard_operations.py",
     '        if not self._captured_identity_is_current(target_identity):\n            logger.error("verified_paste: captured target changed during preparation; refusing to send")\n            return False',

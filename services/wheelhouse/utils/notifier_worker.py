@@ -13,6 +13,7 @@ delay file/stream draining, and a slow file write cannot delay toasts.
 
 from __future__ import annotations
 
+import logging
 import queue
 import sys
 import threading
@@ -20,6 +21,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_NOTIFIER_QUEUE_MAXSIZE = 64
 # Poll interval for the worker's queue.get. Bounds shutdown latency on an
@@ -171,4 +174,23 @@ class NotifierWorker:
         except Exception as exc:
             _safe_stderr_write(
                 f"[wheelhouse-notifier] plyer notify failed: {exc!r}\n"
+            )
+            # The stderr write above is first because it is the one of the
+            # two that still works when the logging system has already been
+            # torn down. The log record is what a packaged run can read
+            # afterwards: a packaged run has no console, so stderr goes
+            # nowhere, and wh-parakeet-crash-windows10 is the case that
+            # needed it -- a notice was built, queued and refused, and the
+            # log could not say whether the backend raised or the computer
+            # simply showed nothing.
+            #
+            # WARNING, and the level is load bearing. ErrorNotificationHandler
+            # takes level=logging.ERROR by default (utils/error_notifier.py)
+            # and setup_logging constructs it without overriding that level
+            # (utils/logging_setup.py), so an ERROR record here would build
+            # another payload, submit it to THIS worker, and fail the same
+            # way. A WARNING reaches the log file and never reaches that
+            # handler.
+            logger.warning(
+                "Could not deliver a notice: %s", payload.message, exc_info=True
             )

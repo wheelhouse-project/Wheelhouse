@@ -20,8 +20,8 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | Say this | What happens | Notes |
 |---|---|---|
 | backspace [number] | Deletes one character to the left, or that many with a number | e.g. "backspace 5" or "backspace twenty three" -- say the count as digits or as words; the number is optional, counts capped at 50. |
-| delete [number] | Deletes one character (or that many) to the right. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | e.g. "delete 5" or "delete twenty three" -- say the count as digits or as words; counts capped at 50 |
-| delete word | Deletes the entire word under the cursor |  |
+| delete [number] | Deletes one character (or that many) to the right. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | e.g. "delete 5" or "delete twenty three" -- say the count as digits or as words; counts capped at 50. Say "erase" in place of "delete" here too, as in "erase 5". |
+| delete (or erase) word | Deletes the entire word under the cursor |  |
 | undo [number] | Undoes the last action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ctrl+Z; e.g. "undo 3". Common mishearings "undue" and "undu" also fire |
 | redo [number] | Redoes the last undone action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ctrl+Y; the common mishearing "redu" also fires |
 | new line | Inserts a line break without submitting the field | Works inline during dictation |
@@ -38,7 +38,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | paste | Pastes the clipboard contents. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
 | x-ray replace all | Selects everything and pastes over it | Destructive -- requires the hotword |
 | select all | Selects everything in the current field |  |
-| delete all | Selects everything in the current field and deletes it | Say it as the whole sentence. "delete all the files" on its own is typed as ordinary text, not treated as this command. |
+| delete (or erase) all | Selects everything in the current field and deletes it | Say it as the whole sentence. "delete all the files" on its own is typed as ordinary text, not treated as this command. |
 | select word | Selects the word under the cursor | "select this word" also works. "select word by word until it looks right" on its own is typed as ordinary text, not treated as this command. |
 | select line | Selects the line under the cursor | "select this line" also works. "select line six and copy it" on its own is typed as ordinary text, not treated as this command. |
 | select paragraph | Selects the paragraph under the cursor | "select this paragraph" also works. "select paragraph three of the contract" on its own is typed as ordinary text, not treated as this command. |
@@ -47,17 +47,17 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | x-ray find [text] | Opens the app's find bar and types the search term | e.g. "x-ray find invoice" |
 | replace | Opens find-and-replace (Ctrl+H). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
 | search | Copies the current selection and runs a web search for it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Select the text first |
-| delete next [number] characters | Selects that many characters to the right of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete next [number] words | Selects that many words to the right of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete next [number] lines | Moves to the start of the line, selects down that many lines, and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete next [number] paragraphs | Selects that many paragraphs below the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete previous / last [number] characters | Selects that many characters to the left of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete previous / last [number] words | Selects that many words to the left of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete previous / last [number] lines | Moves to the start of the line, selects up that many lines, and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete previous / last [number] paragraphs | Selects that many paragraphs above the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete this word | Moves to the start of the word under the cursor, selects the whole word, and deletes it. Fires only when it is the whole utterance. | "delete word" runs the same three keystrokes |
-| delete line | Selects the whole line the cursor is on and deletes its text. Fires only when it is the whole utterance. | "delete this line" does the same; the line break stays, so the line is left empty |
-| delete paragraph | Moves to the start of the paragraph the cursor is in, selects the whole paragraph, and deletes it. Fires only when it is the whole utterance. | "delete this paragraph" does the same |
+| delete (or erase) next [number] characters | Selects that many characters to the right of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) next [number] words | Selects that many words to the right of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) next [number] lines | Moves to the start of the line, selects down that many lines, and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) next [number] paragraphs | Selects that many paragraphs below the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) previous / last [number] characters | Selects that many characters to the left of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) previous / last [number] words | Selects that many words to the left of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) previous / last [number] lines | Moves to the start of the line, selects up that many lines, and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) previous / last [number] paragraphs | Selects that many paragraphs above the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
+| delete (or erase) this word | Moves to the start of the word under the cursor, selects the whole word, and deletes it. Fires only when it is the whole utterance. | "delete word" runs the same three keystrokes |
+| delete (or erase) line | Selects the whole line the cursor is on and deletes its text. Fires only when it is the whole utterance. | "delete this line" does the same; the line break stays, so the line is left empty |
+| delete (or erase) paragraph | Moves to the start of the paragraph the cursor is in, selects the whole paragraph, and deletes it. Fires only when it is the whole utterance. | "delete this paragraph" does the same |
 | cut next [number] characters | Selects that many characters to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
 | cut next [number] words | Selects that many words to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
 | cut next [number] lines | Moves to the start of the line, selects down that many lines, and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
@@ -82,7 +82,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | select previous / last [number] words | Selects that many words to the left of the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
 | select previous / last [number] lines | Selects up that many lines from the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
 | select previous / last [number] paragraphs | Selects that many paragraphs above the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| unselect that / clear selection | Drops the selection with a Right Arrow key press, leaving the cursor at the right-hand end of what was selected. Fires only when it is the whole utterance. | Nothing is deleted; with nothing selected the cursor simply moves one character right |
+| unselect that / clear selection | Drops the selection with a Right Arrow key press, leaving the cursor at the right-hand end of what was selected. Fires only when it is the whole utterance. | Nothing is deleted; with nothing selected the cursor moves one character right |
 | tab | Presses the Tab key once. Fires only when it is the whole utterance. | "tab [number]" presses it that many times |
 
 ### Text Formatting
@@ -180,8 +180,8 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | go to the end of the word | Moves the cursor forward one word (Ctrl and Right Arrow). Fires only when it is the whole utterance. | Each app decides where a word boundary falls, so the cursor may land at the start of the next word |
 | go to the beginning of the paragraph | Moves the cursor back one paragraph (Ctrl and Up Arrow). Fires only when it is the whole utterance. | "go to the start of the paragraph" also works |
 | go to the end of the paragraph | Moves the cursor forward one paragraph (Ctrl and Down Arrow). Fires only when it is the whole utterance. | Each app decides where a paragraph boundary falls, so the cursor may land at the start of the next paragraph |
-| move to the beginning of the selection | Presses Left Arrow, which drops the selection and leaves the cursor at its left-hand end. Fires only when it is the whole utterance. | With nothing selected the cursor simply moves one character left |
-| move to the end of the selection | Presses Right Arrow, which drops the selection and leaves the cursor at its right-hand end. Fires only when it is the whole utterance. | With nothing selected the cursor simply moves one character right |
+| move to the beginning of the selection | Presses Left Arrow, which drops the selection and leaves the cursor at its left-hand end. Fires only when it is the whole utterance. | With nothing selected the cursor moves one character left |
+| move to the end of the selection | Presses Right Arrow, which drops the selection and leaves the cursor at its right-hand end. Fires only when it is the whole utterance. | With nothing selected the cursor moves one character right |
 | scroll down [number] | Turns the mouse wheel down, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | The number is how many wheel notches to send, up to 50; e.g. "scroll down 3". The count can be digits or spoken words, so "scroll down eleven" works whether your speech provider writes numbers as digits or as words. The command turns the wheel without moving the pointer, so it scrolls whatever a real wheel turn would scroll from where the pointer already sits |
 | scroll up [number] | Turns the mouse wheel up, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | The number is how many wheel notches to send, up to 50; e.g. "scroll up 3". The count can be digits or spoken words, so "scroll up eleven" works whether your speech provider writes numbers as digits or as words. |
 | scroll left [number] | Turns the sideways mouse wheel left, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | Needs an application that reads the sideways wheel; many do not. The number is how many wheel notches to send, up to 50. The count can be digits or spoken words, so "scroll left eleven" works whether your speech provider writes numbers as digits or as words. |
@@ -315,7 +315,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 |---|---|---|
 | push to talk mode | Switches to press-and-hold listening: Wheelhouse listens only while you hold the floating button | A notification confirms the switch |
 | click to talk mode | Switches back to toggle listening (click to start, click to stop) -- the default |  |
-| help | Opens the Wheelhouse Assistant (the official online help) in your browser. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured, but only when the AI service is enabled; the Help menu item shows its notice whether or not the AI service is enabled |
+| help | Opens the Wheelhouse Assistant (the official online help) in your browser, after a short explanation window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured and no window appears. The explanation window is the same one the Help menu item shows, and both take the same route through the Logic process; ticking "Do not show this again" and selecting Assistant sets explain_before_open to false under [ai.help], which turns the window off for the command and the menu item alike. If Windows cannot start a browser, the notice "Wheelhouse could not open your browser." appears |
 | patterns | Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "pattern manager" also works; see "Special Commands" |
 | learn my voice | Opens the voice-teaching window, where Wheelhouse learns how you sound so it stops missing short words | "calibrate my voice" also works; only the Distil-Whisper speech engine uses it; See "Teaching Wheelhouse your voice" in the Speech Engines section |
 | x-ray fix | Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version | Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure |
@@ -325,7 +325,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | pirate | Rewrites the selected text the way a pirate would say it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Special Commands" for writing your own. |
 | x-ray translate to [language] | Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese". Keeps every fact and leaves names and numbers as they are. | Same AI server and same safeguards as "x-ray fix"; say the language in English and in lower case, as one or more plain words with no punctuation. How good the translation is depends on the model you have configured. |
 | x-ray cancel fix | Cancels an in-progress fix or rewrite |  |
-| boost | Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | See "Special Commands" -- on the default engine this saves the hint but does not apply it until you opt in |
+| boost | Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | See "Special Commands" -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation |
 
 ## Configuration Reference
 
@@ -535,7 +535,9 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [ai.help]
 
-**gem_url** *(default: `"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"`)* -- The web address the wheelhouse-help-online voice command opens in your browser; if you blank it out, the command shows a notice that online help is not configured, but only when the AI service is enabled.
+**gem_url** *(default: `"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"`)* -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured.
+
+**explain_before_open** *(default: `true`)* -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back.
 
 **max_response_tokens** *(default: `800`)* -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.
 
@@ -581,4 +583,4 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ---
 
-Generated: 2026-09-18 for the v1.0.8 release
+Generated: 2026-09-21 for the v1.1.0 release

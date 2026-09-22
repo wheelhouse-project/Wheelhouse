@@ -78,6 +78,7 @@ from shared.rejection_category import (
 from ui.uia_text_reader import read_context_via_text_pattern
 from ui.hwnd_utils import (
     _FALLBACK_SAME_PROCESS_BROWSER_NAMES,
+    hwnd_no_longer_exists,
     hwnds_match_for_foreground_compare,
     normalize_hwnd_for_foreground_compare,
     process_identity_for_hwnd,
@@ -221,14 +222,52 @@ class ShadowBufferStrategy(InsertionStrategy):
                 # inserted string alone.
                 if self.buffer_manager.is_valid:
                     self.buffer_manager.update_after_insertion(insertion_string)
-            return InsertionResult(success=success, clipboard_dirty=True)
+            # wh-lost-word-neighbour-paths: verified_paste is the only
+            # thing in this branch that can put input in the queue, and
+            # ClipboardOperations sets ``last_paste_was_sent`` True in
+            # the instant before it dispatches Ctrl+V
+            # (ui/clipboard_operations.py:941). A False return with that
+            # flag still False therefore proves the attempt typed
+            # nothing: verified_paste refused at one of its own pre-send
+            # checks, the earliest of which runs before its clipboard
+            # write.
+            return InsertionResult(
+                success=success,
+                clipboard_dirty=True,
+                delivered_nothing=(
+                    not success and not self.clipboard.last_paste_was_sent
+                ),
+            )
 
         # DICTATION mode (default): existing behavior.
         # Validate/synchronize buffer
         if not self.buffer_manager.is_valid:
             if not self.buffer_manager.synchronize():
                 logger.warning("Buffer synchronization failed, falling back")
-                return InsertionResult(success=False, clipboard_dirty=False)
+                # wh-lost-word-neighbour-paths: the one branch of this
+                # strategy that ends before verified_paste is called.
+                # ShadowBufferManager.synchronize reads the target
+                # through UIA and synthesizes no input, and no clipboard
+                # write has happened yet, so this return can state both
+                # facts from the code above it alone.
+                #
+                # It is NOT the only branch that delivered nothing. An
+                # earlier version of this comment claimed it was, and
+                # that claim is what lost the word on the common path:
+                # verified_paste has pre-send refusals of its own -- the
+                # captured-identity check at
+                # ui/clipboard_operations.py:689-691 is the one a window
+                # that closed mid-utterance hits -- and they return
+                # before the Ctrl+V and before _safe_copy. The returns
+                # below therefore read ``last_paste_was_sent``, which
+                # ClipboardOperations sets True only in the instant
+                # before it dispatches the keystroke (line 941), and
+                # that flag is their proof.
+                return InsertionResult(
+                    success=False,
+                    clipboard_dirty=False,
+                    delivered_nothing=True,
+                )
 
         # Get context and perfect the string
         buffer_context = self.buffer_manager.get_context()
@@ -257,9 +296,29 @@ class ShadowBufferStrategy(InsertionStrategy):
         if success:
             self.buffer_manager.update_after_insertion(final_string)
 
-        # verified_paste always writes the clipboard before sending Ctrl+V,
-        # so clipboard_dirty=True regardless of success.
-        return InsertionResult(success=success, clipboard_dirty=True)
+        # clipboard_dirty=True regardless of success. verified_paste
+        # writes the clipboard before it sends Ctrl+V on every path that
+        # reaches its copy step, but its captured-identity refusal
+        # (ui/clipboard_operations.py:689-691) returns before that write,
+        # so this mark can over-report. It stays True because its only
+        # consumer is the utterance-end clipboard restore, where an
+        # unnecessary restore is a no-op and a missed one clobbers the
+        # user's clipboard.
+        #
+        # wh-lost-word-neighbour-paths: delivered_nothing rests on the
+        # same proof the verbatim return above uses. Nothing between
+        # this method's entry and verified_paste synthesizes input --
+        # synchronize() reads through UIA, the perfecter is pure, and
+        # the HWND lookup is a read -- so a False return with
+        # last_paste_was_sent still False means no Ctrl+V was queued and
+        # the word is still unsaid.
+        return InsertionResult(
+            success=success,
+            clipboard_dirty=True,
+            delivered_nothing=(
+                not success and not self.clipboard.last_paste_was_sent
+            ),
+        )
 
 
 class ClipboardFallbackStrategy(InsertionStrategy):
@@ -467,7 +526,31 @@ class ClipboardFallbackStrategy(InsertionStrategy):
         # its own foreground check (the wh-ix1z.17 fail-open shape).
         preflight, validated_hwnd = self._slow_path_preflight(context)
         if preflight is not None:
-            return preflight
+            # wh-lost-word-neighbour-paths: the preflight is the only
+            # refusal this strategy makes before its own keystrokes.
+            # clear_selection (Ctrl+C, Delete), gather_context (arrow
+            # keys) and verified_paste (Ctrl+V) all run after it, and
+            # the two _abort_before_paste returns below deliberately
+            # leave delivered_nothing False because they follow the
+            # Delete.
+            # wh-lost-word-neighbour-paths: ask the same question
+            # ClipboardOnlyStrategy asks, for the same reason. This is
+            # the branch both default dictation paths end on when the
+            # captured window closed mid-utterance, and it is the one
+            # whose answer reaches the handler: StandardStrategy returns
+            # its fallback attempt's result, and UnicodeFirstStrategy
+            # returns StandardStrategy's, so the field set here is the
+            # field the retry decision reads. The probe fails closed --
+            # a handle it cannot ask about is not proven dead -- so a
+            # live window that merely lost focus still refuses the
+            # retry and the word fails as it did before.
+            return replace(
+                preflight,
+                delivered_nothing=True,
+                target_window_gone=hwnd_no_longer_exists(
+                    _context_hwnd(context)
+                ),
+            )
 
         if opts.mode is InsertionMode.VERBATIM:
             # wh-ksde.1: clear any leftover ``last_cleared_selection`` from a
@@ -505,7 +588,22 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                 # back. Calling restore_cleared_selection here could raw
                 # paste an unrelated stale selection from a prior call
                 # into the current target.
-                return InsertionResult(success=success, clipboard_dirty=True)
+                #
+                # wh-lost-word-neighbour-paths: that missing restore is
+                # also what makes last_paste_was_sent a complete proof
+                # here. The preflight above reads through UIA and sends
+                # nothing, this branch runs no clear_selection and no
+                # gather_context, and it restores no selection, so
+                # verified_paste's Ctrl+V is the only input it can
+                # produce.
+                return InsertionResult(
+                    success=success,
+                    clipboard_dirty=True,
+                    delivered_nothing=(
+                        not success
+                        and not self.clipboard.last_paste_was_sent
+                    ),
+                )
             except Exception as e:
                 logger.error("Clipboard fallback strategy (verbatim) failed: %s", e)
                 return InsertionResult(success=False, clipboard_dirty=True)
@@ -601,6 +699,7 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                 **_identity_options(context),
             )
 
+            restored_a_selection = False
             if success:
                 self._update_shadow_buffer_from_context(preceding, final_string)
                 # wh-t81d9.5: clear any captured selection on success so
@@ -615,14 +714,42 @@ class ClipboardFallbackStrategy(InsertionStrategy):
                 # inserted text. Ctrl+Z is the user's recovery for that
                 # case.
                 if not self.clipboard.last_paste_was_sent and _target_is_current(context):
-                    self.clipboard.restore_cleared_selection(
+                    restored_a_selection = self.clipboard.restore_cleared_selection(
                         self.window_manager,
                         target_control=context.focused_control,
                         target_hwnd=target_hwnd,
                         flutter_control=context.focused_control if context.is_flutter else None,
                     )
 
-            return InsertionResult(success=success, clipboard_dirty=True)
+            # wh-lost-word-neighbour-paths: three things must hold
+            # before this return may claim the attempt was empty, and
+            # last_paste_was_sent is only one of them.
+            #
+            # 1. ``uia_context is not None`` says the TextPattern
+            #    sub-branch ran. The other sub-branch sent
+            #    clear_selection's Ctrl+C and Delete and
+            #    gather_context's arrow keys before it ever reached the
+            #    paste, and a retry there would repeat the Delete
+            #    against a newly captured target.
+            # 2. No selection restore ran. restore_cleared_selection
+            #    raw-pastes the saved text -- a real Ctrl+V -- and then
+            #    pins last_paste_was_sent back to its prior value in a
+            #    finally block (ui/clipboard_operations.py:1353-1361),
+            #    so that flag cannot report it. It fires on this
+            #    sub-branch when an earlier call left text in
+            #    last_cleared_selection.
+            # 3. last_paste_was_sent is still False, which proves
+            #    verified_paste refused before it dispatched Ctrl+V.
+            return InsertionResult(
+                success=success,
+                clipboard_dirty=True,
+                delivered_nothing=(
+                    not success
+                    and uia_context is not None
+                    and not restored_a_selection
+                    and not self.clipboard.last_paste_was_sent
+                ),
+            )
 
         except Exception as e:
             # wh-t81d9.5: do NOT auto-restore in this branch. If the
@@ -739,10 +866,23 @@ class StandardStrategy(InsertionStrategy):
         # The fallback's clipboard path is the legitimate recovery.
         logger.warning("Shadow buffer failed, using clipboard fallback")
         fallback_result = self.clipboard_strategy.insert(insertion_string, context, request_id, options)
+        # wh-lost-word-neighbour-paths: delivered_nothing describes THIS
+        # call, which ran two inner attempts, so it holds only when both
+        # of them proved it. Passing the fallback's answer through would
+        # report "nothing was delivered" for a call whose shadow attempt
+        # may already have written the clipboard or fired Ctrl+V, and
+        # the handler would retry a word that is already in the target.
+        delivered_nothing = (
+            shadow_result.delivered_nothing and fallback_result.delivered_nothing
+        )
         if shadow_result.clipboard_dirty and not fallback_result.clipboard_dirty:
             # A later refusal must retain the earlier clipboard write.
-            return replace(fallback_result, clipboard_dirty=True)
-        return fallback_result
+            return replace(
+                fallback_result,
+                clipboard_dirty=True,
+                delivered_nothing=delivered_nothing,
+            )
+        return replace(fallback_result, delivered_nothing=delivered_nothing)
 
 
 class FlutterStrategy(StandardStrategy):
@@ -821,7 +961,19 @@ class UnicodeFirstStrategy(InsertionStrategy):
         # first SendInput batch). Hand off to StandardStrategy, whose
         # ClipboardFallbackStrategy can gather context via the clipboard
         # in apps that do not expose UIA TextPattern.
-        return self.standard.insert(insertion_string, context, request_id, options)
+        standard_result = self.standard.insert(insertion_string, context, request_id, options)
+        # wh-lost-word-neighbour-paths: two inner attempts ran, so this
+        # call may claim it delivered nothing only when both of them
+        # proved it. The gate above reads a flag StandardStrategy resets
+        # at its own entry, so it cannot stand in for the Unicode
+        # attempt's own answer; the "and" is what makes the claim true
+        # of the whole call.
+        return replace(
+            standard_result,
+            delivered_nothing=(
+                result.delivered_nothing and standard_result.delivered_nothing
+            ),
+        )
 
 
 class VerifiedUnicodeStrategy(InsertionStrategy):
@@ -1091,23 +1243,36 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
         self.clipboard.last_paste_was_optimistic = False
         self.clipboard.last_paste_was_sent = False
 
+        # wh-lost-word-neighbour-paths: every refusal from here down to
+        # the identity recheck immediately before the send reports
+        # delivered_nothing=True. This strategy writes no clipboard
+        # anywhere, and the first input it can put in the queue is the
+        # SendInput burst below, which runs after
+        # ``last_paste_was_sent = True``. The refusals after that burst
+        # leave the field False, because characters may have landed.
         if not context.focused_control:
             logger.warning(
                 "VerifiedUnicodeStrategy: no focused_control in context; "
                 "cannot determine target HWND, refusing to send."
             )
-            return InsertionResult(success=False, clipboard_dirty=False)
+            return InsertionResult(
+                success=False, clipboard_dirty=False, delivered_nothing=True,
+            )
 
         target_control = context.focused_control
         target_hwnd = _context_hwnd(context)
         if not _target_is_current(context):
-            return InsertionResult(False, False, "captured_target_lost")
+            return InsertionResult(
+                False, False, "captured_target_lost", delivered_nothing=True,
+            )
         if target_hwnd is None:
             logger.warning(
                 "VerifiedUnicodeStrategy: could not resolve target HWND "
                 "from focused_control; refusing to send."
             )
-            return InsertionResult(success=False, clipboard_dirty=False)
+            return InsertionResult(
+                success=False, clipboard_dirty=False, delivered_nothing=True,
+            )
 
         # wh-iti5: VERBATIM mode skips the shadow-buffer sync gate and the
         # TextPerfector pass entirely. The caller already composed the
@@ -1124,7 +1289,11 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
                     logger.warning(
                         "VerifiedUnicodeStrategy: buffer synchronization failed"
                     )
-                    return InsertionResult(success=False, clipboard_dirty=False)
+                    return InsertionResult(
+                        success=False,
+                        clipboard_dirty=False,
+                        delivered_nothing=True,
+                    )
 
             buffer_context = self.buffer_manager.get_context()
             final_string = self.text_perfector.perfected_string(
@@ -1148,7 +1317,12 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
         if not self._prove_target_is_foreground(
             target_control, target_hwnd, **_identity_options(context),
         ):
-            return InsertionResult(success=False, clipboard_dirty=False)
+            # The proof activates a window and calls SetFocus; neither
+            # puts input in the queue nor writes into the target, so a
+            # refusal here still proves the attempt was empty.
+            return InsertionResult(
+                success=False, clipboard_dirty=False, delivered_nothing=True,
+            )
 
         # Capture the ordinal, modifier-key state, and final-string boundaries
         # at DEBUG immediately before SendInput. These values help diagnose
@@ -1172,7 +1346,11 @@ class VerifiedUnicodeStrategy(InsertionStrategy):
         # without another wait or focus change before SendInput.
         identity = getattr(context, "target_identity", None)
         if identity is not None and not identity.is_current():
-            return InsertionResult(success=False, clipboard_dirty=False)
+            # The last refusal before the send, so the last one that can
+            # prove the attempt was empty.
+            return InsertionResult(
+                success=False, clipboard_dirty=False, delivered_nothing=True,
+            )
 
         # Mark the keystroke as fired before SendInput is issued so the
         # provenance flag reflects "something may have landed" even if
@@ -1336,9 +1514,25 @@ class SimplePasteStrategy(InsertionStrategy):
             target_class_name=context.class_name,
             **_identity_options(context),
         )
-        # verified_paste writes the clipboard before sending Ctrl+V, so
-        # clipboard_dirty=True regardless of success.
-        return InsertionResult(success=success, clipboard_dirty=True)
+        # clipboard_dirty=True regardless of success. verified_paste
+        # writes the clipboard before it sends Ctrl+V on every path that
+        # reaches its copy step; its captured-identity refusal returns
+        # before that write, and the mark stays True for the same reason
+        # it does elsewhere -- an unnecessary restore is a no-op.
+        #
+        # wh-lost-word-neighbour-paths: this strategy is not on the
+        # handler's retry allow-list, so the field changes no retry
+        # decision here. It is still the honest answer, and the
+        # retraction gate reads it: an attempt that put nothing in front
+        # of the user must not set _used_simple_paste and close the gate
+        # on the rest of the utterance.
+        return InsertionResult(
+            success=success,
+            clipboard_dirty=True,
+            delivered_nothing=(
+                not success and not self.clipboard.last_paste_was_sent
+            ),
+        )
 
 
 class ClipboardOnlyStrategy(InsertionStrategy):
@@ -1589,6 +1783,8 @@ class ClipboardOnlyStrategy(InsertionStrategy):
         #   verified_paste False, keystroke_fired False -> failure
         #     (pre-send: _safe_copy or verification refused before any
         #     keystroke; the caller's Future MUST surface this)
+        target_window_gone = False
+        delivered_nothing = False
         if paste_returned_true:
             success = True
             retry_outcome = "verified" if not was_optimistic else "unverified"
@@ -1598,11 +1794,27 @@ class ClipboardOnlyStrategy(InsertionStrategy):
         else:
             success = False
             retry_outcome = "unverified"
+            # wh-lost-word-neighbour-paths: the same branch, and the
+            # only one, where verified_paste refused before its Ctrl+V.
+            # The clipboard was written, which is not input and not a
+            # write into the target, so this attempt put nothing in
+            # front of the user.
+            delivered_nothing = True
+            # wh-paste-target-window-vanished: this is the one branch
+            # that sent no keystroke, so it is the one branch where a
+            # second attempt at the word cannot deliver it twice. Ask
+            # whether the window this paste was aimed at still exists.
+            # The handler retries only on a True answer, and only for
+            # this strategy; the probe is what separates "the target
+            # closed" from "the target is there and refused us".
+            target_window_gone = hwnd_no_longer_exists(target_hwnd)
 
         return InsertionResult(
             success=success,
             clipboard_dirty=True,
             retry_outcome=retry_outcome,
+            target_window_gone=target_window_gone,
+            delivered_nothing=delivered_nothing,
         )
 
 

@@ -116,13 +116,27 @@ async def test_cancel_is_silent_and_visible(wired):
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_help_is_silent_and_visible(wired):
+async def test_unconfigured_help_is_silent(wired):
+    """The spoken help command never speaks; the notice is written.
+
+    The wording and the notice itself moved to the Logic controller when
+    the spoken command and the Help menu entry were given one shared code
+    path (wh-assistant-button-explainer, criterion W4). The notice is
+    asserted there, in
+    tests/test_logic_open_help_online.py::test_a_blank_address_opens_nothing_and_says_so.
+    What stays here is the half this file is about: no speech, whatever
+    the outcome.
+    """
     actions, ai = wired
-    actions.speech_handler.logic_controller.config_service.get.return_value = ""
+    lc = actions.speech_handler.logic_controller
+    lc.config_service.get.return_value = ""
+    lc.start_help_online = AsyncMock()
+
     await actions.wheelhouse_help_online()
+
+    lc.start_help_online.assert_awaited_once()
     ai.speak.assert_not_called()
     ai.speak_brief.assert_not_called()
-    assert "Online help is not configured." in notifications(actions)
 
 
 @pytest.mark.asyncio

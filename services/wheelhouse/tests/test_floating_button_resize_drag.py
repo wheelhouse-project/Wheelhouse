@@ -374,10 +374,23 @@ class TestScreenIsRecordedWhenTheDragStarts:
     """
 
     class _FakeScreen:
+        """A stand-in for QScreen answering the one question the resize asks.
+
+        _current_screen_bounds reads ``geometry``, the whole screen, and not
+        ``availableGeometry``: the button is always-on-top and frameless, so
+        it stays visible over the taskbar and a user may park it there, and
+        the stored-position correction measures the same rectangle. Only
+        ``geometry`` is answered here so a return to the usable area cannot
+        pass through this stand-in unnoticed. Which of the two rectangles the
+        resize measures is pinned in
+        tests/test_floating_button_offscreen_recovery.py, on a screen whose
+        two answers differ; these tests are about WHICH screen it measures.
+        """
+
         def __init__(self, x, y, w, h):
             self._rect = QRect(x, y, w, h)
 
-        def availableGeometry(self):
+        def geometry(self):
             return self._rect
 
     def test_a_monitor_change_mid_drag_does_not_move_the_button_to_it(self, button):

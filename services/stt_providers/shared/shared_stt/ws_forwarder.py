@@ -145,6 +145,13 @@ class WSForwarder:
         # exists. False is the safe default -- a provider that never sets
         # it declares no wake word.
         self.wake_word_available = False
+        # Whether the running engine applies a saved hint
+        # (wh-boost-engine-qualification). Declared in the capabilities
+        # frame only when a provider sets it: None leaves the key out, so
+        # WheelHouse keeps the value unknown and the "boost" command works
+        # as it did before the field existed. Set by each provider main
+        # before start(), the same way as wake_word_available.
+        self.applies_hints: bool | None = None
         self._log = log_func or logger.info
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -312,18 +319,24 @@ class WSForwarder:
                     # (reviewer_0 finding wh-nvyh.1.2) -- the connection then
                     # follows the normal close/reconnect path.
                     capabilities_sent = True
+                    capabilities = {
+                        "type": "capabilities",
+                        "provider": self.provider_name,
+                        "emits_eos": self.emits_eos,
+                        "wake_word_available": self.wake_word_available,
+                    }
+                    if self.applies_hints is not None:
+                        capabilities["applies_hints"] = bool(
+                            self.applies_hints
+                        )
                     try:
-                        await ws.send(json.dumps({
-                            "type": "capabilities",
-                            "provider": self.provider_name,
-                            "emits_eos": self.emits_eos,
-                            "wake_word_available": self.wake_word_available,
-                        }))
+                        await ws.send(json.dumps(capabilities))
                         if self.debug:
                             self._log(
                                 f"[ws] sent capabilities: provider={self.provider_name} "
                                 f"emits_eos={self.emits_eos} "
-                                f"wake_word_available={self.wake_word_available}"
+                                f"wake_word_available={self.wake_word_available} "
+                                f"applies_hints={self.applies_hints}"
                             )
                     except Exception as cap_err:
                         capabilities_sent = False

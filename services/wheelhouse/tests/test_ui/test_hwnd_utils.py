@@ -19,6 +19,7 @@ from ui.hwnd_utils import (
     GWL_EXSTYLE,
     WS_EX_TOOLWINDOW,
     hwnd_is_invisible_or_toolwindow,
+    hwnd_no_longer_exists,
     normalize_hwnd_for_foreground_compare,
     same_process_fallback_matches,
     top_level_hwnd_from_control,
@@ -903,3 +904,48 @@ class TestHwndProvenanceTag:
             marker = hwnd_utils.tag_hwnd_provenance(0xB2)
             assert marker > 0
             assert props[0xB2] == marker
+
+
+class TestHwndNoLongerExists:
+    """wh-paste-target-window-vanished: the one question the paste path
+    could not ask.
+
+    normalize_hwnd_for_foreground_compare answers None for a destroyed
+    handle and for three other reasons, so None cannot decide whether
+    the window is gone. This helper answers that one question, and it
+    answers False -- not proven gone -- whenever it cannot.
+    """
+
+    @patch(f"{_MOD}.win32gui")
+    def test_a_destroyed_handle_is_proven_gone(self, mock_win32gui):
+        mock_win32gui.IsWindow.return_value = False
+        assert hwnd_no_longer_exists(0xABCD) is True
+        mock_win32gui.IsWindow.assert_called_once_with(0xABCD)
+
+    @patch(f"{_MOD}.win32gui")
+    def test_a_live_handle_is_not_gone(self, mock_win32gui):
+        mock_win32gui.IsWindow.return_value = True
+        assert hwnd_no_longer_exists(0xABCD) is False
+
+    def test_a_zero_handle_is_not_proven_gone(self):
+        """A caller with no handle has no evidence, so it gets none.
+
+        Answering True here would let a caller recover on the strength
+        of never having had a target at all.
+        """
+        assert hwnd_no_longer_exists(0) is False
+
+    def test_a_none_handle_is_not_proven_gone(self):
+        assert hwnd_no_longer_exists(None) is False
+
+    @patch(f"{_MOD}.win32gui")
+    def test_a_failed_probe_is_not_proven_gone(self, mock_win32gui):
+        mock_win32gui.IsWindow.side_effect = OSError("probe failed")
+        assert hwnd_no_longer_exists(0xABCD) is False
+
+    @patch(f"{_MOD}.win32gui")
+    def test_a_failed_probe_says_so_in_the_log(self, mock_win32gui, caplog):
+        mock_win32gui.IsWindow.side_effect = OSError("probe failed")
+        with caplog.at_level(logging.DEBUG, logger=_MOD):
+            hwnd_no_longer_exists(0xABCD)
+        assert "hwnd_no_longer_exists" in caplog.text

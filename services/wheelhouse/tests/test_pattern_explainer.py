@@ -640,7 +640,10 @@ def _va_range_fallbacks() -> set:
         for unit in units:
             out.add(rf"^{verb} next (\d+)?\s*{unit}$")
             out.add(rf"^{verb} (?:previous|last) (\d+)?\s*{unit}$")
-    for verb in ["delete", "cut", "copy"]:
+    # The shipped delete patterns also accept "erase"
+    # (wh-erase-synonym-for-delete), so the generated shape must carry the
+    # same alternation the pattern file carries.
+    for verb in [r"(?:delete|erase)", "cut", "copy"]:
         for direction in ["next", "previous", "last"]:
             for unit in units:
                 out.add(rf"^{verb} {direction}\s+(\d+)?\s*{unit}$")

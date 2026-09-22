@@ -237,7 +237,7 @@ There are two kinds of voice pattern. **Commands** perform an action -- press a 
 | backspace | Deletes one character to the left |
 | copy | Copies the current selection |
 | paste | Pastes whatever is on the clipboard |
-| delete word | Deletes the whole word the cursor is on |
+| delete word (or erase word) | Deletes the whole word the cursor is on |
 | submit | Presses Enter |
 | go home | Jumps the cursor to the start of the line |
 | go end | Jumps the cursor to the end of the line |
@@ -271,6 +271,8 @@ Utterances beginning with "okay Google", "ok Google", or "hey Google" are discar
 #### Text Editing
 
 Common mishearings of "undo" and "redo" ("undue", "undu", "redu") are accepted, so the command still fires on those spellings. Deletion counts for "backspace" and "delete" are capped at 50. "tab [number]" requires the number. A bare "tab" spoken on its own presses Tab once; "tab" inside a longer sentence is typed as the word.
+
+Say "erase" in place of "delete" in any delete command. "erase word", "erase all" and "erase 5" do the same as "delete word", "delete all" and "delete 5". The word "backspace" has no such alternative.
 
 Wherever a command takes **[number]**, say the count either way: as digits ("backspace 15") or as words ("backspace fifteen", "delete twenty three"). Words up to "nine hundred ninety nine" are read, and each command still applies its own limit afterwards.
 
@@ -353,7 +355,7 @@ Wheelhouse can click buttons, links, menu items, and other on-screen controls. A
 
 #### Wheelhouse Control
 
-These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for grammar correction and replaces the selection with the result; it requires that server to be configured and reachable, shows its progress on screen rather than out loud ("Correcting..."), then a notice with the outcome (for example "Done.", "No changes needed." or "Cancelled."), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under [Selected Commands in Detail](#selected-commands-in-detail), which also covers adding others. "boost" adds the selected text to the speech recognition hints, "patterns" opens the Pattern Manager, "help" opens the Wheelhouse Assistant in the default browser, and "x-ray cancel fix" stops a correction or rewrite still running. Every command in this paragraph written without the "x-ray" prefix needs no hotword, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.
+These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for grammar correction and replaces the selection with the result; it requires that server to be configured and reachable, shows its progress on screen rather than out loud ("Correcting..."), then a notice with the outcome (for example "Done.", "No changes needed." or "Cancelled."), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under [Selected Commands in Detail](#selected-commands-in-detail), which also covers adding others. "boost" adds the selected text to the speech recognition hints when the running engine applies hints (see "boost" below), "patterns" opens the Pattern Manager, "help" opens the Wheelhouse Assistant in the default browser after a short explanation window, and "x-ray cancel fix" stops a correction or rewrite still running. Every command in this paragraph written without the "x-ray" prefix needs no hotword, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.
 
 Three further commands act on text through the host application: "x-ray find [text]" opens its find box and searches for the words spoken, "replace" opens its find-and-replace box, and "search" copies the selection and searches the web for it in the default browser.
 
@@ -371,9 +373,11 @@ Say "literal" followed by the text to be typed, and those words are inserted wit
 
 **"boost"**
 
-When the recognizer repeatedly mishears a specific word -- typically a name, a product, or a technical term -- select it, with the mouse or with "select word", and say **"boost"**, by itself. The selection is saved as a recognition hint in a shared hints file that persists across restarts, so each word needs boosting once. Hints are capped at 100 characters; boost words or short phrases, not sentences.
+When the recognizer repeatedly mishears a specific word -- typically a name, a product, or a technical term -- select it, with the mouse or with "select word", and say **"boost"**, by itself. When the running engine applies hints, the selection is saved as a recognition hint in a shared hints file that persists across restarts, so each word needs boosting once. Hints are capped at 100 characters; boost words or short phrases, not sentences.
 
-**Saving a hint and applying it are separate.** **Parakeet, the default engine, saves the hint but does not apply it**: hint biasing is off by default because it slowed recognition by roughly 25 percent per utterance in the project's measurements. To apply saved hints, set enabled = true under [hotwords] in Parakeet's own config file and restart Wheelhouse, accepting the slower recognition. **Google Cloud Speech-to-Text** applies saved hints without further configuration. **Distil-Whisper** saves hints but does not apply them as shipped, because biasing degrades its recognition; its config file has the same [hotwords] switch, marked for experiments only.
+**Only an engine that applies hints accepts "boost".** **Google Cloud Speech-to-Text** applies saved hints without further configuration. **Parakeet, the default engine**, applies them only when hint biasing is on. Hint biasing is off by default because it slowed recognition by roughly 25 percent per utterance in the project's measurements. To switch it on, set enabled = true under [hotwords] in Parakeet's own config file. Then restart Wheelhouse, and accept the slower recognition. With biasing on, Parakeet accepts "boost" when its hints loaded, or when no hint is saved yet. If its hints failed to load, its ready notice says why. **Distil-Whisper** applies hints only when the [hotwords] switch in its config file is on. That switch is off as shipped, because biasing degrades its recognition, and it is marked for experiments only.
+
+**Under an engine that does not apply hints, "boost" is dictation.** Wheelhouse types the word "boost" in place of the selection. It copies nothing, saves no hint, and shows no notice. In most applications, "undo" removes the typed word and restores the selected text. The same rule covers any pattern with the action "Teach word to speech engine", including a pattern you made yourself. The Pattern Manager's "Try it" field gives the same answer: under such an engine it reports no command for "boost".
 
 **"patterns" (the Pattern Manager)**
 
@@ -403,13 +407,15 @@ Selecting a paragraph and saying "x-ray reading level" then rewrites it. Two con
 
 Opens the Wheelhouse Assistant, the project's online help, in the default browser, where questions can be asked in plain language. The address is the gem_url setting in [ai.help], which points at the assistant by default.
 
+A short explanation window comes first, the same one the **Help** menu item shows: it explains that the assistant runs inside ChatGPT and that an account is needed, and its **Assistant** button opens the browser. Ticking **Do not show this again** and selecting **Assistant** sets explain_before_open to false under [ai.help], after which "help" opens the browser directly. See [Getting Help](#getting-help).
+
 ## Speech Modes
 
 Wheelhouse has no command mode and no dictation mode to switch between. Each utterance is classified as it arrives, using the position of the words within the phrase.
 
 ### Classification of spoken input
 
-- **Command**: the utterance matches a voice command and the command is performed. "undo" presses the undo shortcut; "delete five" deletes five characters. Nothing is typed.
+- **Command**: the utterance matches a voice command and the command is performed. "undo" presses the undo shortcut; "delete five" deletes five characters. "erase five" does the same, because "erase" is a synonym for "delete". Nothing is typed.
 - **Dictation**: the utterance is typed into the focused text field. "dear Sarah thank you for the update" is typed as those words.
 - **Inline replacement**: certain words are replaced with symbols or corrected spellings within dictation. "hello comma world" produces "hello, world"; the word "comma" is replaced by the punctuation mark rather than typed.
 
@@ -497,7 +503,7 @@ Available actions:
 - **Hold Ctrl and roll the mouse wheel** over it to resize it. Both gestures use the same limits.
 - **Right-click** to open the menu described below.
 
-The resize area is a ring 8 pixels wide around the outer edge. The area inside that ring moves the button and starts push-to-talk. The pointer changes to a diagonal arrow over the ring. On a small button the ring narrows to a third of the radius, so that a movable centre always remains. The button is constrained to between 15 and 150 pixels across. If a resize would place the button off the edge of the screen, it is moved back into view.
+The resize area is a ring 8 pixels wide around the outer edge. The area inside that ring moves the button and starts push-to-talk. The pointer changes to a diagonal arrow over the ring. On a small button the ring narrows to a third of the radius, so that a movable centre always remains. The button is constrained to between 15 and 150 pixels across. If a resize would place the button off the edge of the screen, it is moved back into view. At start-up, after a drag, and after a monitor is added or disconnected or the display resolution changes, Wheelhouse checks that at least half of the button is on a screen. If less than half is, it moves the whole button onto the nearest screen and saves that position. A button parked over the taskbar, or partly past an edge with half of it still showing, stays where it is.
 
 To hide the button, right-click it and switch off "Show Floating Button". The same menu item on the tray icon restores it.
 
@@ -523,7 +529,7 @@ The floating button and the tray icon open the same menu. Most items are unavail
 - **AI Model** -- select the AI model, when AI features are configured. If the model named in the settings file is no longer offered by the server, the menu reports that rather than substituting another model.
 - **Pattern Manager** -- open the editor for personal voice patterns. See [Voice Commands](#voice-commands).
 - **Debug** -- switch detailed logging on or off. Leave it off except when diagnosing or reporting a problem.
-- **Help** -- open the Wheelhouse Assistant in the browser. This is the same page the spoken command "help" opens.
+- **Help** -- open the Wheelhouse Assistant in the browser. A short explanation window appears first, with an **Assistant** button that opens it and a **Cancel** button that does not; tick **Do not show this again** and then select **Assistant** to skip the window from then on. This is the same page, and the same window, that the spoken command "help" produces. See [Getting Help](#getting-help).
 - **About Wheelhouse** -- show the program name and the running version. Include the version in any problem report.
 - **Restart Wheelhouse** -- restart the whole program. This is the first step when speech recognition stops responding.
 - **Exit** -- close Wheelhouse. Required before running the installer to update, and before uninstalling.
@@ -689,11 +695,17 @@ If all five pass, the installation is working; any remaining problem is specific
 - *Likely cause:* The speech engine failed to start. Common reasons: its model was never downloaded, the Google Cloud engine has no credentials, or the computer is low on memory.
 - *Action:* Switch engines from the menu on the floating button or the tray icon; Parakeet, the built-in offline engine, needs no account. If the required engine was never set up, re-run the installer and select it at the engine question. For Google Cloud, set the key file's path in the settings file, or set the GOOGLE_APPLICATION_CREDENTIALS environment variable; the variable is consulted only when the settings file names no key. See [Speech Engines](#speech-engines). If the engine will not start right after an install or update, run "uv --version" in a new PowerShell window; uv not found means the installer's tooling is not on the PATH; re-running the installer corrects that.
 
+**Speech will not start and a notice names the Microsoft Visual C++ runtime**
+
+- *Symptom:* Wheelhouse starts, but speech never becomes ready, and a notice says speech needs a newer Microsoft Visual C++ runtime.
+- *Likely cause:* The speech engine's native files need the Microsoft Visual C++ runtime. That runtime is not part of Windows, so a computer that never installed it, or installed an old copy, cannot load them. The speech process then stops within a few seconds of starting, and no text ever appears.
+- *Action:* Run the Wheelhouse installer again and select Yes when Windows asks for permission. The installer then installs the runtime for you, and nothing else about your installation changes. If you already did that, restart the computer: Microsoft's installer sometimes needs a restart before Windows uses the new runtime. If you cannot use that route -- for example your account cannot approve the Windows permission prompt -- ask someone with an administrator account to install the Microsoft Visual C++ Redistributable (x64) from Microsoft's own page at https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist, under the heading "Visual C++ v14 Redistributable". Start Wheelhouse again afterward.
+
 **Commands not recognized**
 
 - *Symptom:* A command such as "maximize" has no effect, or is typed as text.
 - *Likely cause:* The speech engine returned a different word, for example "maximum" instead of "maximize", or the utterance overlapped with playing audio.
-- *Action:* Speak the command as a separate utterance, with a brief pause before it, at normal conversational volume; raised volume reduces accuracy. If one word is misheard repeatedly, select a correctly spelled copy and say "boost" -- see its entry in [Voice Commands](#voice-commands); on the default engine the hint is saved but applied only after hint biasing is enabled.
+- *Action:* Speak the command as a separate utterance, with a brief pause before it, at normal conversational volume; raised volume reduces accuracy. If one word is misheard repeatedly, select a correctly spelled copy and say "boost" -- see its entry in [Voice Commands](#voice-commands). Only Google applies hints as shipped; Parakeet and Distil-Whisper apply them only with hint biasing on. Otherwise "boost" is typed as a word.
 
 **Command words are typed as text instead of running**
 
@@ -712,6 +724,13 @@ If all five pass, the installation is working; any remaining problem is specific
 - *Symptom:* With the Distil-Whisper (graphics card) engine, short phrases -- or for some voices a substantial part of normal speech -- produce no text and no error.
 - *Likely cause:* That engine's confidence filter, calibrated on one voice with a studio microphone, classifies real speech as noise and discards it. This is more likely with a strong accent, quiet speech, or a laptop's built-in microphone.
 - *Action:* If the missed words are short ones spoken alone, such as "comma", run the voice-teaching session first: see [Teaching Wheelhouse your voice](#teaching-wheelhouse-your-voice). If longer speech is still ignored, lower hallucination_logprob_threshold in that engine's own config file from -0.6 to -0.7 or -0.8 (more negative is more permissive) and restart Wheelhouse. If no threshold works, switch engines from the menu on the floating button or the tray icon; the Google Cloud engine does not use this filter.
+
+**Words from a playing video are typed, or listening pauses whenever sound plays**
+
+- *Symptom:* Wheelhouse types the words of a video or other audio that is playing, or listening pauses every time the computer plays sound.
+- *Likely cause:* The microphone's "Audio enhancements" setting in Windows is Off. With that value, Windows offers no echo canceller for the microphone, so the microphone also hears what the speakers play.
+- *Action:* Open Settings > System > Sound > Input, select the microphone, and set "Audio enhancements" to "Device Default Effects" or "Voice Clarity". Either value gives the microphone the Windows echo canceller again. Then restart Wheelhouse: Wheelhouse asks Windows about the echo canceller only once, at start.
+- *Check:* After the restart, the log file wheelhouse.log contains the line "Audio suppression off: Windows reports an echo canceller", followed by the microphone's name.
 
 **AI text correction does nothing or times out**
 
@@ -740,6 +759,8 @@ Each installer failure message and its action is listed under [Installation fail
 
 Three ways to reach it: the address above, the **Help** item in the right-click menu on the floating button or the tray icon, and the spoken command "help". All three open the same assistant in the default browser. It requires a ChatGPT account; the free tier is sufficient.
 
+The menu item and the spoken command show a short explanation window first, headed **Ask the Wheelhouse Assistant**. It says what the assistant is, that it runs inside ChatGPT, that an account is needed, and what signing up involves. Its **Assistant** button opens the assistant; **Cancel**, or the Escape key, closes the window and opens nothing. Tick **Do not show this again** and then select **Assistant**, and Help opens the browser directly from then on. If Windows cannot start a browser, Wheelhouse shows the notice "Wheelhouse could not open your browser." To bring the window back, set `explain_before_open = true` under `[ai.help]` in the settings file; see [Configuration](#configuration).
+
 The assistant does not have access to a particular computer, so it cannot read logs that are not pasted into it, and it does not know about changes made after the release it was built from.
 
 **Reporting a defect.** A problem in Wheelhouse itself -- something that behaves incorrectly rather than something that needs explaining -- goes to the project:
@@ -751,5 +772,5 @@ Include the Wheelhouse version from **About Wheelhouse** in the right-click menu
 
 ---
 
-Generated: 2026-09-18 for the v1.0.8 release
-Wheelhouse version: 1.0.8
+Generated: 2026-09-21 for the v1.1.0 release
+Wheelhouse version: 1.1.0

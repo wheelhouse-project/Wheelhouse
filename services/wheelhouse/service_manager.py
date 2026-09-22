@@ -60,6 +60,7 @@ from stt.provider_env_check import (
     check_provider_environments,
     notify_provider_environment_mismatches,
 )
+from services.runtime_dll_directory import runtime_version_notice
 from services.wheelhouse.ai.service import AIService
 from services.wheelhouse.ai.runtime_config import RuntimeConfig
 from services.wheelhouse.ai.server_launcher import (
@@ -76,6 +77,27 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger(__name__)
+
+
+def startup_speech_notices(providers):
+    """Every speech notice for one startup, the runtime one first.
+
+    The Microsoft Visual C++ runtime notice leads because an old runtime
+    faults inside the extension modules the providers load, so an
+    out-of-date environment underneath it is the smaller half of the
+    problem. A failure to read the runtime version never costs the caller
+    the environment notices it already has.
+    """
+    notices = check_provider_environments(providers)
+    try:
+        notice = runtime_version_notice()
+    except Exception:
+        log.warning("Could not read the system C++ runtime version", exc_info=True)
+        return notices
+    if notice:
+        notices.insert(0, notice)
+    return notices
+
 
 class ServiceManager:
     """
@@ -399,7 +421,7 @@ class ServiceManager:
 
             def report_provider_environments():
                 try:
-                    notices = check_provider_environments(providers)
+                    notices = startup_speech_notices(providers)
                     notify_provider_environment_mismatches(notices)
                 except Exception:
                     log.warning("Provider environment check failed", exc_info=True)

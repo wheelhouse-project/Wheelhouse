@@ -5,6 +5,70 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-21
+
+### Added
+
+- You can now say "erase" wherever you can say "delete". For example,
+  "erase word", "erase line", "erase paragraph" and "erase next three
+  words" work the same as the "delete" commands. "backspace" is unchanged.
+- Help now shows a short window before your browser opens. It explains
+  that the Wheelhouse Assistant runs inside ChatGPT and needs a ChatGPT
+  account; a free account works. Only the Assistant button opens the
+  browser. Cancel or Escape closes the window and opens nothing. Tick
+  "Do not show this again" and choose Assistant to go straight to the
+  browser next time. If your browser does not start, Wheelhouse now
+  tells you.
+
+### Changed
+
+- If your speech engine does not use hint phrases, saying "boost" now
+  types the word "boost". Wheelhouse no longer saves a hint that the
+  engine would ignore. The Pattern Manager "Try it" field gives the same
+  answer. The help document names the engines that use hint phrases.
+- The help document now explains that the Windows microphone setting
+  "Audio enhancements" can remove the echo canceller, and how to change
+  it.
+
+### Fixed
+
+- The floating button no longer gets lost off screen. If less than half
+  of the button is on a screen, Wheelhouse moves it back onto the nearest
+  screen at start-up, after you change your displays, and after you drag
+  it past an edge.
+- Setup wizard text is no longer cut off on displays scaled above 100
+  percent. The options on the "AI helper (optional)" page show in full,
+  and the "still working, please wait" note now has its own line.
+- On Windows 10 computers with an old Microsoft Visual C++ runtime, the
+  Parakeet speech engine no longer crashes. The installer now installs
+  the runtime, waits for it to finish, and tells you if you declined the
+  Windows permission prompt.
+- A dictated word is no longer lost when the place you are typing into
+  closes at the moment of typing, for example a browser menu that shuts.
+  Wheelhouse looks once more for that place in the same program and
+  types the word there. It never types the same word twice, and it never
+  types into a different program.
+- When one word fails in a longer sentence, Wheelhouse can still correct
+  the rest of the sentence when the speech engine revises what you said.
+- If you turn listening back on while a video plays, Wheelhouse now
+  pauses listening again when the video's sound continues after a short
+  quiet moment. Before this fix, the video's words were typed until the
+  video ended.
+
+### Known issues
+
+- Over Remote Desktop, when the microphone comes from the remote
+  connection, speech recognition can stop as soon as it starts. The log
+  shows "AudioGraph creation failed: status=3". Until this is fixed, run
+  Wheelhouse on the computer you sit at.
+- On a computer with less memory than the installer requires, the
+  installer stops before it asks for a speech engine. Its message
+  suggests the Google Cloud engine, but the installer does not offer that
+  engine on such a computer.
+- In Visual Studio Code, the rows of an open menu such as File get no
+  numbers, and a click on a row by its name is refused. Visual Studio Code
+  reports those rows as off-screen, so Wheelhouse does not find them.
+
 ## [1.0.8] - 2026-09-19
 
 ### Added
@@ -203,8 +267,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - In Visual Studio Code, the rows of an open menu such as File get no
   numbers, and a click on a row by its name is refused. Visual Studio Code
-  reports those rows as off-screen, so Wheelhouse does not find them
-  (wh-vscode-menu-rows-unnumbered).
+  reports those rows as off-screen, so Wheelhouse does not find them.
 
 ## [1.0.7] - 2026-07-31
 

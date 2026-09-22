@@ -42,6 +42,7 @@ _stub_mod.ensure_win32_importable()
 
 import asyncio
 from multiprocessing import Queue
+from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock, MagicMock, patch
 
 import pytest
@@ -238,40 +239,70 @@ def mock_websocket_manager():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _no_real_notices_from_the_speech_notifier(request, monkeypatch):
-    """Stop SpeechNotifier delivering real toasts to the developer's desktop.
+def _no_real_notices_from_any_module(monkeypatch):
+    """Stop every module delivering a real Windows notice to the developer.
+
+    On 2026-09-19 a test on branch worktree-floating-button-offscreen reached
+    the real ``gui.send_notice``, and a mutation gate then showed the developer
+    a real Windows notice 23 times. Until this change the guard replaced the
+    copy of ``send_notice`` held by ``utils.speech_notifier``, and six other
+    modules import that function by name, so six routes were open.
+
+    THIS GUARD STANDS AT THE LAST STEP INSTEAD, so there is no list of modules
+    to keep. ``utils.notice_text.send_notice`` runs ``from plyer import
+    notification`` on every call (utils/notice_text.py:184), and it is the one
+    place in WheelHouse that reaches plyer at all -- a property held by
+    tests/test_utils/test_notice_sender_is_the_only_plyer_caller.py and by two
+    mutations in tests/mutation_gate_notice_length.py
+    ("a-call-site-calls-plyer-directly-again" and
+    "a-call-site-reaches-plyer-under-an-alias"). Replacing the ``notification``
+    attribute on the ``plyer`` package therefore stops every sender at once:
+    the seven modules that import ``send_notice`` by name, the alias
+    ``send_measured_notice`` in ui/ui_action_handler.py:5918, a module imported
+    after this fixture runs, a module nobody has written yet, and a call site
+    that walks around ``send_notice`` and calls plyer itself.
+
+    WHY THE PACKAGE ATTRIBUTE AND NOT ``plyer.notification.notify``.
+    ``plyer.notification`` is a lazy proxy: reading any attribute of it builds
+    the real Windows backend. Replacing the attribute on the package leaves the
+    proxy untouched, so no test in this suite can start plyer's own
+    notification thread. tests/test_gui.py's ``delivered`` fixture already uses
+    this exact form for the same reason.
+
+    NO TEST IS EXEMPT, and none needs to be. A test that measures a notice
+    patches plyer itself, and its own patch replaces this stub for the length
+    of the test and restores it afterwards. That is the settled convention in
+    this suite: tests/test_utils/test_error_notifier.py uses
+    ``@patch("plyer.notification")`` fourteen times, and test_notice_text.py,
+    test_monitors.py, test_code_telemetry.py, test_gui.py, test_speech_notifier.py,
+    test_transcript_redaction.py and tests/e2e/test_app_adapter.py all read
+    what plyer was handed.
+
+    The paragraph below records why the original ``SpeechNotifier`` guard
+    exists, because that reason still holds and explains why so many ordinary
+    tests reach plyer at all.
 
     ``SpeechNotifier._send_notification`` is a user-facing call site, not a
     debug one: ``state_manager`` calls it directly for the audio-pause,
     speech-off and audio-suppression notices (wh-audio-suppression-control),
     and two more call sites live in ``integrations/websocket_manager.py`` and
     ``main.py``. Ordinary StateManager tests therefore reach plyer. Measured
-    on 2026-09-15 with this guard replaced by a recorder: five test files
+    on 2026-09-15 with the old guard replaced by a recorder: five test files
     (test_state_manager.py, test_ptt_integration.py,
     test_ptt_release_restores_speech.py, test_ptt_mode_consistency.py,
     test_ptt_endpoint_identity.py) asked for 115 real notices in one run.
-
-    Both module objects below are the SAME file under two names,
-    ``utils.speech_notifier`` and
-    ``services.wheelhouse.utils.speech_notifier``, because the top of this
-    file puts the service directory and the project root on ``sys.path``.
-    Python keeps one module object per name, each with its own copy of the
-    ``send_notice`` it imported, so a patch of one does not touch the other.
-    A test that asserts a notice was sent should assert on
-    ``speech_notifier._send_notification`` rather than on plyer.
     """
-    # Two test files drive the SpeechNotifier's real delivery: they patch
-    # plyer.notification themselves and assert on what it receives, so the
-    # stub below would empty the very dict they read. Patching plyer already
-    # stops a real notice, so exempting them delivers nothing to the desktop.
-    # The list is complete: grep -rln "SpeechNotifier" over
-    # services/wheelhouse/tests/ names this file and exactly those two.
-    exempt_modules = ("test_speech_notifier", "test_transcript_redaction")
-    if request.module.__name__.endswith(exempt_modules):
-        return
-    import utils.speech_notifier as notifier_module
-    import services.wheelhouse.utils.speech_notifier as aliased_notifier_module
+    import plyer
 
-    undelivered = Mock(return_value=True)
-    monkeypatch.setattr(notifier_module, "send_notice", undelivered)
-    monkeypatch.setattr(aliased_notifier_module, "send_notice", undelivered)
+    # crewcut: this stub lives in the pytest interpreter, so a notice sent
+    # from a CHILD PROCESS is not covered. No test in this suite starts a
+    # child that sends one today. To remove the limit, have the child's own
+    # entry point refuse to deliver when an environment variable set here is
+    # present, and have the parent assert on that variable rather than on
+    # this stub.
+    #
+    # notify returns None, which is what plyer's own notify returns. Returning
+    # True here would make send_notice's callers see a value plyer never gives.
+    monkeypatch.setattr(
+        plyer, "notification", SimpleNamespace(notify=Mock(return_value=None))
+    )

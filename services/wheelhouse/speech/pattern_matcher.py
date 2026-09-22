@@ -114,6 +114,27 @@ def _normalize_first_word_in_text(text: str) -> str:
     return normalized + sep + rest
 
 
+def _refused_for_hint_engine(
+    data: Optional[Dict[str, Any]], hint_engine: Optional[bool]
+) -> bool:
+    """True when a hint pattern must not match under the running engine.
+
+    wh-boost-engine-qualification (David, 2026-09-19: "option four"): a
+    pattern whose actions save a hint (``requires_hint_engine``, derived by
+    PatternCatalog from the actions) is refused only when the engine has
+    reported that it does not apply hints. ``None`` means the engine has
+    not reported -- no capabilities frame yet, an older provider build, or
+    the gap at a stream boundary -- and keeps the command, so an older
+    provider does not lose it silently. A refused pattern is not a match,
+    so the words finish as dictation through the ordinary path.
+    """
+    return (
+        hint_engine is False
+        and bool(data)
+        and bool(data.get("requires_hint_engine", False))
+    )
+
+
 def _strip_punct_per_token(text: str) -> Optional[str]:
     """Strip ``_MATCHER_PUNCT_STRIP`` from both ends of every token of ``text``.
 
@@ -246,7 +267,8 @@ class PatternMatcher:
         text: str,
         pattern_type: Optional[str] = None,
         hotword_active: bool = False,
-        first_word: Optional[str] = None
+        first_word: Optional[str] = None,
+        hint_engine: Optional[bool] = None,
     ) -> Optional[MatchResult]:
         """Try to match text against patterns.
 
@@ -259,6 +281,10 @@ class PatternMatcher:
             pattern_type: Optional filter - "command" or "replacement"
             hotword_active: Whether hotword is currently active
             first_word: Optional first word for pattern lookup optimization
+            hint_engine: Whether the running speech engine applies a saved
+                hint: True, False, or None for unknown. Only False refuses
+                a pattern whose actions save a hint (see
+                ``_refused_for_hint_engine``).
 
         Returns:
             MatchResult if matched, None if no match
@@ -346,6 +372,8 @@ class PatternMatcher:
                 # Check hotword requirement
                 requires_hotword = data.get('requires_hotword', False) if data else False
                 if requires_hotword and not hotword_active:
+                    continue
+                if _refused_for_hint_engine(data, hint_engine):
                     continue
 
                 # Validate numeric capture groups
@@ -482,6 +510,7 @@ class PatternMatcher:
         text: str,
         pattern_data: dict,
         authorized_command: bool = False,
+        hint_engine: Optional[bool] = None,
     ) -> Optional[MatchResult]:
         """Match text against a single pattern.
 
@@ -497,6 +526,9 @@ class PatternMatcher:
                 hotword-required command (e.g. ``save``) from being executed
                 via a replacement remainder like ``hello period save``
                 (wh-qj70s). Default is fail-closed.
+            hint_engine: Same meaning as in ``match_complete``. The
+                execution walk passes the value the router used, so both
+                layers refuse the same hint pattern.
 
         Returns:
             MatchResult if matched, None otherwise
@@ -508,6 +540,8 @@ class PatternMatcher:
         # Hotword authorization gate: refuse hotword-required patterns unless
         # the caller has explicitly vetted the input upstream.
         if data.get('requires_hotword', False) and not authorized_command:
+            return None
+        if _refused_for_hint_engine(data, hint_engine):
             return None
 
         # CORE LOGIC: Determine matching strategy from ^ anchor.
@@ -565,7 +599,8 @@ class PatternMatcher:
         self,
         buffer: List[str],
         pattern_type: str,
-        hotword_active: bool = False
+        hotword_active: bool = False,
+        hint_engine: Optional[bool] = None,
     ) -> Optional[MatchResult]:
         """Match for routing decisions (SpeechRouter use case).
 
@@ -592,14 +627,16 @@ class PatternMatcher:
             text=text,
             pattern_type=pattern_type,
             hotword_active=hotword_active,
-            first_word=first_word
+            first_word=first_word,
+            hint_engine=hint_engine,
         )
 
     def is_pattern_complete(
         self,
         buffer: List[str],
         pattern_type: str,
-        hotword_active: bool = False
+        hotword_active: bool = False,
+        hint_engine: Optional[bool] = None,
     ) -> bool:
         """Check if buffer contains a complete (non-greedy) pattern.
 
@@ -613,7 +650,9 @@ class PatternMatcher:
         Returns:
             True if buffer matches a complete, non-greedy pattern
         """
-        result = self.match_for_routing(buffer, pattern_type, hotword_active)
+        result = self.match_for_routing(
+            buffer, pattern_type, hotword_active, hint_engine=hint_engine
+        )
         if result and result.matched and not result.is_greedy:
             return True
         return False
@@ -622,7 +661,8 @@ class PatternMatcher:
         self,
         buffer: List[str],
         pattern_type: str,
-        hotword_active: bool = False
+        hotword_active: bool = False,
+        hint_engine: Optional[bool] = None,
     ) -> bool:
         """Check if buffer could potentially match with more words.
 
@@ -691,6 +731,10 @@ class PatternMatcher:
             # dictation immediately instead of waiting command_timeout.
             requires_hotword = data.get('requires_hotword', False) if data else False
             if requires_hotword and not hotword_active:
+                continue
+            # Same reasoning for a hint pattern the running engine cannot
+            # serve (wh-boost-engine-qualification).
+            if _refused_for_hint_engine(data, hint_engine):
                 continue
 
             # Strategy 1: Already matches exactly
@@ -923,7 +967,8 @@ class PatternMatcher:
         self,
         buffer: List[str],
         pattern_type: str,
-        hotword_active: bool = False
+        hotword_active: bool = False,
+        hint_engine: Optional[bool] = None,
     ) -> bool:
         """Check if buffer cannot possibly match any pattern.
 
@@ -935,11 +980,14 @@ class PatternMatcher:
             hotword_active: Forwarded to can_continue. When False (default),
                 requires_hotword patterns are treated as unable to match, so a
                 hotword-only buffer reports cannot_match=True (wh-4o1aj).
+            hint_engine: Forwarded to can_continue.
 
         Returns:
             True if no pattern can match this buffer, False if match possible
         """
-        return not self.can_continue(buffer, pattern_type, hotword_active)
+        return not self.can_continue(
+            buffer, pattern_type, hotword_active, hint_engine=hint_engine
+        )
 
     def validate_numeric(
         self,

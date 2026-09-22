@@ -3,6 +3,10 @@
 # Used for contextual biasing - helps the recognizer with uncommon words
 # and with the short command words WheelHouse listens for.
 #
+# Google applies these hints always. Parakeet and Distil-Whisper apply
+# them only when [hotwords] enabled = true in their own config file.
+# Under an engine that does not apply hints, "boost" is typed as a word.
+#
 # This is a starter list. Add the names, jargon, and phrases YOU dictate
 # often; remove anything you never say. Keep the list focused - very long
 # lists dilute the boost (and on the Parakeet provider, hotword biasing

@@ -384,8 +384,13 @@ class TestMonitorAudioStopHoldoff:
     """
 
     @staticmethod
-    async def _run(monitor, peaks):
-        """Run monitor_audio over peaks; return (is_playing, clock) per event."""
+    async def _run(monitor, peaks, on_event=None, before_poll=None):
+        """Run monitor_audio over peaks; return (is_playing, clock) per event.
+
+        on_event, when given, receives each published event (an async
+        subscriber). before_poll, when given, is called with the index of
+        each reading just before the monitor takes it.
+        """
         monitor._first_run = False
         monitor._previous_audio_state = False
         clock = {"now": 0.0}
@@ -393,12 +398,16 @@ class TestMonitorAudioStopHoldoff:
         events = []
 
         def fake_is_audio_playing():
+            if before_poll is not None:
+                before_poll(polls["count"])
             peak = peaks[polls["count"]]
             polls["count"] += 1
             return peak > 0.05
 
         async def fake_publish(event):
             events.append((event.is_playing, clock["now"]))
+            if on_event is not None:
+                await on_event(event)
 
         async def fake_sleep(duration):
             if polls["count"] >= len(peaks):
@@ -416,7 +425,8 @@ class TestMonitorAudioStopHoldoff:
     async def test_a_one_poll_dip_publishes_no_stop(self, audio_monitor):
         events = await self._run(audio_monitor, [0.5, 0.0, 0.5])
 
-        assert [playing for playing, _ in events] == [True]
+        # The returning sound is reported as playing again, never as a stop.
+        assert [playing for playing, _ in events] == [True, True]
 
     async def test_quiet_past_the_hold_off_publishes_one_stop_at_its_end(
         self, audio_monitor
@@ -434,7 +444,7 @@ class TestMonitorAudioStopHoldoff:
     ):
         events = await self._run(audio_monitor, [0.5, 0.0, 0.0, 0.5])
 
-        assert [playing for playing, _ in events] == [True]
+        assert [playing for playing, _ in events] == [True, True]
 
     async def test_quiet_after_sound_returns_waits_a_whole_new_hold_off(
         self, audio_monitor
@@ -447,7 +457,116 @@ class TestMonitorAudioStopHoldoff:
 
         # The loud reading at 3.0 s ends the first quiet stretch, so the
         # hold-off counts from the next quiet reading at 4.0 s, not from 1.0 s.
-        assert events == [(True, 0.0), (False, 4.0 + AUDIO_STOP_HOLDOFF_SECONDS)]
+        assert events == [
+            (True, 0.0), (True, 3.0), (False, 4.0 + AUDIO_STOP_HOLDOFF_SECONDS)
+        ]
+
+
+# ===========================================================================
+# Playing reported again after a dip (wh-sound-pause-returns-after-toggle)
+# ===========================================================================
+
+@pytest.fixture
+def state_manager(mock_config, mock_event_bus, mock_gui_queue,
+                  mock_websocket_manager):
+    """A real StateManager, so the monitor's events reach the real setter."""
+    from state_manager import StateManager
+
+    loop = asyncio.new_event_loop()
+    loop.create_task = Mock()  # keep broadcasts from running
+    mgr = StateManager(
+        config_service=mock_config,
+        event_bus=mock_event_bus,
+        loop=loop,
+        state_to_gui_queue=mock_gui_queue,
+        websocket_manager=mock_websocket_manager,
+    )
+    mgr.speech_notifier = Mock()
+    yield mgr
+    loop.close()
+
+
+class TestMonitorAudioRepublishesPlaying:
+    """Sound that returns inside the stop hold-off is reported as playing again.
+
+    The user toggle clears the sound pause while a video plays. Before the
+    stop hold-off, a quiet reading published 'stopped' and the next loud
+    reading published 'playing', which set the sound pause again. The
+    repeated 'playing' event keeps that effect without a 'stopped' event.
+    """
+
+    _run = staticmethod(TestMonitorAudioStopHoldoff._run)
+
+    async def test_sound_returning_inside_the_hold_off_publishes_playing_again(
+        self, audio_monitor
+    ):
+        events = await self._run(audio_monitor, [0.5, 0.0, 0.0, 0.5])
+
+        assert events == [(True, 0.0), (True, 3.0)]
+
+    async def test_continuous_sound_after_the_return_publishes_nothing_more(
+        self, audio_monitor
+    ):
+        events = await self._run(audio_monitor, [0.5, 0.0, 0.5, 0.5, 0.5])
+
+        assert events == [(True, 0.0), (True, 2.0)]
+
+    async def test_continuous_sound_publishes_one_event(self, audio_monitor):
+        events = await self._run(audio_monitor, [0.5, 0.5, 0.5, 0.5])
+
+        assert events == [(True, 0.0)]
+
+    async def test_repeated_playing_changes_nothing_while_the_pause_is_on(
+        self, audio_monitor, state_manager, mock_websocket_manager
+    ):
+        state_manager._speech_enabled = True
+        state_manager.send_state_update = Mock()
+        effects = []
+
+        async def deliver(event):
+            before = self._effect_counts(state_manager, mock_websocket_manager)
+            await state_manager._handle_audio_state_changed(event)
+            after = self._effect_counts(state_manager, mock_websocket_manager)
+            effects.append(tuple(a - b for a, b in zip(after, before)))
+
+        events = await self._run(audio_monitor, [0.5, 0.0, 0.5], on_event=deliver)
+
+        assert [playing for playing, _ in events] == [True, True]
+        assert effects[0] == (1, 1, 1)  # the first event starts the pause
+        assert effects[1] == (0, 0, 0)  # the repeat changes nothing
+        assert state_manager.speech_enabled is False
+
+    @staticmethod
+    def _effect_counts(mgr, ws):
+        """(notices, transcription-status broadcasts, GUI state updates)."""
+        return (
+            mgr.speech_notifier.notify_suppression_change.call_count,
+            ws.set_transcription_status.call_count,
+            mgr.send_state_update.call_count,
+        )
+
+    async def test_repeated_playing_restores_the_pause_the_toggle_cleared(
+        self, audio_monitor, state_manager
+    ):
+        state_manager._speech_enabled = True
+        after_toggle = {}
+
+        def toggle_during_the_video(poll_index):
+            # After the first 'playing' event, the user turns listening on.
+            if poll_index == 1:
+                state_manager.toggle_speech_enabled_state()
+                after_toggle["speech_enabled"] = state_manager.speech_enabled
+
+        await self._run(
+            audio_monitor,
+            [0.5, 0.0, 0.5],
+            on_event=state_manager._handle_audio_state_changed,
+            before_poll=toggle_during_the_video,
+        )
+
+        assert after_toggle == {"speech_enabled": True}
+        assert state_manager._speech_suppressed_by_audio is True
+        assert state_manager.speech_enabled is False
 
 
 # ===========================================================================

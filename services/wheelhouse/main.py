@@ -39,6 +39,24 @@ this vision:
     separation of configuration.
 """
 
+# Wheelhouse: put the owned Microsoft Visual C++ runtime folder on this
+# process's library search path BEFORE any extension module loads. The order
+# is the whole fix -- os.add_dll_directory cannot displace a library the
+# process already holds. services/runtime_dll_directory.py explains it.
+import os.path
+import sys
+
+_services_dir = os.path.abspath(__file__)
+while (os.path.basename(_services_dir) != "services"
+       and os.path.dirname(_services_dir) != _services_dir):
+    _services_dir = os.path.dirname(_services_dir)
+if _services_dir not in sys.path:
+    sys.path.append(_services_dir)
+from runtime_dll_directory import add_runtime_dll_directory
+
+add_runtime_dll_directory()
+
+
 import asyncio
 import enum
 import functools
@@ -9889,13 +9907,24 @@ class LogicController:
             # the network/IPC issue resolves.
             self._in_flight_retry_tokens.discard(correlation_token)
 
-    async def _open_help_online(self) -> None:
-        """Open the Wheelhouse help page for the Help menu entry.
+    async def start_help_online(
+        self, explained: bool = False, source: str = "menu"
+    ) -> None:
+        """Decide what Help does: the explanation window, or the browser.
 
-        The GUI process shows the menu but holds no settings, so it sends a
-        command and this opens the browser. The address is the ai.help
-        gem_url setting, which is the same setting the spoken command
-        "wheelhouse help online" reads -- one place to change, both ways in.
+        Both ways in end here. The GUI process shows the Help menu entry but
+        holds no settings, so it sends a command; the spoken command "help"
+        calls this method through the logic controller. One method, so there
+        is no second copy of the decision to keep in step.
+
+        A new user who reaches the ChatGPT sign-in page with no explanation
+        does not know what to do there, so an explanation window comes first.
+        The window's Assistant button sends the same command back with
+        ``explained`` true, which is what stops the window appearing again in
+        answer to its own button. Setting ai.help.explain_before_open to
+        false turns the window off for good; the window's check box is what
+        writes that setting, in the GUI process, through the settings path
+        that acknowledges the write.
 
         Nothing here is allowed to raise. This runs as a background task in
         the process that routes speech, and a browser that will not start is
@@ -9903,24 +9932,74 @@ class LogicController:
         """
         config = getattr(self, "config_service", None)
         if not config:
-            logger.warning("Help menu: no settings available, cannot open help.")
+            logger.warning("Help: no settings available, cannot open help.")
             return
 
         gem_url = config.get("ai.help.gem_url", "")
         if not gem_url:
             # Blanking the setting is how a user turns online help off, so
-            # this is a plain statement of fact rather than an error.
+            # this is a plain statement of fact rather than an error. The
+            # explanation window stays shut: its one button would have
+            # nothing to open. This check comes first on purpose: the
+            # window is modeless, so the address can be blanked while it is
+            # open, and the Assistant button must then say so rather than
+            # open an empty page.
+            logger.info(
+                "Help: source=%s explained=%s, online help is not configured.",
+                source,
+                explained,
+            )
             self._send_gui_notification(
                 "Online help is not configured. Set gem_url under [ai.help]."
             )
             return
 
+        if not explained and config.get("ai.help.explain_before_open", True):
+            logger.info(
+                "Help: source=%s explained=%s, asking for the explanation window.",
+                source,
+                explained,
+            )
+            self._request_help_explainer()
+            return
+
+        logger.info(
+            "Help: source=%s explained=%s, opening the browser.",
+            source,
+            explained,
+        )
         try:
             import webbrowser
-            await asyncio.to_thread(webbrowser.open, gem_url)
+            opened = await asyncio.to_thread(webbrowser.open, gem_url)
+            if not opened:
+                # webbrowser.open reports the common failure by returning
+                # False rather than raising: on Windows it catches the
+                # OSError from os.startfile (wh-open-url-action.1.2). The
+                # exception arm below would never see it, so a browser that
+                # will not start would open nothing and say nothing. The
+                # address stays out of the line: it is a user setting, and
+                # the two browser launches in speech/actions.py redact what
+                # they log for the same reason (wh-assistant-button-
+                # explainer.1.1).
+                logger.warning("Help: the browser reported failure opening help.")
+                self._send_gui_notification(
+                    "Wheelhouse could not open your browser."
+                )
         except Exception as exc:
-            logger.warning("Help menu: could not open the browser: %s", exc)
+            logger.warning("Help: could not open the browser: %s", exc)
             self._send_gui_notification("Wheelhouse could not open your browser.")
+
+    def _request_help_explainer(self) -> None:
+        """Ask the GUI process for the explanation window. Never raises."""
+        state_manager = getattr(self, "state_manager", None)
+        queue = getattr(state_manager, "state_to_gui_queue", None)
+        if queue is None:
+            logger.warning("Cannot show the help explanation, no GUI queue.")
+            return
+        try:
+            queue.put_nowait({"action": "open_help_explainer"})
+        except Exception as exc:
+            logger.warning("Help explanation could not be queued: %s", exc)
 
     def _send_gui_notification(self, message: str) -> None:
         """Put a one-line notice on the GUI queue. Never raises."""
@@ -10668,8 +10747,13 @@ class LogicController:
                 from speech.pattern_tester import run_test_phrase
 
                 parser = speech_handler.text_parser
+                # hint_engine: the engine's hint support the runtime
+                # matcher refuses hint patterns by, so "boost" under a
+                # non-hint engine answers "no command" here as well
+                # (wh-boost-engine-qualification.1.1).
                 result = run_test_phrase(
                     data["text"], parser.patterns, parser.matcher,
+                    hint_engine=parser.hint_engine,
                 )
                 # Echo the sender's request_id so the dialog can pair the
                 # answer with the request that produced it and drop an
@@ -10694,6 +10778,7 @@ class LogicController:
                     data["draft"], data["text"],
                     parser.patterns, parser.matcher,
                     catalog=parser.pattern_catalog,
+                    hint_engine=parser.hint_engine,
                 )
                 request_id = data.get("request_id")
                 if request_id is not None:
@@ -11053,7 +11138,12 @@ class LogicController:
             "get_config_values": lambda: self.create_task_with_error_handling(self.state_manager.get_config_values(command.get('keys') or [], command.get('request_id')), "GetConfigValues"),
             "switch_stt_provider": lambda: self.create_task_with_error_handling(self._switch_stt_provider(command.get('provider')), "SwitchSTTProvider"),
             "switch_ai_provider": lambda: self.create_task_with_error_handling(self._switch_ai_provider(command.get('provider')), "SwitchAIProvider"),
-            "open_help_online": lambda: self.create_task_with_error_handling(self._open_help_online(), "OpenHelpOnline"),
+            # The strict "is True" is deliberate. This command crosses a
+            # process boundary, so the field is whatever the sender put
+            # there, and bool("false") is True. Only the literal boolean
+            # skips the explanation window; anything else takes the full
+            # decision (boss ruling on wh-assistant-button-explainer).
+            "open_help_online": lambda: self.create_task_with_error_handling(self.start_help_online(explained=command.get("explained") is True, source=str(command.get("source", "menu"))), "OpenHelpOnline"),
             "help_ask": lambda: self.create_task_with_error_handling(self._handle_help_ask(command.get("question", "")), "HelpAsk"),
             "help_reset": lambda: self._handle_help_reset(),
             "help_cancel": lambda: self._handle_help_cancel(),

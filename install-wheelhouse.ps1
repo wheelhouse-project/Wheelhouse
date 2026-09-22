@@ -103,7 +103,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.0.8"
+$AppVersion = "1.1.0"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -194,6 +194,35 @@ $DiskFloorBytes = 10GB           # app + venvs + model download + staged copy
 # NVIDIA PCI vendor id, for the CUDA provider offer.
 $NvidiaVendorId = 4318
 $CudaMinVramBytes = 4GB
+
+# The lowest Microsoft C++ runtime version the speech engine's extension
+# modules can load. THE SOURCE OF TRUTH IS PYTHON: MINIMUM_SYSTEM_RUNTIME in
+# services/runtime_dll_directory.py, which the app reads at run time to decide
+# whether to tell the user anything, and whose comment carries the measurement
+# behind the number. This script is downloaded and run on its own and cannot
+# import Python, so the pair is copied here and the drift is guarded rather
+# than prevented (test_installer.py,
+# test_the_runtime_threshold_matches_the_python_constant, reads both files and
+# fails when they disagree). Two copies that disagreed would install a runtime
+# the app still complains about, or leave one out that it needs.
+$MinimumSystemRuntime = [version]"14.30"
+
+# Microsoft's permanent address for the current x64 redistributable, published
+# on Microsoft's own documentation page. It redirects to whatever build is
+# current, which is exactly why no checksum can be pinned for this one file and
+# the Authenticode signature proves the publisher instead. The reasoning, and
+# what that exception costs, is in docs/vendoring/SECURITY.md under
+# "Install-time Microsoft runtime fetch".
+$VcRedistUrl = "https://aka.ms/vc14/vc_redist.x64.exe"
+
+# The one line the wizard's finish page shows when Microsoft's installer
+# reports 3010: the runtime went in, and Windows wants a restart before it is
+# fully in place. It is a named constant so that changing the wording is one
+# edit -- test_installer.py, test_the_restart_notice_is_one_named_constant,
+# fails when a second copy of this text appears anywhere in this script. David
+# approved these exact words as QUESTIONS-2026-09-19.md item 14; reword them
+# only on an answer that supersedes it.
+$RuntimeRestartNotice = "The Microsoft Visual C++ runtime is installed. Restart the computer before you use speech."
 
 # Cloud AI defaults. The graphical installer pre-fills Google's Gemini Flash
 # Lite (OpenAI-compatible endpoint) so the user supplies only a key; the engine
@@ -1226,6 +1255,302 @@ function Invoke-DownloadOnce {
         Write-Progress -Activity "Downloading $Description" -Completed
     } finally {
         $response.Close()
+    }
+}
+
+# --- The Microsoft C++ runtime the speech engine needs --------------------------
+#
+# The speech engine's extension modules are built against a Visual Studio 2022
+# toolset and carry no C++ library of their own, so they fall through to
+# Windows' copy in System32. On MavenCore (Windows 10 Pro 22H2) that copy was
+# 14.29 -- a toolset generation older -- and the speech process died with an
+# access violation two seconds after the recognizer loaded, six times in a row.
+# services/runtime_dll_directory.py holds the measurement in full.
+#
+# Wheelhouse holds no licence that permits shipping Microsoft's file, so this
+# fetches Microsoft's installer from Microsoft, and only on a computer that
+# needs it. Nothing in this section may stop an install: every other part of
+# Wheelhouse works on a computer whose runtime stayed old.
+
+function Get-FileVersionIfReadable {
+    param([string]$Path)
+    # A file-version probe that cannot abort the install: it runs under the
+    # script-wide ErrorActionPreference Stop, where a file that is absent or
+    # cannot be opened would be a terminating error. $null means "this file
+    # answered nothing" -- a file that is not there, and one carrying no
+    # version resource, are the same answer -- and every caller reads that as
+    # "not shown to meet the threshold" rather than as a version.
+    #
+    # The four numeric parts, not the FileVersion string: Windows writes that
+    # string for a person to read and some libraries put build notes in it,
+    # while the parts come from the fixed version resource. They are the same
+    # numbers services/runtime_dll_directory.py reads through
+    # GetFileVersionInfoW, so the two halves judge one file the same way.
+    try {
+        $info = (Get-Item -LiteralPath $Path).VersionInfo
+    } catch {
+        return $null
+    }
+    if (-not $info -or -not $info.FileVersion) { return $null }
+    return (New-Object System.Version($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart))
+}
+
+function Get-NativeSystemDirectory {
+    # The directory holding the x64 Windows libraries, named so that THIS
+    # process reaches them. SystemRoot rather than a literal C:\Windows,
+    # because Windows is not always on C.
+    #
+    # WOW64 redirects a 32-bit process's $env:SystemRoot\System32 to SysWOW64,
+    # so from such a process that name reads the x86 msvcp140.dll -- a
+    # different file from the x64 one Wheelhouse's extension modules load.
+    # Measured on a 64-bit Windows 11 computer from the 32-bit host: the
+    # System32 name gave a 447,568-byte file whose PE machine field is 0x014C
+    # (x86), the Sysnative name a 553,552-byte file whose field is 0x8664
+    # (x64). Both carried the same version there, so comparing versions cannot
+    # reveal the difference; they are different files that happened to match.
+    #
+    # A 32-bit parent process is the mechanism that produces such a host: a
+    # 32-bit program that starts %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe
+    # is redirected and gets the 32-bit one. Wheelhouse-Setup.iss already
+    # launches this script through {sysnative} for that reason, so the wizard
+    # always arrives in the 64-bit host; the console path has no such
+    # protection.
+    #
+    # Sysnative is the name Windows gives a 32-bit process to reach the real
+    # directory. It does NOT exist for a 64-bit process, so the branch is
+    # required: a 64-bit host asking for it would name a directory that is not
+    # there, read nothing, and fetch Microsoft's installer on every computer.
+    $root = $env:SystemRoot
+    if (-not $root) { $root = "C:\Windows" }
+    if ((-not [Environment]::Is64BitProcess) -and [Environment]::Is64BitOperatingSystem) {
+        return (Join-Path $root "Sysnative")
+    }
+    return (Join-Path $root "System32")
+}
+
+function Test-SystemRuntimeIsCurrent {
+    # Whether this computer's own C++ runtime is new enough for the extension
+    # modules.
+    #
+    # A version this cannot read is NOT current. The criterion is "at or above
+    # the threshold", and a version nobody can read cannot be shown to meet it.
+    # Being wrong that way costs one Microsoft install on a computer that did
+    # not need it; being wrong the other way costs the user speech on every
+    # start, with no sign of why.
+    $version = Get-FileVersionIfReadable -Path (Join-Path (Get-NativeSystemDirectory) "msvcp140.dll")
+    if ($null -eq $version) { return $false }
+    return ($version -ge $MinimumSystemRuntime)
+}
+
+function Test-MicrosoftSignature {
+    param([string]$Path)
+    # Publisher proof for the one file that cannot carry a pinned checksum:
+    # Microsoft's permanent link serves whatever build is current, so the bytes
+    # change with every Microsoft update and a pinned hash would reject the
+    # first updated build for every user (docs/vendoring/SECURITY.md).
+    #
+    # Both halves have to hold, and there is exactly one way to pass. A status
+    # of anything but Valid, a check that throws, a file with no signer, and a
+    # signer that is not Microsoft are all refusals.
+    #
+    # The organisation field, not a search for the words: anyone may put
+    # "Microsoft Corporation" in a common name, so the match is anchored to a
+    # whole O= field. The comparison is case-insensitive, as X.500 name
+    # comparison is -- a certificate authority validates the legal name, and
+    # spelling it in another case does not make it another company.
+    try {
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    if ($null -eq $signature) { return $false }
+    if ([string]$signature.Status -ne "Valid") { return $false }
+    if ($null -eq $signature.SignerCertificate) { return $false }
+    return ([string]$signature.SignerCertificate.Subject -match '(^|,)\s*O="?Microsoft Corporation"?\s*(,|$)')
+}
+
+function Invoke-SignatureVerifiedDownload {
+    param([string]$Url, [string]$Destination, [string]$Description)
+    # A download path of its own, deliberately separate from
+    # Invoke-VerifiedDownload: that function's -ExpectedSha256 is what stands
+    # between the four pinned downloads and a file nobody checked, and this one
+    # file has no hash to pin. Nothing here can weaken that. What replaces the
+    # hash is the Authenticode signature.
+    #
+    # Returns $true only when a file signed by Microsoft is at $Destination.
+    # Every failure is an answer rather than an exception, because this step
+    # must never stop an install: a connection failure, a refused signature and
+    # a rename that fails all come back as $false with a warning.
+    #
+    # The bytes land in a per-run partial and are moved to $Destination only
+    # after the signature passes, so the path the caller runs never holds an
+    # unchecked file, not for an instant. There is no resume and no adoption of
+    # another run's partial, both of which Invoke-VerifiedDownload does: with
+    # no checksum, bytes from another run cannot be shown to belong to this
+    # file, and a spliced file would only be refused later by its signature.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+    $partial = "$Destination.partial-$PID"
+    $meta = "$partial.meta"
+    # A leftover from a run that died in here would otherwise be taken for a
+    # verified copy, and the rename below cannot overwrite one either.
+    foreach ($stale in @($Destination, $partial, $meta)) {
+        Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+    }
+    try {
+        try {
+            Invoke-DownloadOnce -Url $Url -Partial $partial -Meta $meta -Description $Description
+        } catch {
+            Write-Warn "Downloading $Description failed: $($_.Exception.Message)"
+            return $false
+        }
+        if (-not (Test-MicrosoftSignature -Path $partial)) {
+            Write-Warn "$Description was downloaded, but it is not a file signed by Microsoft; it has been discarded."
+            return $false
+        }
+        try {
+            [System.IO.File]::Move($partial, $Destination)
+        } catch {
+            Write-Warn "Placing $Description failed: $($_.Exception.Message)"
+            return $false
+        }
+        return $true
+    } finally {
+        # The partial is gone after a successful rename and the meta file has
+        # no reader once the download is over; on any of the three failure
+        # paths both are what would otherwise be left behind.
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $meta -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-RuntimeInstaller {
+    param([string]$Exe, [string[]]$Arguments)
+    # Starts Microsoft's redistributable and waits for it, so that its exit
+    # code can be read at all.
+    #
+    # NOT Invoke-Native, and that is the whole reason this function exists.
+    # vc_redist.x64.exe is a WINDOWS-SUBSYSTEM program: its PE header says
+    # subsystem 2, measured read-only on the computer that reported
+    # wh-parakeet-crash-windows10. PowerShell's call operator does not wait
+    # for such a program and leaves $LASTEXITCODE untouched, so Invoke-Native
+    # answers $null for it however the install went. That is A12 run 1, where
+    # an install that ran for eight seconds and returned 1602 reached the user
+    # as "failed (code unknown)" -- and a run that SUCCEEDED would have said
+    # the same thing. Invoke-Native itself is left alone: its four other
+    # callers run console programs, whose exit codes it reads correctly.
+    #
+    # UseShellExecute stays false, which is what the call operator used, so
+    # the program starts exactly as it did before. Microsoft's own progress
+    # window still appears, because /passive asks for it and nothing here
+    # hides it.
+    #
+    # The arguments are joined into one string because Windows PowerShell
+    # 5.1's ProcessStartInfo has no ArgumentList. Every argument this is
+    # called with is a fixed literal containing no space; an argument that
+    # needed quoting would have to carry its own quotes.
+    #
+    # crewcut: the wait has no time limit, so an installer of Microsoft's
+    # that never exits holds this step for as long as it runs. No limit was
+    # set because a legitimate /passive install can take minutes, and
+    # abandoning one would report a failure for an install that was working.
+    # Removing the limit means a WaitForExit(milliseconds) whose expiry is
+    # reported as an outcome of its own rather than as an exit code.
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $Exe
+    $start.Arguments = ($Arguments -join " ")
+    $start.UseShellExecute = $false
+    $process = [System.Diagnostics.Process]::Start($start)
+    try {
+        $process.WaitForExit()
+        @{ ExitCode = $process.ExitCode }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Install-SystemRuntime {
+    # NOTHING HERE IS FATAL, by design. Every outcome that is not a finished
+    # install writes one line for the wizard's finish page and the install
+    # carries on. A hard stop here would cost the user the whole application to
+    # save one part of it, and the part is recoverable afterwards: the notice
+    # says how.
+    if (Test-SystemRuntimeIsCurrent) { return }
+
+    New-Item -ItemType Directory -Force -Path $DownloadsDir | Out-Null
+    # The process id in the name, like the other downloads': two installer runs
+    # at once must not write or delete each other's copy.
+    $installer = Join-Path $DownloadsDir "vc_redist.x64-$PID.exe"
+    Write-Status "Installing the Microsoft Visual C++ runtime the speech engine needs..."
+    try {
+        if (-not (Invoke-SignatureVerifiedDownload -Url $VcRedistUrl -Destination $installer -Description "the Microsoft Visual C++ runtime")) {
+            Write-InstallNotice ("Wheelhouse could not download a Microsoft-signed copy of the Visual C++ " +
+                "runtime the speech engine needs, so speech may not start. Run this installer again, or " +
+                "install the Microsoft Visual C++ Redistributable (x64) from Microsoft, then start " +
+                "Wheelhouse again.")
+            return
+        }
+        # /passive shows Microsoft's own progress window and asks the user
+        # nothing beyond the Windows permission prompt; /norestart keeps it from
+        # restarting the computer in the middle of an install that has barely
+        # started.
+        #
+        # A file that cannot be STARTED at all never returns an exit code:
+        # [System.Diagnostics.Process]::Start raises a TERMINATING error for
+        # that, which $ErrorActionPreference does not soften. Measured on
+        # Windows PowerShell 5.1.26100.9444 -- a MethodInvocationException
+        # wrapping a Win32Exception, reading "The specified executable is not
+        # a valid application for this OS platform." when the image cannot be
+        # loaded, and "The system cannot find the file specified" when the
+        # file is gone. Both are real here: an antivirus can quarantine the
+        # file between the signature check and this line, and an execution
+        # policy can refuse an unrecognised executable under %LOCALAPPDATA%.
+        # Uncaught, either one unwinds past every arm below and ends the whole
+        # install, which this section may never do. The catch leaves $result
+        # $null instead, so the "unknown" default stands and the catch-all arm
+        # writes the notice it was already written to write.
+        try {
+            $result = Start-RuntimeInstaller -Exe $installer -Arguments @("/install", "/passive", "/norestart")
+        } catch {
+            $result = $null
+            # Write-Status reaches the setup log and nothing else, which is
+            # where this belongs: the user gets the notice below, and whoever
+            # reads the log gets the reason -- a silent catch would leave the
+            # failure with no diagnosis at all. Sanitized like the other raw
+            # native diagnostics. Neither of the two messages measured for
+            # this call names a path, but both come from Windows rather
+            # than from this script, so nothing here can promise what a
+            # later Windows build puts in one.
+            Write-Status ("The Microsoft Visual C++ runtime installer could not be started: " +
+                (Hide-UserProfilePath -Text $_.Exception.Message))
+        }
+        # The exit code is the whole of the outcome. A code that is absent is
+        # named rather than printed as a blank.
+        $code = "unknown"
+        if ($null -ne $result -and $null -ne $result.ExitCode) { $code = [int]$result.ExitCode }
+        if ($code -eq 0) {
+            Write-Status "The Microsoft Visual C++ runtime was installed."
+        } elseif ($code -eq 3010) {
+            # 3010 is success with a restart owing. Nothing failed, so this is
+            # not a warning about a problem -- but the restart is a thing the
+            # user must do before speech works, and Write-Status reaches only
+            # the setup log, which nobody reads. The finish page is the one
+            # place the user is going to see it, so the line goes there.
+            Write-InstallNotice $RuntimeRestartNotice
+        } elseif ($code -eq 1602) {
+            Write-InstallNotice ("You declined the Windows permission prompt, so the Microsoft Visual C++ " +
+                "runtime the speech engine needs was not installed and speech may not start. Run this " +
+                "installer again and select Yes when Windows asks.")
+        } else {
+            Write-InstallNotice ("Installing the Microsoft Visual C++ runtime the speech engine needs " +
+                "failed (code $code), so speech may not start. Run this installer again, or install the " +
+                "Microsoft Visual C++ Redistributable (x64) from Microsoft, then start Wheelhouse again.")
+        }
+    } finally {
+        # Microsoft's installer has no further use once it has run, and a copy
+        # left behind would be a file with no checksum sitting among the
+        # checksummed ones.
+        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -2860,6 +3185,12 @@ function Invoke-MainInstall {
     Test-RunningWheelHouse
 
     New-Item -ItemType Directory -Force -Path $LocalRoot | Out-Null
+
+    # Before anything else is installed, and after the check that refuses a
+    # running Wheelhouse: a re-install that is going to stop must stop before
+    # asking the user for a Windows permission prompt it then does not need.
+    # Nothing about this step can stop the install (see Install-SystemRuntime).
+    Install-SystemRuntime
 
     Write-InstallProgress 5 "Installing the package manager"
     Write-InstallHeartbeat "Installing the package manager (uv)"

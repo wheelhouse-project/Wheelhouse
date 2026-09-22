@@ -299,6 +299,10 @@ startup_timeout_seconds = 90
 [ai.help]
 gem_url = "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
 max_response_tokens = 800
+# Show the window that explains the Wheelhouse Assistant before the browser
+# opens. The window's "Do not show this again" check box sets this to false.
+# Set it back to true to see the explanation again.
+explain_before_open = true
 
 [click]
 enabled = true

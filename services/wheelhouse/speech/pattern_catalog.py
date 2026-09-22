@@ -105,6 +105,27 @@ def _normalize_lookup_word(word: str) -> str:
     return stripped.lower()
 
 
+# The action that saves a hint in the speech engine
+# (speech/actions.py ActionFunctions.add_hint_to_stt).
+HINT_ACTION_NAME = "add_hint_to_stt"
+
+
+def _actions_need_hint_engine(actions: Any) -> bool:
+    """True when any action step calls the hint action.
+
+    wh-boost-engine-qualification: such a pattern matches only while the
+    running speech engine applies hints (or has not reported). A step that
+    is not a table, or a non-list value, is hand-edit garbage and counts as
+    no hint action.
+    """
+    if not isinstance(actions, list):
+        return False
+    return any(
+        isinstance(step, dict) and step.get("function") == HINT_ACTION_NAME
+        for step in actions
+    )
+
+
 class PatternType(Enum):
     """Classification of pattern types for speech processor decision logic.
     
@@ -1081,6 +1102,20 @@ class PatternCatalog:
                     if whole_utterance_only:
                         data_dict["whole_utterance_only"] = True
 
+                    # A pattern that saves a hint needs an engine that
+                    # applies hints (wh-boost-engine-qualification, ruling
+                    # 1 of 2026-09-21). Derived from the actions, not read
+                    # from a patterns.toml key, so the Pattern Manager's
+                    # write-back cannot drop it and a user-made pattern
+                    # with the same action obeys the same rule. The
+                    # matcher refuses such a pattern only when the running
+                    # engine reports that it does not apply hints.
+                    requires_hint_engine = _actions_need_hint_engine(
+                        actions_list
+                    )
+                    if requires_hint_engine:
+                        data_dict["requires_hint_engine"] = True
+
                     # Add auto-detected validation metadata
                     if auto_metadata.get("validation_group"):
                         data_dict["validation_group"] = auto_metadata["validation_group"]
@@ -1160,6 +1195,7 @@ class PatternCatalog:
                         'raw_pattern': pattern_str,
                         'is_user': source_file == self._user_patterns_file,
                         'whole_utterance_only': whole_utterance_only,
+                        'requires_hint_engine': requires_hint_engine,
                     }
                     # Carry the durable name forward so anything working on
                     # the built list can ask the same identity question the
@@ -1229,8 +1265,8 @@ class PatternCatalog:
         Returns:
             ``(lowercased_word, entry_dict)`` on success; ``None`` if the
             entry failed validation. The entry_dict has ``compiled_pattern``
-            (re.Pattern matching the word case-insensitively) and
-            ``actions`` (the raw action list).
+            (re.Pattern matching the word case-insensitively), ``actions``
+            (the raw action list) and ``requires_hint_engine``.
         """
         if not isinstance(pattern_str, str) or not pattern_str.strip():
             logger.warning(
@@ -1270,6 +1306,9 @@ class PatternCatalog:
         return word, {
             "compiled_pattern": compiled,
             "actions": actions_list,
+            # wh-boost-engine-qualification: the same derived flag the
+            # leading entries carry; SpeechProcessor reads it.
+            "requires_hint_engine": _actions_need_hint_engine(actions_list),
         }
 
     def _load_patterns(self):

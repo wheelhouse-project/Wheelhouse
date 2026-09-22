@@ -27,9 +27,14 @@ KNOWLEDGE_ROOT = SERVICE_ROOT / "knowledge"
 
 REMOVED_ACTIONS = ("audio_suppression_off", "audio_suppression_on")
 
-# The bead's criterion 6 search: grep -rn -i 'audio suppression o'
-# services/wheelhouse/knowledge must find no spoken command.
-SPOKEN_COMMAND_TEXT = re.compile(r"audio suppression o", re.IGNORECASE)
+# Matches the words "audio suppression on" and "audio suppression off" as a
+# spoken command offer. Does not match the quote of the log line
+# "Audio suppression off: Windows reports an echo canceller", which
+# utils/audio_suppression_decision.py writes; that quote always continues
+# with a colon (wh-release-after-1-0-8.9).
+SPOKEN_COMMAND_TEXT = re.compile(
+    r"\baudio suppression o(?:n|ff)\b(?!\s*:)", re.IGNORECASE
+)
 
 
 def test_the_gui_has_no_audio_suppression_sender():

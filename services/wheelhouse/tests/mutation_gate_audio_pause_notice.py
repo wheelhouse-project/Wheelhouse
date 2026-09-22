@@ -7,6 +7,12 @@ Two changes are guarded:
   reported on the first loud poll. Catchers: TestMonitorAudioStopHoldoff in
   tests/test_handlers/test_audio_monitor.py (TestMonitorAudioLoop is in the
   selection so a mutation that breaks start reporting is seen there too).
+* Sound that returns inside the hold-off publishes the playing event once
+  more, so a sound pause the user toggle cleared starts again
+  (wh-sound-pause-returns-after-toggle). Catchers:
+  TestMonitorAudioRepublishesPlaying in the same file; two of its tests run
+  the loop against a real StateManager, and one mutation removes the
+  same-value guard in state_manager.py set_speech_suppressed_by_audio.
 * state_manager.py set_speech_suppressed_by_audio no longer sends the
   listening-paused notice. Catcher: TestNoPauseNotice in
   tests/test_audio_suppression_control.py.
@@ -59,6 +65,7 @@ CONTROL_TESTS = "tests/test_audio_suppression_control.py"
 SELECTION = [
     f"{MONITOR_TESTS}::TestMonitorAudioLoop",
     f"{MONITOR_TESTS}::TestMonitorAudioStopHoldoff",
+    f"{MONITOR_TESTS}::TestMonitorAudioRepublishesPlaying",
     f"{CONTROL_TESTS}::TestNoPauseNotice",
 ]
 RUN_TIMEOUT = 180  # A clean run of the selection takes a few seconds.
@@ -69,6 +76,11 @@ RETURNS = "test_sound_returning_inside_the_hold_off_publishes_no_stop"
 RESTART = "test_quiet_after_sound_returns_waits_a_whole_new_hold_off"
 NO_NOTICE = "test_a_pause_sends_no_notification"
 LOOP_START = "test_publishes_event_on_state_change"
+REPUBLISH = "test_sound_returning_inside_the_hold_off_publishes_playing_again"
+AFTER_RETURN = "test_continuous_sound_after_the_return_publishes_nothing_more"
+CONTINUOUS = "test_continuous_sound_publishes_one_event"
+PAUSE_ON = "test_repeated_playing_changes_nothing_while_the_pause_is_on"
+AFTER_TOGGLE = "test_repeated_playing_restores_the_pause_the_toggle_cleared"
 
 MUTATIONS = [
     {
@@ -79,10 +91,10 @@ MUTATIONS = [
         "old": "if now - quiet_since < AUDIO_STOP_HOLDOFF_SECONDS:",
         "new": "if now - quiet_since < 0:",
         "catchers": {
-            DIP: "assert [True, False, True] == [True]",
+            DIP: "assert [True, False, True] == [True, True]",
             PAST: "assert [(True, 0.0), (False, 1.0)] == [(True, 0.0), (False, 4.0)]",
-            RETURNS: "assert [True, False, True] == [True]",
-            RESTART: "assert [(True, 0.0),... (False, 4.0)] == [(True, 0.0), (False, 7.0)]",
+            RETURNS: "assert [True, False, True] == [True, True]",
+            RESTART: "assert [(True, 0.0),... (False, 4.0)] == [(True, 0.0),... (False, 7.0)]",
         },
     },
     {
@@ -93,24 +105,26 @@ MUTATIONS = [
         "new": "if now - quiet_since < 10**9:",
         "catchers": {
             PAST: "assert [(True, 0.0)] == [(True, 0.0), (False, 4.0)]",
-            RESTART: "assert [(True, 0.0)] == [(True, 0.0), (False, 7.0)]",
+            RESTART: "assert [(True, 0.0), (True, 3.0)] == [(True, 0.0),... (False, 7.0)]",
         },
     },
     {
         # A loud poll no longer resets quiet_since, so a later quiet stretch
-        # is timed from the earlier one and the stop comes early.
+        # is timed from the earlier one and the stop comes early, and every
+        # later loud poll repeats the playing event.
         "name": "loud-poll-keeps-stale-quiet-since",
         "file": MONITOR,
         "old": (
-            "                    if is_playing or not report_change:\n"
             "                        quiet_since = None\n"
+            "                    else:\n"
         ),
         "new": (
-            "                    if is_playing or not report_change:\n"
             "                        pass\n"
+            "                    else:\n"
         ),
         "catchers": {
-            RESTART: "assert [(True, 0.0), (False, 4.0)] == [(True, 0.0), (False, 7.0)]",
+            RESTART: "assert [(True, 0.0),... (False, 4.0)] == [(True, 0.0),... (False, 7.0)]",
+            AFTER_RETURN: "assert [(True, 0.0),..., (True, 4.0)] == [(True, 0.0), (True, 2.0)]",
         },
     },
     {
@@ -121,10 +135,10 @@ MUTATIONS = [
         "old": "if is_playing or not report_change:",
         "new": "if not report_change:",
         "catchers": {
-            DIP: "assert [] == [True]",
+            DIP: "assert [] == [True, True]",
             PAST: "assert [] == [(True, 0.0), (False, 4.0)]",
-            RETURNS: "assert [] == [True]",
-            RESTART: "assert [] == [(True, 0.0), (False, 7.0)]",
+            RETURNS: "assert [] == [True, True]",
+            RESTART: "assert [] == [(True, 0.0),... (False, 7.0)]",
             LOOP_START: "AssertionError: Expected 'publish' to have been called.",
         },
     },
@@ -137,7 +151,7 @@ MUTATIONS = [
         "new": "if True:",
         "catchers": {
             PAST: "assert [(True, 0.0)] == [(True, 0.0), (False, 4.0)]",
-            RESTART: "assert [(True, 0.0)] == [(True, 0.0), (False, 7.0)]",
+            RESTART: "assert [(True, 0.0), (True, 3.0)] == [(True, 0.0),... (False, 7.0)]",
         },
     },
     {
@@ -149,7 +163,7 @@ MUTATIONS = [
         "new": "if now - quiet_since <= AUDIO_STOP_HOLDOFF_SECONDS:",
         "catchers": {
             PAST: "assert [(True, 0.0)] == [(True, 0.0), (False, 4.0)]",
-            RESTART: "assert [(True, 0.0)] == [(True, 0.0), (False, 7.0)]",
+            RESTART: "assert [(True, 0.0), (True, 3.0)] == [(True, 0.0),... (False, 7.0)]",
         },
     },
     {
@@ -160,7 +174,51 @@ MUTATIONS = [
         "old": "AUDIO_STOP_HOLDOFF_SECONDS = 3\n",
         "new": "AUDIO_STOP_HOLDOFF_SECONDS = 1\n",
         "catchers": {
-            RETURNS: "assert [True, False, True] == [True]",
+            RETURNS: "assert [True, False, True] == [True, True]",
+            REPUBLISH: "assert [(True, 0.0),..., (True, 3.0)] == [(True, 0.0), (True, 3.0)]",
+        },
+    },
+    {
+        # The repeat is removed: sound that returns inside the hold-off
+        # publishes nothing, so a pause the toggle cleared stays off
+        # (the behaviour before wh-sound-pause-returns-after-toggle).
+        "name": "repeat-removed",
+        "file": MONITOR,
+        "old": "                            report_change = True\n",
+        "new": "                            pass\n",
+        "catchers": {
+            DIP: "assert [True] == [True, True]",
+            RETURNS: "assert [True] == [True, True]",
+            RESTART: "assert [(True, 0.0), (False, 7.0)] == [(True, 0.0),... (False, 7.0)]",
+            REPUBLISH: "assert [(True, 0.0)] == [(True, 0.0), (True, 3.0)]",
+            AFTER_RETURN: "assert [(True, 0.0)] == [(True, 0.0), (True, 2.0)]",
+            PAUSE_ON: "assert [True] == [True, True]",
+            AFTER_TOGGLE: "assert False is True",
+        },
+    },
+    {
+        # Every loud poll repeats the playing event, not only the first
+        # loud poll after a quiet reading.
+        "name": "repeat-on-every-loud-poll",
+        "file": MONITOR,
+        "old": "if is_playing and quiet_since is not None:",
+        "new": "if is_playing:",
+        "catchers": {
+            CONTINUOUS: "assert [(True, 0.0),..., (True, 3.0)] == [(True, 0.0)]",
+            AFTER_RETURN: "assert [(True, 0.0),..., (True, 4.0)] == [(True, 0.0), (True, 2.0)]",
+        },
+    },
+    {
+        # The setter no longer skips a value it already holds, so the
+        # repeated playing event broadcasts the status and updates the GUI
+        # again while the pause is already on. state_manager.py is not
+        # changed by this branch; the mutation proves PAUSE_ON guards it.
+        "name": "setter-same-value-guard-removed",
+        "file": STATE,
+        "old": "        if self._speech_suppressed_by_audio != is_suppressed:\n",
+        "new": "        if True:\n",
+        "catchers": {
+            PAUSE_ON: "assert (0, 1, 1) == (0, 0, 0)",
         },
     },
     {

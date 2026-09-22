@@ -21,6 +21,8 @@ import pytest
 from floating_button_geometry import (
     MAX_BUTTON_SIZE,
     MIN_BUTTON_SIZE,
+    MIN_VISIBLE_AREA_FRACTION,
+    correct_onto_any_screen,
     correct_onto_screen,
     is_in_resize_ring,
     resize_from_pointer,
@@ -186,3 +188,117 @@ class TestGeometryAgree:
     def test_centre_of_every_supported_size_stays_available_for_moving(self, size):
         radius = size / 2
         assert is_in_resize_ring(radius, radius, size) is False
+
+
+class TestCorrectOntoAnyScreen:
+    """A stored position has to survive the screens changing underneath it.
+
+    ``correct_onto_screen`` above knows one screen, which is right for a
+    resize: the gesture began on a screen and stays with it. A stored position
+    is a different problem. It was written on whatever screens existed then,
+    and it is read back on whatever screens exist now -- a monitor unplugged, a
+    resolution changed, a Remote Desktop session at another size. So the
+    question here is not "does it overhang an edge" but "can the user still
+    see enough of it to click it".
+
+    The rule is one line of arithmetic: add up how much of the button's square
+    lands on a screen, and leave the position alone while that is at least
+    ``MIN_VISIBLE_AREA_FRACTION`` of the button. Adding the areas rather than
+    testing each screen on its own is what lets a button sit across the seam
+    between two monitors, where no single screen holds half of it but the user
+    can see all of it.
+
+    wh-floating-button-offscreen.
+    """
+
+    LEFT = (0, 0, 1920, 1080)
+    RIGHT = (1920, 0, 1920, 1080)
+    SIZE = 50
+
+    def test_the_fraction_is_a_half(self):
+        # The boss set the amount; the tests below read it from the constant,
+        # so this is the one place the number itself is checked.
+        assert MIN_VISIBLE_AREA_FRACTION == 0.5
+
+    def test_a_button_well_inside_a_screen_is_left_alone(self):
+        assert correct_onto_any_screen(500, 500, self.SIZE, [self.LEFT]) == (500, 500)
+
+    def test_a_button_across_the_seam_between_two_monitors_is_left_alone(self):
+        # 20 px of the button on the left monitor, 30 px on the right one.
+        # Neither screen holds half of it; together they show all of it, so
+        # moving it would take away a button the user can see and click.
+        assert correct_onto_any_screen(
+            1900, 500, self.SIZE, [self.LEFT, self.RIGHT]
+        ) == (1900, 500)
+
+    def test_a_button_split_across_a_seam_counts_both_screens_together(self):
+        # The test above cannot tell the summed rule from a per-screen one.
+        # A 50 px button fully covered by two monitors has 2500 px of area
+        # against a 1250 px threshold, so whichever way it splits, one screen
+        # always holds at least half. Only a button that ALSO hangs off an
+        # outer edge separates them.
+        #
+        # Here 26 of the 50 rows are on screen: 20 columns on the left
+        # monitor and 30 on the right. Left holds 520 px, right holds 780 px,
+        # and neither reaches 1250. Added they come to 1300, so the user can
+        # see more than half the button and it stays where it is.
+        #
+        # This is the case the mutation gate found unguarded: replacing sum()
+        # with max() in correct_onto_any_screen left every other test green.
+        assert correct_onto_any_screen(
+            1900, -24, self.SIZE, [self.LEFT, self.RIGHT]
+        ) == (1900, -24)
+
+    def test_a_button_exactly_half_off_an_outer_edge_is_left_alone(self):
+        # 25 of 50 px of width, all 50 px of height: exactly half the area.
+        # "At least half" keeps it, so a position parked on an edge survives.
+        assert correct_onto_any_screen(-25, 500, self.SIZE, [self.LEFT]) == (-25, 500)
+
+    def test_a_button_less_than_half_visible_is_moved_fully_onto_the_screen(self):
+        # One pixel further out than the case above.
+        assert correct_onto_any_screen(-26, 500, self.SIZE, [self.LEFT]) == (0, 500)
+
+    def test_a_button_on_no_screen_at_all_comes_back(self):
+        # The monitor it was stored on is gone. This is the case David hit.
+        assert correct_onto_any_screen(3000, 2000, self.SIZE, [self.LEFT]) == (1870, 1030)
+
+    def test_a_duplicated_display_does_not_count_the_same_pixels_twice(self):
+        # Two screens reporting identical bounds are one display, mirrored.
+        # Counting both would make 20 px of visible button look like 40.
+        duplicated = [self.LEFT, self.LEFT]
+        assert correct_onto_any_screen(-30, 500, self.SIZE, duplicated) == (0, 500)
+
+    def test_a_monitor_left_of_the_primary_one_keeps_its_negative_coordinates(self):
+        # Windows gives a monitor placed to the left of the primary display
+        # negative x. A button living there is fully visible and must not be
+        # dragged onto the primary screen.
+        negative = (-1920, 0, 1920, 1080)
+        assert correct_onto_any_screen(
+            -1000, 500, self.SIZE, [negative, self.LEFT]
+        ) == (-1000, 500)
+
+    def test_a_lost_position_returns_to_the_nearest_screen_not_the_first_one(self):
+        # Stored far to the right of all three monitors. The right-hand one is
+        # nearest, so the button belongs against its right edge, not on either
+        # of the others.
+        negative = (-1920, 0, 1920, 1080)
+        assert correct_onto_any_screen(
+            5000, 500, self.SIZE, [negative, self.LEFT, self.RIGHT]
+        ) == (3790, 500)
+
+    def test_a_lost_position_above_every_screen_comes_down_to_the_top_edge(self):
+        assert correct_onto_any_screen(500, -4000, self.SIZE, [self.LEFT]) == (500, 0)
+
+    def test_no_screens_at_all_leaves_the_position_untouched(self):
+        # Qt can report an empty screen list while a session is being torn
+        # down or handed over. There is nothing to correct onto, and inventing
+        # (0, 0) would overwrite a good stored position with a guess.
+        assert correct_onto_any_screen(500, 500, self.SIZE, []) == (500, 500)
+
+    @pytest.mark.parametrize("size", [MIN_BUTTON_SIZE, 50, 100, MAX_BUTTON_SIZE])
+    def test_a_button_of_any_supported_size_ends_up_fully_on_a_screen(self, size):
+        left, top = correct_onto_any_screen(9000, 9000, size, [self.LEFT])
+        screen_x, screen_y, screen_w, screen_h = self.LEFT
+        assert left >= screen_x and top >= screen_y
+        assert left + size <= screen_x + screen_w
+        assert top + size <= screen_y + screen_h

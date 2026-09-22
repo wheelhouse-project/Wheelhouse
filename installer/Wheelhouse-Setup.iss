@@ -298,12 +298,27 @@ begin
       WizardForm.ProgressGauge.Style := npbstNormal;
       WizardForm.ProgressGauge.Position := pct;
     end;
-    if msg <> '' then
+    if msg <> '' then begin
       WizardForm.StatusLabel.Caption := msg;
+      { Clear the still-working line a previous HEARTBEAT left behind. A
+        PROGRESS message means that step finished, so leaving "still
+        working" under it would say the opposite of what happened. }
+      WizardForm.FilenameLabel.Caption := '';
+    end;
   end else if TagPayload(line, 'HEARTBEAT', msg) then begin
     WizardForm.ProgressGauge.Style := npbstMarquee;
-    if msg <> '' then
-      WizardForm.StatusLabel.Caption := msg + '  (still working, please wait...)';
+    if msg <> '' then begin
+      { The still-working note goes on its OWN line, not on the end of the
+        message. Appended, the longest pair was 87 + 33 = 120 characters on
+        one line, and StatusLabel is a single line that does not wrap: David
+        photographed it cut at "...(still working, pl" on 2026-09-19
+        (wh-installer-text-clipped defect 2). FilenameLabel is the line
+        directly below StatusLabel on the Installing page. Three places in
+        this script write it: this branch, the PROGRESS branch above, and
+        the clear at the start of RunEngine. The words are unchanged. }
+      WizardForm.StatusLabel.Caption := msg;
+      WizardForm.FilenameLabel.Caption := '(still working, please wait...)';
+    end;
   end else if TagPayload(line, 'NOTICE', msg) then begin
     { Kept for the finish page rather than shown here: the status label is
       overwritten by the next PROGRESS line, so a note put there would be gone
@@ -384,6 +399,17 @@ begin
     change exists to replace (wh-wizard-failure-guidance.2.1). }
   try
     ExtractTemporaryFile(ENGINE);
+    { Start the still-working line empty. This clear sits AFTER the
+      extraction on purpose. The Inno Setup documentation declares
+      FilenameLabel as a property of TWizardForm and says nothing about
+      what writes that label or when
+      (https://jrsoftware.org/ishelp/topic_scriptclasses.htm), so whether
+      ExtractTemporaryFile leaves anything on it is unknown here. If it
+      does, that text would sit under the status caption set below until
+      the first engine line arrives. One assignment closes the question
+      whatever the answer is; a clear placed above the extraction would
+      not (wh-installer-text-clipped). }
+    WizardForm.FilenameLabel.Caption := '';
     cloud := AiCloudRadio.Checked;
 
     Params :=
@@ -514,6 +540,16 @@ begin
   AiSkipRadio.Left := 0;
   AiSkipRadio.Top := ScaleY(8);
   AiSkipRadio.Width := AiPage.SurfaceWidth;
+  { A radio button cannot size itself: the Inno Setup script class
+    TNewRadioButton declares neither AutoSize nor WordWrap
+    (https://jrsoftware.org/ishelp/topic_scriptclasses.htm), so the default
+    height stays at its unscaled value while the wizard font grows with the
+    display scale, and the caption is cut off across its middle. David
+    photographed that on 2026-09-19 (wh-installer-text-clipped defect 1).
+    An explicit Height is the only remedy, and ScaleY is what makes it
+    follow the same scale factor Inno applies to the font -- the same idiom
+    the microphone page below already uses for its own controls. }
+  AiSkipRadio.Height := ScaleY(17);
   if ExistingInstall then
     AiSkipRadio.Caption := 'Leave my AI helper setting unchanged.'
   else
@@ -526,6 +562,9 @@ begin
   AiCloudRadio.Left := 0;
   AiCloudRadio.Top := AiSkipRadio.Top + ScaleY(26);
   AiCloudRadio.Width := AiPage.SurfaceWidth;
+  { Same reason as AiSkipRadio above: no AutoSize, no WordWrap, so the height
+    must be set here or the caption is cut off on a high-scale display. }
+  AiCloudRadio.Height := ScaleY(17);
   AiCloudRadio.Caption := 'Use a cloud model (Google Gemini). This sends dictated text to Google.';
   AiCloudRadio.OnClick := @AiRadioClick;
 
@@ -546,6 +585,15 @@ begin
   AiKeyLink.Left := ScaleX(18);
   AiKeyLink.Top := AiKeyEdit.Top + ScaleY(26);
   AiKeyLink.Width := AiPage.SurfaceWidth - ScaleX(36);
+  { This caption is 84 characters, the longest on the page. AutoSize overrides
+    Width, so with AutoSize left on the control grows into one long line that
+    can run past the right edge instead of wrapping inside the page. Turning
+    AutoSize off and WordWrap on, then giving a Height, is the order the
+    microphone page below uses, and it is the only order in which a fixed
+    Height means anything. No word changes. }
+  AiKeyLink.AutoSize := False;
+  AiKeyLink.WordWrap := True;
+  AiKeyLink.Height := ScaleY(30);
   AiKeyLink.Caption := 'Get a free key at https://aistudio.google.com/apikey (a Google account is required).';
 
   UpdateAiKeyState;

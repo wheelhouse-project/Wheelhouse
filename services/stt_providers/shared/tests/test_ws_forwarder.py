@@ -9,6 +9,7 @@ These tests verify that:
 6. Send methods queue messages correctly
 """
 import asyncio
+import socket
 import threading
 import time
 import sys
@@ -20,6 +21,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared_stt.ws_forwarder import WSForwarder
+
+
+def _unused_port():
+    """Return a port that Windows chose and that has no listener now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class TestDisconnectCallback:
@@ -39,7 +47,7 @@ class TestDisconnectCallback:
 
         forwarder = WSForwarder(
             host="localhost",
-            port=59999,  # Use high port unlikely to be in use
+            port=_unused_port(),  # No server running
             transcription_enabled_event=threading.Event(),
             on_disconnect_callback=on_disconnect,
             debug=False
@@ -179,15 +187,16 @@ class TestReconnectCallback:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59994)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         # Create and start forwarder
         event = threading.Event()
         event.set()  # Start enabled
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59994,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             on_disconnect_callback=on_disconnect,
             on_reconnect_callback=on_reconnect,
@@ -272,15 +281,16 @@ class TestShutdownCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59996)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         # Create and start forwarder with shutdown callback
         event = threading.Event()
         event.set()  # Start enabled
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59996,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             shutdown_callback=on_shutdown,
             debug=False
@@ -321,7 +331,7 @@ class TestQueueClearing:
 
         forwarder = WSForwarder(
             host="localhost",
-            port=59997,  # No server running
+            port=_unused_port(),  # No server running
             transcription_enabled_event=threading.Event(),
             on_disconnect_callback=on_disconnect,
             debug=False
@@ -367,14 +377,15 @@ class TestSendMethods:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59995)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59995,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -419,14 +430,15 @@ class TestSendMethods:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59993)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59993,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -471,14 +483,15 @@ class TestSendMethods:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59992)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59992,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -522,14 +535,15 @@ class TestSendMethods:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59991)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59991,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -576,14 +590,15 @@ class TestSendEos:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59980)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59980,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -627,14 +642,15 @@ class TestSendEos:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59981)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59981,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -694,14 +710,15 @@ class TestSendFinalReason:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59983)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59983,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -754,14 +771,15 @@ class TestSendFinalReason:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59984)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59984,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -804,14 +822,15 @@ class TestSendFinalReason:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59985)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59985,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -873,14 +892,15 @@ class TestSendFinalConfidence:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59910)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59910,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -930,14 +950,15 @@ class TestSendFinalConfidence:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59911)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59911,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -981,14 +1002,15 @@ class TestSendFinalConfidence:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59912)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59912,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -1043,14 +1065,15 @@ class TestTranscriptionStatusCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59990)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         # Start with event cleared
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59990,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1091,14 +1114,15 @@ class TestTranscriptionStatusCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59989)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()  # Start enabled
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59989,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1150,14 +1174,15 @@ class TestSetInterimResultsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59950)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59950,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             set_interim_results_callback=on_set_interim,
             debug=False
@@ -1204,14 +1229,15 @@ class TestSetInterimResultsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59951)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59951,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             set_interim_results_callback=on_set_interim,
             debug=False
@@ -1251,15 +1277,16 @@ class TestSetInterimResultsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59952)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         # No set_interim_results_callback provided
         forwarder = WSForwarder(
-            host="localhost",
-            port=59952,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1306,14 +1333,15 @@ class TestLogForwarding:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59940)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59940,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1363,14 +1391,15 @@ class TestLogForwarding:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59941)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59941,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1418,14 +1447,15 @@ class TestLogForwarding:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59942)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59942,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1476,14 +1506,15 @@ class TestLogForwarding:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59943)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59943,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1540,14 +1571,15 @@ class TestWebSocketLogHandler:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59944)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59944,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1604,14 +1636,15 @@ class TestWebSocketLogHandler:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59945)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59945,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1669,14 +1702,15 @@ class TestWebSocketLogHandler:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59946)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59946,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1732,14 +1766,15 @@ class TestSendWakeWordDetected:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59930)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59930,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -1803,14 +1838,15 @@ class TestWakeWordActivateCallback:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59932)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59932,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             wake_word_activate_callback=on_wake_word_activate,
             debug=False
@@ -1860,14 +1896,15 @@ class TestWakeWordActivateCallback:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59933)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         # Start cleared
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59933,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             wake_word_activate_callback=on_wake_word_activate,
             debug=False
@@ -1917,14 +1954,15 @@ class TestWakeWordActivateCallback:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59934)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59934,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             wake_word_activate_callback=on_wake_word_activate,
             debug=False
@@ -1967,15 +2005,16 @@ class TestWakeWordActivateCallback:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59935)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         # No wake_word_activate_callback provided
         forwarder = WSForwarder(
-            host="localhost",
-            port=59935,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2044,14 +2083,15 @@ class TestTraceId:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59920)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59920,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2093,14 +2133,15 @@ class TestTraceId:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59921)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59921,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2142,14 +2183,15 @@ class TestTraceId:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59922)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59922,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2191,14 +2233,15 @@ class TestTraceId:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59923)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59923,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2264,14 +2307,15 @@ class TestTraceId:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59924)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59924,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2323,14 +2367,15 @@ class TestTraceId:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59925)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59925,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2380,14 +2425,15 @@ class TestSetLogLevelCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59960)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59960,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             set_log_level_callback=on_set_log_level,
             debug=False
@@ -2434,14 +2480,15 @@ class TestSetLogLevelCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59961)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59961,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             set_log_level_callback=on_set_log_level,
             debug=False
@@ -2481,15 +2528,16 @@ class TestSetLogLevelCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59962)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         # No set_log_level_callback provided
         forwarder = WSForwarder(
-            host="localhost",
-            port=59962,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False
         )
@@ -2542,14 +2590,15 @@ class TestSetCalibrationModeCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59900)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59900,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             set_calibration_mode_callback=on_set_calibration_mode,
             debug=False,
@@ -2598,14 +2647,15 @@ class TestSetCalibrationModeCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59901)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59901,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             set_calibration_mode_callback=on_set_calibration_mode,
             debug=False,
@@ -2647,15 +2697,16 @@ class TestSetCalibrationModeCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59902)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         # No set_calibration_mode_callback provided
         forwarder = WSForwarder(
-            host="localhost",
-            port=59902,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -2704,14 +2755,15 @@ class TestSetCalibrationModeCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59903)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59903,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             set_calibration_mode_callback=on_set_calibration_mode,
             debug=False,
@@ -2745,7 +2797,7 @@ class TestSetCalibrationModeCommand:
 
         forwarder = WSForwarder(
             host="localhost",
-            port=59904,  # No server running
+            port=_unused_port(),  # No server running
             transcription_enabled_event=threading.Event(),
             set_calibration_mode_callback=on_set_calibration_mode,
             debug=False,
@@ -2795,14 +2847,15 @@ class TestApplyEngineSettingsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59905)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59905,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             apply_engine_settings_callback=on_apply,
             debug=False,
@@ -2856,14 +2909,15 @@ class TestApplyEngineSettingsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59906)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59906,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             apply_engine_settings_callback=on_apply,
             debug=False,
@@ -2915,14 +2969,15 @@ class TestApplyEngineSettingsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59907)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59907,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             apply_engine_settings_callback=on_apply,
             debug=False,
@@ -2978,14 +3033,15 @@ class TestApplyEngineSettingsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59909)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59909,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             apply_engine_settings_callback=on_apply,
             debug=False,
@@ -3029,15 +3085,16 @@ class TestApplyEngineSettingsCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59908)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         # No apply_engine_settings_callback provided
         forwarder = WSForwarder(
-            host="localhost",
-            port=59908,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -3089,14 +3146,15 @@ class TestSendEngineSettingsResult:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59913)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59913,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -3143,14 +3201,15 @@ class TestSendEngineSettingsResult:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59914)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59914,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -3217,14 +3276,15 @@ class TestStopDeliversQueuedFrames:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59916)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59916,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )
@@ -3377,14 +3437,15 @@ class TestHardRestartCommandRemoved:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59994)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59994,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             add_hint_callback=_record("add_hint"),
             restart_callback=_record("restart"),

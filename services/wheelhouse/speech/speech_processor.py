@@ -98,6 +98,7 @@ from services.wheelhouse.shared.grapheme import (
 from .domain import ProcessingMode, Action, Decision
 from .number_word_parser import parse_number_word
 from .click_parser import _NUMBER_FILLERS, _TRAILING_PUNCT
+from .pattern_matcher import _refused_for_hint_engine
 from .router import SpeechRouter, _word_matches_hotword
 from utils.trace_context import set_trace, elapsed_ms
 
@@ -485,6 +486,9 @@ class SpeechProcessor:
         self.buffer: list[str] = []
         self.timeout_task: Optional[asyncio.Task] = None
         self.hotword_active = False  # Track if current buffer was triggered by hotword
+        # Whether the running speech engine applies a saved hint; None is
+        # unknown. Set by apply_hint_engine (wh-boost-engine-qualification).
+        self.hint_engine: Optional[bool] = None
         # wh-cancel-fix-running-rewrite: the cancel-only lane. While an AI
         # command awaits the model, _processing_loop is blocked inside that
         # command and cannot read word_queue, so "x-ray cancel fix" used to
@@ -775,6 +779,22 @@ class SpeechProcessor:
         self.hotword = normalized
         self.router.hotword = normalized
         logger.info("Command hotword updated to '%s'", normalized)
+
+    def apply_hint_engine(self, value: Optional[bool]) -> None:
+        """Record whether the running speech engine applies a saved hint.
+
+        wh-boost-engine-qualification. ``value`` is True, False, or None
+        for unknown, as WebSocketManager keeps it from the provider's
+        capabilities frame. Copied onto the router, which hands it to every
+        routing match, and onto the TextParser, whose execution walk
+        re-matches the command text (``_execute_command``), so both layers
+        refuse the same hint pattern. Only False refuses: the words then
+        finish as dictation.
+        """
+        self.hint_engine = value
+        self.router.hint_engine = value
+        self.text_parser.hint_engine = value
+        logger.info("Speech engine applies hints: %s", value)
 
     # ========================================================================
     # HELD-TAIL COMPATIBILITY PROPERTIES
@@ -2366,9 +2386,21 @@ class SpeechProcessor:
         words = text.split()
         if not words:
             return text, None
-        if self.catalog.get_trailing_command(words[-1]) is None:
+        if self._usable_trailing_command(words[-1]) is None:
             return text, None
         return " ".join(words[:-1]), words[-1]
+
+    def _usable_trailing_command(self, word: str):
+        """The trailing-command entry for ``word``, or None.
+
+        None also when the entry's actions save a hint and the running
+        speech engine does not apply hints (wh-boost-engine-qualification):
+        the word is then ordinary dictation, as for a leading pattern.
+        """
+        entry = self.catalog.get_trailing_command(word)
+        if _refused_for_hint_engine(entry, self.hint_engine):
+            return None
+        return entry
 
     async def _maybe_hold_trailing_candidate(self, text: str) -> bool:
         """If ``text`` is a single word matching the trailing-command map,
@@ -2388,7 +2420,7 @@ class SpeechProcessor:
         # pattern; do not retro-classify them as trailing.
         if " " in text.strip():
             return False
-        entry = self.catalog.get_trailing_command(text)
+        entry = self._usable_trailing_command(text)
         if entry is None:
             return False
         # The top-of-loop guard in process_word_event has already
@@ -2493,6 +2525,17 @@ class SpeechProcessor:
             logger.warning(
                 "Trailing candidate %r no longer in catalog at "
                 "fire time; dictating as text instead",
+                redact_transcript(word),
+            )
+            await self._send_to_dictation(word)
+            return
+        if _refused_for_hint_engine(entry, self.hint_engine):
+            # wh-boost-engine-qualification: the engine reported that it
+            # does not apply hints between hold and fire. Same outcome as
+            # a refusal at hold time: the word is dictation.
+            logger.info(
+                "Trailing candidate %r saves a hint and the speech engine "
+                "does not apply hints; dictating as text",
                 redact_transcript(word),
             )
             await self._send_to_dictation(word)
@@ -4286,7 +4329,9 @@ class SpeechProcessor:
         Returns ``(match, pattern_data)`` on success, ``None`` if no
         replacement pattern matches the text. Greedy patterns are
         skipped to mirror PatternMatcher.match_complete semantics
-        (wh-oe7u.1 / wh-oe7u.2).
+        (wh-oe7u.1 / wh-oe7u.2), and so are patterns refused by the
+        hint rule (``_refused_for_hint_engine``,
+        wh-boost-engine-qualification).
         """
         matcher = self.text_parser.matcher
         candidates = []
@@ -4294,6 +4339,9 @@ class SpeechProcessor:
             if pattern_data.get('pattern_type') != 'replacement':
                 continue
             if pattern_data.get('is_greedy', False):
+                continue
+            # wh-boost-engine-qualification: the matcher's hint rule.
+            if _refused_for_hint_engine(pattern_data, self.hint_engine):
                 continue
             compiled = pattern_data['compiled_pattern']
             match = compiled.search(text)

@@ -48,8 +48,10 @@ GROUP 3, the two tests in ``TestACommandPrefixIsUnaffected``, are Stage
 B's regression net for the ruling's constraints (a) and (b): holding
 "open" must not change how a command starting with "open" behaves. Both
 PASS before the Stage B change and must keep passing after it, so
-neither is red-first evidence. Both patch ``webbrowser.open``, because
-the command they use really opens a browser.
+neither is red-first evidence. The command they use is the spoken help
+command; the first test gives it an awaitable
+``start_help_online`` and asserts the await, the second checks that
+the command did not run by the typed words.
 
 The unit-level tests for the extractor and the matchers are in
 tests/test_pattern_transform_boundary_body.py.
@@ -58,6 +60,7 @@ import asyncio
 import sys
 import webbrowser
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -527,11 +530,16 @@ class TestACommandPrefixIsUnaffected:
     is why "open" buffers as a command rather than as a replacement,
     which is the whole reason the hold could not reach it before.
 
-    Both tests patch ``webbrowser.open``. Measured 2026-09-05: without
-    the patch the real call raises ``TypeError: replace() argument 2
-    must be str, not MagicMock`` because the harness supplies a mock
-    URL, and the words are then dictated instead. So an unpatched test
-    would assert the shape of a failure path, not of the command.
+    Since the assistant-button merge (93d073ee), the spoken help
+    command awaits ``LogicController.start_help_online(source="spoken")``
+    and opens no browser itself. The harness's logic controller is a
+    MagicMock, whose auto-attribute cannot be awaited: the action
+    raises ``TypeError: object MagicMock can't be used in 'await'
+    expression`` and the words are then dictated instead
+    (wh-open-help-test-mock-await). So the first test installs an
+    ``AsyncMock`` in its place; without it the test would assert the
+    shape of a failure path, not of the command. Both tests still patch
+    ``webbrowser.open`` so that no path can open a real browser.
     """
 
     @pytest.mark.asyncio
@@ -543,12 +551,19 @@ class TestACommandPrefixIsUnaffected:
         The hold must never shorten or change the command buffer inside
         one utterance. Measured 2026-09-05 against the code before the
         Stage B change: one browser call and no inserted text at all.
+        Since 93d073ee the command's one effect is one await of
+        ``start_help_online(source="spoken")``, still with no inserted
+        text.
         """
         opened = []
         monkeypatch.setattr(
             webbrowser, "open", lambda *a, **k: opened.append(a) or True
         )
         harness = SpeechPipelineHarness()
+        start_help_online = AsyncMock()
+        harness.mock_speech_handler.logic_controller.start_help_online = (
+            start_help_online
+        )
         await harness.start()
         try:
             await harness.send_utterance(
@@ -566,8 +581,11 @@ class TestACommandPrefixIsUnaffected:
             for out in outputs
             if out.action == "intelligent_insert_text"
         ]
-        assert len(opened) == 1, (opened, insertions)
+        start_help_online.assert_awaited_once_with(source="spoken")
         assert insertions == [], (insertions, [o.action for o in outputs])
+        # The spoken path hands the browser to start_help_online; a
+        # browser call of its own would be a second copy of that decision.
+        assert opened == [], (opened, insertions)
 
     @pytest.mark.asyncio
     async def test_open_then_a_long_pause_keeps_the_rest_separate(

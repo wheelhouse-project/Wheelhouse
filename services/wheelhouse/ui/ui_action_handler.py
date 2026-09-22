@@ -84,6 +84,7 @@ from .elevation_check import target_elevation_state
 from .router import InsertionRouter
 from .strategies.base import InsertionMode, InsertionOptions
 from .strategies.specific import (
+    _context_hwnd,
     ClipboardOnlyStrategy,
     StandardStrategy,
     FlutterStrategy,
@@ -999,6 +1000,20 @@ class UIActionHandler:
         # Retraction state (reset per utterance)
         self._user_interacted_during_utterance: bool = False
         self._used_simple_paste: bool = False
+        # wh-lost-word-neighbour-paths.1.4: set when an insert retry
+        # moved the remembered target while this utterance already
+        # held credited characters. See the set site in
+        # _execute_insert_with_ack's retry loop.
+        self._retry_rebound_target: bool = False
+        # wh-lost-word-neighbour-paths.1.5: the windows this
+        # utterance credited characters to. Empty means nothing was
+        # recorded, one element means every credit went to the same
+        # window, and two or more means the credits are split. The
+        # retry guard reads it through _retry_returned_to_credited.
+        # A zero member stands for a delivery whose window could not
+        # be read, so it can never equal a real window and always
+        # leaves the set looking split.
+        self._credited_target_hwnds: set[int] = set()
 
         logger.debug("UIActionHandler initialized with all specialist components.")
 
@@ -1171,6 +1186,8 @@ class UIActionHandler:
         # Reset retraction tracking for new utterance
         self._user_interacted_during_utterance = False
         self._used_simple_paste = False
+        self._retry_rebound_target = False
+        self._credited_target_hwnds.clear()
         self.clipboard.reset_paste_counter()
         # wh-9weum Phase 1: clear the soft-fallback strategy's
         # preceding-chars mirror so the first word of the new
@@ -1229,6 +1246,8 @@ class UIActionHandler:
         # Reset retraction tracking (safety cleanup)
         self._user_interacted_during_utterance = False
         self._used_simple_paste = False
+        self._retry_rebound_target = False
+        self._credited_target_hwnds.clear()
         self.clipboard.reset_paste_counter()
 
     def skip_clipboard_restore(self, enable: bool = True, **kwargs):
@@ -1313,6 +1332,26 @@ class UIActionHandler:
         if self._used_simple_paste:
             logger.info("Retraction blocked: SimplePaste strategy was used")
             return {"status": "not_retracted", "reason": "simple_paste"}
+
+        # wh-lost-word-neighbour-paths.1.4: a retry moved the remembered
+        # target after this utterance had already credited characters, so
+        # the accumulated total no longer belongs to a single window.
+        # Backspaces follow the foreground window, so sending them would
+        # chew into text the user typed there. The set site in
+        # _execute_insert_with_ack's retry loop explains the accounting.
+        #
+        # wh-lost-word-neighbour-paths.1.5 narrowed which retries set
+        # it: a retry that came back to the one window every credited
+        # character already went to leaves the flag clear, because the
+        # backspaces would reach exactly those characters.
+        if self._retry_rebound_target:
+            logger.info(
+                "Retraction blocked: a retry moved the target window "
+                "while this utterance already held credited characters",
+            )
+            return {
+                "status": "not_retracted", "reason": "retry_rebound_target",
+            }
 
         # Fail-closed gates against provenance the rest of the pipeline
         # already records (wh-20yil, wh-t81d9.1). Sending backspaces under
@@ -1717,6 +1756,64 @@ class UIActionHandler:
             return False
         return expected_root == actual_root
 
+    def _record_credited_target(self, context, result) -> None:
+        """Record the window a successful delivery targeted.
+
+        wh-lost-word-neighbour-paths.1.5: the retraction counters in
+        ClipboardOperations hold one per-utterance total and record
+        nothing about which window each credit went to. This records it
+        alongside them, so the retry guard can tell a retry that moved
+        to a new window from a retry that came back to the window the
+        earlier words went to.
+
+        Called at every delivery call site in this module after the
+        strategy reports success. A site that is missed leaves the set
+        empty, and the guard then refuses exactly as it did before this
+        change. A delivery whose window cannot be read adds 0, which no
+        real window equals, so the set reads as split and the guard
+        refuses for that too.
+
+        crewcut: this records the window the capture TARGETED, not the
+        window the keystroke was proven to reach, and the two can
+        disagree on a VERIFIED delivery. The known case is a Brave text
+        control under an invisible helper top-level window while the
+        main window holds the foreground. The capture carries the helper
+        as its root, the post-paste check in
+        ClipboardOperations.verified_paste accepts the unequal pair
+        through same_process_fallback_matches, the characters reach the
+        main window, and this records the helper. A later retry that
+        comes back to the main window then misses the recorded helper,
+        so the guard refuses the retraction even when every credit went
+        to that main window: the earlier words stay on screen and the
+        corrected final is not typed. The refusal is the safe direction,
+        because a refused retraction sends no backspaces; it is accepted
+        as a known limit. To remove the limit, record both windows of
+        each delivery and match on them, or have
+        ClipboardOperations.credit_paste_chars record the proven
+        recipient itself and read it from there. Finding
+        wh-lost-word-neighbour-paths.1.6 holds the code reading and what
+        it leaves unproven.
+        """
+        if not getattr(result, "success", False):
+            return
+        self._credited_target_hwnds.add(_context_hwnd(context) or 0)
+
+    def _retry_returned_to_credited(self, context) -> bool:
+        """True when this retry captured the one window already credited.
+
+        wh-lost-word-neighbour-paths.1.5, boss ruling case A term 2:
+        refuse by default. False when nothing was recorded, when the
+        credits are split across windows, when this capture has no
+        readable window, and when the captured window is not the
+        credited one. Only a single credited window that matches this
+        capture answers True.
+        """
+        credited = self._credited_target_hwnds
+        if len(credited) != 1:
+            return False
+        hwnd = _context_hwnd(context)
+        return bool(hwnd) and hwnd in credited
+
     def _execute_insert_with_ack(
         self,
         insertion_string,
@@ -1801,109 +1898,325 @@ class UIActionHandler:
                     )
                     return False
 
-            # Capture Context
-            context = capture_context()
+            # wh-paste-target-window-vanished: two attempts at most.
+            # The second one runs only when the first refused before
+            # any keystroke because the window it captured no longer
+            # exists. That failure delivered the word nowhere, so one
+            # more attempt cannot deliver it twice. Every other outcome
+            # leaves this loop on the first pass, exactly as before.
+            attempt = 0
+            captured_process_name = ""
+            while True:
+                # Capture Context
+                context = capture_context()
+                # wh-paste-target-window-vanished, boss ruling option
+                # 2: the word must not land in a different program from
+                # the one the user spoke it into. The capture recorded
+                # the program name while the window was still alive, so
+                # this comparison needs no Windows call and no live
+                # handle. An empty name means the capture could not read
+                # the program, and two unreadable names must not compare
+                # equal, so the retry is refused there too.
+                if attempt == 1 and (
+                    not context.process_name
+                    or context.process_name != captured_process_name
+                ):
+                    logger.info(
+                        "%s: the captured window is gone and the newly "
+                        "captured target belongs to %s, not %s; the "
+                        "word is not delivered.",
+                        action_name,
+                        context.process_name or "an unreadable program",
+                        captured_process_name or "an unreadable program",
+                    )
+                    break
+                captured_process_name = context.process_name
 
-            # Remember window handle for focus restoration
-            if context.focused_control:
-                self.window_manager.remember_target(context.focused_control)
+                # Remember window handle for focus restoration
+                if context.focused_control:
+                    self.window_manager.remember_target(context.focused_control)
+                    # wh-lost-word-neighbour-paths.1.4, boss ruling
+                    # 9: the retry has just moved the remembered
+                    # target to a different window. The retraction
+                    # counter is one per-utterance total that
+                    # records nothing about which window each
+                    # credit went to, so characters credited
+                    # earlier in this utterance do not belong to
+                    # the window the retry chose, and sending them
+                    # there would delete text the user typed.
+                    # retract() refuses while this flag stands.
+                    # The condition names no strategy class, so it
+                    # covers the ClipboardOnly route as well as the
+                    # default paths, and it reads the counters
+                    # rather than the mere fact of a retry, so an
+                    # utterance that has credited nothing yet still
+                    # retracts normally.
+                    #
+                    # wh-lost-word-neighbour-paths.1.5, boss ruling
+                    # case A: a transient same-program helper
+                    # window that dies before any keystroke makes
+                    # this retry capture the ORIGINAL window again.
+                    # Every credit then still belongs to the window
+                    # the backspaces would reach, so refusing there
+                    # cost the user a correction that used to work.
+                    # _retry_returned_to_credited answers True only
+                    # for that case: one credited window, readable,
+                    # and equal to this capture's. Everything else
+                    # refuses, including an empty record and credits
+                    # split across two windows.
+                    #
+                    # The scope stays attempt == 1. An utterance
+                    # with no retry behaves as it did before this
+                    # change even when its words went to two
+                    # windows; the focus-drift gate above stays the
+                    # only control there. The letter buffer is
+                    # deliberately not read: its branch clears the
+                    # buffer and sends no backspaces, so it cannot
+                    # delete text in the wrong window.
+                    if attempt == 1:
+                        held_credit = (
+                            self.clipboard.accumulated_paste_chars
+                            or self.clipboard.accumulated_paste_clusters
+                        )
+                        back_at_credited = self._retry_returned_to_credited(
+                            context,
+                        )
+                        if held_credit and not back_at_credited:
+                            self._retry_rebound_target = True
 
-            # Get Strategy from Router. The text length feeds the
-            # Unicode-vs-Standard branch (wh-606yk).
-            strategy = self.router.get_strategy(context, insertion_string)
+                # Get Strategy from Router. The text length feeds the
+                # Unicode-vs-Standard branch (wh-606yk).
+                strategy = self.router.get_strategy(context, insertion_string)
 
-            # wh-fz7j.4: clear the per-instance write-seq buffer so a stale
-            # value from a previous insert that did NOT call _safe_copy this
-            # time around cannot leak into the deferred-restore baseline.
-            # Any clipboard write the strategy makes via _safe_copy will
-            # repopulate the value before we read it below.
-            self.clipboard.last_clipboard_write_seq = None
+                # wh-fz7j.4: clear the per-instance write-seq buffer so a stale
+                # value from a previous insert that did NOT call _safe_copy this
+                # time around cannot leak into the deferred-restore baseline.
+                # Any clipboard write the strategy makes via _safe_copy will
+                # repopulate the value before we read it below.
+                self.clipboard.last_clipboard_write_seq = None
 
-            # Execute Strategy
-            result = strategy.insert(insertion_string, context, request_id, options)
+                # Execute Strategy
+                result = strategy.insert(insertion_string, context, request_id, options)
 
-            # Forward dirty signal to the utterance manager (wh-4z4g9).
-            # Done unconditionally on result.clipboard_dirty -- a failed
-            # clipboard paste can still leave dictated text on the
-            # clipboard, so the manager must restore in that case too.
-            #
-            # wh-fz7j.2: pass the post-write seq captured inside _safe_copy
-            # so the deferred-restore ownership baseline reflects the
-            # actual post-write seq, not the seq read at this dirty-mark
-            # callsite (which may already have advanced if the user
-            # manually copied between the strategy's clipboard write and
-            # this point).
-            if result.clipboard_dirty:
-                self.utterance_manager.mark_clipboard_dirty(
-                    write_seq=self.clipboard.last_clipboard_write_seq
-                )
-                # _last_paste_time feeds wrap_or_insert's "recent paste"
-                # heuristic. Only an actual clipboard write counts; a
-                # Unicode SendInput delivery should not look like a paste
-                # to that heuristic.
-                self.utterance_manager._last_paste_time = time.time()
+                # wh-lost-word-neighbour-paths.1.5: record which
+                # window took this word, beside the characters
+                # ClipboardOperations credits for it.
+                self._record_credited_target(context, result)
 
-            # Track strategy type for retraction gating
-            if isinstance(strategy, SimplePasteStrategy):
-                self._used_simple_paste = True
-            elif isinstance(strategy, ClipboardOnlyStrategy):
-                # wh-9weum Phase 1 (wh-0ci9n) /
-                # wh-soft-allow-verdict-tier: ClipboardOnly is the
-                # silent-paste tier for soft-allow accepts -- targets
-                # the user has explicitly approved via the
-                # three-strikes grant prompt. The strategy still does
-                # NOT advance accumulated_paste_chars: even though the
-                # user has approved the target, ClipboardOnly cannot
-                # verify the paste landed (the target does not surface
-                # UIA TextPattern), so a later retract over the same
-                # utterance would walk back the wrong span if the
-                # counter advanced here. Reuse the simple_paste
-                # retraction gate -- both strategies share the
-                # "we cannot prove what landed" property.
-                self._used_simple_paste = True
-                # Review wh-kox5.3: invalidate the shadow buffer because
-                # the soft-paste may have changed the target's content
-                # and the buffer's preceding-chars mirror is no longer
-                # reliable. If a later Standard or VerifiedUnicode call
-                # in the same utterance reads the buffer's get_context()
-                # without re-syncing, TextPerfector composes against
-                # stale preceding text and produces wrong spacing or
-                # capitalization. The buffer's normal invalidate path
-                # only fires on user mouse/keyboard input; voice-only
-                # routing through ClipboardOnly never reaches it. Force
-                # the invalidation here so the next compose re-syncs
-                # via UIA before any TextPerfector pass.
-                self.buffer_manager.invalidate()
-            elif isinstance(strategy, RejectedInsertionStrategy):
-                # wh-paste-when-unverified.3.4: a rejected insert
-                # delivered NOTHING, and that is exactly why the
-                # retraction gate has to close. The remembered window
-                # moved to the newly focused control a few lines above
-                # this, BEFORE the routing decision, so by now it names
-                # a window this insert never wrote to. The retraction's
-                # own focus check compares the remembered window against
-                # the foreground and would therefore pass, and the
-                # backspaces would delete text the program did not
-                # write -- characters credited in the PREVIOUS window
-                # are still on the counter. Blocking the retraction
-                # costs a correction spoken after a rejected insert; a
-                # rejected insert put nothing on screen for that
-                # correction to walk back.
+                # Forward dirty signal to the utterance manager (wh-4z4g9).
+                # Done unconditionally on result.clipboard_dirty -- a failed
+                # clipboard paste can still leave dictated text on the
+                # clipboard, so the manager must restore in that case too.
                 #
-                # Deliberately set for EVERY RejectedInsertionStrategy,
-                # not only the empty-identity silent drop: the elevated-
-                # window refusal returns the same object and carries the
-                # same hazard. No buffer_manager.invalidate() here --
-                # nothing was written, so the shadow buffer's mirror of
-                # the target is still whatever it was.
-                self._used_simple_paste = True
+                # wh-fz7j.2: pass the post-write seq captured inside _safe_copy
+                # so the deferred-restore ownership baseline reflects the
+                # actual post-write seq, not the seq read at this dirty-mark
+                # callsite (which may already have advanced if the user
+                # manually copied between the strategy's clipboard write and
+                # this point).
+                if result.clipboard_dirty:
+                    self.utterance_manager.mark_clipboard_dirty(
+                        write_seq=self.clipboard.last_clipboard_write_seq
+                    )
+                    # _last_paste_time feeds wrap_or_insert's "recent paste"
+                    # heuristic. Only an actual clipboard write counts; a
+                    # Unicode SendInput delivery should not look like a paste
+                    # to that heuristic.
+                    self.utterance_manager._last_paste_time = time.time()
 
-            # wh-paste-when-unverified.2: record WHY this insertion did
-            # not deliver, at the one place the handler reads the
-            # result. A pre-send refusal is a deliberate no-op; every
-            # other non-delivery is a fault. end_utterance needs the
-            # difference to pick its log level.
-            self._last_insert_was_rejected = result.was_rejected
+                # wh-paste-target-window-vanished.1.2: does a retry
+                # supersede this attempt? Decided here, once, above the
+                # per-attempt bookkeeping, and read again by the retry
+                # decision below, so the two can never disagree about
+                # which attempt ends the loop.
+                #
+                # wh-lost-word-neighbour-paths: the strategy allow-list
+                # is no longer the thing that proves the attempt was
+                # empty -- result.delivered_nothing is, and every
+                # strategy sets it per branch. The allow-list stays as
+                # the second guard, so a strategy that sets the field
+                # wrongly still cannot earn a retry.
+                will_retry = (
+                    attempt == 0
+                    and not result.success
+                    and result.delivered_nothing
+                    and result.target_window_gone
+                    and isinstance(
+                        strategy,
+                        # The OUTER types the router returns. It never
+                        # returns VerifiedUnicodeStrategy: the short-text
+                        # branch returns the UnicodeFirstStrategy
+                        # composite that wraps it. FlutterStrategy is on
+                        # this list by inheritance -- it subclasses
+                        # StandardStrategy with an empty body, so it runs
+                        # the same insert and computes
+                        # delivered_nothing the same way.
+                        (
+                            UnicodeFirstStrategy,
+                            StandardStrategy,
+                            ClipboardOnlyStrategy,
+                        ),
+                    )
+                )
+
+                # Track strategy type for retraction gating.
+                #
+                # wh-lost-word-neighbour-paths: an attempt that PROVED
+                # it delivered nothing wrote no characters into any
+                # window, so it has nothing for a retraction to walk
+                # back and no reason to close the gate on the rest of
+                # the utterance. Words a counter-crediting strategy
+                # delivered earlier in the same utterance stay
+                # retractable. "Not proven" keeps the old behaviour,
+                # because an attempt that may have pasted must still
+                # block.
+                #
+                # wh-lost-word-neighbour-paths.1.2: EMPTY IS NOT ENOUGH
+                # -- the attempt's window must also be proven GONE.
+                # The remembered target moved to the newly focused
+                # control a few lines above this, BEFORE the routing
+                # decision, so an empty attempt leaves the remembered
+                # window naming a window this insert never wrote to
+                # while the characters on the counter were credited in
+                # the PREVIOUS window. If that newly bound window is
+                # still ALIVE, retract's focus-drift gate compares the
+                # remembered window against the foreground, both name
+                # it, the gate passes, and the backspaces delete text
+                # the program did not write -- the same hazard the
+                # RejectedInsertionStrategy branch below spells out,
+                # reached through this route. A window proven gone
+                # cannot hold the foreground, so there the focus-drift
+                # gate refuses the re-bound case by itself, and the
+                # exemption only has to stop the per-utterance gate
+                # staying shut for a LATER word that a counter-
+                # crediting strategy delivers into a live window of its
+                # own. Never re-widen this to delivered_nothing alone:
+                # emptiness says nothing about WHICH window the attempt
+                # bound.
+                if isinstance(strategy, SimplePasteStrategy):
+                    if not (
+                        result.delivered_nothing and result.target_window_gone
+                    ):
+                        self._used_simple_paste = True
+                elif isinstance(strategy, ClipboardOnlyStrategy):
+                    # wh-9weum Phase 1 (wh-0ci9n) /
+                    # wh-soft-allow-verdict-tier: ClipboardOnly is the
+                    # silent-paste tier for soft-allow accepts -- targets
+                    # the user has explicitly approved via the
+                    # three-strikes grant prompt. The strategy still does
+                    # NOT advance accumulated_paste_chars: even though the
+                    # user has approved the target, ClipboardOnly cannot
+                    # verify the paste landed (the target does not surface
+                    # UIA TextPattern), so a later retract over the same
+                    # utterance would walk back the wrong span if the
+                    # counter advanced here. Reuse the simple_paste
+                    # retraction gate -- both strategies share the
+                    # "we cannot prove what landed" property.
+                    #
+                    # wh-paste-target-window-vanished.1.2: except when a
+                    # retry is about to supersede this attempt. The gate
+                    # is per-utterance and nothing clears it inside an
+                    # utterance, so an attempt that fired no keystroke
+                    # and credited nothing would otherwise block the
+                    # retraction of a word the NEXT attempt delivers
+                    # through a strategy that does credit the counter.
+                    # The attempt that ends the loop governs the gate;
+                    # every other piece of bookkeeping in this branch
+                    # still runs for both attempts.
+                    #
+                    # wh-lost-word-neighbour-paths: both conditions
+                    # apply. A superseded attempt is not the one that
+                    # governs the gate, and an attempt that proved it
+                    # delivered nothing has nothing to protect -- the
+                    # attempt that ENDS the loop can still be an empty
+                    # one, and it must not block the retraction of a
+                    # word another strategy delivered.
+                    #
+                    # wh-lost-word-neighbour-paths.1.2: and the empty
+                    # attempt's window must be proven GONE as well.
+                    # This is the route the reported defect travels:
+                    # ClipboardOnlyStrategy sets delivered_nothing on
+                    # its pre-send refusal while target_window_gone
+                    # stays False for a live window that merely lost
+                    # the foreground, and the remembered target already
+                    # names that live window. See the full reasoning
+                    # above the SimplePasteStrategy branch.
+                    if not will_retry and not (
+                        result.delivered_nothing and result.target_window_gone
+                    ):
+                        self._used_simple_paste = True
+                    # Review wh-kox5.3: invalidate the shadow buffer because
+                    # the soft-paste may have changed the target's content
+                    # and the buffer's preceding-chars mirror is no longer
+                    # reliable. If a later Standard or VerifiedUnicode call
+                    # in the same utterance reads the buffer's get_context()
+                    # without re-syncing, TextPerfector composes against
+                    # stale preceding text and produces wrong spacing or
+                    # capitalization. The buffer's normal invalidate path
+                    # only fires on user mouse/keyboard input; voice-only
+                    # routing through ClipboardOnly never reaches it. Force
+                    # the invalidation here so the next compose re-syncs
+                    # via UIA before any TextPerfector pass.
+                    self.buffer_manager.invalidate()
+                elif isinstance(strategy, RejectedInsertionStrategy):
+                    # wh-paste-when-unverified.3.4: a rejected insert
+                    # delivered NOTHING, and that is exactly why the
+                    # retraction gate has to close. The remembered window
+                    # moved to the newly focused control a few lines above
+                    # this, BEFORE the routing decision, so by now it names
+                    # a window this insert never wrote to. The retraction's
+                    # own focus check compares the remembered window against
+                    # the foreground and would therefore pass, and the
+                    # backspaces would delete text the program did not
+                    # write -- characters credited in the PREVIOUS window
+                    # are still on the counter. Blocking the retraction
+                    # costs a correction spoken after a rejected insert; a
+                    # rejected insert put nothing on screen for that
+                    # correction to walk back.
+                    #
+                    # Deliberately set for EVERY RejectedInsertionStrategy,
+                    # not only the empty-identity silent drop: the elevated-
+                    # window refusal returns the same object and carries the
+                    # same hazard. No buffer_manager.invalidate() here --
+                    # nothing was written, so the shadow buffer's mirror of
+                    # the target is still whatever it was.
+                    self._used_simple_paste = True
+
+                # wh-paste-when-unverified.2: record WHY this insertion did
+                # not deliver, at the one place the handler reads the
+                # result. A pre-send refusal is a deliberate no-op; every
+                # other non-delivery is a fault. end_utterance needs the
+                # difference to pick its log level.
+                self._last_insert_was_rejected = result.was_rejected
+
+                # wh-paste-target-window-vanished: the retry decision.
+                # Two strategies set target_window_gone, each on a
+                # branch that fired no keystroke: ClipboardOnlyStrategy
+                # on its soft-paste refusal, and ClipboardFallbackStrategy
+                # on its preflight refusal (wh-lost-word-neighbour-paths).
+                # The second one is what carries the answer out of both
+                # default dictation paths, because StandardStrategy
+                # returns its fallback attempt's result and
+                # UnicodeFirstStrategy returns StandardStrategy's. A
+                # strategy that sends first and verifies afterwards could
+                # already have delivered the word, so a retry there could
+                # type it twice; the isinstance check is what keeps the
+                # retry off those paths even if one of them ever sets the
+                # field.
+                #
+                # wh-paste-target-window-vanished.1.2: the condition now
+                # lives in will_retry, computed above the bookkeeping
+                # that has to know the same answer.
+                if not will_retry:
+                    break
+                logger.info(
+                    "%s: %s refused before any keystroke because the "
+                    "captured window no longer exists; capturing the "
+                    "target once more (program=%s).",
+                    action_name, type(strategy).__name__,
+                    captured_process_name or "unreadable",
+                )
+                attempt += 1
 
             if result.success:
                 # wh-zndq: a pre-send rejection (RejectedInsertionStrategy)
@@ -2661,6 +2974,11 @@ class UIActionHandler:
                 self.utterance_manager._last_paste_time = time.time()
             raise
 
+        # wh-lost-word-neighbour-paths.1.5: same record as the
+        # dictation path, so a verbatim word cannot leave the set
+        # empty while the counter it credited stands.
+        self._record_credited_target(context, result)
+
         if result.clipboard_dirty:
             self.utterance_manager.mark_clipboard_dirty(
                 write_seq=self.clipboard.last_clipboard_write_seq
@@ -2673,14 +2991,34 @@ class UIActionHandler:
         # focused control fallback) or ClipboardOnlyStrategy (soft
         # fallback) must leave retract fail-closed because neither
         # strategy can verify the paste actually landed.
+        # wh-lost-word-neighbour-paths: the same guard as the
+        # _execute_insert_with_ack branches. An attempt that proved it
+        # put no input in the queue and wrote nothing into the target
+        # has nothing for a retraction to walk back, so it must not
+        # close the gate on words another strategy delivered. This
+        # caller runs one attempt only, so there is no will_retry here.
+        #
+        # wh-lost-word-neighbour-paths.1.2: and the same narrowing.
+        # This caller also remembers the newly focused window BEFORE it
+        # routes (a few lines above), so an empty attempt against a
+        # window that is still ALIVE leaves the remembered target
+        # naming a window nothing was written to while the previous
+        # window's characters are still on the counter, and retract's
+        # focus-drift gate passes because both sides name the new
+        # window. Only a window proven GONE is safe to leave the gate
+        # open for; a dead window can never hold the foreground. The
+        # full reasoning is above the SimplePasteStrategy branch in
+        # _execute_insert_with_ack.
         if isinstance(strategy, SimplePasteStrategy):
-            self._used_simple_paste = True
+            if not (result.delivered_nothing and result.target_window_gone):
+                self._used_simple_paste = True
         elif isinstance(strategy, ClipboardOnlyStrategy):
             # wh-9weum Phase 1 (wh-0ci9n): same rationale as the
             # _execute_insert_with_ack branch -- soft-fallback paste
             # poisons retract because the paste's actual landing in
             # the target cannot be confirmed.
-            self._used_simple_paste = True
+            if not (result.delivered_nothing and result.target_window_gone):
+                self._used_simple_paste = True
             # Review wh-kox5.3: invalidate the shadow buffer; see the
             # _execute_insert_with_ack branch for the full reasoning.
             self.buffer_manager.invalidate()
@@ -5302,6 +5640,10 @@ class UIActionHandler:
                         cached_text, context, request_id, None,
                         retry_identity=retry_identity,
                     )
+
+            # wh-lost-word-neighbour-paths.1.5: both branches above
+            # assign insertion_result, so one record covers them.
+            self._record_credited_target(context, insertion_result)
 
             # Forward dirty signal to the utterance manager (parallel to
             # _execute_insert_with_ack at line ~754). The override path

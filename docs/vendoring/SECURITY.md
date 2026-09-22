@@ -61,6 +61,52 @@ committed form is LF, which is also what `.gitattributes` (`* text=auto
 eol=lf`) checks out on every machine, so the recorded hash matches the
 working-tree file anywhere.
 
+## Install-time Microsoft runtime fetch
+
+One artifact is fetched at install time rather than vendored: the Microsoft
+Visual C++ Redistributable (`vc_redist.x64.exe`). `install-wheelhouse.ps1`
+downloads it from Microsoft's permanent link, and only when the x64
+`msvcp140.dll` in the Windows system directory is missing or below the
+version the speech engine needs. The installer builds that path from
+`$env:SystemRoot`, not a literal `C:\Windows`, because Windows is not always
+on C. A 32-bit PowerShell host reaches the x64 directory through `Sysnative`,
+because WOW64 would otherwise redirect `System32` to `SysWOW64` and read the
+x86 file instead. A machine already at or above that version downloads
+nothing. No Microsoft file enters this repository or the release archive, so
+WheelHouse distributes no Microsoft file.
+
+**Why item 1 of the vendoring discipline cannot apply.** A committed
+`.sha256` sidecar is the trust anchor for every vendored wheel. Microsoft's
+permanent link serves whatever version is current, so the bytes behind it
+change with each Microsoft update. A pinned hash would reject the file the
+first time Microsoft ships an update, and the install would then stop for
+every user until someone committed a new hash. Pinning a versioned URL
+instead would avoid that, at the cost of handing users a runtime that ages
+with no way to refresh it.
+
+**The rule that replaces it.** The installer accepts the downloaded file
+only when BOTH of these hold:
+
+1. `Get-AuthenticodeSignature` reports `Status` exactly `Valid`.
+2. The signer certificate subject names Microsoft Corporation.
+
+A file that fails either check is deleted and never run. The signature check
+does for this artifact what the hash does for a wheel: it proves the
+publisher. It does not pin the version, and it is not meant to. The download
+uses HTTPS, and the signature check does not trust the transport.
+
+**What this costs.** Item 2 of the vendoring discipline forbids resolving a
+wheel from a third-party URL at install time, and the reason behind it is
+that an install should be reproducible without the network deciding what a
+user gets. This fetch gives that up for one file. It is worth it only
+because the alternative is worse: without the runtime the speech engine
+cannot start at all, and the project holds no licence that permits shipping
+Microsoft's file.
+The exception is narrow by construction. It covers one file, from one
+publisher, fetched only when the local runtime is too old to run the speech
+engine, and `-ExpectedSha256` stays mandatory for every other download in
+`install-wheelhouse.ps1`.
+
 ## Re-vendoring procedure (Vulkan wheels)
 
 The Vulkan wheels are custom builds, not PyPI downloads. To re-vendor (new upstream version, new Vulkan SDK, or a fresh machine):

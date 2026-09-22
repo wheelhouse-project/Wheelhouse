@@ -1377,12 +1377,17 @@ class ActionFunctions:
         2. Validates the hint text
         3. Sends a WebSocket command to the STT server to add the hint
         
-        The STT server will update its config.toml file and reload the hints.
+        The STT provider saves the hint to the shared hints file
+        (services/stt_providers/shared/hints.txt, through
+        shared/hints_updater.py). Whether the running engine applies it
+        depends on the engine; the command matches only when the engine
+        reports that it applies hints or has not reported
+        (wh-boost-engine-qualification).
         
         Usage in patterns.toml:
             [[pattern]]
             pattern = '''^boost$'''
-            requires_hotword = true
+            whole_utterance_only = true
             actions = [
                 { function = "skip_clipboard_restore", awaits_done = true },
                 { function = "hk", params = ["ctrl", "c"], awaits_done = true },
@@ -2478,22 +2483,17 @@ class ActionFunctions:
         return None """
 
     async def wheelhouse_help_online(self):
-        """Open cloud help in browser (Gemini Gem)."""
+        """Open the Wheelhouse Assistant, explaining it first when needed.
+
+        The decision lives in LogicController.start_help_online, which the
+        Help menu entry also reaches. Keeping it there is what stops the
+        spoken command and the menu entry behaving differently: a user who
+        says "help" meets the same explanation window, and turning that
+        window off turns it off for both.
+        """
         lc = getattr(self.speech_handler, "logic_controller", None)
         if not lc:
             return None
 
-        config = getattr(lc, "config_service", None)
-        if not config:
-            return None
-
-        gem_url = config.get("ai.help.gem_url", "")
-        if not gem_url:
-            ai = self._get_ai_service()
-            if ai:
-                self._notify_ai_status("Online help is not configured.")
-            return None
-
-        import webbrowser
-        await asyncio.to_thread(webbrowser.open, gem_url)
+        await lc.start_help_online(source="spoken")
         return None

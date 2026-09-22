@@ -5,6 +5,24 @@ Stage B benchmark: WER 0.0057 (v3), 406ms avg latency, CPU.
 """
 from __future__ import annotations
 
+# Wheelhouse: put the owned Microsoft Visual C++ runtime folder on this
+# process's library search path BEFORE any extension module loads. The order
+# is the whole fix -- os.add_dll_directory cannot displace a library the
+# process already holds. services/runtime_dll_directory.py explains it.
+import os.path
+import sys
+
+_services_dir = os.path.abspath(__file__)
+while (os.path.basename(_services_dir) != "services"
+       and os.path.dirname(_services_dir) != _services_dir):
+    _services_dir = os.path.dirname(_services_dir)
+if _services_dir not in sys.path:
+    sys.path.append(_services_dir)
+from runtime_dll_directory import add_runtime_dll_directory
+
+add_runtime_dll_directory()
+
+
 import argparse
 import logging
 import os
@@ -143,6 +161,27 @@ def prepare_hotwords_file(tokens_path: Path | None = None) -> str | None:
             f"Could not prepare hotwords file, continuing without hotwords: {e}"
         )
         return None
+
+
+def applies_hints_value(status, hotwords_enabled: bool) -> bool:
+    """Whether this run applies a saved hint, for the capabilities frame.
+
+    wh-boost-engine-qualification, ruling 2 of 2026-09-21: when boosting
+    was requested (a hotwords file was built), the answer is the engine's
+    own status -- active, or refused for a reason such as an unusable
+    bpe.vocab. When it was not requested, the answer is the [hotwords]
+    enabled flag: with boosting on and no hint saved yet the engine
+    records "not requested", and reading only "active" would refuse the
+    first "boost", so a user could never add the first hint.
+
+    ``status`` is engine.hotwords_status, the object _hotwords_notice
+    reads; nothing here decides a second time whether boosting works.
+    Every read is ``is True`` for the same reason as there: a MagicMock
+    status must not be able to claim "requested".
+    """
+    if getattr(status, "requested", False) is True:
+        return getattr(status, "active", False) is True
+    return bool(hotwords_enabled)
 
 
 class ParakeetServer:
@@ -362,6 +401,13 @@ class ParakeetServer:
         # WheelHouse telling the user to say a wake word.
         self.forwarder.wake_word_available = bool(
             self._wake_word_detector and self._wake_word_detector.is_loaded
+        )
+        # Whether this run applies a saved hint
+        # (wh-boost-engine-qualification). WheelHouse types the word
+        # "boost" as dictation when this is False.
+        self.forwarder.applies_hints = applies_hints_value(
+            getattr(self.engine, "hotwords_status", None),
+            hotwords_enabled,
         )
 
     # -- Command handlers --

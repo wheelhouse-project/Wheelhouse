@@ -4,7 +4,7 @@ from typing import Optional, List, Sequence, Tuple
 from .domain import ProcessingMode, Action, Decision
 from .word_event import WordEvent
 from .pattern_catalog import PatternCatalog, PatternType
-from .pattern_matcher import PatternMatcher
+from .pattern_matcher import PatternMatcher, _refused_for_hint_engine
 from .pattern_transform import (
     build_literal_prefix_matchers,
     extract_literal_prefix,
@@ -56,6 +56,16 @@ class SpeechRouter:
         # it; initialized here as a defensive fallback.
         self._active_hotword = self.hotword
         self.matcher = PatternMatcher(catalog)
+        # Whether the running speech engine applies a saved hint: True,
+        # False, or None for unknown (wh-boost-engine-qualification).
+        # Pushed by SpeechProcessor.apply_hint_engine, the way apply_hotword
+        # pushes self.hotword, and handed to every matcher call below, so a
+        # pattern whose actions save a hint is refused only while this is
+        # False. An attribute rather than a decide() parameter: the value
+        # belongs to the connected engine, not to one word, and every
+        # routing path (decide, decide_timeout, and the probes they call)
+        # must read the same value.
+        self.hint_engine: Optional[bool] = None
 
     def decide(
         self,
@@ -174,7 +184,9 @@ class SpeechRouter:
         if not buffer:
             return None
         for ptype in pattern_types:
-            result = self.matcher.match_for_routing(list(buffer), ptype, hotword_active)
+            result = self.matcher.match_for_routing(
+                list(buffer), ptype, hotword_active, hint_engine=self.hint_engine
+            )
             if result and result.matched and result.is_greedy:
                 return greedy_timeout_ms
         # Fall through to the prefix probe. A multi-word greedy pattern (e.g.
@@ -223,6 +235,11 @@ class SpeechRouter:
             if not (data and data.get("is_greedy", False)):
                 continue
             if data.get("requires_hotword", False) and not hotword_active:
+                continue
+            # A hint pattern the running engine cannot serve must not
+            # attract the long greedy timer either
+            # (wh-boost-engine-qualification).
+            if _refused_for_hint_engine(data, self.hint_engine):
                 continue
             # Prefer the matchers compiled at catalog load time
             # (wh-greedy-prefix-precompute, extended by
@@ -511,7 +528,9 @@ class SpeechRouter:
             )
 
         # 2. Check for Complete Pattern
-        result = self.matcher.match_for_routing(new_buffer, target_type, hotword_active)
+        result = self.matcher.match_for_routing(
+            new_buffer, target_type, hotword_active, hint_engine=self.hint_engine
+        )
         if result and result.matched and not result.is_greedy:
             # wh-int8-punctuation-mishears: a whole-utterance-only pattern
             # (sound-alike punctuation alias) matches the buffer, but the
@@ -769,7 +788,9 @@ class SpeechRouter:
         # this whole-buffer path; test_interior_comma_whole_buffer_command
         # pins it (wh-midword-punct-severs-count.1.3).
         result = (
-            self.matcher.match_for_routing(buffer, "command", hotword_active)
+            self.matcher.match_for_routing(
+                buffer, "command", hotword_active, hint_engine=self.hint_engine
+            )
             if allow_commands
             else None
         )
@@ -821,7 +842,9 @@ class SpeechRouter:
         )
         if first_word_has_command:
             for k in range(len(buffer) - 1, 0, -1):
-                result = self.matcher.match_for_routing(buffer[:k], "command", hotword_active)
+                result = self.matcher.match_for_routing(
+                    buffer[:k], "command", hotword_active, hint_engine=self.hint_engine
+                )
                 if (
                     result
                     and result.matched
@@ -879,7 +902,9 @@ class SpeechRouter:
                     )
 
         # 2. Try Replacement (uses PatternMatcher.match_for_routing)
-        result = self.matcher.match_for_routing(buffer, "replacement", hotword_active=False)
+        result = self.matcher.match_for_routing(
+            buffer, "replacement", hotword_active=False, hint_engine=self.hint_engine
+        )
         if result and result.matched:
             if result.remainder or result.before_remainder:
                 return Decision(
@@ -955,7 +980,9 @@ class SpeechRouter:
         provably ends. Uses the same first-match-wins lookup the execute
         paths use, so the check agrees with the pattern that would fire.
         """
-        result = self.matcher.match_for_routing(buffer, target_type, hotword_active)
+        result = self.matcher.match_for_routing(
+            buffer, target_type, hotword_active, hint_engine=self.hint_engine
+        )
         return bool(
             result
             and result.matched
@@ -967,7 +994,9 @@ class SpeechRouter:
 
         Delegates to PatternMatcher.is_pattern_complete().
         """
-        return self.matcher.is_pattern_complete(buffer, target_type, hotword_active)
+        return self.matcher.is_pattern_complete(
+            buffer, target_type, hotword_active, hint_engine=self.hint_engine
+        )
 
     def _cannot_match(self, buffer: List[str], target_type: str, hotword_active: bool = False) -> bool:
         """Check if buffer cannot match any pattern.
@@ -978,7 +1007,9 @@ class SpeechRouter:
         _decide_buffering finalize it as dictation immediately instead of
         waiting command_timeout (wh-4o1aj).
         """
-        return self.matcher.cannot_match(buffer, target_type, hotword_active)
+        return self.matcher.cannot_match(
+            buffer, target_type, hotword_active, hint_engine=self.hint_engine
+        )
 
     def _cannot_match_with_next_word(self, buffer: List[str], target_type: str) -> bool:
         """Check if buffer cannot possibly match any pattern even with more words.
@@ -1151,9 +1182,13 @@ class SpeechRouter:
         """
         if not word:
             return False
-        if self.matcher.is_pattern_complete([word], "replacement", False):
+        if self.matcher.is_pattern_complete(
+            [word], "replacement", False, hint_engine=self.hint_engine
+        ):
             return False
-        return not self.matcher.cannot_match([word], "replacement", False)
+        return not self.matcher.cannot_match(
+            [word], "replacement", False, hint_engine=self.hint_engine
+        )
 
     def is_incomplete_replacement_name(self, words: List[str]) -> bool:
         """True when ``words`` TOGETHER are an unfinished replacement name.
@@ -1190,9 +1225,13 @@ class SpeechRouter:
         """
         if not words:
             return False
-        if self.matcher.is_pattern_complete(words, "replacement", False):
+        if self.matcher.is_pattern_complete(
+            words, "replacement", False, hint_engine=self.hint_engine
+        ):
             return False
-        return not self.matcher.cannot_match(words, "replacement", False)
+        return not self.matcher.cannot_match(
+            words, "replacement", False, hint_engine=self.hint_engine
+        )
 
     def _can_match_replacement(self, buffer: List[str]) -> bool:
         """Check if buffer could match a replacement pattern.

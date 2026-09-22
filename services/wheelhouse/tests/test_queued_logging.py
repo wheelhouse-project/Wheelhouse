@@ -380,6 +380,88 @@ def test_notifier_worker_stop_handles_full_queue():
     worker._thread.join(timeout=1.0)
 
 
+def test_a_notice_that_could_not_be_delivered_is_named_in_the_log(monkeypatch):
+    """wh-parakeet-crash-windows10 fault 2: a notice the backend refuses
+    has to leave a record in the log file, not only on stderr.
+
+    On the run that reported that bead the startup notice was built and
+    queued, the backend was asked, and nothing appeared on the screen.
+    Two accounts fit that log equally well: the backend delivered and
+    Windows 10 showed nothing, or the backend raised and the only report
+    went to stderr, which a packaged run discards. The log could not tell
+    those apart, so neither could the next run.
+
+    The LEVEL is load bearing, and the last level assertion below is what
+    pins it. ErrorNotificationHandler takes level=logging.ERROR by
+    default (utils/error_notifier.py) and setup_logging constructs it
+    without overriding that level (utils/logging_setup.py), so an ERROR
+    record from inside _deliver would build another payload, submit it to
+    this same worker, and fail again. A WARNING reaches the log file and
+    never reaches that handler.
+    """
+    from utils import notifier_worker as notifier_worker_module
+    from utils.notifier_worker import NotifierPayload, NotifierWorker
+
+    written = []
+    monkeypatch.setattr(
+        notifier_worker_module, "_safe_stderr_write", written.append
+    )
+
+    def refusing_send_notice(*args, **kwargs):
+        raise RuntimeError("no notification backend answered")
+
+    records = []
+
+    class _Collector(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    # The logger is looked up by name rather than through the module, so
+    # this test fails on the assertion below when the module has no
+    # logger at all, rather than on an AttributeError that would prove
+    # nothing about what reaches the log.
+    module_logger = logging.getLogger("utils.notifier_worker")
+    collector = _Collector(level=logging.DEBUG)
+    previous_level = module_logger.level
+    module_logger.addHandler(collector)
+    module_logger.setLevel(logging.DEBUG)
+    try:
+        with patch("utils.notice_text.send_notice", refusing_send_notice):
+            NotifierWorker()._deliver(
+                NotifierPayload(
+                    title="Wheelhouse",
+                    message="Speech may not start on this computer.",
+                    levelname="ERROR",
+                    trace_id="",
+                )
+            )
+    finally:
+        module_logger.removeHandler(collector)
+        module_logger.setLevel(previous_level)
+
+    assert len(records) == 1, (
+        "a delivery failure has to reach the log exactly once: "
+        f"{[record.getMessage() for record in records]}"
+    )
+    record = records[0]
+    assert "Speech may not start on this computer." in record.getMessage(), (
+        "the record has to name the notice that was lost, or the next run "
+        f"still cannot say what the user did not see: {record.getMessage()}"
+    )
+    assert record.exc_info is not None, (
+        "the exception is the only thing that says why the backend refused"
+    )
+    assert record.levelno < logging.ERROR, (
+        "an ERROR record here reaches ErrorNotificationHandler, which "
+        "builds another payload and submits it to this same worker, so "
+        f"this level must stay below ERROR: {record.levelname}"
+    )
+    assert written, (
+        "the stderr write stays beside the log record: it is the only one "
+        "of the two that still works once logging has been torn down"
+    )
+
+
 def test_monitor_loop_matches_stdlib(isolated_root_logger):
     """wh-anai.6: WheelHouseQueueListener._monitor mirrors CPython 3.12.10's loop.
 

@@ -7,6 +7,7 @@ These tests verify that:
 4. Disconnect callback properly clears transcription_enabled_event
 """
 import asyncio
+import socket
 import threading
 import time
 import sys
@@ -18,6 +19,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "shared" / "shared_stt"))
 
 from ws_forwarder import WSForwarder
+
+
+def _unused_port():
+    """Return a port that Windows chose and that has no listener now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class TestDisconnectCallback:
@@ -37,7 +45,7 @@ class TestDisconnectCallback:
 
         forwarder = WSForwarder(
             host="localhost",
-            port=59999,  # Use high port unlikely to be in use
+            port=_unused_port(),  # No server running
             transcription_enabled_event=threading.Event(),
             on_disconnect_callback=on_disconnect,
             debug=False
@@ -82,15 +90,16 @@ class TestDisconnectCallback:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59998)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         # Create and start forwarder
         event = threading.Event()
         event.set()  # Start enabled
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59998,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             on_disconnect_callback=on_disconnect,
             debug=False
@@ -151,7 +160,7 @@ class TestQueueClearing:
 
         forwarder = WSForwarder(
             host="localhost",
-            port=59997,  # No server running
+            port=_unused_port(),  # No server running
             transcription_enabled_event=threading.Event(),
             on_disconnect_callback=on_disconnect,
             debug=False
@@ -212,15 +221,16 @@ class TestReconnectCallback:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59994)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         # Create and start forwarder
         event = threading.Event()
         event.set()  # Start enabled
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59994,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             on_disconnect_callback=on_disconnect,
             on_reconnect_callback=on_reconnect,
@@ -305,15 +315,16 @@ class TestShutdownCommand:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59996)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         # Create and start forwarder with shutdown callback
         event = threading.Event()
         event.set()  # Start enabled
 
         forwarder = WSForwarder(
-            host="localhost",
-            port=59996,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             shutdown_callback=on_shutdown,
             debug=False
@@ -406,13 +417,14 @@ class TestNotificationKindOnTheWire:
             except Exception:
                 pass
 
-        server = await websockets.serve(handler, "localhost", 59997)
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
 
         event = threading.Event()
         event.set()
         forwarder = WSForwarder(
-            host="localhost",
-            port=59997,
+            host="127.0.0.1",
+            port=port,
             transcription_enabled_event=event,
             debug=False,
         )

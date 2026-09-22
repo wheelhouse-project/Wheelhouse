@@ -4,6 +4,7 @@ Handles TOML read/write, regex generation from user input,
 validation, and conflict detection for voice command patterns.
 """
 import hashlib
+import itertools
 import logging
 import os
 import re
@@ -272,6 +273,25 @@ class PatternManager:
     _PHRASE_ALT_SPLIT_RE = re.compile(r"(?<!\\)\|")
     _ESCAPE_UNDO_RE = re.compile(r"\\(.)")
 
+    # A non-capturing group holding two or more alternatives and no
+    # nested parentheses: the shape of a command that accepts more than
+    # one spoken wording, such as ^(?:delete|erase)\s+word$. Stripping
+    # such a group removed the command's verb from its display, which
+    # left 18 rows named "word", "all" or "line" and made the Pattern
+    # Manager filter unable to find them (wh-erase-synonym-for-delete.1.1).
+    # A lookahead or lookbehind cannot match this: (?= and (?< carry no
+    # alternative, and the group must hold at least one "|".
+    _LITERAL_ALTERNATION_RE = re.compile(r"\(\?:([^()|]*(?:\|[^()|]*)+)\)")
+
+    # \s, \d, \w and \b are character classes, not spoken words. A group
+    # carrying one is left to the stripping below.
+    _CLASS_ESCAPE_RE = re.compile(r"\\\w")
+
+    # Every wording shares one display line, so a command with many
+    # alternatives would produce a line nobody can read. Past this many
+    # combinations the display falls back to the stripping below.
+    _MAX_ALTERNATION_DISPLAYS = 8
+
     @classmethod
     def _phrases_from_expression(cls, raw_pattern: str) -> list[str] | None:
         """The literal phrases of a phrase-shaped expression, or None.
@@ -295,6 +315,78 @@ class PatternManager:
                 return None
             phrases.append(candidate)
         return phrases or None
+
+    @classmethod
+    def _literal_alternatives(cls, inner: str) -> list[str] | None:
+        """The spoken wordings of one alternation, or None.
+
+        None means the group is not a plain list of spoken words --
+        it carries a character class, or it holds a single branch --
+        so the caller leaves it to the strip-based display.
+        """
+        alternatives: list[str] = []
+        for alternative in cls._PHRASE_ALT_SPLIT_RE.split(inner):
+            if not alternative or cls._CLASS_ESCAPE_RE.search(alternative):
+                return None
+            candidate = cls._ESCAPE_UNDO_RE.sub(r"\1", alternative)
+            if not candidate.strip():
+                return None
+            alternatives.append(candidate)
+        return alternatives if len(alternatives) > 1 else None
+
+    @classmethod
+    def _strip_display(cls, raw_pattern: str) -> str:
+        """The trigger text left once regex syntax is removed."""
+        return ' '.join(cls._TRIGGER_STRIP_RE.sub(' ', raw_pattern).split())
+
+    @classmethod
+    def _alternation_displays(cls, raw_pattern: str) -> list[str] | None:
+        """One trigger text per spoken wording, or None.
+
+        Each alternation is replaced by one of its wordings in turn and
+        the whole expression is then stripped as before, so the wording
+        keeps the words that surround it: ^(?:delete|erase)\\s+word$
+        yields 'delete word' and 'erase word'. None means the shape does
+        not apply and the caller falls back to the strip-based display.
+        """
+        found = list(cls._LITERAL_ALTERNATION_RE.finditer(raw_pattern))
+        matches = []
+        choices: list[list[str]] = []
+        for match in found:
+            # A group followed by ? or * is optional, so the command also
+            # accepts the wording without it: ^paste(?: that| here)?$ answers
+            # to the bare word "paste". Naming only the longer wordings would
+            # hide that one, so the stripping below handles such a group, as
+            # it did before (wh-erase-synonym-for-delete.1.1, criterion D4).
+            if raw_pattern[match.end():match.end() + 1] in ("?", "*"):
+                continue
+            alternatives = cls._literal_alternatives(match.group(1))
+            if alternatives is None:
+                return None
+            matches.append(match)
+            choices.append(alternatives)
+        if not matches:
+            return None
+        combinations = 1
+        for alternatives in choices:
+            combinations *= len(alternatives)
+        if combinations > cls._MAX_ALTERNATION_DISPLAYS:
+            return None
+        displays: list[str] = []
+        for combination in itertools.product(*choices):
+            rebuilt: list[str] = []
+            cursor = 0
+            for match, wording in zip(matches, combination):
+                rebuilt.append(raw_pattern[cursor:match.start()])
+                rebuilt.append(wording)
+                cursor = match.end()
+            rebuilt.append(raw_pattern[cursor:])
+            text = cls._strip_display("".join(rebuilt))
+            if not text:
+                return None
+            if text not in displays:
+                displays.append(text)
+        return displays or None
 
     @classmethod
     def _save_trigger_key(cls, pattern: str) -> str:
@@ -353,16 +445,20 @@ class PatternManager:
         """Convert regex pattern to human-readable trigger text.
 
         A phrase-generated expression renders as its spoken phrases
-        (wh-pattern-editor-r8.2); anything else strips regex syntax
-        (anchors, word boundaries, groups, quantifiers) to extract the
-        plain-text trigger phrase.
+        (wh-pattern-editor-r8.2). An expression carrying a group of
+        plain-word alternatives renders every wording, so
+        ^(?:delete|erase)\\s+word$ reads 'delete word (or erase word)'
+        (wh-erase-synonym-for-delete.1.1). Anything else strips regex
+        syntax (anchors, word boundaries, groups, quantifiers) to
+        extract the plain-text trigger phrase.
         """
         phrases = cls._phrases_from_expression(raw_pattern)
         if phrases is not None:
             return cls._format_phrase_display(phrases)
-        text = cls._TRIGGER_STRIP_RE.sub(' ', raw_pattern)
-        # Collapse whitespace and strip
-        result = ' '.join(text.split())
+        wordings = cls._alternation_displays(raw_pattern)
+        if wordings is not None:
+            return cls._format_phrase_display(wordings)
+        result = cls._strip_display(raw_pattern)
         return result if result else raw_pattern
 
     @staticmethod

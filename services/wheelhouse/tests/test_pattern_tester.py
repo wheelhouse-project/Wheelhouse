@@ -654,6 +654,38 @@ class TestBoundedMatching:
         assert "too long" in result["error"]
         assert PATHOLOGICAL_EXPR in result["error"]
 
+    def test_abort_message_names_every_wording_of_an_alternation(self):
+        # _saved_pattern_timeout_error builds its name with
+        # PatternManager._trigger_display, whose alternation branch this
+        # branch added (wh-erase-synonym-for-delete.1.1). The test above
+        # reaches the raw-expression fallback only, so without this test no
+        # test drives the abort message through the new branch.
+        entry = _entry(r"^(?:delete|erase)\s+word$")
+        result = pattern_tester._saved_pattern_timeout_error(entry)
+        assert result["success"] is False
+        assert result["error"] == (
+            "Test aborted: the saved pattern 'delete word (or erase word)' "
+            "takes too long to match and could freeze Wheelhouse. Edit or "
+            "delete that pattern."
+        )
+
+    def test_abort_message_survives_more_wordings_than_the_cap(self):
+        # Three wordings in each of two groups is nine combinations, over
+        # _MAX_ALTERNATION_DISPLAYS. _alternation_displays gives up there
+        # and _trigger_display falls back to the stripped text, so the
+        # message still names something and nothing raises.
+        expression = r"^(?:a|b|c)\s+(?:d|e|f)\s+word$"
+        assert 3 * 3 > PatternManager._MAX_ALTERNATION_DISPLAYS
+        result = pattern_tester._saved_pattern_timeout_error(_entry(expression))
+        assert result["success"] is False
+        assert result["error"] == (
+            "Test aborted: the saved pattern 'word' takes too long to "
+            "match and could freeze Wheelhouse. Edit or delete that "
+            "pattern."
+        )
+        # The cap held: no wording list was built for nine combinations.
+        assert "(or " not in result["error"]
+
 
 # ---------------------------------------------------------------------------
 # Logic-side handlers (style of test_pattern_manager_update.py)
@@ -688,6 +720,10 @@ class _FakeTextParser:
         self.pattern_catalog = catalog
         self.patterns = catalog.get_all_patterns()
         self.matcher = PatternMatcher(catalog)
+        # TextParser.__init__ starts it at None ("the engine has not
+        # reported"); SpeechProcessor.apply_hint_engine sets it later
+        # (wh-boost-engine-qualification).
+        self.hint_engine = None
 
 
 class _FakeSpeechHandler:
@@ -713,11 +749,11 @@ class _CapturingQueue:
         self.items.append(item)
 
 
-def _make_controller(tmp_path):
+def _make_controller(tmp_path, system_content=SYSTEM_CONTENT):
     from main import LogicController
 
     system_file = tmp_path / "patterns.toml"
-    system_file.write_text(SYSTEM_CONTENT, encoding="utf-8")
+    system_file.write_text(system_content, encoding="utf-8")
     user_file = tmp_path / "user_patterns.toml"  # never created
 
     controller = MagicMock(spec=LogicController)
@@ -879,3 +915,169 @@ class TestPatternTesterHandlers:
         )
         data = _results(controller, "pm_test_draft_result")[0]["data"]
         assert data["request_id"] == 3
+
+
+# ---------------------------------------------------------------------------
+# The running engine's hint support (wh-boost-engine-qualification.1.1)
+# ---------------------------------------------------------------------------
+#
+# The runtime refuses a pattern whose actions include add_hint_to_stt when
+# the engine has reported that it does not apply hints (hint_engine False):
+# the word is typed as dictation. The try-it box must give the same answer.
+# None (not reported) and True keep today's answer.
+
+_BOOST_ACTIONS = [
+    {"function": "skip_clipboard_restore"},
+    {"function": "hk", "params": ["ctrl", "c"]},
+    {"function": "add_hint_to_stt"},
+]
+
+
+def _hint_entry(regex, actions=None, **kwargs):
+    """A catalog entry carrying the flag PatternCatalog derives."""
+    entry = _entry(regex, actions=actions or list(_BOOST_ACTIONS), **kwargs)
+    entry["requires_hint_engine"] = True
+    return entry
+
+
+class TestHintEngineRefusal:
+
+    def test_phrase_hint_pattern_refused_when_engine_does_not_apply_hints(
+        self,
+    ):
+        patterns = [_hint_entry("^boost$")]
+        result = pattern_tester.run_test_phrase(
+            "boost", patterns, _matcher(), hint_engine=False,
+        )
+        assert result == {"success": True, "match": None}
+
+    def test_phrase_refused_hint_pattern_lets_a_later_pattern_answer(self):
+        # Same first-match walk as the runtime: the refused entry is not a
+        # match, so the next entry that matches responds.
+        patterns = [
+            _hint_entry("^boost$"),
+            _entry("^boost$", actions=[{"function": "text", "params": ["b"]}]),
+        ]
+        result = pattern_tester.run_test_phrase(
+            "boost", patterns, _matcher(), hint_engine=False,
+        )
+        assert result["match"]["resolved_steps"] == [
+            {"function": "text", "params": ["b"]},
+        ]
+
+    def test_phrase_hint_pattern_matches_when_engine_applies_hints(self):
+        patterns = [_hint_entry("^boost$")]
+        result = pattern_tester.run_test_phrase(
+            "boost", patterns, _matcher(), hint_engine=True,
+        )
+        assert result["match"] is not None
+        assert result["match"]["resolved_steps"][-1] == {
+            "function": "add_hint_to_stt", "params": [],
+        }
+
+    def test_phrase_hint_pattern_matches_when_engine_has_not_reported(self):
+        patterns = [_hint_entry("^boost$")]
+        explicit = pattern_tester.run_test_phrase(
+            "boost", patterns, _matcher(), hint_engine=None,
+        )
+        default = pattern_tester.run_test_phrase(
+            "boost", patterns, _matcher(),
+        )
+        assert explicit["match"] is not None
+        assert default == explicit
+
+    def test_draft_with_hint_action_refused_when_engine_does_not_apply_hints(
+        self,
+    ):
+        result = pattern_tester.run_test_draft(
+            _raw_draft("^teach$", actions=list(_BOOST_ACTIONS)),
+            "teach", [], _matcher(), catalog=None, hint_engine=False,
+        )
+        assert result["draft_error"] is None
+        assert result["draft_matches"] is False
+        assert result["winner"] == "none"
+
+    def test_draft_with_hint_action_matches_when_engine_applies_hints(self):
+        for value in (True, None):
+            result = pattern_tester.run_test_draft(
+                _raw_draft("^teach$", actions=list(_BOOST_ACTIONS)),
+                "teach", [], _matcher(), catalog=None, hint_engine=value,
+            )
+            assert result["winner"] == "draft", value
+            assert result["draft_matches"] is True, value
+
+    def test_draft_not_shadowed_by_refused_hint_pattern(self):
+        # A saved hint pattern the runtime refuses cannot shadow the draft.
+        patterns = [_hint_entry("^boost$")]
+        result = pattern_tester.run_test_draft(
+            _draft(phrases=["boost"]), "boost", patterns, _matcher(),
+            catalog=None, hint_engine=False,
+        )
+        assert result["winner"] == "draft"
+        assert result["shadowed_by"] is None
+
+    def test_shadowed_hint_draft_reports_it_would_not_match(self):
+        # An earlier saved pattern wins; the "would the draft match on its
+        # own" answer must also apply the engine rule.
+        patterns = [_entry("^teach$")]
+        result = pattern_tester.run_test_draft(
+            _raw_draft("^teach( now)?$", actions=list(_BOOST_ACTIONS)),
+            "teach", patterns, _matcher(), catalog=None, hint_engine=False,
+        )
+        assert result["winner"] == "existing"
+        assert result["draft_matches"] is False
+
+
+_BOOST_SYSTEM_CONTENT = SYSTEM_CONTENT + (
+    '\n'
+    '[[pattern]]\n'
+    "pattern = '''^boost$'''\n"
+    'actions = [\n'
+    '    { function = "skip_clipboard_restore" },\n'
+    '    { function = "hk", params = ["ctrl", "c"] },\n'
+    '    { function = "add_hint_to_stt" }\n'
+    ']\n'
+)
+
+
+class TestHintEngineHandlers:
+    """The two main.py handlers pass the parser's hint_engine through."""
+
+    async def test_phrase_handler_uses_parser_hint_engine(self, tmp_path):
+        controller = _make_controller(tmp_path, _BOOST_SYSTEM_CONTENT)
+        parser = controller.service_manager.speech_handler.text_parser
+        parser.hint_engine = False
+        await controller._handle_pattern_manager_action(
+            "pm_test_phrase", {"data": {"text": "boost"}},
+        )
+        data = _results(controller, "pm_test_phrase_result")[0]["data"]
+        assert data == {"success": True, "match": None}
+
+        parser.hint_engine = True
+        await controller._handle_pattern_manager_action(
+            "pm_test_phrase", {"data": {"text": "boost"}},
+        )
+        data = _results(controller, "pm_test_phrase_result")[1]["data"]
+        assert data["match"]["pattern_id"] == (
+            PatternManager.pattern_id("^boost$")
+        )
+
+    async def test_draft_handler_uses_parser_hint_engine(self, tmp_path):
+        controller = _make_controller(tmp_path)
+        parser = controller.service_manager.speech_handler.text_parser
+        draft = _raw_draft("^teach$", actions=list(_BOOST_ACTIONS))
+        parser.hint_engine = False
+        await controller._handle_pattern_manager_action(
+            "pm_test_draft", {"data": {"draft": draft, "text": "teach"}},
+        )
+        data = _results(controller, "pm_test_draft_result")[0]["data"]
+        assert data["draft_error"] is None
+        assert data["winner"] == "none"
+        assert data["draft_matches"] is False
+
+        parser.hint_engine = True
+        await controller._handle_pattern_manager_action(
+            "pm_test_draft", {"data": {"draft": draft, "text": "teach"}},
+        )
+        data = _results(controller, "pm_test_draft_result")[1]["data"]
+        assert data["winner"] == "draft"

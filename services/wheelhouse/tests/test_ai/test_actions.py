@@ -483,44 +483,44 @@ class TestWheelhouseHelpDisabled:
 
 
 class TestWheelhouseHelpOnline:
-    """Tests for the wheelhouse_help_online action -- opens browser."""
+    """The spoken "help" command hands the decision to the Logic controller.
+
+    Criterion W4 of wh-assistant-button-explainer: the spoken command and
+    the Help menu entry share one code path, so there is no second copy of
+    the decision. What that shared method does -- the explanation window,
+    the browser, the blank-address notice -- is tested once, in
+    tests/test_logic_open_help_online.py.
+    """
 
     @pytest.mark.asyncio
-    async def test_opens_browser_with_gem_url(self):
-        """wheelhouse_help_online opens browser with configured gem_url."""
+    async def test_it_hands_the_decision_to_the_logic_controller(self):
         ai = _make_ai_service()
         actions = _make_actions(ai_service=ai)
 
-        # Wire config_service with key-based lookup
         lc = actions.speech_handler.logic_controller
-        config = MagicMock()
-        config.get = MagicMock(side_effect=lambda key, default="": {
-            "ai.help.gem_url": "https://example.com/gem",
-        }.get(key, default))
-        lc.config_service = config
+        lc.start_help_online = AsyncMock()
 
         import webbrowser
         with patch.object(webbrowser, "open") as mock_open:
             await actions.wheelhouse_help_online()
-            mock_open.assert_called_once_with("https://example.com/gem")
+
+        # The source names the spoken command, so the Logic process log
+        # says which way in produced the window (boss ruling condition 3).
+        lc.start_help_online.assert_awaited_once_with(source="spoken")
+        # The spoken path must not open a browser of its own: that would be
+        # the second copy of the decision W4 forbids.
+        mock_open.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_shows_when_gem_url_not_configured(self):
-        """wheelhouse_help_online shows error when gem_url is empty."""
-        ai = _make_ai_service()
-        actions = _make_actions(ai_service=ai)
+    async def test_no_logic_controller_does_nothing(self):
+        """Startup can fail before the controller exists."""
+        actions = _make_actions(ai_service=None)
 
-        lc = actions.speech_handler.logic_controller
-        config = MagicMock()
-        config.get = MagicMock(side_effect=lambda key, default="": {
-            "ai.help.gem_url": "",
-        }.get(key, default))
-        lc.config_service = config
+        import webbrowser
+        with patch.object(webbrowser, "open") as mock_open:
+            await actions.wheelhouse_help_online()
 
-        await actions.wheelhouse_help_online()
-
-        assert notifications(actions)
-        assert "not configured" in " ".join(notifications(actions)).lower()
+        mock_open.assert_not_called()
 
 
 # =========================================================================

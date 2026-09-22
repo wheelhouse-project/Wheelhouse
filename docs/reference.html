@@ -137,10 +137,10 @@
 <tr>
 <td>delete [number]</td>
 <td>Deletes one character (or that many) to the right. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
-<td>e.g. "delete 5" or "delete twenty three" -- say the count as digits or as words; counts capped at 50</td>
+<td>e.g. "delete 5" or "delete twenty three" -- say the count as digits or as words; counts capped at 50. Say "erase" in place of "delete" here too, as in "erase 5".</td>
 </tr>
 <tr>
-<td>delete word</td>
+<td>delete (or erase) word</td>
 <td>Deletes the entire word under the cursor</td>
 <td></td>
 </tr>
@@ -225,7 +225,7 @@
 <td></td>
 </tr>
 <tr>
-<td>delete all</td>
+<td>delete (or erase) all</td>
 <td>Selects everything in the current field and deletes it</td>
 <td>Say it as the whole sentence. "delete all the files" on its own is typed as ordinary text, not treated as this command.</td>
 </tr>
@@ -270,57 +270,57 @@
 <td>Select the text first</td>
 </tr>
 <tr>
-<td>delete next [number] characters</td>
+<td>delete (or erase) next [number] characters</td>
 <td>Selects that many characters to the right of the cursor and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete next [number] words</td>
+<td>delete (or erase) next [number] words</td>
 <td>Selects that many words to the right of the cursor and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete next [number] lines</td>
+<td>delete (or erase) next [number] lines</td>
 <td>Moves to the start of the line, selects down that many lines, and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete next [number] paragraphs</td>
+<td>delete (or erase) next [number] paragraphs</td>
 <td>Selects that many paragraphs below the cursor and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete previous / last [number] characters</td>
+<td>delete (or erase) previous / last [number] characters</td>
 <td>Selects that many characters to the left of the cursor and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete previous / last [number] words</td>
+<td>delete (or erase) previous / last [number] words</td>
 <td>Selects that many words to the left of the cursor and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete previous / last [number] lines</td>
+<td>delete (or erase) previous / last [number] lines</td>
 <td>Moves to the start of the line, selects up that many lines, and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete previous / last [number] paragraphs</td>
+<td>delete (or erase) previous / last [number] paragraphs</td>
 <td>Selects that many paragraphs above the cursor and deletes them. Fires only when it is the whole utterance.</td>
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 <tr>
-<td>delete this word</td>
+<td>delete (or erase) this word</td>
 <td>Moves to the start of the word under the cursor, selects the whole word, and deletes it. Fires only when it is the whole utterance.</td>
 <td>"delete word" runs the same three keystrokes</td>
 </tr>
 <tr>
-<td>delete line</td>
+<td>delete (or erase) line</td>
 <td>Selects the whole line the cursor is on and deletes its text. Fires only when it is the whole utterance.</td>
 <td>"delete this line" does the same; the line break stays, so the line is left empty</td>
 </tr>
 <tr>
-<td>delete paragraph</td>
+<td>delete (or erase) paragraph</td>
 <td>Moves to the start of the paragraph the cursor is in, selects the whole paragraph, and deletes it. Fires only when it is the whole utterance.</td>
 <td>"delete this paragraph" does the same</td>
 </tr>
@@ -447,7 +447,7 @@
 <tr>
 <td>unselect that / clear selection</td>
 <td>Drops the selection with a Right Arrow key press, leaving the cursor at the right-hand end of what was selected. Fires only when it is the whole utterance.</td>
-<td>Nothing is deleted; with nothing selected the cursor simply moves one character right</td>
+<td>Nothing is deleted; with nothing selected the cursor moves one character right</td>
 </tr>
 <tr>
 <td>tab</td>
@@ -911,12 +911,12 @@
 <tr>
 <td>move to the beginning of the selection</td>
 <td>Presses Left Arrow, which drops the selection and leaves the cursor at its left-hand end. Fires only when it is the whole utterance.</td>
-<td>With nothing selected the cursor simply moves one character left</td>
+<td>With nothing selected the cursor moves one character left</td>
 </tr>
 <tr>
 <td>move to the end of the selection</td>
 <td>Presses Right Arrow, which drops the selection and leaves the cursor at its right-hand end. Fires only when it is the whole utterance.</td>
-<td>With nothing selected the cursor simply moves one character right</td>
+<td>With nothing selected the cursor moves one character right</td>
 </tr>
 <tr>
 <td>scroll down [number]</td>
@@ -1507,8 +1507,8 @@
 </tr>
 <tr>
 <td>help</td>
-<td>Opens the Wheelhouse Assistant (the official online help) in your browser. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
-<td>Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured, but only when the AI service is enabled; the Help menu item shows its notice whether or not the AI service is enabled</td>
+<td>Opens the Wheelhouse Assistant (the official online help) in your browser, after a short explanation window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured and no window appears. The explanation window is the same one the Help menu item shows, and both take the same route through the Logic process; ticking "Do not show this again" and selecting Assistant sets explain_before_open to false under [ai.help], which turns the window off for the command and the menu item alike. If Windows cannot start a browser, the notice "Wheelhouse could not open your browser." appears</td>
 </tr>
 <tr>
 <td>patterns</td>
@@ -1558,7 +1558,7 @@
 <tr>
 <td>boost</td>
 <td>Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
-<td>See "Special Commands" -- on the default engine this saves the hint but does not apply it until you opt in</td>
+<td>See "Special Commands" -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation</td>
 </tr>
 </tbody>
 </table>
@@ -1666,7 +1666,8 @@
 <p><strong>gpu_layers</strong> <em>(default: <code>99</code>)</em> -- How much of the model to place on the graphics card. Valid values: 99 places the whole model on the graphics card; 0 runs it entirely on the processor, which the installer chooses for a machine with enough system memory but no suitable graphics card. Values in between split it. Lower it if the server fails to start because the graphics card is out of memory.</p>
 <p><strong>startup_timeout_seconds</strong> <em>(default: <code>90</code>)</em> -- How long Wheelhouse waits for its model server to report itself ready before giving up and leaving the AI features off. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.</p>
 <h3 id="aihelp">[ai.help]</h3>
-<p><strong>gem_url</strong> <em>(default: <code>"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"</code>)</em> -- The web address the wheelhouse-help-online voice command opens in your browser; if you blank it out, the command shows a notice that online help is not configured, but only when the AI service is enabled.</p>
+<p><strong>gem_url</strong> <em>(default: <code>"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"</code>)</em> -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured.</p>
+<p><strong>explain_before_open</strong> <em>(default: <code>true</code>)</em> -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back.</p>
 <p><strong>max_response_tokens</strong> <em>(default: <code>800</code>)</em> -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.</p>
 <h3 id="click">[click]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- The master switch for voice clicking -- the click-something-by-name commands and the numbered overlay.</p>
@@ -1689,7 +1690,7 @@
 <p><strong>output_cap_chars</strong> <em>(default: <code>10000</code>)</em> -- The most characters a pattern step's captured text may hold -- the output a run_capture program prints or the reply an ask_ai step receives; longer output makes the step fail rather than insert an incomplete piece of it. Raise it (up to the 15360 ceiling) if a legitimate script prints more; lower it for a tighter guard against a runaway program filling your document.</p>
 <p><strong>run_capture_timeout_default_s</strong> <em>(default: <code>10</code>)</em> -- How many seconds a run_capture pattern step waits for its program to finish when the pattern gives no timeout number of its own. Raise it if your scripts legitimately run longer; 60 seconds is the most any waiting step will wait, because voice commands wait their turn while a step runs.</p>
 <hr />
-<p>Generated: 2026-09-18 for the v1.0.8 release</p>
+<p>Generated: 2026-09-21 for the v1.1.0 release</p>
 </main>
 </body>
 </html>

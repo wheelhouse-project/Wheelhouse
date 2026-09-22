@@ -35,6 +35,10 @@
 #   router matches a PREFIX of an utterance, so a bare ^save$ would
 #   otherwise fire on "save the document for me".
 # - actions: Array of {function, params, awaits_done?} action steps
+#   A pattern whose actions include add_hint_to_stt matches only when the
+#   running speech engine applies hints (or has not reported whether it
+#   does); otherwise its words are typed as dictation
+#   (wh-boost-engine-qualification).
 #
 # ORDERING RULES:
 # 1. Commands with ^ anchor checked before replacements without ^ anchor
@@ -441,7 +445,7 @@ actions = [
 
 # delete word must come BEFORE delete N to avoid "word" being captured as invalid number
 [[pattern]]
-pattern = '''^delete word$'''
+pattern = '''^(?:delete|erase) word$'''
 doc_id = "delete-word"
 whole_utterance_only = true
 actions = [
@@ -455,7 +459,7 @@ actions = [
 # dictatable in a sentence. Without the flag "delete all the files" wiped the
 # focused document at the second word (DeepSeek round 1 on commit bc5b588e).
 [[pattern]]
-pattern = '''^delete all$'''
+pattern = '''^(?:delete|erase) all$'''
 doc_id = "delete-all"
 whole_utterance_only = true
 actions = [
@@ -464,7 +468,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete\s*(\d+)?$'''
+pattern = '''^(?:delete|erase)\s*(\d+)?$'''
 doc_id = "delete"
 whole_utterance_only = true
 actions = [
@@ -484,7 +488,7 @@ actions = [
 # --- delete over a range -----------------------------------------------
 
 [[pattern]]
-pattern = '''^delete next\s+(\d+)?\s*characters?$'''
+pattern = '''^(?:delete|erase) next\s+(\d+)?\s*characters?$'''
 doc_id = "delete-next-character"
 whole_utterance_only = true
 actions = [
@@ -493,7 +497,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete next\s+(\d+)?\s*words?$'''
+pattern = '''^(?:delete|erase) next\s+(\d+)?\s*words?$'''
 doc_id = "delete-next-word"
 whole_utterance_only = true
 actions = [
@@ -502,7 +506,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete next\s+(\d+)?\s*lines?$'''
+pattern = '''^(?:delete|erase) next\s+(\d+)?\s*lines?$'''
 doc_id = "delete-next-line"
 whole_utterance_only = true
 actions = [
@@ -512,7 +516,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete next\s+(\d+)?\s*paragraphs?$'''
+pattern = '''^(?:delete|erase) next\s+(\d+)?\s*paragraphs?$'''
 doc_id = "delete-next-paragraph"
 whole_utterance_only = true
 actions = [
@@ -521,7 +525,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete previous\s+(\d+)?\s*characters?$'''
+pattern = '''^(?:delete|erase) previous\s+(\d+)?\s*characters?$'''
 doc_id = "delete-previous-character"
 whole_utterance_only = true
 actions = [
@@ -530,7 +534,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete previous\s+(\d+)?\s*words?$'''
+pattern = '''^(?:delete|erase) previous\s+(\d+)?\s*words?$'''
 doc_id = "delete-previous-word"
 whole_utterance_only = true
 actions = [
@@ -539,7 +543,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete previous\s+(\d+)?\s*lines?$'''
+pattern = '''^(?:delete|erase) previous\s+(\d+)?\s*lines?$'''
 doc_id = "delete-previous-line"
 whole_utterance_only = true
 actions = [
@@ -549,7 +553,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete previous\s+(\d+)?\s*paragraphs?$'''
+pattern = '''^(?:delete|erase) previous\s+(\d+)?\s*paragraphs?$'''
 doc_id = "delete-previous-paragraph"
 whole_utterance_only = true
 actions = [
@@ -558,7 +562,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete last\s+(\d+)?\s*characters?$'''
+pattern = '''^(?:delete|erase) last\s+(\d+)?\s*characters?$'''
 doc_id = "delete-last-character"
 whole_utterance_only = true
 actions = [
@@ -567,7 +571,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete last\s+(\d+)?\s*words?$'''
+pattern = '''^(?:delete|erase) last\s+(\d+)?\s*words?$'''
 doc_id = "delete-last-word"
 whole_utterance_only = true
 actions = [
@@ -576,7 +580,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete last\s+(\d+)?\s*lines?$'''
+pattern = '''^(?:delete|erase) last\s+(\d+)?\s*lines?$'''
 doc_id = "delete-last-line"
 whole_utterance_only = true
 actions = [
@@ -586,7 +590,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^delete last\s+(\d+)?\s*paragraphs?$'''
+pattern = '''^(?:delete|erase) last\s+(\d+)?\s*paragraphs?$'''
 doc_id = "delete-last-paragraph"
 whole_utterance_only = true
 actions = [
@@ -600,7 +604,7 @@ actions = [
 # reuses the existing entry's exact action steps.
 
 [[pattern]]
-pattern = '''^delete this word$'''
+pattern = '''^(?:delete|erase) this word$'''
 doc_id = "delete-this-word"
 whole_utterance_only = true
 actions = [
@@ -613,7 +617,7 @@ actions = [
 # One block covers both, following the ^select (?:this )?line$ style at
 # patterns.toml:450. Home first: this is a "line form" under mechanism rule 2.
 [[pattern]]
-pattern = '''^delete (?:this )?line$'''
+pattern = '''^(?:delete|erase) (?:this )?line$'''
 doc_id = "delete-line"
 whole_utterance_only = true
 actions = [
@@ -627,7 +631,7 @@ actions = [
 # ^select (?:this )?paragraph$ style at patterns.toml:458 (its 3-step
 # boundary-snap-then-extend shape), plus the final delete.
 [[pattern]]
-pattern = '''^delete (?:this )?paragraph$'''
+pattern = '''^(?:delete|erase) (?:this )?paragraph$'''
 doc_id = "delete-paragraph"
 whole_utterance_only = true
 actions = [

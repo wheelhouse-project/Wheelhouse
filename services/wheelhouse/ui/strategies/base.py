@@ -117,12 +117,61 @@ class InsertionResult:
         unverified") -- the IPC succeeded and the caller's Future should
         resolve. The IPC response carries the field through to logic so
         the override-flow click counter can branch on it.
+
+    target_window_gone: True when the strategy refused before any
+        keystroke AND the window it was going to paste into no longer
+        exists (wh-paste-target-window-vanished). Two strategies set
+        it, each on one branch that fired no keystroke:
+        ClipboardOnlyStrategy on its soft-paste refusal, and
+        ClipboardFallbackStrategy on its preflight refusal
+        (wh-lost-word-neighbour-paths). The handler reading it True
+        knows the word was delivered nowhere and one more attempt
+        cannot deliver it twice. Every other strategy and every other
+        branch leaves it False, which the handler treats as "no retry".
+        False is also the answer when the probe itself fails: a handle
+        that cannot be asked about is not proven dead, and the word
+        fails as it did before this field existed.
+
+        A composite strategy PASSES THIS FIELD THROUGH from the inner
+        result it returns, and does not combine the inner answers the
+        way delivered_nothing below is combined. This field describes
+        the window the last attempt aimed at, and a window dead at that
+        attempt is dead now. Combining with "and" would answer False
+        whenever an earlier inner attempt saw a live window, which is
+        the common case, and no retry would ever fire. A composite that
+        returns an earlier inner result answers False, which is the
+        direction that refuses the retry and is therefore safe.
+
+    delivered_nothing: True ONLY when the strategy proves it put no
+        input into the operating system queue and wrote nothing into
+        the target (wh-lost-word-neighbour-paths). False means "not
+        proven", so a strategy that never sets it refuses by default:
+        no retry, and the retraction gate closes. The proof is per
+        branch, not per strategy -- the same strategy sets it True on a
+        branch that returned before its first keystroke and leaves it
+        False on a branch that returned after one, because
+        ClipboardFallbackStrategy's own Ctrl+C, Delete and arrow keys
+        run before two of its failure returns and a retry there would
+        repeat the Delete against a newly captured target.
+
+        A composite strategy must not pass an inner result through
+        unchanged. It reports True only when EVERY inner attempt it ran
+        proved True: the first attempt may have typed, and the second
+        may then prove it delivered nothing, and a pass-through would
+        report "nothing was delivered" for a call that already typed.
+
+        This field answers a different question from
+        ``target_window_gone`` above, and the handler reads both. This
+        one says the attempt was empty; that one says the window it was
+        aimed at is gone. A retry needs both.
     """
 
     success: bool
     clipboard_dirty: bool
     rejected_reason: Optional[str] = None
     retry_outcome: str = "n/a"
+    target_window_gone: bool = False
+    delivered_nothing: bool = False
 
     def __bool__(self) -> bool:
         return self.success
