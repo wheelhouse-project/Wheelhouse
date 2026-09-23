@@ -47,7 +47,10 @@ _ONNX_HEADER = b"\x08"
 # the provider's audio loop feeds frames to the detector only while the
 # detector is armed.
 WAKE_WORD_ARMED_REASONS: dict[str, tuple[str, ...]] = {
-    "idle_recovery": ("idle",),
+    # Every reason WheelHouse sends except "ptt": the wake word turns
+    # listening on whatever switched it off (wh-wake-word-stop-listening,
+    # boss ruling R2). A push-to-talk release is not a pause to end.
+    "idle_recovery": ("idle", "manual", "startup", "audio", "sonos"),
     "push_to_talk": ("idle", "audio", "sonos"),
 }
 
@@ -58,14 +61,19 @@ def should_listen_for_wake_word(mode: str, reason: Optional[str]) -> bool:
     The three provider mains each carried their own copy of this rule; they
     all call this one function instead (wh-audio-suppression-control C3).
 
-    "audio" armed idle_recovery for one release, so the user could say the
-    command that switched audio suppression off while the sound that caused
-    the pause kept playing. wh-audio-suppression-auto removed that command
-    and the recovery window it was spoken into, so the reason arms nothing
-    in this mode any more: a sound pause now ends when the sound stops.
+    "idle_recovery" arms on every disable reason WheelHouse sends except
+    "ptt": the idle pause, the user's own switch-off ("manual", which the
+    "stop listening" command and an interaction-mode switch also send), a
+    start with listening off ("startup"), sound from this computer
+    ("audio"), and Sonos playback ("sonos"). The wake word then does what
+    the floating button does while listening is off
+    (wh-wake-word-stop-listening). With the detector armed during a sound
+    pause, a recording that says the wake word can switch listening on
+    while the sound plays; the button has the same exposure.
 
-    "push_to_talk" still arms on every reason. Its hold mutes the speakers,
-    so the wake word there is not about the sound pause at all.
+    "push_to_talk" keeps its own list ("idle", "audio", "sonos"). Its hold
+    mutes the speakers, so the wake word there is not about the sound pause
+    at all.
 
     Args:
         mode: the [wake_word] mode value, "idle_recovery" or "push_to_talk".

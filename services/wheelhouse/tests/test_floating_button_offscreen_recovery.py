@@ -1169,6 +1169,66 @@ class TestEveryLayoutSignalReachesASlotThatFitsIt:
         assert caplog.records == []
 
 
+class TestADiscardedManagerIsFreed:
+    """The screen signals must not keep a GuiManager alive.
+
+    PySide6 6.11 holds a functools.partial receiver strongly and never
+    removes it, while it holds a bound-method receiver weakly and removes
+    it when the receiver dies (wh-gui-screen-signal-leak). Through partial
+    receivers, every GuiManager the suite built stayed alive for the whole
+    run. This is leak cleanup, not a crash fix: disconnecting these signals
+    did not stop the 0xC0000374 crash (wh-gui-manager-fixture-heap-crash).
+
+    The connections here are the real ones, made against the real
+    QGuiApplication and its real screens.
+    """
+
+    def test_no_discarded_manager_stays_alive(self, mock_editor_window):
+        import gc
+        import weakref
+
+        from PySide6.QtGui import QGuiApplication
+
+        # Without a screen, only the application-level signals are
+        # connected, and the per-screen connections go untested.
+        assert QGuiApplication.screens(), "the test needs at least one screen"
+        managers = []
+        for _ in range(3):
+            with _manager_patches() as mock_button:
+                built = _build_manager(mock_button)
+            managers.append(weakref.ref(built))
+            del built, mock_button
+        # The stand-in editor window records every call made to it, and the
+        # manager is in those records. They are the test's own references,
+        # not the application's, so they go before the count.
+        mock_editor_window.reset_mock()
+        gc.collect()
+        alive = [ref for ref in managers if ref() is not None]
+        assert alive == [], f"{len(alive)} of {len(managers)} managers stayed alive"
+
+    @pytest.mark.parametrize("owner, signal, carried, expected_name", [
+        pytest.param("app", "primaryScreenChanged", "screen",
+                     "QGuiApplication.primaryScreenChanged", id="primary-screen"),
+        pytest.param("screen", "geometryChanged", _rect(0, 0, 1280, 720),
+                     "QScreen.geometryChanged", id="geometry"),
+        pytest.param("screen", "availableGeometryChanged", _rect(0, 0, 1920, 1040),
+                     "QScreen.availableGeometryChanged", id="available-geometry"),
+        pytest.param("screen", "logicalDotsPerInchChanged", 144.0,
+                     "QScreen.logicalDotsPerInchChanged", id="dots-per-inch"),
+    ])
+    def test_each_signal_still_names_itself_in_the_log(
+            self, manager, owner, signal, carried, expected_name):
+        """The bound methods replaced functools.partial receivers that bound
+        the signal's own name. The log must still name the same signal."""
+        screen = _FakeScreen(0, 0, 1920, 1080)
+        app = _watch_the_layout(manager, [screen])
+        source = app if owner == "app" else screen
+        with patch.object(manager, "_on_screens_changed") as changed:
+            _only_slot(getattr(source, signal))(
+                screen if carried == "screen" else carried)
+        changed.assert_called_once_with(signal_name=expected_name)
+
+
 # What a stale native rectangle looks like. The button is stored at
 # VISIBLE_POS (400, 300) at SIZE 50, and the screen now reports a device
 # pixel ratio of 2.0, so Windows should hold a 100 px window at (800, 600).

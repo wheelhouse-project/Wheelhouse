@@ -1,9 +1,9 @@
 """The window shown before the Wheelhouse Assistant opens (wh-assistant-button-explainer).
 
-A new user who chooses Help reaches the ChatGPT sign-in page with no
+A new user who chooses Help reaches the Gemini sign-in page with no
 explanation. This window comes first: it says the assistant runs inside
-ChatGPT, that a ChatGPT account is needed, that a free one works, and
-what signing up involves. An Assistant button then opens the assistant;
+Google Gemini, that a sign-in is needed, that a free account works, and
+what signing in involves. An Assistant button then opens the assistant;
 a Cancel button opens nothing.
 
 The window carries no settings and sends no message between processes.
@@ -30,8 +30,15 @@ appears; two copies do not pay for the base class, and the extraction
 would have to re-prove the rejection window's own tests.
 
 The body wording is David's, approved word for word on 2026-09-19
-(bead wh-assistant-button-explainer, comment of 2026-09-20 00:56). Do
-not reword it without his approval; a test asserts every string.
+(bead wh-assistant-button-explainer, comment of 2026-09-20 00:56). One
+later change edited it: on 2026-09-22 the assistant moved from ChatGPT to
+a Google Gemini Gem (wh-gem-replaces-gpt-assistant), which rewrote the
+assistant's name, the account sentence (it said a ChatGPT account is
+needed; Gemini asks for a sign-in instead), and the sign-up sentence (it
+said Sign up and named an email address or a Microsoft account; Gemini
+says Sign in and takes a Google account, an Apple account, or an email
+address). Do not reword any of it further without his approval; a test
+asserts every string.
 """
 
 from __future__ import annotations
@@ -57,11 +64,11 @@ EXPLAINER_TITLE = "Ask the Wheelhouse Assistant"
 
 EXPLAINER_BODY_PARAGRAPHS = (
     "The Wheelhouse Assistant answers questions about Wheelhouse."
-    " It runs inside ChatGPT, in your web browser.",
-    "You need a ChatGPT account. A free account works.",
-    'No account yet? On the ChatGPT page, select "Sign up". Enter an'
-    " email address, or use a Google, Microsoft, or Apple account."
-    " The sign-up takes about two minutes.",
+    " It runs inside Google Gemini, in your web browser.",
+    "Gemini asks you to sign in first. A free account works.",
+    'No account yet? On the Gemini page, select "Sign in". You can use a'
+    " Google account, an Apple account, or an email address."
+    " Signing in takes about two minutes.",
     "Then type or dictate your question in plain words.",
 )
 

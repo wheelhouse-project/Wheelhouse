@@ -1,11 +1,11 @@
 # Wheelhouse help for your LLM
 
 The fastest path is the official
-[Wheelhouse Assistant on ChatGPT](https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse)
+[Wheelhouse Assistant on Google Gemini](https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A)
 — one click, nothing to set up, and it always answers from the latest
-help document. A free ChatGPT account is enough; if ChatGPT says you "do
-not have access to GPT interactions", click **Sign up for free** in the
-upper right corner (no credit card required).
+documentation. Gemini asks you to sign in first. A Google account, an
+Apple account, or an email address works, and the free tier is enough (no
+credit card required).
 
 Prefer your own setup? Wheelhouse's complete user guide is written so an
 AI chat service can answer questions from it. Load it into the LLM you
@@ -34,28 +34,33 @@ content is plain text.
 The step-by-step setup guides live on the Wheelhouse site, one section per
 service:
 
-- [ChatGPT — use a Project](https://wheelhouse-project.org/#llm-chatgpt)
-- [Google Gemini — create a Gem](https://wheelhouse-project.org/#llm-gemini)
-- [Claude — use a Project](https://wheelhouse-project.org/#llm-claude)
-- [Perplexity — use a Project](https://wheelhouse-project.org/#llm-perplexity)
+- [ChatGPT — use a Project](https://wheelhouse-project.org/help.html#llm-chatgpt)
+- [Google Gemini — create a Gem](https://wheelhouse-project.org/help.html#llm-gemini)
+- [Claude — use a Project](https://wheelhouse-project.org/help.html#llm-claude)
+- [Perplexity — use a Project](https://wheelhouse-project.org/help.html#llm-perplexity)
 
 All four work on the service's free plan, with one caveat: Perplexity
 documents file uploads inside a project only for its paid plans.
 
-## For builders: the official GPT's files
+## For builders: the official assistant's instructions
 
-This folder also ships the two files behind the official Wheelhouse
-ChatGPT GPT, which fetches the current documentation live at answer time
-instead of using an uploaded copy:
+This folder also ships
+[`gem-instructions.txt`](./gem-instructions.txt), the instruction text
+behind the official Wheelhouse Assistant. It is longer and stricter than
+the rules embedded in the help document. It tells the assistant to answer
+Wheelhouse questions only from the three documents, to answer general
+computing questions from its own knowledge, to end every Wheelhouse answer
+with the document it read and the release that document describes, and
+never to invent a voice command, a configuration key, or a default value.
 
-- [`gpt-instructions.txt`](./gpt-instructions.txt) — the GPT's
-  instructions: fetch before answering (the command reference for
-  command and configuration questions, the guide otherwise), and refuse
-  to answer from memory when the fetch fails.
-- [`gpt-action-openapi.json`](./gpt-action-openapi.json) — the GPT Action
-  schema: three GETs of raw GitHub URLs, `getHelpDocument` for the guide and
-  `getCommandReference` for the command-and-configuration reference, and
-  `getInstallGuide` for installation, updates, and removal.
+Paste it into any assistant that accepts an instruction text, then attach
+the three documents above. Only one phrase is Gemini's own: the file calls
+the attached documents your "Knowledge section", which is what Gemini calls
+them. Every rule in the file works the same on any assistant that can read
+attached files.
 
-You can reuse both to build your own live-fetching assistant on any
-platform that can fetch a URL while answering.
+The official assistant reads one Google Doc holding all three documents
+joined together, and the Wheelhouse release rewrites that Doc. That is why
+the official assistant always describes the current release. An assistant
+built from uploaded copies describes the release you uploaded, which is
+what the release line in every answer makes visible.

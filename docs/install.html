@@ -1,76 +1,36 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wheelhouse Installation Guide</title>
-<meta name="description" content="Install, update, and remove Wheelhouse, with installation troubleshooting.">
-<style>
-  body { max-width: 62rem; margin: 0 auto; padding: 1.5rem; font-family: system-ui, Segoe UI, Arial, sans-serif; color: #1a1a1a; background: #ffffff; line-height: 1.5; overflow-wrap: anywhere; }
-  .skip-link { position: absolute; left: -999px; top: 0; background: #0b5cad; color: #ffffff; padding: 0.75rem 1.25rem; z-index: 10; }
-  .skip-link:focus { left: 0.5rem; top: 0.5rem; }
-  a:focus-visible { outline: 3px solid #0b5cad; outline-offset: 2px; }
-  header { border-bottom: 1px solid #c9d4dd; margin-bottom: 1.5rem; padding-bottom: 0.75rem; }
-  h1 { font-size: 1.8rem; margin: 0 0 0.4rem 0; }
-  h2 { font-size: 1.4rem; margin-top: 2rem; border-bottom: 1px solid #c9d4dd; padding-bottom: 0.3rem; }
-  h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #0b5cad; }
-  a { color: #0b5cad; }
-  nav { background: #f2f5f8; border: 1px solid #c9d4dd; padding: 0.75rem 1rem; margin-bottom: 2rem; border-radius: 6px; }
-  nav ul { margin: 0.3rem 0; padding-left: 1.2rem; }
-  table { border-collapse: collapse; width: 100%; margin: 0.75rem 0; display: block; overflow-x: auto; }
-  th, td { border: 1px solid #c9d4dd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
-  th { background: #f2f5f8; }
-  code { background: #eef2f5; padding: 0.1rem 0.3rem; border-radius: 3px; }
-  pre { max-width: 100%; overflow-x: auto; padding: 0.75rem; background: #eef2f5; }
-  pre code { padding: 0; }
-  @media (max-width: 40rem) { body { padding: 1rem; } }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Full instructions for installing, updating, choosing speech recognition, and removing Wheelhouse.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#151e19" media="(prefers-color-scheme: dark)">
+  <title>Installation guide · Wheelhouse</title>
+  <link rel="icon" href="favicon.ico">
+  <link rel="stylesheet" href="site.css">
+  
 </head>
-<body>
-<a class="skip-link" href="#main">Skip to main content</a>
-<header>
-<h1>Wheelhouse Installation Guide</h1>
-<p><a href="index.html">Back to the Wheelhouse guide</a></p>
-</header>
-<nav aria-label="Contents">
-<ul>
-  <li><a href="#installation-and-setup">Installation and Setup</a>
-    <ul>
-      <li><a href="#running-the-installer">Running the installer</a></li>
-      <li><a href="#what-you-need">What you need</a></li>
-      <li><a href="#successful-installation">Successful installation</a></li>
-      <li><a href="#installation-failure-messages">Installation failure messages</a></li>
-      <li><a href="#updating-wheelhouse">Updating Wheelhouse</a></li>
-      <li><a href="#security-warnings">Security warnings</a></li>
-      <li><a href="#uninstalling-wheelhouse">Uninstalling Wheelhouse</a></li>
-      <li><a href="#administrator-windows-and-uac-prompts">Administrator windows and UAC prompts</a></li>
-      <li><a href="#first-run">First run</a></li>
-      <li><a href="#microphone-verification">Microphone verification</a></li>
-      <li><a href="#the-hotword-x-ray">The hotword ("x-ray")</a></li>
-      <li><a href="#the-wake-word-computer">The wake word ("computer")</a></li>
-    </ul>
-  </li>
-  <li><a href="#speech-engines">Speech Engines</a>
-    <ul>
-      <li><a href="#account-requirements">Account requirements</a></li>
-      <li><a href="#local-and-cloud-engines-compared">Local and cloud engines compared</a></li>
-      <li><a href="#setting-up-google-cloud-credentials-only-if-you-chose-that-engine">Setting up Google Cloud credentials (only if you chose that engine)</a></li>
-      <li><a href="#adding-or-switching-engines-later">Adding or switching engines later</a></li>
-      <li><a href="#installer-troubleshooting">Installer troubleshooting</a></li>
-    </ul>
-  </li>
-</ul>
-</nav>
-<main id="main">
-<h2 id="installation-and-setup">Installation and Setup</h2>
+<body id="top">
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="site-header"><div class="header-inner wrap">
+    <a class="brand" href="index.html" aria-label="Wheelhouse home"><span class="wheel" aria-hidden="true">☸</span> Wheelhouse<span class="brand-dot" aria-hidden="true">.</span></a>
+    <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="start.html">Get started</a><a href="guide.html">User guide</a><a href="reference.html">Commands</a><a href="install.html" aria-current="page">Installation</a><a href="help.html">Get help</a></nav>
+    <a class="button small" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe" aria-label="Download for Windows">Download <span aria-hidden="true">↗</span></a>
+  </div></header>
+  <main id="main" tabindex="-1"><div class="document-heading wrap"><h1>Installation guide</h1><p class="lead">Instructions for installing, updating, and removing Wheelhouse. For a first installation, there’s also a <a href="start.html">short getting-started guide</a>.</p>
+    <div class="guide-links"><a href="guide.html">Using Wheelhouse</a><a href="install.html">Installation details</a><a href="reference.html">Commands &amp; settings</a></div></div>
+    <div class="document-layout wrap"><aside class="document-toc"><details open><summary>On this page</summary><nav aria-label="Page contents"><ul><li><a href="install.html#installation-and-setup">Installation and Setup</a><ul><li><a href="install.html#running-the-installer">Running the installer</a></li><li><a href="install.html#what-you-need">What you need</a></li><li><a href="install.html#successful-installation">Successful installation</a></li><li><a href="install.html#installation-failure-messages">Installation failure messages</a></li><li><a href="install.html#updating-wheelhouse">Updating Wheelhouse</a></li><li><a href="install.html#security-warnings">Security warnings</a></li><li><a href="install.html#uninstalling-wheelhouse">Uninstalling Wheelhouse</a></li><li><a href="install.html#administrator-windows-and-uac-prompts">Administrator windows and UAC prompts</a></li><li><a href="install.html#first-run">First run</a></li><li><a href="install.html#microphone-verification">Microphone verification</a></li><li><a href="install.html#the-hotword-x-ray">The hotword (&quot;x-ray&quot;)</a></li><li><a href="install.html#the-wake-word-computer">The wake word (&quot;computer&quot;)</a></li></ul></li><li><a href="install.html#speech-engines">Speech Engines</a><ul><li><a href="install.html#account-requirements">Account requirements</a></li><li><a href="install.html#local-and-cloud-engines-compared">Local and cloud engines compared</a></li><li><a href="install.html#setting-up-google-cloud-credentials-only-if-you-chose-that-engine">Setting up Google Cloud credentials (only if you chose that engine)</a></li><li><a href="install.html#adding-or-switching-engines-later">Adding or switching engines later</a></li><li><a href="install.html#installer-troubleshooting">Installer troubleshooting</a></li></ul></li></ul></nav></details></aside>
+    <article class="document-body"><h2 id="installation-and-setup">Installation and Setup</h2>
 <p>Installing Wheelhouse, updating it, removing it, and the checks to perform after the first start.</p>
 <h3 id="running-the-installer">Running the installer</h3>
 <p>The installer is a standard Windows setup wizard. Download it and run it -- nothing needs to be installed ahead of time:</p>
 <p>https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe</p>
-<p>If Windows shows a "Windows protected your PC" screen, see <a href="#security-warnings">Security warnings</a> below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 3 GB in total). The wizard:</p>
+<p>If Windows shows a "Windows protected your PC" screen, see <a href="install.html#security-warnings">Security warnings</a> below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 3 GB in total). The wizard:</p>
 <ol>
-<li>Asks its questions up front: which speech engine to use (the pre-selected answer suits most installations -- see <a href="#speech-engines">Speech Engines</a>), whether to set up the optional AI helper (the wizard offers one AI choice, a cloud model from Google, and skipping; the model that runs on your own machine is set up from the command line instead, described below), and whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected). It also asks you to turn on microphone access for desktop apps, but only when that Windows setting is currently off; when it is already on, setup says nothing about it.</li>
-<li>Checks the requirements listed under <a href="#what-you-need">What you need</a>. Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and the memory floor. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count and a connected microphone -- produce a notice and setup continues.</li>
+<li>Asks its questions up front: which speech engine to use (the pre-selected answer suits most installations -- see <a href="install.html#speech-engines">Speech Engines</a>), whether to set up the optional AI helper (the wizard offers one AI choice, a cloud model from Google, and skipping; the model that runs on your own machine is set up from the command line instead, described below), and whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected). It also asks you to turn on microphone access for desktop apps, but only when that Windows setting is currently off; when it is already on, setup says nothing about it.</li>
+<li>Checks the requirements listed under <a href="install.html#what-you-need">What you need</a>. Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and the memory floor. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count and a connected microphone -- produce a notice and setup continues.</li>
 <li>Installs the Microsoft Visual C++ runtime that the speech engine needs, but only when the computer does not have it or has a copy that is too old. Windows asks for permission first, and then Microsoft's own progress window appears. If you decline, or the runtime install fails, setup continues and its final page says so and what to do.</li>
 <li>Installs uv, the environment manager Wheelhouse uses, into the user profile.</li>
 <li>Downloads the Wheelhouse application, verifies the download against its published fingerprint, and creates Wheelhouse's own Python environments. Those environments are self-contained and separate from any other Python installation on the computer.</li>
@@ -104,8 +64,8 @@
 <li><strong>"Could not install uv"</strong>: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.</li>
 <li><strong>"... failed its integrity check"</strong>: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; a changed release asset is the other. Add an exception or try a different network, and if it keeps failing, file an issue on the GitHub page.</li>
 <li><strong>"Downloading ... failed twice"</strong>: network trouble. Run the installer again -- downloads resume where they left off.</li>
-<li><strong>"Setting up services/... failed"</strong>: a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again. If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.</li>
-<li><strong>"An incomplete speech model was found"</strong>: informational, not an error. A previous run was interrupted before the model was complete; the installer removes the incomplete files and puts the model together again from the files it has already downloaded. The 2.5 GB download only repeats for a file that is damaged or missing.</li>
+<li><strong>"Setting up services\wheelhouse failed"</strong> (or another folder under services): a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again. If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.</li>
+<li><strong>"An incomplete speech model was found"</strong>: informational, not an error. The speech model an earlier run installed is now incomplete or damaged, for example because one of its files was deleted. The installer removes it and installs the model again, which repeats the 2.5 GB download. An interrupted run does not cause this message: the installer only puts a model in place after checking it is complete.</li>
 <li><strong>"The spoken-hint vocabulary ..."</strong>: informational, not an error; the install finishes. The word list Parakeet reads before it can favour a boosted word is absent, failed its checksum, or could not be copied. Parakeet biasing is off by default, so nothing else changes. If biasing is switched on, Parakeet then applies no hints, and "boost" is typed as a word. Google still applies hints. Re-running the installer replaces the file.</li>
 <li><strong>"The Microsoft Visual C++ runtime is installed. Restart the computer before you use speech."</strong>: informational, not an error; the install finishes. Microsoft's installer needs a restart before Windows uses the new runtime. Restart the computer, then start Wheelhouse.</li>
 <li><strong>"You declined the Windows permission prompt, so the Microsoft Visual C++ runtime the speech engine needs was not installed ..."</strong>: the install finishes, but speech may not start. Run the installer again and select Yes when Windows asks.</li>
@@ -113,17 +73,17 @@
 <li><strong>"Installing the Microsoft Visual C++ runtime the speech engine needs failed (code N) ..."</strong>: the install finishes, but speech may not start. Run the installer again, or install the Microsoft Visual C++ Redistributable (x64) from Microsoft, then start Wheelhouse again. The code is Microsoft's exit code, or the word "unknown" when setup could not read one; include it in a help request.</li>
 <li><strong>No Wheelhouse entry in the Start menu</strong>: check Start &gt; All apps under W first -- new entries are not pinned to the front page. If it is truly absent, the desktop shortcut works the same; the installer log records a "Shortcut created" or "Could not create" line for a help request.</li>
 </ul>
-<p><strong>Re-running the installer is safe at any time.</strong> It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your user data; the list of what is preserved is under <a href="#updating-wheelhouse">Updating Wheelhouse</a>.</p>
-<p>If none of these apply, the Wheelhouse Assistant can read an installer message and identify the cause; see <a href="index.html#getting-help">Getting Help</a>. Reports can also be filed at https://github.com/wheelhouse-project/Wheelhouse or sent to <code>help@wheelhouse-project.org</code> -- include the installer's output or the setup log.</p>
+<p><strong>Re-running the installer is safe at any time.</strong> It repairs a broken install, resumes interrupted downloads, and updates an existing install while preserving your user data; the list of what is preserved is under <a href="install.html#updating-wheelhouse">Updating Wheelhouse</a>.</p>
+<p>If none of these apply, the Wheelhouse Assistant can read an installer message and identify the cause; see <a href="guide.html#getting-help">Getting Help</a>. Reports can also be filed at https://github.com/wheelhouse-project/Wheelhouse or sent to <code>help@wheelhouse-project.org</code> -- include the installer's output or the setup log.</p>
 <h3 id="updating-wheelhouse">Updating Wheelhouse</h3>
-<p>There is no separate update procedure: <strong>updating is re-running the installer.</strong> Download and run the newest Wheelhouse-Setup.exe, or run the same PowerShell line, from <a href="#running-the-installer">Running the installer</a>. The installer fetches the newest release, and when it finds Wheelhouse already present, it updates it in place. Exit Wheelhouse first -- right-click the floating button or the tray icon, both of which open the same menu, and choose Exit. The installer refuses to replace an application that is running.</p>
+<p>There is no separate update procedure: <strong>updating is re-running the installer.</strong> Download and run the newest Wheelhouse-Setup.exe, or run the same PowerShell line, from <a href="install.html#running-the-installer">Running the installer</a>. The installer fetches the newest release, and when it finds Wheelhouse already present, it updates it in place. Exit Wheelhouse first -- right-click the floating button or the tray icon, both of which open the same menu, and choose Exit. The installer refuses to replace an application that is running.</p>
 <p>An update replaces the application and preserves user data:</p>
 <ul>
 <li>The settings file (config.toml)</li>
 <li>Personal voice patterns</li>
 <li>Approved and declined dictation targets</li>
 <li>Saved speech hints</li>
-<li>The downloaded speech model -- it is stored outside the part an update replaces, so the 2.5 GB download does not repeat. An update that renames the model folder is the exception, and this release renames it: the model downloads once more, and the previous copy is removed only after the new one is verified</li>
+<li>The downloaded speech model -- it is stored outside the part an update replaces, so the 2.5 GB download does not repeat.</li>
 </ul>
 <p><strong>If an update is interrupted</strong> -- a power cut, a closed window, a crash -- user files are preserved. Before replacing anything, the installer copies them into a holding folder next to the application, and the next run restores whatever it finds there. Recovery is running the same command again; no manual step is required.</p>
 <h3 id="security-warnings">Security warnings</h3>
@@ -166,7 +126,7 @@
 </ul>
 <p>No Wheelhouse setting removes this limit. Windows enforces it, and the UAC screen remains protected in all cases.</p>
 <h3 id="first-run">First run</h3>
-<p>Starting Wheelhouse starts five programs: <strong>the launcher</strong> (started from the shortcut; supervises the others and restarts any that crash), <strong>the logic process</strong> (interprets recognized speech and routes it to an action), <strong>the input process</strong> (types text, presses keys, performs clicks), <strong>the GUI process</strong> (the tray icon and the floating status button), and <strong>the speech engine</strong> (a separate helper that converts audio to text). Within a few seconds the Wheelhouse icon appears in the system tray, near the clock; if it does not, see <a href="index.html#troubleshooting">Troubleshooting</a>.</p>
+<p>Starting Wheelhouse starts five programs: <strong>the launcher</strong> (started from the shortcut; supervises the others and restarts any that crash), <strong>the logic process</strong> (interprets recognized speech and routes it to an action), <strong>the input process</strong> (types text, presses keys, performs clicks), <strong>the GUI process</strong> (the tray icon and the floating status button), and <strong>the speech engine</strong> (a separate helper that converts audio to text). Within a few seconds the Wheelhouse icon appears in the system tray, near the clock; if it does not, see <a href="guide.html#troubleshooting">Troubleshooting</a>.</p>
 <h3 id="microphone-verification">Microphone verification</h3>
 <p>Confirm Windows itself receives audio before diagnosing recognition problems. Three checks, in order:</p>
 <ol>
@@ -177,7 +137,7 @@
 <h3 id="the-hotword-x-ray">The hotword ("x-ray")</h3>
 <p>The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands run only when the utterance begins with "x-ray": "close window" is transcribed as ordinary dictation, "x-ray close window" closes the active window. Common commands such as "undo", "copy", and "select all" need no hotword. Throughout this document a command that requires it is written with the "x-ray" prefix; the command reference states the requirement for every command.</p>
 <h3 id="the-wake-word-computer">The wake word ("computer")</h3>
-<p>After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input, not silence, so a film watched without touching either triggers the pause. Saying "computer" resumes it, no keyboard or mouse needed. The wake word and the hotword differ: "computer" resumes listening after an idle pause, "x-ray" runs a protected command. Wake-word behavior is configurable in the wake_word section of the settings file, enabled by default. The idle pause comes from the Idle Monitor plugin (<a href="index.html#plugins">Plugins</a>), also enabled by default; with that plugin disabled, listening does not pause when idle.</p>
+<p>Whenever listening is off, saying "computer" turns it back on, no keyboard or mouse needed. That holds whatever switched it off: the floating button, the "stop listening" command, a start with listening off, sound playing on this computer, Sonos playback, or an idle pause. In push-to-talk mode the wake word ends only the idle pause, and listening then waits for the next hold of the floating button. After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input, not silence, so a film watched without touching either triggers the pause. The wake word and the hotword differ: "computer" turns listening back on, "x-ray" runs a protected command. While sound plays, a recording that says "computer" can also turn listening back on. Wake-word behavior is configurable in the wake_word section of the settings file, enabled by default. The idle pause comes from the Idle Monitor plugin (<a href="guide.html#plugins">Plugins</a>), also enabled by default; with that plugin disabled, listening does not pause when idle.</p>
 <hr />
 <h2 id="speech-engines">Speech Engines</h2>
 <h3 id="account-requirements">Account requirements</h3>
@@ -185,7 +145,7 @@
 <p>An account is required in one case: the <strong>Google Cloud</strong> speech engine, selected at the installer's speech-engine question. That engine processes speech on Google's servers and requires a Google Cloud account and a one-time credentials setup. The account is free and most personal use stays within Google's free tier; Google charges for use beyond it. One limitation: on a computer with less than 8 GB of memory the installer stops before installing anything. Its closing message mentions the cloud engine, but the installer cannot set that engine up on such a machine either, so the remedy is more memory or a different computer.</p>
 <p>A third engine, <strong>Distil-Whisper</strong>, runs locally on an NVIDIA graphics card with at least 4 GB of dedicated memory. The two installers differ here. The setup wizard lists it whatever graphics hardware is present; without a suitable card the install sets up Parakeet instead and says so on its final page, among the notices shown there. The command-line installer checks the hardware first and offers Distil-Whisper only when it finds a suitable card. It downloads its own model on first start, so the first launch takes several minutes.</p>
 <h3 id="local-and-cloud-engines-compared">Local and cloud engines compared</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Aspect</th>
@@ -225,7 +185,7 @@
 <td>No</td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="setting-up-google-cloud-credentials-only-if-you-chose-that-engine">Setting up Google Cloud credentials (only if you chose that engine)</h3>
 <p>This section applies only if you selected the <strong>Google Cloud</strong> speech engine at the installer's speech-engine question. With the default Parakeet engine, skip it: that engine requires no account and no credentials.</p>
 <p>If you selected Google Cloud, the installer ended with a warning that the engine requires credentials before it can transcribe, and referred you to "the Google Cloud section". This is that section.</p>
@@ -245,15 +205,21 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 </ol>
 <p>There is a second method, and it needs no file editing: set an environment variable named GOOGLE_APPLICATION_CREDENTIALS to the full path of the key file (press the Windows key, type "environment variables", open "Edit environment variables for your account"), then close Wheelhouse and start it again from the Start menu. The menu item "Restart Wheelhouse" is not enough for this method: part of the program keeps running across it, and that part still holds the environment from before you set the variable. Google's own software reads that variable automatically. Wheelhouse uses the variable whenever <code>credentials_file</code> is empty, so set one or the other, not both.</p>
 <h3 id="adding-or-switching-engines-later">Adding or switching engines later</h3>
-<p>To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open <strong>STT Provider</strong>, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. If the new engine fails to start, the choice is not recorded and the next start returns to the previous engine. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.</p>
+<p>To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open <strong>STT Provider</strong>, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. The choice is recorded as soon as the new engine's process starts. If that process cannot be started at all, the choice is not recorded and the next start returns to the previous engine. If the process starts and the engine then fails its own startup, the choice stays recorded and the next start tries that engine again; select a working engine from the menu to change it. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.</p>
 <p>To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up what that engine requires, except that Distil-Whisper's model is downloaded by the engine itself the first time it starts. For example, moving from Google Cloud to Parakeet requires the re-run, because that is what downloads Parakeet's speech model; selecting it from the menu alone is not sufficient. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.</p>
 <p>The same re-run repairs a missing or incomplete speech model, for example after an interrupted download. The installer detects an incomplete model and reinstalls it. Re-running the installer is safe at any time, and the speech-engine question defaults to the engine already installed, so pressing Enter keeps it. If the current engine is no longer available on this hardware, the PowerShell installer reports that before asking; the setup wizard does not.</p>
 <h3 id="installer-troubleshooting">Installer troubleshooting</h3>
 <p><strong>Installer failures</strong></p>
-<p>Each installer failure message and its action is listed under <a href="#installation-failure-messages">Installation failure messages</a>; re-running the installer is safe and interrupted downloads resume.</p>
-<hr />
-<p>Generated: 2026-09-21 for the v1.1.0 release
-Wheelhouse version: 1.1.0</p>
-</main>
+<p>Each installer failure message and its action is listed under <a href="install.html#installation-failure-messages">Installation failure messages</a>; re-running the installer is safe and interrupted downloads resume.</p></article></div></main>
+  <footer class="site-footer wrap">
+    <div><a class="brand" href="index.html">Wheelhouse.</a><p>Free and open source.</p></div>
+    <nav aria-label="Footer navigation">
+      <a href="https://github.com/wheelhouse-project/Wheelhouse">Source on GitHub</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/PRIVACY.md">Privacy</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
+      <a href="#top">Back to top ↑</a>
+    </nav>
+    <p class="fine-print">Documentation for Wheelhouse 1.2.0. Speech recognition runs on your computer by default; cloud options are optional.</p>
+  </footer>
 </body>
 </html>

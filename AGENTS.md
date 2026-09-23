@@ -21,7 +21,8 @@ read it first; this file only adds agent-workflow expectations.
 - Run targeted tests for touched code, then broader suites for affected
   subsystems: `python scripts/run_tests.py` from the repo root (see
   `CLAUDE.md` for the wrapper's usage; do not run bare `pytest` or pipe its
-  output through text filters).
+  output through text filters). Run the full main-app suite as
+  `python scripts/run_tests.py --split`, which runs it in parts.
 - Do not use direct `pip install` for project dependencies. Use the owning
   service's uv workflow (`uv add`, `uv sync`) from that service's directory.
 - Keep changes scoped to the task unless a dependency fix is required; do

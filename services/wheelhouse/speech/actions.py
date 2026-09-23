@@ -540,6 +540,7 @@ class ActionFunctions:
         self._functions["open_calibration"] = self.open_calibration
         # Mode switching
         self._functions["set_speech_interaction_mode"] = self.set_speech_interaction_mode
+        self._functions["stop_listening"] = self.stop_listening
 
     def get_functions(self):
         """Returns the function registry for action lookup.
@@ -1880,6 +1881,43 @@ class ActionFunctions:
                 logger.warning("Cannot set interaction mode -- state_manager not available")
         else:
             logger.warning("Cannot set interaction mode -- logic_controller not available")
+        return None
+
+    def stop_listening(self):
+        """Switch listening off: the "stop listening" voice command.
+
+        Runs the disabling half of the floating-button toggle
+        (StateManager.disable_speech_by_user), so the engine is told reason
+        "manual" (wh-wake-word-stop-listening, boss ruling R3). In toggle
+        mode that reason arms the detector and the wake word switches
+        listening back on. In push-to-talk mode it does not: the wake word
+        there ends only the idle pause
+        (StateManager._wake_word_ends_idle_pause_only, boss ruling option
+        2), so the way back is the next hold of the floating button. The
+        help texts state that limit (wh-wake-word-stop-listening.1.2).
+
+        disable_speech_by_user already shows the "Speech is off. You
+        switched it off." notice, through the same send_notice toast the
+        mode-switch commands reach with their
+        show_notification GUI action. This function therefore sends no
+        show_notification of its own: a second one would show the user two
+        notices for one command. Do not add one (boss ruling 11:14
+        2026-09-22, departure b).
+
+        The phrase normally arrives only while listening is on, since
+        nothing is transcribed while it is off. A transcript already in
+        flight when a pause starts is the exception, and it changes nothing.
+        """
+        lc = getattr(self.speech_handler, 'logic_controller', None)
+        sm = getattr(lc, 'state_manager', None) if lc else None
+        if sm is None:
+            logger.warning("Cannot stop listening -- state_manager not available")
+            return None
+        if not sm.speech_enabled:
+            logger.info("Stop listening: listening is already off - nothing to do")
+            return None
+        sm.disable_speech_by_user("Voice command")
+        logger.info("Listening stopped by voice command")
         return None
 
     def _send_gui_action(self, action_dict: dict) -> None:

@@ -1,12 +1,10 @@
 """The Parakeet server arms the wake word for the reasons the shared rule names.
 
-wh-audio-suppression-control C3. "audio" armed idle_recovery for one
-release, so the user could say the command that switched audio
-suppression off while the sound that caused the pause kept playing.
-wh-audio-suppression-auto removed that command and the recovery window
-it was spoken into, so idle_recovery now arms on "idle" alone and a
-sound pause ends when the sound stops. push_to_talk still arms on
-every reason, because its hold mutes the speakers.
+wh-wake-word-stop-listening (boss ruling R2): idle_recovery arms on every
+disable reason WheelHouse sends except "ptt" -- "idle", "manual",
+"startup", "audio" and "sonos" -- so the wake word turns listening on
+whatever switched it off. push_to_talk keeps its own list ("idle",
+"audio", "sonos"), unchanged.
 
 These tests drive the real `_handle_wake_word_activate`, which is where the
 arming decision lands. The rule it applies lives in one shared function,
@@ -17,6 +15,8 @@ test_wake_word_detector.py) and these tests cover this provider's use of it.
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+
+import pytest
 
 from main import ParakeetServer
 
@@ -38,22 +38,27 @@ def _server(mode: str, is_loaded: bool = True) -> ParakeetServer:
 
 
 class TestWakeWordArming:
-    def test_audio_reason_does_not_arm_in_idle_recovery(self):
-        """wh-audio-suppression-auto: the sound pause has no voice way out.
-
-        The detector armed on "audio" so the user could say the command
-        that switched audio suppression off. That command is gone, and so
-        is the recovery window it was spoken into.
-        """
+    @pytest.mark.parametrize(
+        "reason", ["idle", "manual", "startup", "audio", "sonos"]
+    )
+    def test_every_pause_reason_arms_in_idle_recovery(self, reason):
+        """wh-wake-word-stop-listening R2: the wake word ends any pause."""
         server = _server("idle_recovery")
-        server._handle_wake_word_activate("audio")
+        server._handle_wake_word_activate(reason)
+        assert server._wake_word_listening is True
+        server._wake_word_detector.reset.assert_called_once()
+
+    def test_ptt_reason_does_not_arm_in_idle_recovery(self):
+        """A push-to-talk release is not a pause the wake word ends."""
+        server = _server("idle_recovery")
+        server._handle_wake_word_activate("ptt")
         assert server._wake_word_listening is False
         server._wake_word_detector.reset.assert_not_called()
 
-    def test_sonos_reason_does_not_arm_in_idle_recovery(self):
-        """The Sonos pause keeps the behaviour it has today in this mode."""
-        server = _server("idle_recovery")
-        server._handle_wake_word_activate("sonos")
+    def test_manual_reason_does_not_arm_in_push_to_talk(self):
+        """push_to_talk keeps its own list, which names no "manual"."""
+        server = _server("push_to_talk")
+        server._handle_wake_word_activate("manual")
         assert server._wake_word_listening is False
         server._wake_word_detector.reset.assert_not_called()
 

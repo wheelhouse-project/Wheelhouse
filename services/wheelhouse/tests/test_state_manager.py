@@ -951,7 +951,7 @@ class TestSuppressionReason:
         mock_websocket_manager.set_transcription_status.assert_called_with(False, reason="idle")
 
     def test_idle_restore_sends_no_reason(self, sm, mock_websocket_manager):
-        """When re-enabling from idle, no reason is passed (default None)."""
+        """When re-enabling from idle, the reason is None."""
         sm._speech_enabled = True
         sm._speech_suppressed_by_idle = True
         loop = asyncio.new_event_loop()
@@ -961,7 +961,7 @@ class TestSuppressionReason:
             )
         )
         loop.close()
-        mock_websocket_manager.set_transcription_status.assert_called_with(True)
+        mock_websocket_manager.set_transcription_status.assert_called_with(True, reason=None)
 
     def test_audio_suppression_sends_reason_audio(self, sm, mock_websocket_manager):
         """When audio suppression activates, reason='audio' is passed."""
@@ -970,11 +970,11 @@ class TestSuppressionReason:
         mock_websocket_manager.set_transcription_status.assert_called_with(False, reason="audio")
 
     def test_audio_restore_sends_no_reason(self, sm, mock_websocket_manager):
-        """When audio suppression clears, no reason is passed."""
+        """When audio suppression clears and listening comes back, the reason is None."""
         sm._speech_enabled = True
         sm._speech_suppressed_by_audio = True
         sm.set_speech_suppressed_by_audio(False)
-        mock_websocket_manager.set_transcription_status.assert_called_with(True)
+        mock_websocket_manager.set_transcription_status.assert_called_with(True, reason=None)
 
     def test_sonos_suppression_sends_reason_sonos(self, sm, mock_websocket_manager):
         """When Sonos suppression activates, reason='sonos' is passed."""
@@ -983,11 +983,11 @@ class TestSuppressionReason:
         mock_websocket_manager.set_transcription_status.assert_called_with(False, reason="sonos")
 
     def test_sonos_restore_sends_no_reason(self, sm, mock_websocket_manager):
-        """When Sonos suppression clears, no reason is passed."""
+        """When Sonos suppression clears and listening comes back, the reason is None."""
         sm._speech_enabled = True
         sm._speech_suppressed_by_sonos = True
         sm._set_speech_suppressed_by_sonos(False)
-        mock_websocket_manager.set_transcription_status.assert_called_with(True)
+        mock_websocket_manager.set_transcription_status.assert_called_with(True, reason=None)
 
     def test_manual_toggle_off_sends_reason_manual(self, sm, mock_websocket_manager):
         """When user manually disables speech, reason='manual' is passed."""

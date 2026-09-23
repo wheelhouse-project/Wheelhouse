@@ -81,6 +81,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -114,6 +115,28 @@ def _admit_execution():
             f"Preserved recovery evidence: {EVIDENCE_ROOT}")
 
 
+def _default_launch(service, test_file, report, collect):
+    """The argv and working directory for one pytest run, as a 2-tuple.
+
+    Every gate in the main checkout goes through scripts/run_tests.py, which
+    starts pytest under ``uv run``. A gate module that must not let ``uv``
+    build a .venv where it runs -- a git worktree, where a .venv makes the
+    directory undeletable -- replaces this function by assigning
+    ``runner.LAUNCH``. Nothing else about the run changes: the same owned
+    Job, the same timeout, the same marker, the same output parsing.
+    """
+    resolved_service = service.resolve()
+    suite = ("release" if resolved_service == (ROOT / "scripts/release").resolve()
+             else resolved_service.relative_to(ROOT / "services").as_posix())
+    command = [sys.executable, str(ROOT / "scripts/run_tests.py"), "--service", suite,
+               *_targets(test_file), f"--junitxml={report}",
+               *(["--collect-only"] if collect else ["-rf", "-p", "no:randomly"])]
+    return command, ROOT
+
+
+LAUNCH = _default_launch
+
+
 def _invoke(service, test_file, collect=False):
     """No source restore or next launch until every owned process has exited.
 
@@ -124,22 +147,35 @@ def _invoke(service, test_file, collect=False):
     global _cleanup_confirmed
     _admit_execution()
     helper = _owned()
-    resolved_service = service.resolve()
-    suite = ("release" if resolved_service == (ROOT / "scripts/release").resolve()
-             else resolved_service.relative_to(ROOT / "services").as_posix())
     evidence = EVIDENCE_ROOT / uuid.uuid4().hex
     evidence.mkdir(parents=True)
     report = evidence / "junit.xml"
-    command = [sys.executable, str(ROOT / "scripts/run_tests.py"), "--service", suite,
-               *_targets(test_file), f"--junitxml={report}",
-               *(["--collect-only"] if collect else ["-rf", "-p", "no:randomly"])]
+    command, cwd = LAUNCH(service, test_file, report, collect)
+    command = list(command)
     marker = evidence / "cleanup-pending.json"
     marker.write_text(json.dumps({"command": command, "service": str(service)}), encoding="utf-8")
     _cleanup_confirmed = False
     confirmed = False
     try:
-        result = helper.run_owned(command, ROOT,
-                                  dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+        # COLUMNS=1000 keeps the FAILURE REASON on each short-summary line.
+        # pytest builds that line as "FAILED <nodeid>" and then appends
+        # " - <reason>" only while it fits the terminal width
+        # (_pytest/terminal.py, _get_line_with_reprcrash_message: the node id
+        # is never trimmed, the reason is dropped whole when the remaining
+        # width is too small). A captured run has no terminal, so the width is
+        # 80, and this project's node ids routinely pass 100 characters -- so
+        # at the default every reason is dropped. Measured 2026-09-22 against
+        # a real mutant: at COLUMNS=80 both summary lines ended at the node
+        # id; at COLUMNS=1000 both carried "- AssertionError: assert ...".
+        #
+        # The name _failed_names reads is NOT at risk: it sits before the cut.
+        # What the reason buys is the check the mutation-gate skill requires
+        # before trusting a verdict -- that the expected assertion fired,
+        # rather than an unrelated exception upstream of it, which reads as a
+        # catch and proves nothing.
+        result = helper.run_owned(command, cwd,
+                                  dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                                       COLUMNS="1000"),
                                   RUN_TIMEOUT, evidence)
         if result.cleanup_confirmed is not True:
             raise helper.CleanupUnconfirmedError("Test launch did not confirm process exit")
@@ -275,9 +311,23 @@ def _collected_names(service: Path, test_file):
 
 
 def _failed_names(output: str):
+    """The test names pytest's SHORT TEST SUMMARY section reports as failed.
+
+    The body of a run is not a source of verdicts. A test that captures a log
+    record written at ERROR level prints it into the body, and a record whose
+    message begins with FAILED would be read as a test result by a scan over
+    the whole output. Only the lines after the "short test summary info"
+    banner are read, and only when that banner is present; without it (a gate
+    that does not pass -rf) the whole output is read, as before.
+    """
+    lines = output.splitlines()
+    for index, line in enumerate(lines):
+        if "short test summary info" in line:
+            lines = lines[index + 1:]
+            break
     return {
         re.sub(r"\[.*\]$", "", line.split("::")[-1].split()[0])
-        for line in output.splitlines()
+        for line in lines
         if line.startswith("FAILED")
     }
 
@@ -307,7 +357,20 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     tmp = path.with_name(f"{path.name}.mutation-gate.{os.getpid()}.tmp")
     try:
         tmp.write_bytes(data)
-        os.replace(tmp, path)
+        # Windows refuses a rename over a file another process still holds
+        # open (PermissionError, WinError 5). A language server or an
+        # antivirus scan reading the source is transient, so the rename is
+        # retried a bounded number of times before the error propagates --
+        # unbounded would hang the sweep, and no retry at all would leave the
+        # mutant in place with the rename reported as failed.
+        for attempt in range(1, 6):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.2)
     finally:
         # A successful replace already consumed the temporary file. An
         # interrupt before it leaves the target untouched, which is the
@@ -690,7 +753,10 @@ def run(mutations, argv=None) -> int:
             errors.append(f"{m['name']}: {detail}")
             print(f"ERROR {m['name']}: {detail}")
             continue
-        failed = _failed_names(out)
+        # The exit code decides first. Exit 0 means pytest failed no test, so
+        # the mutation survived whatever the text says; only a nonzero exit
+        # makes the short summary worth reading.
+        failed = set() if proc.returncode == 0 else _failed_names(out)
         missing = [t for t in m["expect"] if t not in failed]
         if missing:
             survivors.append(f"{m['name']}: expected {missing}")

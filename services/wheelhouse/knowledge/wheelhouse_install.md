@@ -26,7 +26,7 @@ Behavior rules:
   help document explains the features in prose, but the complete list of every
   command and setting now lives in that reference.
 - For installation, updates, removal, or installer troubleshooting, use the
-  separate installation guide (wheelhouse_install.md), fetched by getInstallGuide.
+  separate installation guide (wheelhouse_install.md).
 - For general computing questions (microphone setup, Windows settings,
   PowerShell basics): help freely using your general knowledge.
 - If the answer isn't in any of the documents provided to you: "I don't have
@@ -108,8 +108,8 @@ Installer failure messages contain no personal data and can be included in a hel
 - **"Could not install uv"**: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.
 - **"... failed its integrity check"**: the downloaded file does not match its published fingerprint. An antivirus or proxy rewriting downloads is the most common cause; a changed release asset is the other. Add an exception or try a different network, and if it keeps failing, file an issue on the GitHub page.
 - **"Downloading ... failed twice"**: network trouble. Run the installer again -- downloads resume where they left off.
-- **"Setting up services/... failed"**: a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again. If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.
-- **"An incomplete speech model was found"**: informational, not an error. A previous run was interrupted before the model was complete; the installer removes the incomplete files and puts the model together again from the files it has already downloaded. The 2.5 GB download only repeats for a file that is damaged or missing.
+- **"Setting up services\wheelhouse failed"** (or another folder under services): a Python environment could not be built. If the message shows a "uv sync exit code", it is usually a network or proxy problem -- check the connection and run the installer again. If it says a path "is missing or is not a folder", the unpacked files are incomplete or were quarantined -- run the installer again and check whether antivirus is removing files.
+- **"An incomplete speech model was found"**: informational, not an error. The speech model an earlier run installed is now incomplete or damaged, for example because one of its files was deleted. The installer removes it and installs the model again, which repeats the 2.5 GB download. An interrupted run does not cause this message: the installer only puts a model in place after checking it is complete.
 - **"The spoken-hint vocabulary ..."**: informational, not an error; the install finishes. The word list Parakeet reads before it can favour a boosted word is absent, failed its checksum, or could not be copied. Parakeet biasing is off by default, so nothing else changes. If biasing is switched on, Parakeet then applies no hints, and "boost" is typed as a word. Google still applies hints. Re-running the installer replaces the file.
 - **"The Microsoft Visual C++ runtime is installed. Restart the computer before you use speech."**: informational, not an error; the install finishes. Microsoft's installer needs a restart before Windows uses the new runtime. Restart the computer, then start Wheelhouse.
 - **"You declined the Windows permission prompt, so the Microsoft Visual C++ runtime the speech engine needs was not installed ..."**: the install finishes, but speech may not start. Run the installer again and select Yes when Windows asks.
@@ -135,7 +135,7 @@ An update replaces the application and preserves user data:
 - Personal voice patterns
 - Approved and declined dictation targets
 - Saved speech hints
-- The downloaded speech model -- it is stored outside the part an update replaces, so the 2.5 GB download does not repeat. An update that renames the model folder is the exception, and this release renames it: the model downloads once more, and the previous copy is removed only after the new one is verified
+- The downloaded speech model -- it is stored outside the part an update replaces, so the 2.5 GB download does not repeat.
 
 **If an update is interrupted** -- a power cut, a closed window, a crash -- user files are preserved. Before replacing anything, the installer copies them into a holding folder next to the application, and the next run restores whatever it finds there. Recovery is running the same command again; no manual step is required.
 
@@ -222,7 +222,7 @@ The hotword protects commands that would be disruptive or hard to undo if they f
 
 ### The wake word ("computer")
 
-After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input, not silence, so a film watched without touching either triggers the pause. Saying "computer" resumes it, no keyboard or mouse needed. The wake word and the hotword differ: "computer" resumes listening after an idle pause, "x-ray" runs a protected command. Wake-word behavior is configurable in the wake_word section of the settings file, enabled by default. The idle pause comes from the Idle Monitor plugin ([Plugins](wheelhouse_help.md#plugins)), also enabled by default; with that plugin disabled, listening does not pause when idle.
+Whenever listening is off, saying "computer" turns it back on, no keyboard or mouse needed. That holds whatever switched it off: the floating button, the "stop listening" command, a start with listening off, sound playing on this computer, Sonos playback, or an idle pause. In push-to-talk mode the wake word ends only the idle pause, and listening then waits for the next hold of the floating button. After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input, not silence, so a film watched without touching either triggers the pause. The wake word and the hotword differ: "computer" turns listening back on, "x-ray" runs a protected command. While sound plays, a recording that says "computer" can also turn listening back on. Wake-word behavior is configurable in the wake_word section of the settings file, enabled by default. The idle pause comes from the Idle Monitor plugin ([Plugins](wheelhouse_help.md#plugins)), also enabled by default; with that plugin disabled, listening does not pause when idle.
 
 ---
 
@@ -277,7 +277,7 @@ There is a second method, and it needs no file editing: set an environment varia
 
 ### Adding or switching engines later
 
-To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open **STT Provider**, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. If the new engine fails to start, the choice is not recorded and the next start returns to the previous engine. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.
+To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open **STT Provider**, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. The choice is recorded as soon as the new engine's process starts. If that process cannot be started at all, the choice is not recorded and the next start returns to the previous engine. If the process starts and the engine then fails its own startup, the choice stays recorded and the next start tries that engine again; select a working engine from the menu to change it. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.
 
 To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up what that engine requires, except that Distil-Whisper's model is downloaded by the engine itself the first time it starts. For example, moving from Google Cloud to Parakeet requires the re-run, because that is what downloads Parakeet's speech model; selecting it from the menu alone is not sufficient. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.
 
@@ -297,5 +297,5 @@ Each installer failure message and its action is listed under [Installation fail
 
 ---
 
-Generated: 2026-09-21 for the v1.1.0 release
-Wheelhouse version: 1.1.0
+Generated: 2026-09-23 for the v1.2.0 release
+Wheelhouse version: 1.2.0

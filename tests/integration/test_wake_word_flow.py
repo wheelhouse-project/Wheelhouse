@@ -189,15 +189,12 @@ class TestWakeWordModeFiltering:
             loop.close()
 
     @pytest.mark.asyncio
-    async def test_wake_word_does_not_clear_audio_suppression(self):
-        """A wake word leaves the sound pause exactly as it found it.
+    async def test_wake_word_clears_audio_suppression(self):
+        """A wake word ends the sound pause, as the floating button does.
 
-        wh-audio-suppression-auto: the audio monitor owns
-        ``_speech_suppressed_by_audio`` and the sound really is still
-        playing, so the wake word neither writes that field nor overrides
-        it. The recovery window that used to override it carried one
-        command out of the pause, and that command is gone, so listening
-        stays off until the sound stops.
+        wh-wake-word-stop-listening (boss ruling R1): the wake word turns
+        listening on whatever switched it off, and clears every pause. The
+        pause is cleared, not suspended for a window.
         """
         ws = _make_ws_manager()
         sm, bus, gui_queue, loop = _make_state_manager(ws_manager=ws)
@@ -208,15 +205,14 @@ class TestWakeWordModeFiltering:
 
             await bus.publish(WakeWordDetectedEvent(keyword="computer"))
 
-            # Audio suppression NOT cleared by wake word
-            assert sm._speech_suppressed_by_audio is True
-            assert sm.speech_enabled is False
+            assert sm._speech_suppressed_by_audio is False
+            assert sm.speech_enabled is True
         finally:
             loop.close()
 
 
 class TestWakeWordIgnoredWhenNotSuppressed:
-    """Wake word event is ignored when no idle suppression is active."""
+    """Wake word event is ignored only while listening is already on."""
 
     @pytest.mark.asyncio
     async def test_no_state_change_when_already_active(self):
@@ -236,8 +232,12 @@ class TestWakeWordIgnoredWhenNotSuppressed:
             loop.close()
 
     @pytest.mark.asyncio
-    async def test_no_state_change_when_user_disabled(self):
-        """Wake word ignored when user manually disabled speech."""
+    async def test_wake_word_turns_on_speech_the_user_disabled(self):
+        """The user's own switch-off also ends at the wake word.
+
+        wh-wake-word-stop-listening (boss ruling R1): "manual" arms the
+        detector, and the wake word does what the floating button does.
+        """
         ws = _make_ws_manager()
         sm, bus, gui_queue, loop = _make_state_manager(ws_manager=ws)
         try:
@@ -246,9 +246,9 @@ class TestWakeWordIgnoredWhenNotSuppressed:
 
             await bus.publish(WakeWordDetectedEvent(keyword="computer"))
 
-            # Nothing happens: user disabled speech, not idle suppression
-            ws.set_transcription_status.assert_not_called()
-            assert sm._speech_enabled is False
+            ws.set_transcription_status.assert_called_once_with(True)
+            assert sm._speech_enabled is True
+            assert sm.speech_enabled is True
         finally:
             loop.close()
 
@@ -413,7 +413,7 @@ class TestIdleSuppressionWithWakeWordInteraction:
 
     @pytest.mark.asyncio
     async def test_wake_word_during_multiple_suppressions(self):
-        """Wake word clears idle but speech stays off due to audio suppression."""
+        """Wake word clears the idle and the sound pause together."""
         ws = _make_ws_manager()
         sm, bus, gui_queue, loop = _make_state_manager(ws_manager=ws)
         try:
@@ -424,10 +424,9 @@ class TestIdleSuppressionWithWakeWordInteraction:
 
             await bus.publish(WakeWordDetectedEvent(keyword="computer"))
 
-            # Idle cleared, but audio still suppressing
             assert sm._speech_suppressed_by_idle is False
-            assert sm._speech_suppressed_by_audio is True
-            assert sm.speech_enabled is False
+            assert sm._speech_suppressed_by_audio is False
+            assert sm.speech_enabled is True
         finally:
             loop.close()
 

@@ -539,7 +539,8 @@ ENABLE_AUDIO_SUPPRESSION = "auto"
 # The check runs every polling_interval seconds, 2 in this file.
 # Listening also resumes when WheelHouse cannot reach the speaker.
 # Switching speech on resumes listening only until the next check finds music.
-# The wake word and a push-to-talk hold do not end this pause.
+# In toggle mode the wake word ends this pause the same way. In push-to-talk
+# mode neither the wake word nor a hold ends it.
 # An echo canceller cannot remove this music, because it never passes through
 # this computer.
 ENABLE_SONOS_SUPPRESSION = true
@@ -664,45 +665,38 @@ pattern = '''^click to talk mode$'''
 """,
         ["test_no_shipped_pattern_calls_an_audio_suppression_action"]),
 
-    # -- The recovery window comes back, one piece each (plan item 22) -----
+    # -- The wake word ends the sound pause (wh-wake-word-stop-listening) ---
+    # These two replaced "a-wake-word-ends-the-sound-pause" and its flow
+    # twin: boss ruling R1 reversed the behaviour they guarded, so the
+    # wake word now clears the sound pause the way the floating button
+    # does, and the mutations break that instead.
     mutation(
-        "a-wake-word-ends-the-sound-pause", CONTROL_TESTS, STATE_MANAGER,
+        "the-wake-word-leaves-the-sound-pause", CONTROL_TESTS, STATE_MANAGER,
         """\
-            self.send_state_update()
-        else:
-            logger.info(f"Wake word '{event.keyword}' detected but not idle-suppressed - ignoring")
+        self._set_speech_enabled_explicitly(True)
+        self._speech_suppressed_by_audio = False
+        self._speech_suppressed_by_sonos = False
 """,
         """\
-            self.send_state_update()
-        elif (
-            self._speech_suppressed_by_audio
-            and self._audio_suppression_active
-        ):
-            self._speech_suppressed_by_audio = False
-            self.send_state_update()
-        else:
-            logger.info(f"Wake word '{event.keyword}' detected but not idle-suppressed - ignoring")
+        self._set_speech_enabled_explicitly(True)
+        self._speech_suppressed_by_sonos = False
 """,
-        ["test_a_wake_word_during_a_sound_pause_leaves_listening_off"]),
+        ["test_a_wake_word_during_a_sound_pause_turns_listening_on",
+         "test_a_wake_word_during_idle_and_sound_pauses_clears_both"]),
     mutation(
-        "a-wake-word-ends-the-sound-pause-in-the-flow", FLOW_TESTS, STATE_MANAGER,
+        "the-wake-word-leaves-the-sound-pause-in-the-flow", FLOW_TESTS,
+        STATE_MANAGER,
         """\
-            self.send_state_update()
-        else:
-            logger.info(f"Wake word '{event.keyword}' detected but not idle-suppressed - ignoring")
+        self._set_speech_enabled_explicitly(True)
+        self._speech_suppressed_by_audio = False
+        self._speech_suppressed_by_sonos = False
 """,
         """\
-            self.send_state_update()
-        elif (
-            self._speech_suppressed_by_audio
-            and self._audio_suppression_active
-        ):
-            self._speech_suppressed_by_audio = False
-            self.send_state_update()
-        else:
-            logger.info(f"Wake word '{event.keyword}' detected but not idle-suppressed - ignoring")
+        self._set_speech_enabled_explicitly(True)
+        self._speech_suppressed_by_sonos = False
 """,
-        ["test_wake_word_does_not_clear_audio_suppression"]),
+        ["test_wake_word_clears_audio_suppression",
+         "test_wake_word_during_multiple_suppressions"]),
     mutation(
         "the-stable-transcript-gate-comes-back", RETRACTION_TESTS, WEBSOCKET,
         "                        # Extract delta (new words since last stable)\n",
@@ -727,11 +721,13 @@ pattern = '''^click to talk mode$'''
                         # wh-7ou.7.6.11 verdict gate: a final carrying the
 """,
         ["test_a_final_reaches_the_pipeline_when_the_manager_reports_a_window"]),
+    # Replaced "idle-recovery-arms-on-audio-again": boss ruling R2 made
+    # idle_recovery arm on "audio" (wh-wake-word-stop-listening).
     mutation(
-        "idle-recovery-arms-on-audio-again", DETECTOR_TESTS, DETECTOR,
-        '    "idle_recovery": ("idle",),\n',
-        '    "idle_recovery": ("idle", "audio"),\n',
-        ["test_idle_recovery_does_not_arm_on_audio"]),
+        "idle-recovery-stops-arming-on-audio", DETECTOR_TESTS, DETECTOR,
+        '    "idle_recovery": ("idle", "manual", "startup", "audio", "sonos"),\n',
+        '    "idle_recovery": ("idle", "manual", "startup", "sonos"),\n',
+        ["test_idle_recovery_arms_on_every_other_pause"]),
 
     # -- The help prose (plan items 23-24) ---------------------------------
     mutation(

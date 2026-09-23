@@ -2142,3 +2142,83 @@ def test_uia_module_failure_is_not_memoized(monkeypatch):
     # The retry must reach comtypes again rather than replay the failure.
     assert uia_walker._uia_module() is fake_client
     assert attempts == ["UIAutomationCore.dll", "UIAutomationCore.dll"]
+
+
+# ---------------------------------------------------------------------------
+# selection_state_via_selection_item_pattern (wh-pattern-manager-tree-click)
+#
+# The outcome signal for the tree-item Invoke check: a Qt tree row answers
+# Invoke() with S_OK and selects nothing, so the executor reads the row's
+# selection state around the press. The reader must tell "no SelectionItem
+# pattern" (None -- no signal, leave today's behaviour alone) apart from
+# "selected" and "not selected", and must NOT swallow a raising read: the
+# executor treats a raise as evidence that the press removed the element.
+# ---------------------------------------------------------------------------
+
+class FakeSelectionItemPattern:
+    """Models the typed IUIAutomationSelectionItemPattern."""
+
+    def __init__(self, is_selected=False, raises=None):
+        self._is_selected = is_selected
+        self._raises = raises
+        self.reads = 0
+
+    @property
+    def CurrentIsSelected(self):
+        self.reads += 1
+        if self._raises is not None:
+            raise self._raises
+        return self._is_selected
+
+
+def test_selection_state_uses_the_cached_pattern():
+    pattern = FakeSelectionItemPattern(is_selected=True)
+    raw = FakeRawPattern(pattern)
+    element = FakeInvokableElement(cached=raw)
+
+    assert uia_walker.selection_state_via_selection_item_pattern(element) is True
+    assert raw.qi_calls == 1
+    # The cached pattern was present, so the live fallback was not consulted.
+    assert element.current_calls == 0
+
+
+def test_selection_state_falls_back_to_the_current_pattern():
+    pattern = FakeSelectionItemPattern(is_selected=False)
+    element = FakeInvokableElement(cached=None, current=FakeRawPattern(pattern))
+
+    assert uia_walker.selection_state_via_selection_item_pattern(element) is False
+    assert element.cached_calls == 1
+    assert element.current_calls == 1
+
+
+def test_selection_state_is_none_when_the_control_has_no_pattern():
+    element = FakeInvokableElement(cached=None, current=None)
+
+    assert uia_walker.selection_state_via_selection_item_pattern(element) is None
+
+
+def test_selection_state_treats_a_null_pointer_as_no_pattern():
+    element = FakeInvokableElement(
+        cached=FakeNullPattern(), current=FakeNullPattern()
+    )
+
+    assert uia_walker.selection_state_via_selection_item_pattern(element) is None
+
+
+def test_selection_state_lets_a_raising_read_propagate():
+    """A raise means the element stopped resolving -- the executor's bound (b)
+    reads that as "the press acted", which it cannot do if this swallows it."""
+    boom = RuntimeError("element not available")
+    pattern = FakeSelectionItemPattern(raises=boom)
+    element = FakeInvokableElement(cached=FakeRawPattern(pattern))
+
+    with pytest.raises(RuntimeError):
+        uia_walker.selection_state_via_selection_item_pattern(element)
+
+
+def test_selection_state_coerces_the_com_value_to_a_bool():
+    """A real COM BOOL arrives as an int; the executor compares with ``is``."""
+    pattern = FakeSelectionItemPattern(is_selected=1)
+    element = FakeInvokableElement(cached=FakeRawPattern(pattern))
+
+    assert uia_walker.selection_state_via_selection_item_pattern(element) is True

@@ -655,3 +655,225 @@ class TestTheCheckMode:
                     new="OTHER = 2")
         assert runner.run([stale, good], argv=["--check", "good-one"]) == 0
         assert stub_pytest["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# wh-overlay-rewalk-after-filter, contract C8. The four behaviours the
+# 26c2117c runner change added, each with a test that fails when it is undone.
+# ---------------------------------------------------------------------------
+
+
+class TestWhereAVerdictIsReadFrom:
+    """pytest's short-summary section is the only source of failed names.
+
+    A test that captures a log record written at ERROR level prints that
+    record into the BODY of the run. A record whose message begins with
+    FAILED is then read as a test result by a scan over the whole output, so
+    one logged line turns a survivor into a catch. Reading only the lines
+    after the "short test summary info" banner removes that reach.
+    """
+
+    def test_a_failed_line_in_the_body_is_not_a_verdict(self):
+        output = (
+            "FAILED to reach the device after 3 attempts\n"
+            "=== short test summary info ===\n"
+            "FAILED tests/x.py::test_real - assert 0\n"
+            "1 failed in 0.01s\n"
+        )
+
+        assert runner._failed_names(output) == {"test_real"}
+
+    def test_without_the_banner_the_whole_output_is_read(self):
+        """A gate that does not pass -rf prints no banner. Reading nothing in
+        that case would report every mutation as a survivor, so the older
+        whole-output behaviour is what the absent banner keeps."""
+        output = "FAILED tests/x.py::test_real - assert 0\n1 failed in 0.01s\n"
+
+        assert runner._failed_names(output) == {"test_real"}
+
+
+class TestTheExitCodeDecidesFirst:
+    """Exit 0 means pytest failed no test, whatever the text says.
+
+    The text can say otherwise: a passing test that logs or prints a line
+    beginning FAILED puts one in the output of a green run. Reading the text
+    first would report that mutation as caught by a test that passed.
+    """
+
+    def test_exit_zero_is_no_failures_even_with_failed_lines(
+            self, one_mutation, monkeypatch, capsys):
+        mutation, target, original = one_mutation
+        monkeypatch.setattr(runner, "_collected_names",
+                            lambda service, test_file: {"test_value"})
+        monkeypatch.setattr(runner, "_clear_pycache", lambda service: None)
+        calls = {"n": 0}
+
+        def _run(service, test_file):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _green()
+            # Green, but a passing test printed a FAILED line of its own.
+            return _FakeCompleted(
+                returncode=0,
+                stdout="=== short test summary info ===\n"
+                       "FAILED tests/x.py::test_value - printed, not failed\n"
+                       "1 passed in 0.01s\n",
+                stderr="")
+
+        monkeypatch.setattr(runner, "_run_pytest", _run)
+
+        rc = runner.run([mutation], argv=[])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "SURVIVED value-changed" in out
+        assert "caught value-changed" not in out
+        assert target.read_bytes() == original
+
+
+class TestWhereTheLaunchComesFrom:
+    """A gate module replaces runner.LAUNCH to keep its own pytest off uv.
+
+    A gate run from a git worktree must not let ``uv`` build a .venv there --
+    that makes the worktree undeletable -- so it assigns runner.LAUNCH and
+    names an interpreter directly. That only works if _invoke takes BOTH the
+    command and the working directory from whatever LAUNCH returns at call
+    time, and the proof has to be read where it matters: in the arguments
+    run_owned actually receives.
+    """
+
+    @pytest.fixture
+    def watched_owned(self, monkeypatch, tmp_path):
+        """A stub owned-process helper that records its run_owned call."""
+        seen = {}
+
+        class _CleanupUnconfirmedError(Exception):
+            pass
+
+        def _run_owned(command, cwd, env, timeout, evidence):
+            seen.update(command=command, cwd=cwd, env=env)
+            return SimpleNamespace(cleanup_confirmed=True, returncode=0,
+                                   stdout="1 passed in 0.01s\n", stderr="")
+
+        monkeypatch.setattr(
+            runner, "_owned",
+            lambda: SimpleNamespace(
+                run_owned=_run_owned,
+                CleanupUnconfirmedError=_CleanupUnconfirmedError))
+        monkeypatch.setattr(runner, "_cleanup_confirmed", True)
+        return seen
+
+    def test_invoke_runs_the_command_and_cwd_that_launch_returned(
+            self, watched_owned, monkeypatch, tmp_path):
+        service = tmp_path / "service"
+        service.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        # _default_launch is stubbed as well, and with a DIFFERENT answer.
+        # Without it, a change that calls _default_launch directly instead of
+        # LAUNCH fails this test with a ValueError out of relative_to, on a
+        # temporary path that is not under services/ -- a catch earned by an
+        # unrelated crash, which proves nothing. With it, such a change fails
+        # on the assertion below, which is the thing being pinned.
+        monkeypatch.setattr(
+            runner, "_default_launch",
+            lambda service, test_file, report, collect: (
+                ["the-default"], tmp_path))
+        monkeypatch.setattr(
+            runner, "LAUNCH",
+            lambda service, test_file, report, collect: (
+                ["my-python", "-m", "pytest", str(test_file)], elsewhere))
+
+        runner._invoke(service, "tests/x.py")
+
+        assert watched_owned["command"] == [
+            "my-python", "-m", "pytest", "tests/x.py"]
+        assert watched_owned["cwd"] == elsewhere
+
+    def test_every_run_is_given_a_wide_terminal(
+            self, watched_owned, monkeypatch, tmp_path):
+        """COLUMNS=1000 keeps the " - <reason>" suffix on each summary line.
+
+        pytest appends the reason only while it fits the terminal width, and
+        a captured run has no terminal, so the width is 80 -- narrower than
+        this project's node ids. Without the reason a reader cannot tell a
+        catch on the expected assertion from a catch on an unrelated
+        exception upstream of it.
+        """
+        service = tmp_path / "service"
+        service.mkdir()
+        # The ambient environment must not answer for the runner. A shell that
+        # already exports COLUMNS -- which the gate logs are read from, so it
+        # often does -- makes this test pass against a runner that sets
+        # nothing. Measured 2026-09-22: without this line the mutation that
+        # removes COLUMNS from the environment survived, 34 passed.
+        monkeypatch.delenv("COLUMNS", raising=False)
+        # Stubbed for the same reason as in the test above: so a change that
+        # bypasses LAUNCH fails on an assertion somewhere, never on a
+        # relative_to ValueError raised before this test measures anything.
+        monkeypatch.setattr(
+            runner, "_default_launch",
+            lambda service, test_file, report, collect: (["x"], service))
+        monkeypatch.setattr(
+            runner, "LAUNCH",
+            lambda service, test_file, report, collect: (["x"], service))
+
+        runner._invoke(service, "tests/x.py")
+
+        assert watched_owned["env"].get("COLUMNS") == "1000"
+        assert watched_owned["env"].get("PYTHONDONTWRITEBYTECODE") == "1"
+
+
+class TestARenameOverAHeldFile:
+    """os.replace onto a source file can lose a race with another reader.
+
+    Windows refuses a rename over a file some other process holds open
+    (PermissionError, WinError 5). A language server or an antivirus scan
+    reading the source is transient, so a bounded retry turns that into a
+    pause instead of a failed sweep. Bounded on purpose: unbounded would
+    hang the sweep on a permanent refusal.
+    """
+
+    def test_a_transient_refusal_is_retried_and_then_succeeds(
+            self, tmp_path, monkeypatch):
+        target = tmp_path / "target.py"
+        target.write_bytes(b"OLD\n")
+        real_replace = runner.os.replace
+        attempts = {"n": 0}
+
+        def _refuse_twice(src, dst):
+            attempts["n"] += 1
+            if attempts["n"] <= 2:
+                raise PermissionError(5, "held open")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(runner.os, "replace", _refuse_twice)
+        monkeypatch.setattr(runner.time, "sleep", lambda seconds: None)
+
+        runner._atomic_write_bytes(target, b"NEW\n")
+
+        assert attempts["n"] == 3
+        assert target.read_bytes() == b"NEW\n"
+
+    def test_a_permanent_refusal_raises_after_five_attempts(
+            self, tmp_path, monkeypatch):
+        target = tmp_path / "target.py"
+        target.write_bytes(b"OLD\n")
+        attempts = {"n": 0}
+
+        def _always_refuse(src, dst):
+            attempts["n"] += 1
+            raise PermissionError(5, "held open")
+
+        monkeypatch.setattr(runner.os, "replace", _always_refuse)
+        monkeypatch.setattr(runner.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(PermissionError):
+            runner._atomic_write_bytes(target, b"NEW\n")
+
+        assert attempts["n"] == 5
+        # The target keeps the bytes it had: a refused rename never partially
+        # wrote it, and the temporary file is cleaned up by the finally.
+        assert target.read_bytes() == b"OLD\n"
+        assert list(tmp_path.glob("*.tmp")) == []

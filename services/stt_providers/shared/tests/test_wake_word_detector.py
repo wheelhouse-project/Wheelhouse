@@ -392,23 +392,36 @@ class TestShouldListenForWakeWord:
 
         assert should_listen_for_wake_word("idle_recovery", "idle") is True
 
-    def test_idle_recovery_does_not_arm_on_audio(self):
-        """wh-audio-suppression-auto: the sound pause has no voice way out.
+    @pytest.mark.parametrize("reason", ["manual", "startup", "audio", "sonos"])
+    def test_idle_recovery_arms_on_every_other_pause(self, reason):
+        """wh-wake-word-stop-listening R2: the wake word ends any pause.
 
-        The detector armed on "audio" so the user could say the command
-        that switched audio suppression off. That command is gone, and so
-        is the recovery window it was spoken into, so arming here would
-        open a window onto nothing.
+        The user's own switch-off ("manual"), a start with listening off
+        ("startup"), sound from this computer ("audio") and Sonos playback
+        ("sonos") all arm the detector, so the wake word turns listening on
+        whatever switched it off.
         """
         from shared_stt.wake_word_detector import should_listen_for_wake_word
 
-        assert should_listen_for_wake_word("idle_recovery", "audio") is False
+        assert should_listen_for_wake_word("idle_recovery", reason) is True
 
-    def test_idle_recovery_does_not_arm_on_sonos(self):
-        """The Sonos pause keeps the behaviour it has today in this mode."""
+    def test_idle_recovery_does_not_arm_on_ptt(self):
+        """A push-to-talk release is not a pause the wake word ends."""
         from shared_stt.wake_word_detector import should_listen_for_wake_word
 
-        assert should_listen_for_wake_word("idle_recovery", "sonos") is False
+        assert should_listen_for_wake_word("idle_recovery", "ptt") is False
+
+    def test_push_to_talk_list_is_unchanged(self):
+        """R2 leaves the push_to_talk entry as it was."""
+        from shared_stt.wake_word_detector import WAKE_WORD_ARMED_REASONS
+
+        assert WAKE_WORD_ARMED_REASONS["push_to_talk"] == ("idle", "audio", "sonos")
+
+    @pytest.mark.parametrize("reason", ["manual", "startup", "ptt"])
+    def test_push_to_talk_does_not_arm_on_reasons_it_does_not_name(self, reason):
+        from shared_stt.wake_word_detector import should_listen_for_wake_word
+
+        assert should_listen_for_wake_word("push_to_talk", reason) is False
 
     def test_push_to_talk_arms_on_sonos(self):
         """push_to_talk arms on every disable reason, unchanged."""

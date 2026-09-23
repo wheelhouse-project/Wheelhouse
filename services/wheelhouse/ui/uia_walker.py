@@ -749,6 +749,50 @@ class DefaultActionIsExpandCollapse(RuntimeError):
         self.default_action = default_action
 
 
+def _typed_pattern(
+    element: Any, getter_name: str, pattern_id: int, iface_fn: Any
+) -> Any:
+    """Fetch a raw pattern pointer via ``getter_name`` and QueryInterface it to
+    the typed pattern ``iface_fn()`` names, or return None when none exists.
+
+    The one implementation behind ``_typed_invoke_pattern``,
+    ``_typed_legacy_pattern`` and ``_typed_selection_item_pattern``.
+    The first two were byte-identical copies differing only in the interface
+    class; the third would have been a third copy, so this change collapsed
+    all three onto one body (wh-pattern-manager-tree-click). Every failure path returns None so each
+    caller can degrade its own way: the getter is absent (a fake without it),
+    the getter raises (an uncached pattern raises rather than returning null),
+    the raw result is falsy (Python ``None`` OR a NULL ``POINTER(IUnknown)`` --
+    comtypes returns the latter for an unsupported pattern, and it is ``is not
+    None`` True but boolean-False), the raw result exposes no
+    ``QueryInterface``, the interface class cannot be resolved, or
+    ``QueryInterface`` itself raises.
+
+    ``QueryInterface`` is the only way to a callable pattern method: a raw
+    ``IUIAutomationElement`` / ``POINTER(IUnknown)`` has none, and the ``*As``
+    getters return a raw int (wh-click-invoke-on-element-not-pattern).
+    """
+    getter = getattr(element, getter_name, None)
+    if getter is None:
+        return None
+    try:
+        raw = getter(pattern_id)
+    except Exception:  # noqa: BLE001 -- uncached pattern raises; treat as absent
+        return None
+    if not raw:  # Python None OR a NULL POINTER(IUnknown) (both falsy)
+        return None
+    query_interface = getattr(raw, "QueryInterface", None)
+    if query_interface is None:
+        return None
+    iface = iface_fn()
+    if iface is None:
+        return None
+    try:
+        return query_interface(iface)
+    except Exception:  # noqa: BLE001 -- QueryInterface can raise COMError
+        return None
+
+
 def _invoke_pattern_class() -> Any:
     """Return the IUIAutomationInvokePattern interface class, or None.
 
@@ -765,45 +809,17 @@ def _invoke_pattern_class() -> Any:
 
 
 def _typed_invoke_pattern(element: Any, getter_name: str, pattern_id: int) -> Any:
-    """Fetch a raw pattern pointer via ``getter_name`` and QueryInterface it
-    to the typed Invoke pattern, or return None when no usable pattern exists.
+    """Fetch the typed Invoke pattern through ``getter_name``, or None.
 
-    Returns None when: the getter is absent (a fake without it), the getter
-    raises (an uncached pattern raises rather than returning null), the raw
-    result is falsy (Python ``None`` OR a NULL ``POINTER(IUnknown)`` -- comtypes
-    returns the latter for an unsupported pattern, and it is ``is not None``
-    True but boolean-False), the raw result exposes no ``QueryInterface``, or
-    the interface class cannot be resolved. ``QueryInterface`` is the only way
-    to a callable ``Invoke``: a raw ``IUIAutomationElement`` /
-    ``POINTER(IUnknown)`` has none, and the ``*As`` getters return a raw int
-    (wh-click-invoke-on-element-not-pattern).
+    A thin naming wrapper over ``_typed_pattern``; see it for the absence
+    handling. Every failure reads as absent so ``invoke_via_invoke_pattern``
+    can still fall back from the cached pattern to the live current one
+    instead of propagating the exception and skipping the fallback. Keeping
+    every path returning None also keeps this in step with
+    ``_cached_invoke_supported``'s truthiness check (reviewer_2/deepseek
+    finding wh-click-invoke-on-element-not-pattern.3.1).
     """
-    getter = getattr(element, getter_name, None)
-    if getter is None:
-        return None
-    try:
-        raw = getter(pattern_id)
-    except Exception:  # noqa: BLE001 -- uncached pattern raises; treat as absent
-        return None
-    if not raw:  # Python None OR a NULL POINTER(IUnknown) (both falsy)
-        return None
-    query_interface = getattr(raw, "QueryInterface", None)
-    if query_interface is None:
-        return None
-    iface = _invoke_pattern_class()
-    if iface is None:
-        return None
-    try:
-        return query_interface(iface)
-    except Exception:  # noqa: BLE001 -- QueryInterface can raise COMError
-        # Treat a present-but-unqueryable cached pointer as absent, the same
-        # as every other failure path here, so invoke_via_invoke_pattern can
-        # still fall back to the live current pattern instead of propagating
-        # the exception and skipping the fallback. Keeping every path returning
-        # None also keeps this in step with _cached_invoke_supported's
-        # truthiness check (reviewer_2/deepseek finding
-        # wh-click-invoke-on-element-not-pattern.3.1).
-        return None
+    return _typed_pattern(element, getter_name, pattern_id, _invoke_pattern_class)
 
 
 def invoke_via_invoke_pattern(element: Any) -> None:
@@ -842,6 +858,56 @@ def invoke_via_invoke_pattern(element: Any) -> None:
     pattern.Invoke()
 
 
+def _selection_item_pattern_class() -> Any:
+    """Return the IUIAutomationSelectionItemPattern interface class, or None.
+
+    Needed to ``QueryInterface`` a raw pattern pointer into the typed
+    SelectionItem pattern. None when the generated comtypes module cannot be
+    resolved; the caller then reports "no selection state available", which
+    turns the tree-item outcome check off rather than failing a click.
+    """
+    try:
+        return _uia_module().IUIAutomationSelectionItemPattern
+    except Exception:  # noqa: BLE001 -- gen module absent / unresolvable
+        return None
+
+
+def selection_state_via_selection_item_pattern(element: Any) -> Optional[bool]:
+    """Read ``SelectionItem.IsSelected`` off a control, or None when it has none.
+
+    The outcome signal for the tree-item Invoke check
+    (wh-pattern-manager-tree-click): measured 2026-09-22 against the Pattern
+    Manager's QTreeWidget, ``InvokePattern.Invoke()`` returns S_OK and selects
+    nothing, so the executor needs a way to ask the control whether the press
+    did anything. A tree row's selection state is that way -- it is what a
+    real mouse click on the row changes.
+
+    Returns None when the control exposes no SelectionItem pattern (cached or
+    live), which the executor reads as "no outcome signal" and leaves today's
+    behaviour untouched. A raising property read is NOT caught here: the
+    executor distinguishes a raise (the element stopped resolving, so the
+    Invoke is treated as having acted) from a False (the element is fine and
+    the press did nothing), and swallowing the raise here would collapse the
+    two.
+    """
+    pattern_id = _uia_const("UIA_SelectionItemPatternId", 10010)
+
+    pattern = _typed_pattern(
+        element, "GetCachedPattern", pattern_id, _selection_item_pattern_class
+    )
+    if pattern is None:
+        pattern = _typed_pattern(
+            element,
+            "GetCurrentPattern",
+            pattern_id,
+            _selection_item_pattern_class,
+        )
+    if pattern is None:
+        return None
+
+    return bool(pattern.CurrentIsSelected)
+
+
 def _legacy_pattern_class() -> Any:
     """Return the IUIAutomationLegacyIAccessiblePattern interface class, or None.
 
@@ -859,37 +925,14 @@ def _legacy_pattern_class() -> Any:
 
 
 def _typed_legacy_pattern(element: Any, getter_name: str, pattern_id: int) -> Any:
-    """Fetch a raw pattern pointer via ``getter_name`` and QueryInterface it to
-    the typed LegacyIAccessible pattern, or return None when none exists.
+    """Fetch the typed LegacyIAccessible pattern through ``getter_name``, or None.
 
-    The DoDefaultAction analogue of ``_typed_invoke_pattern`` with identical
-    absence handling: every failure path (missing getter, getter raises, falsy
-    raw incl. a NULL ``POINTER(IUnknown)``, missing ``QueryInterface``,
-    unresolvable interface class, ``QueryInterface`` raising) returns None so
+    The DoDefaultAction analogue of ``_typed_invoke_pattern``, over the same
+    ``_typed_pattern`` implementation: every failure path reads as absent so
     the caller degrades to ``DoDefaultActionUnavailable`` rather than crashing
-    or silently no-op'ing. ``QueryInterface`` is the only way to a callable
-    ``DoDefaultAction``: a raw ``IUIAutomationElement`` / ``POINTER(IUnknown)``
-    has none.
+    or silently no-op'ing.
     """
-    getter = getattr(element, getter_name, None)
-    if getter is None:
-        return None
-    try:
-        raw = getter(pattern_id)
-    except Exception:  # noqa: BLE001 -- uncached pattern raises; treat as absent
-        return None
-    if not raw:  # Python None OR a NULL POINTER(IUnknown) (both falsy)
-        return None
-    query_interface = getattr(raw, "QueryInterface", None)
-    if query_interface is None:
-        return None
-    iface = _legacy_pattern_class()
-    if iface is None:
-        return None
-    try:
-        return query_interface(iface)
-    except Exception:  # noqa: BLE001 -- QueryInterface can raise COMError
-        return None
+    return _typed_pattern(element, getter_name, pattern_id, _legacy_pattern_class)
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ did not regress wh-fc1x's safety baseline.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -54,6 +55,35 @@ def _clear_default_predicate_soft_allow(monkeypatch):
     """
     monkeypatch.setattr(
         _text_target_module.default_predicate, "_soft_allow", frozenset(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _refuse_live_focused_control_read(monkeypatch):
+    """Fail any test in this file that reaches the live desktop.
+
+    wh-test-helper-early-patch-release: a helper once returned from
+    inside its ``with patch(...)`` block, which released the
+    capture_context patch before the test body ran. The body then
+    reached the real capture_context and the real UI Automation
+    focused-control read, and one run crashed python.exe with
+    0xc000070a. The replacement below records the call and raises
+    instead of reading the desktop. capture_context catches the raise,
+    so the check runs after the test: any recorded call fails it.
+    """
+    calls = []
+
+    def _refuse(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError(
+            "a test reached the real auto.GetFocusedControl"
+        )
+
+    monkeypatch.setattr(auto, "GetFocusedControl", _refuse)
+    yield
+    assert not calls, (
+        f"auto.GetFocusedControl was reached {len(calls)} time(s); a "
+        "patch that should replace capture_context was not active"
     )
 
 
@@ -1110,11 +1140,15 @@ class TestHandlerBufferInvalidationOnClipboardOnly:
     component and the strategy intentionally has no reference to it.
     """
 
+    @contextmanager
     def _build_handler_with_clipboard_only_routed(self):
         from unittest.mock import patch
         # Build the handler with all dependencies mocked, then swap
         # the router so get_strategy returns the ClipboardOnly
-        # instance the handler constructed.
+        # instance the handler constructed. The helper yields inside
+        # the with block so every patch, capture_context above all,
+        # stays active while the test body runs
+        # (wh-test-helper-early-patch-release).
         _MOD = "ui.ui_action_handler"
         with patch(f"{_MOD}.TextPerfector"), \
              patch(f"{_MOD}.ClipboardOperations"), \
@@ -1171,21 +1205,24 @@ class TestHandlerBufferInvalidationOnClipboardOnly:
                 return_value=handler.clipboard_only_strategy,
             )
 
-            return handler, MockSBM
+            yield handler, MockSBM
 
     def test_clipboard_only_invalidates_buffer(self):
-        handler, MockSBM = self._build_handler_with_clipboard_only_routed()
-        # MockSBM is the patched class; MockSBM.return_value is the
-        # MagicMock instance the handler holds as buffer_manager.
-        # Use the class-level MagicMock for assertions because Pyright
-        # cannot prove the attribute on the typed ShadowBufferManager
-        # field; the runtime objects are identical.
-        buffer_mock = MockSBM.return_value
-        assert handler.buffer_manager is buffer_mock
-        handler._execute_insert_with_ack(
-            "hello world", request_id="r1",
-        )
-        buffer_mock.invalidate.assert_called()
+        with self._build_handler_with_clipboard_only_routed() as (
+            handler, MockSBM,
+        ):
+            # MockSBM is the patched class; MockSBM.return_value is the
+            # MagicMock instance the handler holds as buffer_manager.
+            # Use the class-level MagicMock for assertions because
+            # Pyright cannot prove the attribute on the typed
+            # ShadowBufferManager field; the runtime objects are
+            # identical.
+            buffer_mock = MockSBM.return_value
+            assert handler.buffer_manager is buffer_mock
+            handler._execute_insert_with_ack(
+                "hello world", request_id="r1",
+            )
+            buffer_mock.invalidate.assert_called()
 
 
 # --- TestLatencyBaselineArtifact (wh-kox5.4) -------------------------------

@@ -119,6 +119,20 @@ _INVOKE_COM_ERROR_ALIASES = frozenset(
         # click that replaced it did not land -- the same transient delivery
         # failure as the two structural chain reasons above.
         "dda_expand_collapse_then_sendinput_failed",
+        # wh-pattern-manager-tree-click: a Qt tree row answered Invoke() with
+        # S_OK and did not select, so the gated coordinate click was sent --
+        # and it did not land. The same transient delivery failure as the
+        # three chain reasons above, so it shares their copy.
+        "invoke_no_effect_then_sendinput_failed",
+        # wh-pattern-manager-tree-click: BOTH presses were delivered (the
+        # Invoke returned success, the coordinate click landed) and the row
+        # still reads unselected. "The control did not respond" is literally
+        # what WheelHouse measured here -- more directly than for any other
+        # member of this set, because the outcome was read back off the
+        # control rather than inferred from a failed call. The tag stays
+        # separate from invoke_com_error for telemetry; only the sentence is
+        # shared, so no new user-visible copy is introduced.
+        "invoke_then_coordinate_no_effect",
     }
 )
 

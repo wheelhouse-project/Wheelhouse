@@ -6,7 +6,7 @@ __pycache__/
 *.py[cod]
 *.class
 .pytest_cache/
-test-results.xml
+test-results*.xml
 
 # Virtual environment -- uv creates `.venv/` per service
 .venv/

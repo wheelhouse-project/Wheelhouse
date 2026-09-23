@@ -238,9 +238,8 @@ MUTATIONS = [
         "name": "the-primary-screen-change-goes-to-the-screen-list-slot",
         "file": GUI,
         "old": (
-            "            app.primaryScreenChanged.connect(\n"
-            "                partial(self._on_screen_layout_signal,\n"
-            "                        'QGuiApplication.primaryScreenChanged'))"
+            "            app.primaryScreenChanged.connect("
+            "self._on_primary_screen_changed)"
         ),
         "new": "            app.primaryScreenChanged.connect(self._on_screens_changed)",
         "expect": ["test_a_primary_screen_change_corrects_the_stored_position"],
@@ -270,8 +269,8 @@ MUTATIONS = [
         "name": "a-screen-size-change-is-not-watched",
         "file": GUI,
         "old": (
-            "            screen.geometryChanged.connect(\n"
-            "                partial(self._on_screen_layout_signal, 'QScreen.geometryChanged'))"
+            "            screen.geometryChanged.connect("
+            "self._on_screen_geometry_changed)"
         ),
         "new": "            pass",
         "expect": ["test_a_screen_resize_corrects_the_stored_position"],
@@ -281,8 +280,7 @@ MUTATIONS = [
         "file": GUI,
         "old": (
             "            screen.availableGeometryChanged.connect(\n"
-            "                partial(self._on_screen_layout_signal,\n"
-            "                        'QScreen.availableGeometryChanged'))"
+            "                self._on_screen_available_geometry_changed)"
         ),
         "new": "            pass",
         "expect": ["test_a_usable_area_change_corrects_the_stored_position"],
@@ -297,8 +295,7 @@ MUTATIONS = [
         "file": GUI,
         "old": (
             "            screen.logicalDotsPerInchChanged.connect(\n"
-            "                partial(self._on_screen_layout_signal,\n"
-            "                        'QScreen.logicalDotsPerInchChanged'))"
+            "                self._on_screen_logical_dots_per_inch_changed)"
         ),
         "new": "            pass",
         "expect": [

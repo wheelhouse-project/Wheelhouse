@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Ask a question, email for help, troubleshoot a problem, or use the Wheelhouse documentation with an AI assistant.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#151e19" media="(prefers-color-scheme: dark)">
+  <title>Get help · Wheelhouse</title>
+  <link rel="icon" href="favicon.ico">
+  <link rel="stylesheet" href="site.css">
+  
+</head>
+<body id="top">
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="site-header"><div class="header-inner wrap">
+    <a class="brand" href="index.html" aria-label="Wheelhouse home"><span class="wheel" aria-hidden="true">☸</span> Wheelhouse<span class="brand-dot" aria-hidden="true">.</span></a>
+    <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="start.html">Get started</a><a href="guide.html">User guide</a><a href="reference.html">Commands</a><a href="install.html">Installation</a><a href="help.html" aria-current="page">Get help</a></nav>
+    <a class="button small" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe" aria-label="Download for Windows">Download <span aria-hidden="true">↗</span></a>
+  </div></header>
+  <main id="main" tabindex="-1"><div class="page-heading wrap narrow"><h1>Get help</h1><p class="lead">You can ask the assistant, read the guides, or email me if you need help.</p></div>
+<section class="wrap help-options" aria-label="Ways to get help">
+  <article class="help-option"><h2>Ask the assistant</h2><p>The Wheelhouse Assistant uses the project’s documentation to answer questions. You don’t have to know which section to look in.</p><a class="button" href="https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A">Open the Wheelhouse Assistant ↗</a><p class="small-note">Opens Google Gemini. Gemini asks you to sign in first; a Google account, an Apple account, or an email address works, and the free tier is sufficient.</p><p class="small-note">The assistant can be mistaken. It can’t see your computer or read your logs unless you share them.</p></article>
+  <article class="help-option"><h2>Read the guides</h2><p>Choose the guide that covers what you’re trying to do.</p><div class="link-list"><a href="start.html">Installing for the first time →</a><a href="guide.html#troubleshooting">Something isn’t working →</a><a href="guide.html">Using Wheelhouse →</a><a href="reference.html">Every command and setting →</a><a href="install.html">Updates, removal, and installation details →</a></div></article>
+  <article class="help-option" id="contact"><h2>Email me</h2><p>If you’ve found a problem, or the guides haven’t answered your question, you can email for help. You don’t need to make a GitHub account.</p><a class="text-link" href="mailto:help@wheelhouse-project.org">help@wheelhouse-project.org ↗</a><p>You can also <a href="https://github.com/wheelhouse-project/Wheelhouse/issues">report a problem on GitHub</a>.</p><p class="small-note">I’m the primary author, so I can’t promise an immediate reply.</p></article>
+</section>
+<section class="wrap section narrow" id="reporting"><h2>Reporting a problem</h2><p>Tell me what you were trying to do, what you expected, and what happened instead. Include the Wheelhouse version shown under <strong>About Wheelhouse</strong> in its menu, and the full error message if there is one.</p><p>If installation failed, the setup log can help. Before sending logs or screenshots, check them for anything you don’t want to share.</p></section>
+<section class="wrap narrow assistant-docs" id="llm-help"><details><summary>Use the documentation with another AI assistant</summary><div class="assistant-instructions"><p>You can also give the documentation to an assistant you already use. The detailed instructions below cover the three documentation files and how to load them.</p><div class="note">
+      <p>
+        <strong>The hosted assistant.</strong> The project maintains a
+        Wheelhouse assistant on Google Gemini that answers from the current
+        documentation:
+        <a href="https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A" target="_blank" rel="noopener">open
+        the Wheelhouse Assistant</a> (opens in a new tab). Gemini asks you to
+        sign in before it opens the assistant. It accepts a Google account, an
+        Apple account, or an email address, and the free tier is sufficient. No
+        payment details are required.
+      </p>
+    </div>
+    <p>
+      The same documentation can be loaded into another AI service. Wheelhouse's
+      user documentation is published as three files, formatted so that a chat
+      service can answer questions from them: for example "how do I make my
+      microphone work?" or "what do I say to select a whole line?". The
+      procedures below cover ChatGPT, Gemini, Claude and Perplexity. Each works
+      on that service's free plan, with one exception for Perplexity noted
+      below.
+    </p>
+    <p><strong>You need three files:</strong></p>
+    <ul class="features">
+      <li>
+        <h3>wheelhouse_install.md — the installation guide</h3>
+        <p>Installation, updates, removal, and speech-engine setup.</p>
+        <p><a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/services/wheelhouse/knowledge/wheelhouse_install.md">wheelhouse_install.md on GitHub</a></p>
+      </li>
+      <li>
+        <h3>wheelhouse_help.md — the help document</h3>
+        <p>
+          Open
+          <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/services/wheelhouse/knowledge/wheelhouse_help.md">wheelhouse_help.md on GitHub</a>
+          and save it with the "Download raw file" button (the down-arrow icon
+          near the top right of the file view). This file documents how to use
+          Wheelhouse.
+        </p>
+      </li>
+      <li>
+        <h3>wheelhouse_reference.md — the command and setting reference</h3>
+        <p>
+          Open
+          <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/services/wheelhouse/knowledge/wheelhouse_reference.md">wheelhouse_reference.md on GitHub</a>
+          and save it the same way. This file lists every voice command and
+          every configuration setting. Upload all three files so your assistant
+          can answer both how-to questions and exact command or setting
+          questions.
+        </p>
+      </li>
+    </ul>
+    <div class="note">
+      <p>
+        No instruction text needs to be pasted: the assistant's behavior rules
+        are contained in the top of the help document, so the three uploaded files
+        are sufficient. If a service refuses a <code>.md</code> upload, rename
+        each file to end in <code>.txt</code> (for example
+        <code>wheelhouse_help.txt</code>). The content is plain text.
+      </p>
+    </div>
+    <p>
+      The procedures below were verified against each provider's official
+      documentation in July 2026. Button names in these products change over
+      time; the sequence of steps does not.
+    </p>
+
+    <h3 id="llm-chatgpt">ChatGPT — use a Project</h3>
+    <ol class="steps">
+      <li>Sign in at chatgpt.com and click <strong>New project</strong> in the sidebar. Give the project a name like "Wheelhouse Help". (Projects are available on every plan, including Free. Do not create a custom GPT: OpenAI stops running them on 11 December 2026.)</li>
+      <li>Inside the project, add <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code> in the project's files area.</li>
+      <li>Start a new chat inside the project and ask your question. To come back later, click the project's name in the sidebar.</li>
+    </ol>
+
+    <h3 id="llm-gemini">Google Gemini — create a Gem</h3>
+    <ol class="steps">
+      <li>Go to gemini.google.com, open the sidebar, and click <strong>Gems</strong>, then <strong>New Gem</strong>. (Some accounts word it "Explore Gems" then "New Gem". Gems are available without a paid plan.)</li>
+      <li>Give the Gem a name. In the instructions box, a single line like "Answer Wheelhouse questions from the uploaded files" is enough — the help document itself carries the assistant's rules.</li>
+      <li>Scroll down to <strong>Knowledge</strong>, click <strong>Add files</strong> then <strong>Upload files</strong>, and upload <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code>.</li>
+      <li>Click <strong>Save</strong>. To use it later: sidebar, <strong>Gems</strong>, pick your Gem under "My Gems", and ask away.</li>
+    </ol>
+
+    <h3 id="llm-claude">Claude — use a Project</h3>
+    <ol class="steps">
+      <li>Sign in at claude.ai and open <strong>Projects</strong> from the sidebar, then click <strong>New Project</strong> and name it. (The free plan includes up to five projects.)</li>
+      <li>On the project page, find the knowledge section and use its <strong>+</strong> button to upload <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code>.</li>
+      <li>Start a chat from the project page — every chat in the project uses the uploaded file automatically.</li>
+    </ol>
+
+    <h3 id="llm-perplexity">Perplexity — use a Project</h3>
+    <ol class="steps">
+      <li>Sign in at perplexity.ai and click the projects icon in the left panel, then <strong>New Project</strong>. (Perplexity renamed this feature — older guides call it "Spaces". One caveat: Perplexity documents per-project file uploads only for its paid plans, so on the free plan you may not be able to upload the help file into a project.)</li>
+      <li>Upload <code>wheelhouse_help.md</code>, <code>wheelhouse_install.md</code>, and <code>wheelhouse_reference.md</code> as project files.</li>
+      <li>Ask questions inside the project — answers draw on the uploaded file in every thread in the project.</li>
+    </ol></div></details></section>
+</main>
+  <footer class="site-footer wrap">
+    <div><a class="brand" href="index.html">Wheelhouse.</a><p>Free and open source.</p></div>
+    <nav aria-label="Footer navigation">
+      <a href="https://github.com/wheelhouse-project/Wheelhouse">Source on GitHub</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/PRIVACY.md">Privacy</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
+      <a href="#top">Back to top ↑</a>
+    </nav>
+    <p class="fine-print">Documentation for Wheelhouse 1.2.0. Speech recognition runs on your computer by default; cloud options are optional.</p>
+  </footer>
+</body>
+</html>

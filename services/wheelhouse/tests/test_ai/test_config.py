@@ -132,10 +132,12 @@ class TestAIConfigExampleTemplate:
 
     def test_gem_url_defaults_to_official_assistant(self, example_data):
         # Shipped default: "wheelhouse help online" opens the official
-        # Wheelhouse Assistant GPT. Public CI copies config.toml.example to
+        # Wheelhouse Assistant Gem. Public CI copies config.toml.example to
         # config.toml before testing, so this pins what new installs get.
+        # The address changed from a ChatGPT custom GPT to a Gemini Gem on
+        # 2026-09-22, because OpenAI stops running custom GPTs on 2026-12-11.
         assert example_data["ai"]["help"]["gem_url"] == (
-            "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
+            "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
         )
 
 

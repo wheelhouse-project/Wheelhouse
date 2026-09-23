@@ -1,6 +1,6 @@
 # Wheelhouse Voice Command and Configuration Reference
 
-This is the complete, automatically generated reference for every Wheelhouse voice command and configuration setting. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using and installing Wheelhouse, see the installation guide (wheelhouse_install.md).
+This is the automatically generated reference for every Wheelhouse voice command and for every user-facing setting that the shipped config.toml contains. Optional settings that the file leaves commented out are described in the help document instead. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using Wheelhouse, see the help document (wheelhouse_help.md); for installation, see the installation guide (wheelhouse_install.md).
 
 ## Voice Command Reference
 
@@ -8,7 +8,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 | Say this | What happens | Notes |
 |---|---|---|
-| literal [words] | Types the words after "literal" exactly, skipping all command and replacement processing. Takes effect wherever it appears in an utterance, not only as the first word. | The escape hatch -- see the detailed explanation in "Special Commands" |
+| literal [words] | Types the words after "literal" exactly, skipping all command and replacement processing. Takes effect wherever it appears in an utterance, not only as the first word. | The way to type a word that is also a command -- see "Selected Commands in Detail" in the Voice Commands section |
 | insert [text] | Inserts raw text with no capitalization, spacing, or formatting applied | Useful for exact fragments like an email address or a product code |
 | item [number] | Inserts a numbered list marker like "1." | e.g. "item 1", "item 5" |
 | submit | Presses Enter. Recognized at the trailing position of an utterance. | Also works as the last word of a sentence: "hello world submit" types "hello world" and then presses Enter. To type the word itself, say "literal submit" |
@@ -280,7 +280,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | snap window to the bottom | Snaps the active window to the bottom of the screen (Windows, Alt and Down Arrow). Fires only when it is the whole utterance. |  |
 | minimize all windows | Minimizes every open window (Windows+M). Fires only when it is the whole utterance. | "minimize all" does the same |
 | show task switcher / list all windows / show all windows | Opens Task View, the Windows overview of every open window (Windows+Tab). Fires only when it is the whole utterance. |  |
-| keyboard | Toggles the Windows on-screen touch keyboard (Windows, Ctrl and O). Fires only when it is the whole utterance. | One word, both directions: it opens the keyboard when closed and closes it when open. The earlier show and hide phrasings were removed because they promised a direction the toggle cannot deliver |
+| keyboard | Toggles the Windows On-Screen Keyboard (Windows, Ctrl and O). Fires only when it is the whole utterance. | One word, both directions: it opens the keyboard when closed and closes it when open. The earlier show and hide phrasings were removed because they promised a direction the toggle cannot deliver |
 | search windows for [words] | Opens Windows Search and types what you say into it. Needs the hotword first. |  |
 | search on google for [words] / search for [words] | Opens a Google search for the words you say in your default browser. Needs the hotword first. | "search [words]" without "for" does the same |
 | search on bing for [words] | Opens a Bing search for the words you say in your default browser. Needs the hotword first. |  |
@@ -302,8 +302,8 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 | show grid | Lays a numbered three-by-three grid over the screen the front window is on, for moving the pointer by voice | Opening the grid removes the numbered overlay; the two are never on screen together. "apply grid" also works. "show grid lines on the chart" on its own is typed as ordinary text, not treated as this command. See the Mouse Control subsection of the Voice Commands section |
 | hide grid | Closes the grid without clicking anything | "dismiss grid" also works. "hide grid lines before printing" on its own is typed as ordinary text, not treated as this command. |
 | grid next screen | Moves the open grid to the next monitor, restarted at full size |  |
-| [number 1-9] | Redraws the open grid inside that cell, narrowing the target. With the grid closed, numbers are ordinary dictation and are typed normally. |  |
-| number [1-9] | Same cell narrowing with the word "number" first ("number five"), which speech engines hear more reliably than a single word. With the grid closed, the phrase is ordinary dictation and is typed normally. |  |
+| [number 1-9] | Redraws the open grid inside that cell, narrowing the target. With the grid closed and the numbered overlay showing, the number clicks the control with that label. With neither showing, numbers are ordinary dictation and are typed normally. |  |
+| number [1-9] | Same cell narrowing with the word "number" first ("number five"), which speech engines hear more reliably than a single word. With the grid closed and the numbered overlay showing, the phrase clicks the control with that label. With neither showing, the phrase is ordinary dictation and is typed normally. |  |
 | click / right click / double click | Clicks at the center of the grid's current cell and closes the grid; a number in the same utterance narrows first ("x-ray click 5") |  |
 | mark | Pins the start point of a drag at the current cell center and restarts the grid so you can navigate to the destination |  |
 | drag | Holds the left button at the marked point, moves gradually to the current cell center, and releases -- a complete drag and drop | Requires a "mark" first; without one, a notice explains the step |
@@ -315,23 +315,24 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 |---|---|---|
 | push to talk mode | Switches to press-and-hold listening: Wheelhouse listens only while you hold the floating button | A notification confirms the switch |
 | click to talk mode | Switches back to toggle listening (click to start, click to stop) -- the default |  |
+| stop listening | Switches listening off, as clicking the floating button does while it listens. Applies only when the words are the whole utterance; inside a longer sentence they dictate normally. | In toggle mode, say the wake word ("computer") to switch listening back on. In push-to-talk mode the wake word ends only the idle pause, so the way back is the next hold of the floating button. A notice confirms that listening is off |
 | help | Opens the Wheelhouse Assistant (the official online help) in your browser, after a short explanation window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured and no window appears. The explanation window is the same one the Help menu item shows, and both take the same route through the Logic process; ticking "Do not show this again" and selecting Assistant sets explain_before_open to false under [ai.help], which turns the window off for the command and the menu item alike. If Windows cannot start a browser, the notice "Wheelhouse could not open your browser." appears |
-| patterns | Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "pattern manager" also works; see "Special Commands" |
+| patterns | Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "pattern manager" also works; see "Selected Commands in Detail" in the Voice Commands section |
 | learn my voice | Opens the voice-teaching window, where Wheelhouse learns how you sound so it stops missing short words | "calibrate my voice" also works; only the Distil-Whisper speech engine uses it; See "Teaching Wheelhouse your voice" in the Speech Engines section |
-| x-ray fix | Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version | Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure |
+| x-ray fix | Sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- then replaces the selection with the result. The AI is told not to reword the text or add or remove words | Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure |
 | simplify | Rewrites the selected text in plain language, using shorter sentences and simpler words. Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix"; the selection comes back as plain text, so formatting applied in a word processor is lost |
 | shorten | Rewrites the selected text more briefly, cutting repetition and padding. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix" |
 | x-ray make formal | Rewrites the selected text in a formal register, avoiding contractions and casual wording | Same AI server and same safeguards as "x-ray fix" |
-| pirate | Rewrites the selected text the way a pirate would say it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Special Commands" for writing your own. |
+| pirate | Rewrites the selected text the way a pirate would say it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Selected Commands in Detail" in the Voice Commands section for writing your own. |
 | x-ray translate to [language] | Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese". Keeps every fact and leaves names and numbers as they are. | Same AI server and same safeguards as "x-ray fix"; say the language in English and in lower case, as one or more plain words with no punctuation. How good the translation is depends on the model you have configured. |
 | x-ray cancel fix | Cancels an in-progress fix or rewrite |  |
-| boost | Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | See "Special Commands" -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation |
+| boost | Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | See "Selected Commands in Detail" in the Voice Commands section -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation |
 
 ## Configuration Reference
 
 ### General
 
-**SPEECH_WEBSOCKET_HOST** *(default: `"127.0.0.1"`)* -- The internal address the speech engine uses to reach Wheelhouse; the default 127.0.0.1 means this computer only. Change only for the advanced setup where speech recognition runs on a second computer on your home network.
+**SPEECH_WEBSOCKET_HOST** *(default: `"127.0.0.1"`)* -- The network address on which Wheelhouse's speech connection server listens; the default 127.0.0.1 accepts connections from this computer only. Change only for the advanced setup where speech recognition runs on a second computer on your home network. That setup also needs ws_host under [stt], the address the speech engine connects to, which the shipped file does not contain.
 
 **REPLACEMENT_TIMEOUT_MS** *(default: `700`)* -- How long Wheelhouse waits after you stop speaking, in milliseconds, before deciding a correction phrase is complete. Raise to 900-1000 if corrections fire before you finish (common on slower machines); lower slightly if responses feel sluggish.
 
@@ -339,7 +340,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **GREEDY_TIMEOUT_MS** *(default: `5000`)* -- A longer wait, in milliseconds, for commands that intentionally keep listening for more words. Rarely needs changing.
 
-**COMMAND_COMPLETION_WAIT_MS** *(default: `1000`)* -- A short pause, in milliseconds, after a command finishes so a fast follow-up does not collide with it. Raise on a slow machine if back-to-back commands step on each other.
+**COMMAND_COMPLETION_WAIT_MS** *(default: `1000`)* -- Has no effect. No part of Wheelhouse reads this setting. Changing it changes nothing. To give commands more time, change COMMAND_TIMEOUT_MS.
 
 **ENABLE_AUDIO_SUPPRESSION** *(default: `"auto"`)* -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone has an echo canceller, and pauses only when Windows reports none or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.
 
@@ -347,7 +348,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **ENABLE_IDLE_SUPPRESSION** *(default: `true`)* -- Pause listening after the computer sits idle. Turn off only if you never want idle pauses; the Idle Monitor plugin controls the timing.
 
-**LOG_FILE** *(default: `""`)* -- Where the activity log goes; empty means the standard log location. Change only when a support conversation asks you to.
+**LOG_FILE** *(default: `""`)* -- Has no effect. No part of Wheelhouse reads this setting. Wheelhouse always writes its activity log to wheelhouse.log in its install folder, %LOCALAPPDATA%\Wheelhouse\app.
 
 **LOG_LEVEL** *(default: `"INFO"`)* -- How detailed the activity log is. Change only when a support conversation asks you to.
 
@@ -371,11 +372,11 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **FLOATING_BUTTON_POS** *(default: `[100, 100]`)* -- Screen position of the small on-screen status button, as [x, y] pixels from the top-left of the desktop. Dragging the button writes this setting, and so does resizing it, because the button grows and shrinks around its own centre.
 
-**FLOATING_BUTTON_VISIBLE** *(default: `true`)* -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target, especially handy in push-to-talk mode.
+**FLOATING_BUTTON_VISIBLE** *(default: `true`)* -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target. In push-to-talk mode the floating button is the only way to listen, because the hold works on it alone.
 
 **SPEECH_ENABLED_ON_STARTUP** *(default: `true`)* -- Whether Wheelhouse starts listening as soon as it launches. Set false to turn the microphone on manually each session.
 
-**SHOW_SPEECH_PULSE** *(default: `true`)* -- Pulse the tray icon while Wheelhouse hears you -- a useful yes-I-can-hear-you signal. Turn off only if the animation distracts.
+**SHOW_SPEECH_PULSE** *(default: `true`)* -- Pulse the floating button while Wheelhouse hears you, as a signal that your speech is reaching it. The tray icon does not pulse. With this off, the button still flashes green when an utterance has been processed. Turn off only if the animation distracts.
 
 **SPATIAL_SOUND_EXEC** *(default: `""`)* -- Path to the small free NirSoft helper tool used for voice switching of Dolby Atmos spatial sound; empty means the feature is off. Fill in the tool path only if you use Dolby Atmos and have that tool installed; everyone else can ignore it.
 
@@ -421,7 +422,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [plugins.idle_monitor]
 
-**enabled** *(default: `true`)* -- Turns the Idle Monitor plugin on or off; it pauses listening when you step away and resumes when you return or say the wake word. Almost everyone should leave this on.
+**enabled** *(default: `true`)* -- Turns the Idle Monitor plugin on or off; it pauses listening when you step away, and listening resumes when you return or say the wake word. Almost everyone should leave this on.
 
 **idle_timeout_minutes** *(default: `10`)* -- Minutes of no keyboard or mouse activity before listening pauses.
 
@@ -443,13 +444,13 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [wake_word]
 
-**enabled** *(default: `true`)* -- Turns wake-word listening on or off; after an idle pause you can wake Wheelhouse by saying its wake word out loud.
+**enabled** *(default: `true`)* -- Turns wake-word listening on or off; in toggle mode, whenever listening is off, for any reason, saying the wake word out loud turns it back on; in push-to-talk mode it ends only the idle pause.
 
 **keyword** *(default: `"computer"`)* -- The wake word.
 
 **sensitivity** *(default: `0.5`)* -- Wake-word detection sensitivity, range 0-1. Lower it if saying the wake word often fails to wake Wheelhouse; raise it if ordinary conversation keeps waking it by accident.
 
-**mode** *(default: `"idle_recovery"`)* -- What the wake word is used for -- waking Wheelhouse from an idle pause. Valid values: "idle_recovery".
+**mode** *(default: `"idle_recovery"`)* -- What the wake word is used for -- in toggle mode, turning listening back on whenever it is off; in push-to-talk mode, ending only the idle pause, after which the next hold of the floating button is the way back. Valid values: "idle_recovery".
 
 **model_dir** *(default: `"../shared/data/wake_words"`)* -- Where the wake-word listening model lives on disk; set by the installer, do not change it.
 
@@ -465,7 +466,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **post_paste_delay_ms** *(default: `30`)* -- Delay, in milliseconds, after pasting text into the target application. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.
 
-**utterance_clipboard_timeout_seconds** *(default: `60.0`)* -- How long, in seconds, a copied utterance stays available for the paste-that style of command.
+**utterance_clipboard_timeout_seconds** *(default: `60.0`)* -- A safety limit, in seconds. Wheelhouse puts dictated text on the clipboard to paste it, and restores your own clipboard contents when the utterance ends. If the signal that the utterance has ended never arrives, Wheelhouse ends it after this long and restores your clipboard.
 
 ### [ui_actions.verified_unicode]
 
@@ -535,7 +536,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ### [ai.help]
 
-**gem_url** *(default: `"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"`)* -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured.
+**gem_url** *(default: `"https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"`)* -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. If this still holds the address of the retired ChatGPT assistant that Wheelhouse used before version 1.2.0, the Wheelhouse Gem opens instead.
 
 **explain_before_open** *(default: `true`)* -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back.
 
@@ -559,7 +560,7 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 **response_timeout_ms** *(default: `3000`)* -- How long, in milliseconds, Wheelhouse waits for a click command's search before giving up. Raise it on a slow machine if clicks time out in complex windows.
 
-**walk_deadline_ms** *(default: `2500`)* -- How long, in milliseconds, Wheelhouse searches a window for the control a spoken click names before giving up. Raise it on a slow machine if clicks time out in complex windows.
+**walk_deadline_ms** *(default: `2500`)* -- How long, in milliseconds, Wheelhouse searches a window for the control a spoken click names before giving up. Raise it on a slow machine if clicks time out in complex windows. Keep it more than 250 below response_timeout_ms: a value that is not switches voice clicking off, and the log names this key.
 
 **screen_read_timeout_ms** *(default: `10000`)* -- How long, in milliseconds, Wheelhouse waits for a read of the window's clickable things (show numbers, the refresh after a focus change, and the re-read after a click) before giving up. Separate from response_timeout_ms, which limits a click reply. Raise it if the numbered overlay reports that it could not draw the numbers in windows that take several seconds to answer.
 
@@ -583,4 +584,4 @@ This is the complete, automatically generated reference for every Wheelhouse voi
 
 ---
 
-Generated: 2026-09-21 for the v1.1.0 release
+Generated: 2026-09-23 for the v1.2.0 release

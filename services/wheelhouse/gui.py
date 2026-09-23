@@ -3587,6 +3587,23 @@ class GuiManager(QObject):
         if schedule_delayed:
             self._schedule_one_delayed_reapply()
 
+    # One bound method per signal, never functools.partial. PySide6 holds a
+    # partial receiver strongly and never removes it, so every GuiManager
+    # stayed alive for as long as the screen did. It holds a bound method
+    # weakly and removes the connection when the GuiManager dies
+    # (wh-gui-screen-signal-leak).
+    def _on_primary_screen_changed(self, *args):
+        self._on_screen_layout_signal('QGuiApplication.primaryScreenChanged', *args)
+
+    def _on_screen_geometry_changed(self, *args):
+        self._on_screen_layout_signal('QScreen.geometryChanged', *args)
+
+    def _on_screen_available_geometry_changed(self, *args):
+        self._on_screen_layout_signal('QScreen.availableGeometryChanged', *args)
+
+    def _on_screen_logical_dots_per_inch_changed(self, *args):
+        self._on_screen_layout_signal('QScreen.logicalDotsPerInchChanged', *args)
+
     def _on_screen_layout_signal(self, signal_name='a screen layout signal', *args):
         """Qt slot for the layout signals whose argument this does not use.
 
@@ -3597,8 +3614,9 @@ class GuiManager(QObject):
         parameter, and the correction would read a screen, a rectangle or a
         number as a list of screens.
 
-        Each connection binds the signal's own name as the first argument,
-        so the log names the signal that arrived (criterion B5).
+        Each signal's own bound method, above, passes the signal's name as
+        the first argument, so the log names the signal that arrived
+        (criterion B5).
         """
         self._on_screens_changed(signal_name=signal_name)
 
@@ -3635,14 +3653,11 @@ class GuiManager(QObject):
         so the button ends where the first one put it.
         """
         try:
-            screen.geometryChanged.connect(
-                partial(self._on_screen_layout_signal, 'QScreen.geometryChanged'))
+            screen.geometryChanged.connect(self._on_screen_geometry_changed)
             screen.availableGeometryChanged.connect(
-                partial(self._on_screen_layout_signal,
-                        'QScreen.availableGeometryChanged'))
+                self._on_screen_available_geometry_changed)
             screen.logicalDotsPerInchChanged.connect(
-                partial(self._on_screen_layout_signal,
-                        'QScreen.logicalDotsPerInchChanged'))
+                self._on_screen_logical_dots_per_inch_changed)
         except (AttributeError, RuntimeError):
             # A screen already being destroyed, or a Qt build without the
             # signals. The layout-level signals still cover adding and
@@ -3659,9 +3674,7 @@ class GuiManager(QObject):
         try:
             app.screenAdded.connect(self._on_screen_added)
             app.screenRemoved.connect(self._on_screen_removed)
-            app.primaryScreenChanged.connect(
-                partial(self._on_screen_layout_signal,
-                        'QGuiApplication.primaryScreenChanged'))
+            app.primaryScreenChanged.connect(self._on_primary_screen_changed)
             for screen in QGuiApplication.screens():
                 self._watch_screen(screen)
         except (AttributeError, RuntimeError):
@@ -4167,6 +4180,12 @@ class GuiManager(QObject):
         if not hasattr(self, '_pm_dialog') or self._pm_dialog is None:
             self._pm_dialog = PatternManagerDialog(parent=None)
             self._pm_dialog.pattern_action.connect(self._send_pm_command)
+            # wh-overlay-rewalk-after-filter: the dialog reports its own tree
+            # changes so the numbered overlay can re-walk; nothing outside this
+            # process can see them.
+            self._pm_dialog.tree_changed.connect(
+                self._send_pattern_manager_tree_changed
+            )
         # Request fresh data from Logic process
         self.commands_to_logic_queue.put_nowait({"action": "pm_get_patterns"})
         self._pm_dialog.show()
@@ -4176,6 +4195,24 @@ class GuiManager(QObject):
     def _send_pm_command(self, command: dict):
         """Forward Pattern Manager commands to Logic process."""
         self.commands_to_logic_queue.put_nowait(command)
+
+    def _send_pattern_manager_tree_changed(self, command: dict) -> None:
+        """Forward a pattern_manager_tree_changed dict to Logic.
+
+        wh-overlay-rewalk-after-filter. Separate from ``_send_pm_command``
+        because a dropped overlay-refresh notification must leave a trace: the
+        visible consequence is badges that no longer match the rows, and a bare
+        ``put_nowait`` would raise ``Full`` into the Qt signal instead. A Full
+        queue is logged and dropped, the same posture
+        ``_emit_overlay_state_changed`` takes.
+        """
+        try:
+            self.commands_to_logic_queue.put_nowait(command)
+        except Full:
+            logger.warning(
+                "pattern_manager_tree_changed: commands_to_logic_queue Full; "
+                "dropping the overlay re-walk request",
+            )
 
     def _open_help_explainer(self):
         """Show the window that explains the Wheelhouse Assistant.

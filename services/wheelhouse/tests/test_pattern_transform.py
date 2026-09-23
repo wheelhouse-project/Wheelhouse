@@ -4043,7 +4043,7 @@ class TestAHyphenAfterTheCaptureBelongsToTheCaller:
             for key, value in self._bodies(transformed).items():
                 totals[key] += value
 
-        assert len(entries) == 319, len(entries)
+        assert len(entries) == 320, len(entries)
         assert totals == {
             "plain": 113, "atomic": 0, "no_hyphen": 0, "atomic_no_hyphen": 0,
         }, totals

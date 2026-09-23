@@ -212,12 +212,14 @@ from ui.invoke_error_codes import is_no_side_effect_hresult
 from ui.uia_walker import (
     NAME_TO_CONTROL_TYPE_ID,
     TASKBAR_WINDOW_CLASSES,
+    UIA_TREEITEM,
     DefaultActionIsExpandCollapse,
     DoDefaultActionUnavailable,
     InvokePatternUnavailable,
     NoDefaultAction,
     do_default_action_via_legacy_pattern,
     invoke_via_invoke_pattern,
+    selection_state_via_selection_item_pattern,
 )
 
 logger = logging.getLogger(__name__)
@@ -542,6 +544,9 @@ class ClickExecutor:
         do_default_action_fn: Callable[
             [Any], None
         ] = do_default_action_via_legacy_pattern,
+        selection_state_fn: Callable[
+            [Any], Optional[bool]
+        ] = selection_state_via_selection_item_pattern,
         enable_coordinate_click_on_com_error: bool = (
             _DEFAULT_ENABLE_COORDINATE_CLICK_ON_COM_ERROR
         ),
@@ -603,6 +608,15 @@ class ClickExecutor:
         # do_default_action_via_legacy_pattern (wh-click-dda-wiring); injected
         # in tests so a fake control_ref can drive the DoDefaultAction branches.
         self._do_default_action_fn = do_default_action_fn
+        # SelectionItem.IsSelected read seam (wh-pattern-manager-tree-click).
+        # ``(control_ref) -> True / False / None``, None meaning the control
+        # exposes no SelectionItem pattern. Consulted ONLY around the Invoke
+        # press of a TreeItem (see _invoke_path): the Qt accessibility bridge
+        # answers Invoke() with S_OK and does nothing, so the executor asks
+        # the control whether the press changed anything. Every other control
+        # type never touches this seam, so the Phase 1 path costs no extra COM
+        # round-trip. Injected in tests to script the selection state.
+        self._selection_state_fn = selection_state_fn
         self._enable_coordinate_click_on_com_error = (
             enable_coordinate_click_on_com_error
         )
@@ -823,13 +837,70 @@ class ClickExecutor:
         *,
         badge_pick: bool = False,
     ) -> ClickResult:
-        """The InvokePattern execution path (pre-click verification done)."""
+        """The InvokePattern execution path (pre-click verification done).
+
+        A TreeItem additionally gets its press OUTCOME checked
+        (wh-pattern-manager-tree-click). Measured 2026-09-22 on the Pattern
+        Manager's QTreeWidget: ``InvokePattern.Invoke()`` returns S_OK, the
+        row does not select, and nothing else happens -- the Qt accessibility
+        bridge reports a press it never performed, so every "click N" on a
+        tree row reported success while doing nothing. A real mouse click on
+        the same row works, and so does the executor's own gated coordinate
+        click.
+
+        The check is deliberately narrow (the 2026-09-22 ruling on the bead):
+        it arms only for a TreeItem that carries a cached Invoke pattern and
+        whose SelectionItem pattern read FALSE BEFORE the press, so no other
+        control type, and no already-selected row, can reach it. A File
+        Explorer navigation-pane folder is a TreeItem that exposes no Invoke
+        pattern (measured live the same day), so the cached-Invoke arm below
+        keeps it on exactly the path it took before this bead: no
+        SelectionItem read, no budget check, straight to the Invoke attempt
+        that raises InvokePatternUnavailable and hands off to the DDA /
+        structural coordinate path (wh-explorer-navpane-click).
+        """
+        selected_before: Optional[bool] = None
+        if winner.control_type_id == UIA_TREEITEM and winner.invoke_supported:
+            # ``invoke_supported`` is the walk's own cached-Invoke answer
+            # (uia_walker._cached_invoke_supported, read off the single
+            # CacheRequest), so arming on it costs no COM call at all at
+            # click time.
+            # crewcut: this narrows the outcome check to rows whose Invoke
+            # pattern was CACHED by the walk. A provider that exposes Invoke
+            # only live (GetCurrentPattern) gets no outcome check. Widen it
+            # by giving the walker a live-Invoke probe for TreeItems, or by
+            # adding a live GetCurrentPattern arm here -- both cost a
+            # cross-process read on the latency-sensitive voice path, which
+            # is why neither is done now.
+            selected_before = self._selection_state_before_invoke(winner)
+            if self._verification_budget_expired("tree-item selection pre-read"):
+                # The selection read above is a LIVE cross-process COM
+                # property read, so it can block, and it is the only work
+                # this executor does between _verify's last budget check and
+                # a press. Without this check a slow tree provider lets the
+                # Invoke go out after the click's deadline has already
+                # passed, which is the single thing the budget exists to stop
+                # (module docstring: "once the budget has expired the
+                # executor refuses and sends no input"). It sits inside the
+                # same arm as the read, so a control that skips the read also
+                # reaches Invoke with exactly the timing it had before this
+                # bead (wh-pattern-manager-tree-click.2.1, Codex round 1;
+                # arm narrowed by the 2026-09-22 hard gate, delta D1).
+                return ClickResult(
+                    outcome="execution_failed",
+                    reason="verification_timeout",
+                    matched_name=winner.name,
+                )
         try:
             self._invoke_fn(winner.control_ref)
         except Exception as exc:  # noqa: BLE001 -- COM raises broad exceptions
             return self._handle_invoke_error(
                 exc, winner, snap, query, badge_pick=badge_pick
             )
+        if selected_before is False:
+            retried = self._invoke_outcome_retry(winner, snap, query)
+            if retried is not None:
+                return retried
         return ClickResult(
             outcome="ok",
             reason=None,
@@ -837,39 +908,160 @@ class ClickExecutor:
             clicked_via="invoke",
         )
 
-    # -- pre-click verification ----------------------------------------------
+    def _selection_state_before_invoke(
+        self, winner: ElementMatch
+    ) -> Optional[bool]:
+        """Read the tree row's selection state before the press, or None.
 
-    def _verify(
+        None -- meaning "no outcome signal, leave today's behaviour alone" --
+        for everything except a TreeItem that answers the SelectionItem read
+        with a bool. A read that raises is also None: the element is already
+        not resolving, which the pre-click verification block will have had
+        its own say about, and arming an outcome check on it would only add a
+        second press to a control that is going away.
+        """
+        if winner.control_type_id != UIA_TREEITEM:
+            return None
+        try:
+            state = self._selection_state_fn(winner.control_ref)
+        except Exception as exc:  # noqa: BLE001 -- COM property read can raise
+            logger.debug(
+                "click_element pre-invoke selection read failed, leaving the "
+                "tree-item outcome check off: matched=%r repr=%.200s",
+                winner.name,
+                repr(exc),
+            )
+            return None
+        if state is None:
+            return None
+        return bool(state)
+
+    def _invoke_outcome_retry(
         self,
         winner: ElementMatch,
         snap: SnapshotForeground,
-    ) -> Optional[str]:
-        """Run the five-step v5 verification block.
+        query: ElementQuery,
+    ) -> Optional[ClickResult]:
+        """Judge a TreeItem Invoke that reported success; press again if inert.
 
-        Returns ``None`` when verification passes (and stashes the fresh
-        bounding-rect centre in ``self._last_rect`` for the coordinate
-        fallback), or a reason tag string on the first failing step.
+        Returns None to mean "nothing more to say" -- the caller then reports
+        the ordinary ``ok`` / ``invoke`` result it always did. A ClickResult
+        is returned only when this method actually took the click somewhere
+        else. The four bounds are the 2026-09-22 ruling:
 
-        Step 5 also applies the Phase 1.5 bounds-tolerance check (design r1c.6):
-        the freshly-read BoundingRectangle (already in hand -- no extra Win32
-        round-trip) is compared per dimension against the cached
-        ``winner.bounds``; a drift exceeding ``self._bounds_tolerance`` (physical
-        UIA pixels) in any of x/y/w/h returns ``bounds_stale``.
-
-        Verification budget (wh-overlay-slow-uia-stale-badges.6): the deadline
-        ``click()`` captured is checked BETWEEN the steps that can block on a
-        COM or Win32 call (the foreground probe, the popup/shell liveness
-        probes, the IsEnabled and BoundingRectangle re-reads, and the
-        on-screen check). An expired deadline returns
-        ``verification_timeout`` so no further step starts and no click is
-        sent. The budget bounds when a NEW step may start; a single hung COM
-        call can still overrun it, because COM cannot be safely aborted
-        mid-call.
+        (b) A post-Invoke selection read that RAISES, a SelectionItem pattern
+            that has gone, or a foreground identity that no longer matches the
+            snapshot all mean the Invoke acted: a navigating Invoke usually
+            removes or replaces the element, and a second press there is a
+            double-action. Report ok, press nothing.
+        (c) Still false and the element still resolves -> the existing gated
+            coordinate click, through the same ``_coord_eligible`` gate and
+            the same ``_coordinate_fallback`` (which re-runs the FULL
+            pre-click verification and the click-point hit-tests before any
+            input). A match that fails the eligibility gate presses nothing
+            and keeps today's ok, exactly as the gate does everywhere else.
+        (d) Still false AFTER that coordinate click -> ``execution_failed``
+            under ``invoke_then_coordinate_no_effect``: two presses were
+            delivered to a control that did not move. It is its own telemetry
+            tag, distinct from ``invoke_com_error`` (where the press itself
+            failed) and from ``invoke_no_effect_then_sendinput_failed`` (where
+            the coordinate click did not land).
         """
+        after_invoke = self._selection_state_after_invoke(winner, "the Invoke")
+        if after_invoke is not False:
+            return None
         probe = self._foreground_probe()
-        if self._verification_budget_expired("foreground probe"):
-            return "verification_timeout"
+        if self._foreground_identity_reason(probe, snap) is not None:
+            # Bound (b): the Invoke navigated. The row's selection state is
+            # no longer the question the user asked about.
+            logger.info(
+                "click_element tree item %r reports unselected after Invoke "
+                "but the foreground moved; treating the Invoke as having acted",
+                winner.name,
+            )
+            return None
+        if not self._coord_eligible(winner, query):
+            logger.info(
+                "click_element tree item %r did not select on Invoke and the "
+                "match is not coordinate-eligible; reporting the Invoke "
+                "result unchanged",
+                winner.name,
+            )
+            return None
 
+        logger.warning(
+            "click_element tree item %r stayed unselected after a successful "
+            "Invoke; retrying with the gated coordinate click",
+            winner.name,
+        )
+        result = self._coordinate_fallback(
+            winner,
+            snap,
+            fail_reason="invoke_no_effect_then_sendinput_failed",
+        )
+        if result.outcome != "ok":
+            return result
+        after_click = self._selection_state_after_invoke(
+            winner, "the coordinate click"
+        )
+        if after_click is False:
+            logger.warning(
+                "click_element tree item %r stayed unselected after both the "
+                "Invoke and the coordinate click (execution_failed, "
+                "invoke_then_coordinate_no_effect)",
+                winner.name,
+            )
+            return self._fail(winner, "invoke_then_coordinate_no_effect")
+        return result
+
+    def _selection_state_after_invoke(
+        self, winner: ElementMatch, after_what: str
+    ) -> Optional[bool]:
+        """Re-read the selection state, mapping every unknown answer to None.
+
+        Bound (b) of the ruling: a raise or a vanished SelectionItem pattern
+        is NOT evidence that the press did nothing -- it is the ordinary shape
+        of an element that was removed or replaced by a press that worked.
+        Both read as None, which every caller treats as "the press acted".
+        """
+        try:
+            state = self._selection_state_fn(winner.control_ref)
+        except Exception as exc:  # noqa: BLE001 -- COM property read can raise
+            logger.info(
+                "click_element selection re-read after %s failed for %r; "
+                "treating the press as having acted: repr=%.200s",
+                after_what,
+                winner.name,
+                repr(exc),
+            )
+            return None
+        if state is None:
+            return None
+        return bool(state)
+
+    # -- pre-click verification ----------------------------------------------
+
+    def _foreground_identity_reason(
+        self,
+        probe: ForegroundProbe,
+        snap: SnapshotForeground,
+    ) -> Optional[str]:
+        """Steps 1-3 of the verification block: is the foreground still ours?
+
+        Returns None when the probed foreground still matches the snapshot
+        ``click()`` was built from, ``"foreground_changed"`` when a check
+        succeeded and DIFFERS, or ``"foreground_verification_failed"`` when
+        the creation-time read was denied AND a lesser check could not
+        complete either.
+
+        Extracted from ``_verify`` unchanged (wh-pattern-manager-tree-click):
+        the tree-item Invoke outcome check needs this identity question alone
+        -- after an Invoke that navigated, the foreground has legitimately
+        moved and a second press must not be sent -- and it must ask it with
+        the same rules ``_verify`` uses, not a second copy of them. It takes
+        the probe rather than calling the seam itself so ``_verify`` keeps its
+        one probe call and its budget check around it.
+        """
         # Step 1: foreground HWND vs the snapshot.
         if probe.window != snap.window:
             return "foreground_changed"
@@ -914,6 +1106,43 @@ class ClickExecutor:
             # HWND + PID + name all matched, only creation-time was denied ->
             # accept (this is the admin-elevated foreground case) and continue.
 
+        return None
+
+    def _verify(
+        self,
+        winner: ElementMatch,
+        snap: SnapshotForeground,
+    ) -> Optional[str]:
+        """Run the five-step v5 verification block.
+
+        Returns ``None`` when verification passes (and stashes the fresh
+        bounding-rect centre in ``self._last_rect`` for the coordinate
+        fallback), or a reason tag string on the first failing step.
+
+        Step 5 also applies the Phase 1.5 bounds-tolerance check (design r1c.6):
+        the freshly-read BoundingRectangle (already in hand -- no extra Win32
+        round-trip) is compared per dimension against the cached
+        ``winner.bounds``; a drift exceeding ``self._bounds_tolerance`` (physical
+        UIA pixels) in any of x/y/w/h returns ``bounds_stale``.
+
+        Verification budget (wh-overlay-slow-uia-stale-badges.6): the deadline
+        ``click()`` captured is checked BETWEEN the steps that can block on a
+        COM or Win32 call (the foreground probe, the popup/shell liveness
+        probes, the IsEnabled and BoundingRectangle re-reads, and the
+        on-screen check). An expired deadline returns
+        ``verification_timeout`` so no further step starts and no click is
+        sent. The budget bounds when a NEW step may start; a single hung COM
+        call can still overrun it, because COM cannot be safely aborted
+        mid-call.
+        """
+        probe = self._foreground_probe()
+        if self._verification_budget_expired("foreground probe"):
+            return "verification_timeout"
+
+        identity_reason = self._foreground_identity_reason(probe, snap)
+        if identity_reason is not None:
+            return identity_reason
+
         if self._verification_budget_expired("foreground identity checks"):
             return "verification_timeout"
 
@@ -953,8 +1182,10 @@ class ClickExecutor:
         # Step 4: re-read IsEnabled on control_ref.
         try:
             enabled = winner.control_ref.CurrentIsEnabled
-        except Exception:  # noqa: BLE001 -- COM property read can raise
-            return "bounds_invalid"
+        except Exception as exc:  # noqa: BLE001 -- COM property read can raise
+            return self._bounds_invalid(
+                "isenabled_read_raised", winner, exc=exc
+            )
         if not enabled:
             return "disabled"
 
@@ -964,14 +1195,18 @@ class ClickExecutor:
         # Step 5: re-read BoundingRectangle on control_ref.
         try:
             rect = winner.control_ref.CurrentBoundingRectangle
-        except Exception:  # noqa: BLE001 -- COM property read can raise
-            return "bounds_invalid"
+        except Exception as exc:  # noqa: BLE001 -- COM property read can raise
+            return self._bounds_invalid(
+                "bounding_rectangle_read_raised", winner, exc=exc
+            )
         parsed = self._parse_rect(rect)
         if parsed is None:
-            return "bounds_invalid"
+            return self._bounds_invalid("rect_unparsable", winner)
         x, y, w, h = parsed
         if w <= 0 or h <= 0:
-            return "bounds_invalid"
+            return self._bounds_invalid(
+                "rect_empty", winner, detail=f"w={w} h={h}"
+            )
 
         if self._verification_budget_expired("BoundingRectangle re-read"):
             return "verification_timeout"
@@ -1003,7 +1238,11 @@ class ClickExecutor:
             # every other read in this method -- so a contract-violating winner
             # cannot raise an unpack error that escapes to the handler's generic
             # execution-failed path with no matched-name context (wh-n29v.89.1).
-            return "bounds_invalid"
+            return self._bounds_invalid(
+                "cached_bounds_malformed",
+                winner,
+                detail=f"cached={winner.bounds!r}",
+            )
         cached_x, cached_y, cached_w, cached_h = cached
         tol = self._bounds_tolerance
         if (
@@ -1018,6 +1257,49 @@ class ClickExecutor:
         # fallback (v5 step 5).
         self._last_rect = (centre_x, centre_y)
         return None
+
+    @staticmethod
+    def _bounds_invalid(
+        source: str,
+        winner: Any,
+        *,
+        exc: Optional[BaseException] = None,
+        detail: str = "",
+    ) -> str:
+        """Log which pre-click re-read failed, then return ``bounds_invalid``.
+
+        Five separate failures in ``_verify`` all refuse under the single
+        reason ``bounds_invalid``: the IsEnabled read raised, the
+        BoundingRectangle read raised, the fresh rect did not parse, the fresh
+        rect was empty, and the cached walk-time bounds were malformed. The
+        handler logs only the reason (``ui_action_handler`` at the
+        ``execution_failed`` line), so wheelhouse.log could not say WHICH one
+        fired, and David's 2026-09-22 Pattern Manager report
+        (wh-pattern-manager-tree-click) could not be diagnosed from the log.
+
+        This writes one warning naming the source, the matched control, and --
+        for the two COM-error sources -- the HRESULT, so the next report is
+        diagnosable from the log alone. The RETURNED reason is unchanged, so
+        no notice wording and no caller behaviour moves: this is a log line,
+        not a new refusal.
+        """
+        parts = [f"bounds_invalid_source={source}"]
+        name = getattr(winner, "name", None)
+        if name:
+            parts.append(f"matched={name!r}")
+        if exc is not None:
+            hresult = _hresult_of(exc)
+            if isinstance(hresult, int):
+                parts.append(f"hresult={hresult & 0xFFFFFFFF:#010x}")
+            parts.append(f"error={type(exc).__name__}")
+        if detail:
+            parts.append(detail)
+        logger.warning(
+            "click_element pre-click re-read failed: %s; refusing "
+            "(bounds_invalid)",
+            " ".join(parts),
+        )
+        return "bounds_invalid"
 
     def _verification_budget_expired(self, completed_step: str) -> bool:
         """True (with a log) when the click's verification deadline passed.

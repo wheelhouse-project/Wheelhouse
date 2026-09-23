@@ -1291,3 +1291,195 @@ class TestManagerMinimumSize:
                 f"{pattern_id}: detail buttons need {row_width}px, more "
                 f"than the right pane offers at the 800px minimum"
             )
+
+
+# ---------------------------------------------------------------------------
+# wh-overlay-rewalk-after-filter: the dialog tells Logic its tree changed.
+#
+# Typing in the filter box hides rows, so numbered-overlay badges painted from
+# an earlier walk float over rows that are gone. The window announces nothing a
+# Logic-side hook can see (measured on the bead: zero UIA StructureChanged
+# events and zero WinEvents 0x8000..0x8004 per filter change), so the dialog
+# emits ``tree_changed`` itself and the GUI manager forwards it to Logic.
+#
+# VISIBILITY. These tests do NOT call ``dialog.show()``: a real top-level
+# window on this machine would flash on screen and could take focus from
+# whatever the user is doing. ``_emit_tree_changed`` reads visibility through
+# ``self.isVisible()``, so stubbing that attribute on the instance exercises
+# the shown path exactly. ``winId()`` needs no show -- it creates the native
+# handle on demand.
+# ---------------------------------------------------------------------------
+
+
+def _record_tree_changed(dialog):
+    """Collect every tree_changed payload the dialog emits."""
+    events: list = []
+    dialog.tree_changed.connect(events.append)
+    return events
+
+
+def _shown(dialog):
+    """Make the dialog report itself as visible without putting it on screen."""
+    dialog.isVisible = lambda: True  # type: ignore[method-assign]
+    return dialog
+
+
+def test_filter_change_emits_one_tree_changed_event():
+    dialog = _shown(_make_dialog())
+    events = _record_tree_changed(dialog)
+    dialog.populate(_sample_data())   # the populate tail sends sequence 1
+    events.clear()
+
+    dialog._filter_input.setText("save")
+
+    assert len(events) == 1
+    assert events[0]["action"] == "pattern_manager_tree_changed"
+    assert events[0]["hwnd"] == int(dialog.window().winId())
+    assert events[0]["sequence"] == 2
+
+
+def test_a_second_filter_change_increments_the_sequence():
+    dialog = _shown(_make_dialog())
+    events = _record_tree_changed(dialog)
+    dialog.populate(_sample_data())
+
+    dialog._filter_input.setText("save")
+    dialog._filter_input.setText("sav")
+
+    # One per model change, counting from the populate that filled the tree.
+    assert [e["sequence"] for e in events] == [1, 2, 3]
+    assert {e["hwnd"] for e in events} == {int(dialog.window().winId())}
+
+
+def test_clearing_the_filter_also_emits():
+    # Clearing restores the hidden rows, which changes the walk result just as
+    # much as hiding them did.
+    dialog = _shown(_make_dialog())
+    dialog.populate(_sample_data())
+    events = _record_tree_changed(dialog)
+
+    dialog._filter_input.setText("save")
+    dialog._filter_input.setText("")
+
+    assert len(events) == 2
+
+
+def test_no_event_is_emitted_while_the_dialog_is_not_visible():
+    # Contract C6(a): no overlay is painted over a dialog the user cannot see,
+    # so nothing is sent. A never-shown dialog is the default state here.
+    dialog = _make_dialog()
+    assert not dialog.isVisible()
+    events = _record_tree_changed(dialog)
+
+    dialog.populate(_sample_data())
+    dialog._filter_input.setText("save")
+
+    assert events == []
+
+
+def test_populate_emits_a_tree_changed_event():
+    # Every add / edit / duplicate / customize / delete result funnels back
+    # through populate, so the populate tail covers all of them.
+    dialog = _shown(_make_dialog())
+    events = _record_tree_changed(dialog)
+
+    dialog.populate(_sample_data())
+
+    assert [e["sequence"] for e in events] == [1]
+
+
+def test_a_failed_window_handle_read_does_not_break_the_filter_box():
+    # A handle read can fail while the dialog is closing. The filter must still
+    # hide its rows; the notification is the part that is allowed to be lost.
+    dialog = _shown(_make_dialog())
+    dialog.populate(_sample_data())
+    events = _record_tree_changed(dialog)
+
+    def _boom():
+        raise RuntimeError("window is going away")
+
+    dialog.window = _boom  # type: ignore[method-assign]
+    dialog._filter_input.setText("zzz-nothing")
+
+    assert events == []
+    assert dialog._tree_empty_label.isVisible() or dialog._tree_empty_label.text()
+
+
+# ---------------------------------------------------------------------------
+# The GUI manager's forwarder for the same event. Bound from the class onto a
+# bare object so no GuiManager is constructed (it builds real Qt widgets).
+# ---------------------------------------------------------------------------
+
+
+def _forwarder(queue):
+    from gui import GuiManager
+
+    holder = type("_Holder", (), {})()
+    holder.commands_to_logic_queue = queue
+    holder._send_pattern_manager_tree_changed = (
+        GuiManager._send_pattern_manager_tree_changed.__get__(holder)
+    )
+    return holder
+
+
+def test_gui_forwards_the_tree_changed_dict_to_the_logic_queue():
+    queue = MagicMock()
+    holder = _forwarder(queue)
+    payload = {"action": "pattern_manager_tree_changed", "hwnd": 7, "sequence": 1}
+
+    holder._send_pattern_manager_tree_changed(payload)
+
+    queue.put_nowait.assert_called_once_with(payload)
+
+
+def test_gui_logs_and_drops_when_the_logic_queue_is_full():
+    # A bare put_nowait would raise Full into the Qt signal that emitted it.
+    from queue import Full
+
+    queue = MagicMock()
+    queue.put_nowait.side_effect = Full()
+    holder = _forwarder(queue)
+
+    holder._send_pattern_manager_tree_changed({"action": "x"})  # must not raise
+
+
+def test_open_pattern_manager_wires_tree_changed_to_the_guarded_sender():
+    """The WIRING, not the sender: tree_changed must reach the guarded slot.
+
+    wh-overlay-rewalk-after-filter. The two tests above bind
+    ``_send_pattern_manager_tree_changed`` onto a bare holder, so they prove
+    the method and never the ``connect`` line that reaches it. Connecting
+    ``tree_changed`` to ``_send_pm_command`` instead -- the bare
+    ``put_nowait`` with no ``Full`` guard -- would change nothing either of
+    them observes, and the first full queue would raise into the Qt signal
+    that emitted it.
+
+    No window is shown, for the reason in this section's header comment: the
+    three activation calls are stubbed and visibility is faked.
+    """
+    from gui import GuiManager
+
+    dialog = _shown(_make_dialog())
+    dialog.show = lambda: None            # type: ignore[method-assign]
+    dialog.raise_ = lambda: None          # type: ignore[method-assign]
+    dialog.activateWindow = lambda: None  # type: ignore[method-assign]
+
+    holder = type("_Holder", (), {})()
+    holder._pm_dialog = None
+    holder.commands_to_logic_queue = MagicMock()
+    holder._send_pm_command = MagicMock()
+    holder._send_pattern_manager_tree_changed = MagicMock()
+
+    with patch(
+        "pattern_manager_dialog.PatternManagerDialog", return_value=dialog
+    ):
+        GuiManager._open_pattern_manager.__get__(holder)()
+
+    # A repopulate is one of the two tree changes the dialog reports.
+    dialog.populate(_sample_data())
+
+    assert holder._send_pattern_manager_tree_changed.call_count >= 1
+    sent = holder._send_pattern_manager_tree_changed.call_args[0][0]
+    assert sent["action"] == "pattern_manager_tree_changed"
+    # The unguarded Pattern Manager command path must never carry this event.
+    holder._send_pm_command.assert_not_called()

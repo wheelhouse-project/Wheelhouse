@@ -809,7 +809,7 @@ begin
         MsgBox(
           'Wheelhouse could not be fully removed. This usually means it is still' + #13#10 +
           'running. Please close it first -- right-click the Wheelhouse icon near' + #13#10 +
-          'the clock and choose Quit -- then run the uninstall again.',
+          'the clock and choose Exit -- then run the uninstall again.',
           mbError, MB_OK);
         RaiseException('Wheelhouse could not be removed (it may still be running). '
           + 'Close Wheelhouse and try the uninstall again.');

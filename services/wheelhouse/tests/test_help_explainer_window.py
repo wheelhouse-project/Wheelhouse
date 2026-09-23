@@ -1,8 +1,8 @@
 """Tests for the HelpExplainerWindow (wh-assistant-button-explainer).
 
 The window appears when the user chooses Help, before the browser opens.
-It explains that the Wheelhouse Assistant runs inside ChatGPT, that a
-ChatGPT account is required, and what signing up involves. An Assistant
+It explains that the Wheelhouse Assistant runs inside Google Gemini, that
+a sign-in is required, and what signing in involves. An Assistant
 button opens the assistant; a Cancel button opens nothing.
 
 The window carries no settings and no message to another process. It
@@ -15,7 +15,10 @@ what to send. Tests cover what a future change could break:
   * the window staying modeless, so the GUI queue keeps running (W5).
 
 The body wording is quoted from David's approval on the bead
-(comment of 2026-09-20 00:56). Assertions are exact, not substrings:
+(comment of 2026-09-20 00:56), as edited on 2026-09-22 when the assistant
+moved from ChatGPT to a Google Gemini Gem (wh-gem-replaces-gpt-assistant):
+that change rewrote the assistant's name, the account sentence, and the
+sign-up sentence. Assertions are exact, not substrings:
 the words are the deliverable, so a silent edit must fail a test.
 """
 
@@ -32,11 +35,11 @@ from help_explainer_window import (
 
 APPROVED_PARAGRAPHS = (
     "The Wheelhouse Assistant answers questions about Wheelhouse."
-    " It runs inside ChatGPT, in your web browser.",
-    "You need a ChatGPT account. A free account works.",
-    'No account yet? On the ChatGPT page, select "Sign up". Enter an'
-    " email address, or use a Google, Microsoft, or Apple account."
-    " The sign-up takes about two minutes.",
+    " It runs inside Google Gemini, in your web browser.",
+    "Gemini asks you to sign in first. A free account works.",
+    'No account yet? On the Gemini page, select "Sign in". You can use a'
+    " Google account, an Apple account, or an email address."
+    " Signing in takes about two minutes.",
     "Then type or dictate your question in plain words.",
 )
 

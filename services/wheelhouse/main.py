@@ -1370,6 +1370,24 @@ def _get_stt_lifecycle_lock(self):
     return lock
 
 
+# The Wheelhouse Assistant's address, used by LogicController.start_help_online
+# when the settings file still names the retired ChatGPT assistant. This is the
+# same address config.toml.example ships as the gem_url default, and
+# test_the_gem_constant_equals_the_shipped_default keeps the two in step.
+_WHEELHOUSE_GEM_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+
+# The address every release before 1.2.0 shipped as the gem_url default: a
+# ChatGPT custom GPT that OpenAI stops running on 2026-12-11. The installer
+# preserves the user's settings file across an update, so an installation made
+# before 1.2.0 still holds this value and would open a dead assistant while the
+# explanation window talks about Gemini (wh-gem-replaces-gpt-assistant.2.3).
+# Delete this constant and the substitution in start_help_online once no
+# supported installation predates 1.2.0.
+_RETIRED_CHATGPT_HELP_URL = (
+    "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
+)
+
+
 class LogicController:
     """Main application logic coordinator."""
 
@@ -1834,6 +1852,27 @@ class LogicController:
         # wh-h9a8v2.
         from services.wheelhouse.overlay_focus_hooks import ForegroundIdentity
         self._overlay_tracked_identity: "ForegroundIdentity | None" = None
+        # wh-overlay-rewalk-after-filter.1.3: the window an IN-FLIGHT build is
+        # being made for. ``_overlay_tracked_identity`` above names the latest
+        # PIN, and the pin happens only after the build response comes back, so
+        # during a build that field is stale (a cross-window refresh) or None
+        # (the first session after a start) and cannot say which window a
+        # Pattern Manager tree change belongs to. Sampled twice: when a batch
+        # holding a build is handed over (``_perform_overlay_effects``, before
+        # the task is scheduled, wh-overlay-rewalk-after-filter.1.4) and again
+        # when the build runs (``_overlay_dispatch_build``). Three paths end
+        # it: the pin consumes it (``_overlay_send_pin``), entry to closed
+        # clears it (``_reconcile_overlay_tracked_identity``), and the next
+        # dispatch replaces it.
+        self._overlay_pending_build_identity: "ForegroundIdentity | None" = None
+        # wh-overlay-rewalk-after-filter: the newest Pattern Manager
+        # tree-change event already applied -- its window handle and its
+        # sequence number. The dialog's counter is monotonic per dialog
+        # instance, so an event at or below the stored sequence FOR THE SAME
+        # HANDLE arrived out of order behind a newer one and is dropped. Both
+        # start at 0: no window tracked, no sequence seen.
+        self._pm_tree_change_last_hwnd: int = 0
+        self._pm_tree_change_last_sequence: int = 0
         # wh-overlay-snapshot-keepalive (trigger B): the foreground-window
         # identity each pinned snapshot was built for, keyed by snapshot_id.
         # Unlike the single ``_overlay_tracked_identity`` (which always names the
@@ -5866,6 +5905,32 @@ class LogicController:
             )
             return
 
+    def _handle_pattern_manager_tree_changed(self, command) -> None:
+        """Validate a pattern_manager_tree_changed payload and hand it on.
+
+        wh-overlay-rewalk-after-filter, contract C5. The Pattern Manager sends
+        this whenever its tree changes what a walk of the dialog would return.
+        ``safe_parse`` logs and returns ``None`` on a malformed payload
+        (wh-uf54), so a bad dict is dropped here rather than raised into the
+        GUI command listener. The decision -- whether the change earns a
+        re-walk -- belongs to ``_on_pattern_manager_tree_change``; this handler
+        only validates and delegates.
+        """
+        from services.wheelhouse.shared.ipc_schema_validation import safe_parse
+        from services.wheelhouse.shared.pattern_manager_tree_changed import (
+            PatternManagerTreeChangedEvent,
+        )
+
+        ev = safe_parse(
+            PatternManagerTreeChangedEvent.from_dict,
+            command,
+            log_label="pattern_manager_tree_changed",
+        )
+        if ev is None:
+            return  # already logged
+
+        self._on_pattern_manager_tree_change(ev.hwnd, ev.sequence)
+
     def _abort_inflight_overlay_build(self) -> None:
         """Wake a parked build the machine can no longer consume.
 
@@ -6066,6 +6131,22 @@ class LogicController:
         self._overlay_arm_scheduled_restore_paint_audit(
             effects, trace_id=trace_id,
         )
+        # wh-overlay-rewalk-after-filter.1.4: record the build's window HERE,
+        # synchronously, not only in the scheduled task. The machine is
+        # already in flight when this runs, and the task below starts only
+        # after every callback already ready on the Logic loop. A Pattern
+        # Manager tree change among those callbacks would otherwise find no
+        # build target (None on a first session) and be dropped; for AUTO_OPEN,
+        # which repaints the snapshot the click walked before the change, that
+        # paints stale badges. ``_overlay_dispatch_build`` samples again when
+        # the build actually runs, so a walk that waited behind another batch
+        # is still judged against the window it reads.
+        from services.wheelhouse.click_overlay_state import EffectKind
+
+        if any(e.kind is EffectKind.DISPATCH_BUILD for e in effects):
+            self._overlay_pending_build_identity = (
+                self._capture_overlay_foreground_identity()
+            )
         return self.create_task_with_error_handling(
             self._dispatch_overlay_effects(tuple(effects), trace_id=trace_id),
             "OverlayEffects",
@@ -6166,6 +6247,15 @@ class LogicController:
         set_trace(trace_id)
         sid = effect.overlay_session_id
         gen = effect.paint_generation
+        # wh-overlay-rewalk-after-filter.1.3: record the window this build is
+        # for, BEFORE the send, so a Pattern Manager tree change arriving while
+        # the walk runs is judged against the window being read rather than
+        # against the previous pin (or against nothing at all on a first
+        # session). AUTO_OPEN takes the same sample: it repaints a snapshot
+        # without a fresh walk, but the machine can still supersede it.
+        self._overlay_pending_build_identity = (
+            self._capture_overlay_foreground_identity()
+        )
         # wh-overlay-slow-uia-stale-badges.3: the awaited window depends on
         # what the build actually asks the Input process to do. AUTO_OPEN
         # sends show_numbered_overlay, a lookup in the snapshot store with no
@@ -7524,6 +7614,11 @@ class LogicController:
                 self._overlay_snapshot_window_identity[effect.snapshot_id] = (
                     self._overlay_tracked_identity
                 )
+            # wh-overlay-rewalk-after-filter.1.3: the pin is the moment the
+            # tracked identity becomes truthful for the visible badges, so the
+            # build-time target has no further use. Leaving it set would make
+            # the tree-change callback prefer it over the pin.
+            self._overlay_pending_build_identity = None
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "overlay: failed to capture tracked identity at pin "
@@ -7947,6 +8042,103 @@ class LogicController:
             return
         self._cancel_overlay_settle_refire()
         self._apply_overlay_event(event, source=f"menu popup {verb}")
+
+    def _on_pattern_manager_tree_change(self, hwnd: int, sequence: int) -> None:
+        """Loop-marshalled Pattern Manager tree change: decide, debounce, refresh.
+
+        wh-overlay-rewalk-after-filter. Typing in the Pattern Manager's filter
+        box hides rows, so badges painted from an earlier walk float over rows
+        that are no longer there. The window announces NOTHING a Logic-side
+        hook could see (measured on this bead: zero UIA StructureChanged events
+        and zero WinEvents 0x8000..0x8004 for a filter change, against a probe
+        control of 150 of each over a page that adds and removes a control
+        every 200 ms), so the GUI process -- which knows its own model changed
+        -- sends the event, and this callback turns it into the same re-walk a
+        menu pop-up produces.
+
+        ``decide_tree_change`` runs BEFORE the debounce, for the same reason
+        ``map_menu_popup_event`` does: an event this window's overlay has no
+        use for must not burn the shared debounce window, or a real change
+        landing right after would be coalesced and the stale badges would
+        survive. Each drop writes exactly one log line naming its reason
+        (contract C2). An accepted event records its ``(hwnd, sequence)``
+        FIRST, before the debounce decides: the event WAS applied to the newest
+        state either by this call's walk or by the settle timer's, so a later
+        duplicate of the same sequence is stale whichever way the debounce
+        went.
+
+        Like the menu pop-up callback, this does NOT touch
+        ``_overlay_tracked_identity`` -- the foreground window does not change
+        when a dialog re-filters its own tree. It does READ a window handle,
+        which the menu pop-up callback does not, and that is why it needs two
+        sources (wh-overlay-rewalk-after-filter.1.3). While a build is in
+        flight the pinned identity is stale or absent, because the pin runs
+        only after the build response comes back, so the handle to judge
+        against is ``_overlay_pending_build_identity`` -- the window the
+        in-flight build was dispatched for. In every other accepted state the
+        badges on screen ARE the pinned ones, so the pinned identity is the
+        right source; reading the pending target there would judge against a
+        window whose badges never reached the screen, which is what a refresh
+        that falls back to its prior pin (``_refresh_fall_back`` in
+        click_overlay_state.py) leaves behind.
+        """
+        if not (
+            self.click_config.enabled
+            and self.click_config.overlay_enabled_effective
+        ):
+            return
+        import time
+
+        from services.wheelhouse.overlay_focus_hooks import decide_tree_change
+
+        from services.wheelhouse.click_overlay_state import OverlayState
+
+        state = self.click_overlay_state.state
+        pending = self._overlay_pending_build_identity
+        if pending is not None and state in (
+            OverlayState.WALK_IN_FLIGHT,
+            OverlayState.PAINT_IN_FLIGHT,
+            OverlayState.REFRESH_IN_FLIGHT,
+        ):
+            tracked = pending
+        else:
+            tracked = self._overlay_tracked_identity
+        decision = decide_tree_change(
+            state=state,
+            tracked_hwnd=tracked.hwnd if tracked is not None else 0,
+            event_hwnd=hwnd,
+            event_sequence=sequence,
+            last_hwnd=self._pm_tree_change_last_hwnd,
+            last_sequence=self._pm_tree_change_last_sequence,
+        )
+        if decision.event is None:
+            _overlay_focus_logger.debug(
+                "overlay: pattern manager tree change hwnd=%s seq=%s dropped "
+                "(%s).",
+                hwnd,
+                sequence,
+                decision.drop_reason,
+            )
+            return
+
+        self._pm_tree_change_last_hwnd = hwnd
+        self._pm_tree_change_last_sequence = sequence
+
+        now_ms = time.monotonic() * 1000.0
+        if not self._overlay_focus_debouncer.should_fire(now_ms=now_ms):
+            _overlay_focus_logger.debug(
+                "overlay: pattern manager tree change hwnd=%s seq=%s "
+                "coalesced by debounce.",
+                hwnd,
+                sequence,
+            )
+            self._arm_overlay_settle_refire("pattern manager tree change")
+            return
+        self._cancel_overlay_settle_refire()
+        self._apply_overlay_event(
+            decision.event,
+            source=f"pattern manager tree change hwnd={hwnd} seq={sequence}",
+        )
 
     def _arm_overlay_settle_refire(self, source: str) -> None:
         """Arm ONE trailing settle timer for the debounce-window remainder.
@@ -8409,6 +8601,9 @@ class LogicController:
             # of the session that just ended
             # (wh-overlay-slow-uia-stale-badges.2.2.1).
             self._overlay_settle_read_identity = None
+            # And the window a build in flight was being made for: the session
+            # it belonged to is over (wh-overlay-rewalk-after-filter.1.3).
+            self._overlay_pending_build_identity = None
 
     def _reconcile_overlay_visible_painted_pair(self) -> None:
         """Track the pair of the list the user can SEE (wh-overlay-slow-uia-stale-badges.8).
@@ -9917,7 +10112,7 @@ class LogicController:
         calls this method through the logic controller. One method, so there
         is no second copy of the decision to keep in step.
 
-        A new user who reaches the ChatGPT sign-in page with no explanation
+        A new user who reaches the Gemini sign-in page with no explanation
         does not know what to do there, so an explanation window comes first.
         The window's Assistant button sends the same command back with
         ``explained`` true, which is what stops the window appearing again in
@@ -9962,6 +10157,37 @@ class LogicController:
             )
             self._request_help_explainer()
             return
+
+        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:
+            # An installation made before 1.2.0 still holds the ChatGPT
+            # custom GPT this used to ship, because the installer preserves
+            # the settings file across an update
+            # (wh-gem-replaces-gpt-assistant.2.3). Opening it would send the
+            # user to an assistant OpenAI stops running on 2026-12-11, right
+            # after a window that told them about Gemini. The comparison is
+            # exact after strip(), so an address the user chose is opened as
+            # written, and a blank setting has already turned help off above.
+            #
+            # crewcut: the settings file is not rewritten, so this
+            # substitution runs on every Help for the life of the
+            # installation. Writing the new address once would need the
+            # acknowledged settings write path that the explanation window's
+            # check box uses for ai.help.explain_before_open: the GUI
+            # process sends a set_config_value command, and only that
+            # process writes the file. Doing it from here would mean a
+            # Logic-side write or a new command, which is a larger change
+            # than this finding needs.
+            gem_url = _WHEELHOUSE_GEM_URL
+            # No address in the line: it is a user setting, and every other
+            # line in this method redacts it for the same reason
+            # (wh-assistant-button-explainer.1.1).
+            logger.info(
+                "Help: source=%s explained=%s, the configured address is the "
+                "retired ChatGPT assistant, opening the Wheelhouse Gem "
+                "instead.",
+                source,
+                explained,
+            )
 
         logger.info(
             "Help: source=%s explained=%s, opening the browser.",
@@ -11205,6 +11431,17 @@ class LogicController:
             "overlay_state_changed": lambda: self.create_task_with_error_handling(
                 self._handle_overlay_state_changed(command),
                 "OverlayStateChanged",
+            ),
+            # wh-overlay-rewalk-after-filter: the Pattern Manager dialog emits
+            # this when its tree changes what a UIA walk would return (the
+            # filter box hiding rows, or a repopulate). The window itself
+            # announces nothing a Logic-side hook can see, so this message IS
+            # the signal. The handler validates the payload and feeds the
+            # existing focus-change re-walk path. The action name carries NO
+            # "pm_" prefix on purpose -- the listener above routes every pm_*
+            # action to _handle_pattern_manager_action before this table.
+            "pattern_manager_tree_changed": lambda: (
+                self._handle_pattern_manager_tree_changed(command)
             ),
             # wh-g2-refactor.18 (Section 5): per-word editor insert
             # responses. The handler validates the payload through the

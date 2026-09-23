@@ -52,6 +52,7 @@ from typing import Optional
 from services.wheelhouse.click_overlay_state import (
     OverlayEvent,
     OverlayEventKind,
+    OverlayState,
 )
 
 
@@ -243,12 +244,154 @@ def map_destroy_event(
     return OverlayEvent(kind=OverlayEventKind.FOCUSED_HWND_DESTROYED)
 
 
+# wh-overlay-rewalk-after-filter: the reasons a Pattern Manager tree-change
+# event is dropped. Each one names exactly one log line on the Logic side, so
+# the reason a badge set was NOT repaired is readable from wheelhouse.log
+# without re-deriving the conditions (contract C2).
+#
+# A dropped STATE names the state it was in, one distinct value per state
+# (contract C2 as amended, wh-overlay-rewalk-after-filter.1.1). The earlier
+# single ``overlay_closed`` value said "closed" about three states that hold an
+# OPEN overlay session, which is a log line that misleads the reader of an
+# incident. ``TREE_CHANGE_DROP_BY_STATE`` is the whole mapping and is the only
+# place a state's drop reason is written down.
+TREE_CHANGE_DROP_STATE_CLOSED = "overlay_state_closed"
+TREE_CHANGE_DROP_STATE_POST_CLICK_SETTLING = "overlay_state_post_click_settling"
+TREE_CHANGE_DROP_STATE_PAUSED = "overlay_state_paused"
+TREE_CHANGE_DROP_STATE_ERROR = "overlay_state_error"
+TREE_CHANGE_DROP_OTHER_WINDOW = "other_window"
+TREE_CHANGE_DROP_STALE_SEQUENCE = "stale_sequence"
+
+# The states whose ``FOCUS_CHANGE`` handling rebuilds the badge set. See
+# :func:`decide_tree_change` for the rule that decides membership.
+TREE_CHANGE_ACCEPTED_STATES = frozenset(
+    {
+        OverlayState.PAINTED,
+        OverlayState.REFRESH_IN_FLIGHT,
+        OverlayState.WALK_IN_FLIGHT,
+        OverlayState.PAINT_IN_FLIGHT,
+    }
+)
+
+# The states whose ``FOCUS_CHANGE`` handling is a no-operation, each with the
+# drop reason its log line names.
+TREE_CHANGE_DROP_BY_STATE = {
+    OverlayState.CLOSED: TREE_CHANGE_DROP_STATE_CLOSED,
+    OverlayState.POST_CLICK_SETTLING: TREE_CHANGE_DROP_STATE_POST_CLICK_SETTLING,
+    OverlayState.PAUSED: TREE_CHANGE_DROP_STATE_PAUSED,
+    OverlayState.ERROR: TREE_CHANGE_DROP_STATE_ERROR,
+}
+
+
+@dataclass(frozen=True)
+class TreeChangeDecision:
+    """The outcome of :func:`decide_tree_change`.
+
+    Exactly one of ``event`` / ``drop_reason`` is set. On an accept, ``event``
+    is the ``FOCUS_CHANGE`` :class:`OverlayEvent` the caller feeds to the state
+    machine and ``accepted_sequence`` is the sequence number the caller records
+    as the newest seen for that window. On a drop, ``event`` and
+    ``accepted_sequence`` are ``None`` and ``drop_reason`` is one of the
+    ``TREE_CHANGE_DROP_*`` constants.
+    """
+
+    event: Optional[OverlayEvent]
+    drop_reason: Optional[str]
+    accepted_sequence: Optional[int]
+
+
+def decide_tree_change(
+    *,
+    state: OverlayState,
+    tracked_hwnd: int,
+    event_hwnd: int,
+    event_sequence: int,
+    last_hwnd: int,
+    last_sequence: int,
+) -> TreeChangeDecision:
+    """Decide whether a Pattern Manager tree-change event earns a re-walk.
+
+    wh-overlay-rewalk-after-filter. Typing in the Pattern Manager's filter box
+    hides rows, so the badges painted from an earlier walk no longer match what
+    is on screen. The window announces nothing a Logic-side hook can see
+    (measured: zero UIA StructureChanged events and zero WinEvents
+    0x8000..0x8004 for a filter change, against a probe control of 150 of each
+    over a page that adds and removes a control every 200 ms), so the GUI
+    process sends the event itself. This function is the PURE decision; the
+    caller owns the debounce, the logging and the state machine.
+
+    The three checks run in this order, which is also the order the contract
+    states them in, so the log line names the FIRST reason that applies:
+
+    1. The STATE check. **The rule that decides the set is "the machine would
+       do work with a FOCUS_CHANGE here".** Read the state's own
+       ``FOCUS_CHANGE`` arm in ``click_overlay_state.py`` and put the state on
+       the side that arm already chose; that way a state added later joins the
+       right side for the right reason rather than by resemblance to a
+       neighbour. Today the four ACCEPTED states are ``painted`` and
+       ``refresh_in_flight`` (which rebuild the badge set) and
+       ``walk_in_flight`` and ``paint_in_flight`` (whose ``FOCUS_CHANGE`` arms
+       call ``_restart_walk(BuildReason.SUPERSEDE)``, so an in-flight build
+       restarts against the changed tree instead of painting the pre-change
+       one). The four DROPPED states -- ``closed``, ``post_click_settling``,
+       ``paused`` and ``error`` -- are exactly those whose ``FOCUS_CHANGE`` arm
+       is a no-operation, so feeding the event would change nothing. Each drops
+       under its OWN reason, named in ``TREE_CHANGE_DROP_BY_STATE``: a log line
+       must never say "closed" about an open session.
+    2. ``other_window`` -- the overlay is painted over some other window, or
+       either handle is ``0`` (nothing is tracked, or the event carries no
+       window). Repainting badges over a window the user is not looking at
+       would be wrong.
+    3. ``stale_sequence`` -- an event for the SAME window whose sequence is at
+       or below the newest already applied, so it arrived out of order behind a
+       newer one. The check applies ONLY when the handles match, because a
+       DIFFERENT handle restarts the counter: a reopened dialog whose counter
+       began again at 1 is a genuinely new window's first event, not a stale
+       one, and must not be mistaken for a replay of the old window's history.
+
+    An accepted event maps to ``FOCUS_CHANGE``, exactly as
+    :func:`map_menu_popup_event` does and for the same reason: "what is
+    clickable over the focused window changed without the focus moving" is
+    precisely what the machine's per-state focus-change handling already does
+    right, so no new event kind and no state-machine change is needed.
+    """
+    if state not in TREE_CHANGE_ACCEPTED_STATES:
+        # A state in neither set is a state nobody decided about. Drop it --
+        # the safe direction -- under a reason built from its own name, so the
+        # log line still names the state truthfully and this path can never
+        # raise on a GUI event. The eight-member table test in
+        # tests/test_overlay_focus_hooks.py is what makes that omission loud.
+        reason = TREE_CHANGE_DROP_BY_STATE.get(
+            state, f"overlay_state_{state.value}"
+        )
+        return TreeChangeDecision(None, reason, None)
+    if tracked_hwnd == 0 or event_hwnd == 0 or tracked_hwnd != event_hwnd:
+        return TreeChangeDecision(None, TREE_CHANGE_DROP_OTHER_WINDOW, None)
+    if event_hwnd == last_hwnd and event_sequence <= last_sequence:
+        return TreeChangeDecision(None, TREE_CHANGE_DROP_STALE_SEQUENCE, None)
+    return TreeChangeDecision(
+        OverlayEvent(kind=OverlayEventKind.FOCUS_CHANGE),
+        None,
+        event_sequence,
+    )
+
+
 __all__ = [
     "DEFAULT_FOCUS_DEBOUNCE_MS",
     "EVENT_SYSTEM_MENUPOPUPEND",
     "EVENT_SYSTEM_MENUPOPUPSTART",
+    "TREE_CHANGE_ACCEPTED_STATES",
+    "TREE_CHANGE_DROP_BY_STATE",
+    "TREE_CHANGE_DROP_OTHER_WINDOW",
+    "TREE_CHANGE_DROP_STALE_SEQUENCE",
+    "TREE_CHANGE_DROP_STATE_CLOSED",
+    "TREE_CHANGE_DROP_STATE_ERROR",
+    "TREE_CHANGE_DROP_STATE_PAUSED",
+    "TREE_CHANGE_DROP_STATE_POST_CLICK_SETTLING",
     "FocusChangeDebouncer",
     "ForegroundIdentity",
+    "TreeChangeDecision",
+    "decide_tree_change",
     "identity_matches",
     "map_destroy_event",
     "map_foreground_event",

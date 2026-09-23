@@ -99,11 +99,10 @@ include passwords and medical text. The short version:
 ## Wheelhouse help in your AI chat
 
 The fastest path is the official
-[Wheelhouse Assistant on ChatGPT](https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse),
-which always answers from the latest help document. A free ChatGPT account
-is enough — if ChatGPT says you "do not have access to GPT interactions",
-click **Sign up for free** in the upper right corner (no credit card
-required).
+[Wheelhouse Assistant on Google Gemini](https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A),
+which always answers from the latest documentation. Gemini asks you to sign
+in first. A Google account, an Apple account, or an email address works, and
+the free tier is enough (no credit card required).
 
 Prefer your own AI service? The user documentation is written so any AI
 chat service can answer questions from it. If you already use ChatGPT,
@@ -120,10 +119,10 @@ setting questions. The assistant rules are embedded at the top of the help
 document, so there is nothing to paste. The
 [llm/ folder](./llm/README.md) explains the setup, and the steps for each
 service live on the project site:
-[ChatGPT](https://wheelhouse-project.org/#llm-chatgpt) ·
-[Gemini](https://wheelhouse-project.org/#llm-gemini) ·
-[Claude](https://wheelhouse-project.org/#llm-claude) ·
-[Perplexity](https://wheelhouse-project.org/#llm-perplexity).
+[ChatGPT](https://wheelhouse-project.org/help.html#llm-chatgpt) ·
+[Gemini](https://wheelhouse-project.org/help.html#llm-gemini) ·
+[Claude](https://wheelhouse-project.org/help.html#llm-claude) ·
+[Perplexity](https://wheelhouse-project.org/help.html#llm-perplexity).
 
 ## Project status
 

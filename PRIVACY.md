@@ -1,6 +1,6 @@
 # Privacy
 
-Wheelhouse is a voice-control application built for people who depend on hands-free computer use. That makes privacy a safety property, not a feature: the things you dictate can include passwords, medical information, and legal or financial text. This document states plainly what stays on your machine, what can leave it, what the application can observe and modify locally, and how the separate **Wheelhouse Help** custom GPT handles data.
+Wheelhouse is a voice-control application built for people who depend on hands-free computer use. That makes privacy a safety property, not a feature: the things you dictate can include passwords, medical information, and legal or financial text. This document states plainly what stays on your machine, what can leave it, what the application can observe and modify locally, and how the separate **Wheelhouse Assistant** handles data.
 
 ## No telemetry
 
@@ -52,41 +52,34 @@ All of these stay on your machine and are excluded from any repository:
 
 Uninstalling removes all of the above: the application, both AppData folders, and every file listed. If you tell the uninstaller to keep your personal data, it instead saves your settings, voice patterns, vocabulary words, and the lists of controls you approved or declined for dictation in a `preserved-user-data` folder under `%LOCALAPPDATA%\WheelHouse`, and it keeps the downloaded speech model there too; everything else is still removed. The uninstall section of `INSTALL.md` describes both options.
 
-# Wheelhouse Help GPT
+# Wheelhouse Assistant
 
-The Wheelhouse project also publishes the **Wheelhouse Help** custom GPT for ChatGPT. This GPT is separate from the Wheelhouse desktop application.
+The Wheelhouse project also publishes the **Wheelhouse Assistant**, a Google Gemini Gem, at <https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A>. The assistant is separate from the Wheelhouse desktop application. You use it in your web browser, and Gemini asks you to sign in first: a Google account, an Apple account, or an email address works, and a free account is enough. Nothing you say to the assistant touches the desktop application, and the desktop application sends nothing to it.
 
 ## How it works
 
-Before answering Wheelhouse-specific questions, the GPT uses an OpenAI Action to retrieve the latest public Wheelhouse documentation from the project's GitHub repository.
+The assistant holds the current Wheelhouse documentation as stored files in its own Knowledge section: the help document, the installation guide, and the command and configuration reference. It reads those stored files and answers from them.
 
-The Action performs a read-only HTTPS request to download a public Markdown documentation file hosted on GitHub. It does not modify any data, access private repositories, or require authentication.
+The assistant retrieves nothing while it answers. It makes no request to the Wheelhouse project, to GitHub, or to any other site, so using it tells the project nothing at all.
 
-## What information is sent
+The project keeps those stored files current by rewriting them when it publishes a release. That rewrite runs on a project maintainer's machine. It carries documentation to Google and carries nothing back.
 
-The Action retrieves a fixed public documentation file only.
+## What the project receives
 
-It does **not** transmit your ChatGPT prompts, conversation history, account information, or personal information to the Wheelhouse project as part of the request.
+The Wheelhouse project does not collect, receive, or store your conversations with the assistant.
 
-The request is made to GitHub's content delivery service (`raw.githubusercontent.com`) solely to retrieve the current documentation. GitHub may receive standard HTTP request metadata (such as IP address, request time, and user agent) as part of serving the file. That processing is governed by GitHub's own privacy policy.
+The project:
 
-## Data collection
+* receives no prompt you type and no answer you get;
+* creates no user account for you;
+* stores no data about you; and
+* performs no analytics and no telemetry on assistant users.
 
-The Wheelhouse project does not collect, receive, or store your ChatGPT conversations through the documentation Action.
+## Google
 
-The Action:
+Your conversations with the Wheelhouse Assistant are processed by Google as part of providing the Gemini service. They are subject to Google's own terms of service and privacy policy, and to whatever data settings you have chosen in the account you signed in with. Read those before you dictate anything sensitive to the assistant.
 
-* is read-only;
-* requires no authentication;
-* creates no user accounts;
-* stores no user-specific data; and
-* performs no analytics or telemetry on GPT users.
-
-## OpenAI
-
-Your conversations with the Wheelhouse Help GPT are processed by OpenAI as part of providing the ChatGPT service and are subject to OpenAI's own Terms of Use and Privacy Policy.
-
-Unless you separately choose to share information with the Wheelhouse project (for example, by opening a GitHub issue or discussion), the project does not receive your ChatGPT conversation history.
+Unless you separately choose to share information with the Wheelhouse project (for example, by opening a GitHub issue or discussion), the project does not receive your conversation history.
 
 ## Questions
 

@@ -1,84 +1,31 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wheelhouse Voice Command and Configuration Reference</title>
-<meta name="description" content="The complete reference for every Wheelhouse voice command and configuration setting, generated from the Wheelhouse sources.">
-<style>
-  body { max-width: 62rem; margin: 0 auto; padding: 1.5rem; font-family: system-ui, Segoe UI, Arial, sans-serif; color: #1a1a1a; background: #ffffff; line-height: 1.5; }
-  .skip-link { position: absolute; left: -999px; top: 0; background: #0b5cad; color: #ffffff; padding: 0.75rem 1.25rem; z-index: 10; }
-  .skip-link:focus { left: 0.5rem; top: 0.5rem; }
-  a:focus-visible { outline: 3px solid #0b5cad; outline-offset: 2px; }
-  header { border-bottom: 1px solid #c9d4dd; margin-bottom: 1.5rem; padding-bottom: 0.75rem; }
-  h1 { font-size: 1.8rem; margin: 0 0 0.4rem 0; }
-  h2 { font-size: 1.4rem; margin-top: 2rem; border-bottom: 1px solid #c9d4dd; padding-bottom: 0.3rem; }
-  h3 { font-size: 1.05rem; margin-top: 1.5rem; color: #0b5cad; }
-  a { color: #0b5cad; }
-  nav { background: #f2f5f8; border: 1px solid #c9d4dd; padding: 0.75rem 1rem; margin-bottom: 2rem; border-radius: 6px; }
-  nav ul { margin: 0.3rem 0; padding-left: 1.2rem; }
-  table { border-collapse: collapse; width: 100%; margin: 0.75rem 0; display: block; overflow-x: auto; }
-  th, td { border: 1px solid #c9d4dd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
-  th { background: #f2f5f8; }
-  code { background: #eef2f5; padding: 0.1rem 0.3rem; border-radius: 3px; }
-  @media (max-width: 40rem) { body { padding: 1rem; } }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="The complete Wheelhouse voice command and configuration reference.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#151e19" media="(prefers-color-scheme: dark)">
+  <title>Commands and settings · Wheelhouse</title>
+  <link rel="icon" href="favicon.ico">
+  <link rel="stylesheet" href="site.css">
+  
 </head>
-<body>
-<a class="skip-link" href="#main">Skip to main content</a>
-<header>
-<h1>Wheelhouse Voice Command and Configuration Reference</h1>
-<p><a href="index.html">Back to the Wheelhouse guide</a></p>
-</header>
-<nav aria-label="Contents">
-<ul>
-  <li><a href="#voice-command-reference">Voice Command Reference</a>
-    <ul>
-      <li><a href="#dictation-control">Dictation Control</a></li>
-      <li><a href="#text-editing">Text Editing</a></li>
-      <li><a href="#text-formatting">Text Formatting</a></li>
-      <li><a href="#navigation">Navigation</a></li>
-      <li><a href="#punctuation-and-symbols">Punctuation and Symbols</a></li>
-      <li><a href="#application-switching">Application Switching</a></li>
-      <li><a href="#system">System</a></li>
-      <li><a href="#voice-element-clicking">Voice Element Clicking</a></li>
-      <li><a href="#mouse-grid">Mouse Grid</a></li>
-      <li><a href="#wheelhouse-control">Wheelhouse Control</a></li>
-    </ul>
-  </li>
-  <li><a href="#configuration-reference">Configuration Reference</a>
-    <ul>
-      <li><a href="#general">General</a></li>
-      <li><a href="#brightness_coordinator">[brightness_coordinator]</a></li>
-      <li><a href="#pluginsinternal_panel">[plugins.internal_panel]</a></li>
-      <li><a href="#pluginssonos">[plugins.sonos]</a></li>
-      <li><a href="#pluginssystem_volume">[plugins.system_volume]</a></li>
-      <li><a href="#pluginsbravia">[plugins.bravia]</a></li>
-      <li><a href="#pluginsidle_monitor">[plugins.idle_monitor]</a></li>
-      <li><a href="#pluginswindow_positioning">[plugins.window_positioning]</a></li>
-      <li><a href="#wake_word">[wake_word]</a></li>
-      <li><a href="#ui_actionstiming">[ui_actions.timing]</a></li>
-      <li><a href="#ui_actionsverified_unicode">[ui_actions.verified_unicode]</a></li>
-      <li><a href="#ui_actionsforeground_check">[ui_actions.foreground_check]</a></li>
-      <li><a href="#ui_actionstext_target">[ui_actions.text_target]</a></li>
-      <li><a href="#speech">[speech]</a></li>
-      <li><a href="#stt">[stt]</a></li>
-      <li><a href="#sttgoogle">[stt.google]</a></li>
-      <li><a href="#ai">[ai]</a></li>
-      <li><a href="#aiserver">[ai.server]</a></li>
-      <li><a href="#airuntime">[ai.runtime]</a></li>
-      <li><a href="#aihelp">[ai.help]</a></li>
-      <li><a href="#click">[click]</a></li>
-      <li><a href="#actions">[actions]</a></li>
-    </ul>
-  </li>
-</ul>
-</nav>
-<main id="main">
-<p>This is the complete, automatically generated reference for every Wheelhouse voice command and configuration setting. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using and installing Wheelhouse, see the installation guide (wheelhouse_install.md).</p>
+<body id="top">
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="site-header"><div class="header-inner wrap">
+    <a class="brand" href="index.html" aria-label="Wheelhouse home"><span class="wheel" aria-hidden="true">☸</span> Wheelhouse<span class="brand-dot" aria-hidden="true">.</span></a>
+    <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="start.html">Get started</a><a href="guide.html">User guide</a><a href="reference.html" aria-current="page">Commands</a><a href="install.html">Installation</a><a href="help.html">Get help</a></nav>
+    <a class="button small" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe" aria-label="Download for Windows">Download <span aria-hidden="true">↗</span></a>
+  </div></header>
+  <main id="main" tabindex="-1"><div class="document-heading wrap"><h1>Commands and settings</h1><p class="lead">Find an exact command or setting here. The <a href="guide.html#voice-commands">user guide</a> explains how to use the commands.</p>
+    <div class="guide-links"><a href="guide.html">Using Wheelhouse</a><a href="install.html">Installation details</a><a href="reference.html">Commands &amp; settings</a></div></div>
+    <div class="document-layout wrap"><aside class="document-toc"><details open><summary>On this page</summary><nav aria-label="Page contents"><ul><li><a href="reference.html#voice-command-reference">Voice Command Reference</a><ul><li><a href="reference.html#dictation-control">Dictation Control</a></li><li><a href="reference.html#text-editing">Text Editing</a></li><li><a href="reference.html#text-formatting">Text Formatting</a></li><li><a href="reference.html#navigation">Navigation</a></li><li><a href="reference.html#punctuation-and-symbols">Punctuation and Symbols</a></li><li><a href="reference.html#application-switching">Application Switching</a></li><li><a href="reference.html#system">System</a></li><li><a href="reference.html#voice-element-clicking">Voice Element Clicking</a></li><li><a href="reference.html#mouse-grid">Mouse Grid</a></li><li><a href="reference.html#wheelhouse-control">Wheelhouse Control</a></li></ul></li><li><a href="reference.html#configuration-reference">Configuration Reference</a><ul><li><a href="reference.html#general">General</a></li><li><a href="reference.html#brightness_coordinator">[brightness_coordinator]</a></li><li><a href="reference.html#pluginsinternal_panel">[plugins.internal_panel]</a></li><li><a href="reference.html#pluginssonos">[plugins.sonos]</a></li><li><a href="reference.html#pluginssystem_volume">[plugins.system_volume]</a></li><li><a href="reference.html#pluginsbravia">[plugins.bravia]</a></li><li><a href="reference.html#pluginsidle_monitor">[plugins.idle_monitor]</a></li><li><a href="reference.html#pluginswindow_positioning">[plugins.window_positioning]</a></li><li><a href="reference.html#wake_word">[wake_word]</a></li><li><a href="reference.html#ui_actionstiming">[ui_actions.timing]</a></li><li><a href="reference.html#ui_actionsverified_unicode">[ui_actions.verified_unicode]</a></li><li><a href="reference.html#ui_actionsforeground_check">[ui_actions.foreground_check]</a></li><li><a href="reference.html#ui_actionstext_target">[ui_actions.text_target]</a></li><li><a href="reference.html#speech">[speech]</a></li><li><a href="reference.html#stt">[stt]</a></li><li><a href="reference.html#sttgoogle">[stt.google]</a></li><li><a href="reference.html#ai">[ai]</a></li><li><a href="reference.html#aiserver">[ai.server]</a></li><li><a href="reference.html#airuntime">[ai.runtime]</a></li><li><a href="reference.html#aihelp">[ai.help]</a></li><li><a href="reference.html#click">[click]</a></li><li><a href="reference.html#actions">[actions]</a></li></ul></li></ul></nav></details></aside>
+    <article class="document-body"><p>This is the automatically generated reference for every Wheelhouse voice command and for every user-facing setting that the shipped config.toml contains. Optional settings that the file leaves commented out are described in the help document instead. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using Wheelhouse, see the help document (wheelhouse_help.md); for installation, see the installation guide (wheelhouse_install.md).</p>
 <h2 id="voice-command-reference">Voice Command Reference</h2>
 <h3 id="dictation-control">Dictation Control</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -90,7 +37,7 @@
 <tr>
 <td>literal [words]</td>
 <td>Types the words after "literal" exactly, skipping all command and replacement processing. Takes effect wherever it appears in an utterance, not only as the first word.</td>
-<td>The escape hatch -- see the detailed explanation in "Special Commands"</td>
+<td>The way to type a word that is also a command -- see "Selected Commands in Detail" in the Voice Commands section</td>
 </tr>
 <tr>
 <td>insert [text]</td>
@@ -118,9 +65,9 @@
 <td>"submit" does the same and also works as the last word of a sentence</td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="text-editing">Text Editing</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -455,9 +402,9 @@
 <td>"tab [number]" presses it that many times</td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="text-formatting">Text Formatting</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -812,9 +759,9 @@
 <td>The number is optional and defaults to 1; counts are capped at 50</td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="navigation">Navigation</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -964,9 +911,9 @@
 <td>The words are "stop scrolling" and not "stop" on its own. A command for the single word "stop" would take that word out of everything you dictate. Saying it when nothing is scrolling does nothing at all.</td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="punctuation-and-symbols">Punctuation and Symbols</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -1226,9 +1173,9 @@
 <td></td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="application-switching">Application Switching</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -1273,9 +1220,9 @@
 <td></td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="system">System</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -1371,7 +1318,7 @@
 </tr>
 <tr>
 <td>keyboard</td>
-<td>Toggles the Windows on-screen touch keyboard (Windows, Ctrl and O). Fires only when it is the whole utterance.</td>
+<td>Toggles the Windows On-Screen Keyboard (Windows, Ctrl and O). Fires only when it is the whole utterance.</td>
 <td>One word, both directions: it opens the keyboard when closed and closes it when open. The earlier show and hide phrasings were removed because they promised a direction the toggle cannot deliver</td>
 </tr>
 <tr>
@@ -1395,9 +1342,9 @@
 <td></td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="voice-element-clicking">Voice Element Clicking</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -1427,9 +1374,9 @@
 <td></td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="mouse-grid">Mouse Grid</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -1455,12 +1402,12 @@
 </tr>
 <tr>
 <td>[number 1-9]</td>
-<td>Redraws the open grid inside that cell, narrowing the target. With the grid closed, numbers are ordinary dictation and are typed normally.</td>
+<td>Redraws the open grid inside that cell, narrowing the target. With the grid closed and the numbered overlay showing, the number clicks the control with that label. With neither showing, numbers are ordinary dictation and are typed normally.</td>
 <td></td>
 </tr>
 <tr>
 <td>number [1-9]</td>
-<td>Same cell narrowing with the word "number" first ("number five"), which speech engines hear more reliably than a single word. With the grid closed, the phrase is ordinary dictation and is typed normally.</td>
+<td>Same cell narrowing with the word "number" first ("number five"), which speech engines hear more reliably than a single word. With the grid closed and the numbered overlay showing, the phrase clicks the control with that label. With neither showing, the phrase is ordinary dictation and is typed normally.</td>
 <td></td>
 </tr>
 <tr>
@@ -1484,9 +1431,9 @@
 <td></td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h3 id="wheelhouse-control">Wheelhouse Control</h3>
-<table>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
 <tr>
 <th>Say this</th>
@@ -1506,6 +1453,11 @@
 <td></td>
 </tr>
 <tr>
+<td>stop listening</td>
+<td>Switches listening off, as clicking the floating button does while it listens. Applies only when the words are the whole utterance; inside a longer sentence they dictate normally.</td>
+<td>In toggle mode, say the wake word ("computer") to switch listening back on. In push-to-talk mode the wake word ends only the idle pause, so the way back is the next hold of the floating button. A notice confirms that listening is off</td>
+</tr>
+<tr>
 <td>help</td>
 <td>Opens the Wheelhouse Assistant (the official online help) in your browser, after a short explanation window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
 <td>Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured and no window appears. The explanation window is the same one the Help menu item shows, and both take the same route through the Logic process; ticking "Do not show this again" and selecting Assistant sets explain_before_open to false under [ai.help], which turns the window off for the command and the menu item alike. If Windows cannot start a browser, the notice "Wheelhouse could not open your browser." appears</td>
@@ -1513,7 +1465,7 @@
 <tr>
 <td>patterns</td>
 <td>Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
-<td>"pattern manager" also works; see "Special Commands"</td>
+<td>"pattern manager" also works; see "Selected Commands in Detail" in the Voice Commands section</td>
 </tr>
 <tr>
 <td>learn my voice</td>
@@ -1522,7 +1474,7 @@
 </tr>
 <tr>
 <td>x-ray fix</td>
-<td>Sends the selected text to the configured AI server for grammar and polish, then replaces the selection with the corrected version</td>
+<td>Sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- then replaces the selection with the result. The AI is told not to reword the text or add or remove words</td>
 <td>Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure</td>
 </tr>
 <tr>
@@ -1543,7 +1495,7 @@
 <tr>
 <td>pirate</td>
 <td>Rewrites the selected text the way a pirate would say it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
-<td>Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Special Commands" for writing your own.</td>
+<td>Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Selected Commands in Detail" in the Voice Commands section for writing your own.</td>
 </tr>
 <tr>
 <td>x-ray translate to [language]</td>
@@ -1558,21 +1510,21 @@
 <tr>
 <td>boost</td>
 <td>Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
-<td>See "Special Commands" -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation</td>
+<td>See "Selected Commands in Detail" in the Voice Commands section -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation</td>
 </tr>
 </tbody>
-</table>
+</table></div>
 <h2 id="configuration-reference">Configuration Reference</h2>
 <h3 id="general">General</h3>
-<p><strong>SPEECH_WEBSOCKET_HOST</strong> <em>(default: <code>"127.0.0.1"</code>)</em> -- The internal address the speech engine uses to reach Wheelhouse; the default 127.0.0.1 means this computer only. Change only for the advanced setup where speech recognition runs on a second computer on your home network.</p>
+<p><strong>SPEECH_WEBSOCKET_HOST</strong> <em>(default: <code>"127.0.0.1"</code>)</em> -- The network address on which Wheelhouse's speech connection server listens; the default 127.0.0.1 accepts connections from this computer only. Change only for the advanced setup where speech recognition runs on a second computer on your home network. That setup also needs ws_host under [stt], the address the speech engine connects to, which the shipped file does not contain.</p>
 <p><strong>REPLACEMENT_TIMEOUT_MS</strong> <em>(default: <code>700</code>)</em> -- How long Wheelhouse waits after you stop speaking, in milliseconds, before deciding a correction phrase is complete. Raise to 900-1000 if corrections fire before you finish (common on slower machines); lower slightly if responses feel sluggish.</p>
 <p><strong>COMMAND_TIMEOUT_MS</strong> <em>(default: <code>700</code>)</em> -- How long Wheelhouse waits after you stop speaking, in milliseconds, before deciding a command phrase is complete. Raise to 900-1000 if commands fire before you finish (common on slower machines); lower slightly if responses feel sluggish.</p>
 <p><strong>GREEDY_TIMEOUT_MS</strong> <em>(default: <code>5000</code>)</em> -- A longer wait, in milliseconds, for commands that intentionally keep listening for more words. Rarely needs changing.</p>
-<p><strong>COMMAND_COMPLETION_WAIT_MS</strong> <em>(default: <code>1000</code>)</em> -- A short pause, in milliseconds, after a command finishes so a fast follow-up does not collide with it. Raise on a slow machine if back-to-back commands step on each other.</p>
+<p><strong>COMMAND_COMPLETION_WAIT_MS</strong> <em>(default: <code>1000</code>)</em> -- Has no effect. No part of Wheelhouse reads this setting. Changing it changes nothing. To give commands more time, change COMMAND_TIMEOUT_MS.</p>
 <p><strong>ENABLE_AUDIO_SUPPRESSION</strong> <em>(default: <code>"auto"</code>)</em> -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone has an echo canceller, and pauses only when Windows reports none or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.</p>
 <p><strong>ENABLE_SONOS_SUPPRESSION</strong> <em>(default: <code>true</code>)</em> -- Pause listening while Sonos music is playing. Turn off only if you want Wheelhouse listening during playback; expect more misrecognitions, because the microphone picks up the audio.</p>
 <p><strong>ENABLE_IDLE_SUPPRESSION</strong> <em>(default: <code>true</code>)</em> -- Pause listening after the computer sits idle. Turn off only if you never want idle pauses; the Idle Monitor plugin controls the timing.</p>
-<p><strong>LOG_FILE</strong> <em>(default: <code>""</code>)</em> -- Where the activity log goes; empty means the standard log location. Change only when a support conversation asks you to.</p>
+<p><strong>LOG_FILE</strong> <em>(default: <code>""</code>)</em> -- Has no effect. No part of Wheelhouse reads this setting. Wheelhouse always writes its activity log to wheelhouse.log in its install folder, %LOCALAPPDATA%\Wheelhouse\app.</p>
 <p><strong>LOG_LEVEL</strong> <em>(default: <code>"INFO"</code>)</em> -- How detailed the activity log is. Change only when a support conversation asks you to.</p>
 <p><strong>LOG_TRANSCRIPTS</strong> <em>(default: <code>false</code>)</em> -- A privacy setting: false keeps the words you dictate and your clipboard contents out of the log files (only text lengths are noted). Set true only while troubleshooting recognition, then turn it back off; while on, everything you dictate, including passwords, accumulates in the logs.</p>
 <p><strong>SIDE_OFFSET</strong> <em>(default: <code>10</code>)</em> -- Width in pixels of the left-edge screen zone where the mouse thumb wheel adjusts brightness instead of volume. Raise it if the brightness zone is hard to hit.</p>
@@ -1584,9 +1536,9 @@
 <p><strong>BRIGHTNESS_STEPS_PER_COMMAND</strong> <em>(default: <code>2</code>)</em> -- The most native TV brightness steps one thumb-wheel command may carry. The TV answers one command at a time, about 400 ms each for a Samsung, so this is how far brightness moves per round trip while the wheel turns. Ticks beyond it are discarded, so the TV never keeps moving after the wheel stops. Set 1 for the smoothest one-step-at-a-time change; raise it if brightness moves too slowly. A value below 1 counts as 1.</p>
 <p><strong>FLOATING_BUTTON_SIZE</strong> <em>(default: <code>50</code>)</em> -- Size in pixels of the small on-screen status button. Dragging the button's outer edge, or holding Ctrl and rolling the mouse wheel over it, writes this setting.</p>
 <p><strong>FLOATING_BUTTON_POS</strong> <em>(default: <code>[100, 100]</code>)</em> -- Screen position of the small on-screen status button, as [x, y] pixels from the top-left of the desktop. Dragging the button writes this setting, and so does resizing it, because the button grows and shrinks around its own centre.</p>
-<p><strong>FLOATING_BUTTON_VISIBLE</strong> <em>(default: <code>true</code>)</em> -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target, especially handy in push-to-talk mode.</p>
+<p><strong>FLOATING_BUTTON_VISIBLE</strong> <em>(default: <code>true</code>)</em> -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target. In push-to-talk mode the floating button is the only way to listen, because the hold works on it alone.</p>
 <p><strong>SPEECH_ENABLED_ON_STARTUP</strong> <em>(default: <code>true</code>)</em> -- Whether Wheelhouse starts listening as soon as it launches. Set false to turn the microphone on manually each session.</p>
-<p><strong>SHOW_SPEECH_PULSE</strong> <em>(default: <code>true</code>)</em> -- Pulse the tray icon while Wheelhouse hears you -- a useful yes-I-can-hear-you signal. Turn off only if the animation distracts.</p>
+<p><strong>SHOW_SPEECH_PULSE</strong> <em>(default: <code>true</code>)</em> -- Pulse the floating button while Wheelhouse hears you, as a signal that your speech is reaching it. The tray icon does not pulse. With this off, the button still flashes green when an utterance has been processed. Turn off only if the animation distracts.</p>
 <p><strong>SPATIAL_SOUND_EXEC</strong> <em>(default: <code>""</code>)</em> -- Path to the small free NirSoft helper tool used for voice switching of Dolby Atmos spatial sound; empty means the feature is off. Fill in the tool path only if you use Dolby Atmos and have that tool installed; everyone else can ignore it.</p>
 <p><strong>SPATIAL_SOUND_FORMAT</strong> <em>(default: <code>"Dolby Atmos for home theater"</code>)</em> -- The spatial sound format name passed to the helper tool. Only matters if SPATIAL_SOUND_EXEC is set.</p>
 <h3 id="brightness_coordinator">[brightness_coordinator]</h3>
@@ -1609,7 +1561,7 @@
 <p><strong>psk</strong> <em>(default: <code>""</code>)</em> -- The pre-shared key you set on the TV under Settings -&gt; Network -&gt; Home Network -&gt; IP Control; the plugin will not start with it blank.</p>
 <p><strong>device_name</strong> <em>(default: <code>"SONY TV"</code>)</em> -- The TV's audio device name exactly as Windows shows it under Sound settings -&gt; Output; a device lookup key for spatial-sound handling, not a free-form label.</p>
 <h3 id="pluginsidle_monitor">[plugins.idle_monitor]</h3>
-<p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the Idle Monitor plugin on or off; it pauses listening when you step away and resumes when you return or say the wake word. Almost everyone should leave this on.</p>
+<p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the Idle Monitor plugin on or off; it pauses listening when you step away, and listening resumes when you return or say the wake word. Almost everyone should leave this on.</p>
 <p><strong>idle_timeout_minutes</strong> <em>(default: <code>10</code>)</em> -- Minutes of no keyboard or mouse activity before listening pauses.</p>
 <p><strong>polling_interval_seconds</strong> <em>(default: <code>4</code>)</em> -- How often, in seconds, the plugin checks for idleness.</p>
 <h3 id="pluginswindow_positioning">[plugins.window_positioning]</h3>
@@ -1620,10 +1572,10 @@
 <p><strong>ignore_window_titles</strong> <em>(default: <code>["Program Manager", "Task Switching", "SoftwareDimmerOverlay_AlphaBlend_v12", "MainWindow"]</code>)</em> -- Window titles that should never trigger a move.</p>
 <p><strong>ignore_window_classes</strong> <em>(default: <code>["Shell_TrayWnd", "Progman"]</code>)</em> -- Window classes that should never trigger a move.</p>
 <h3 id="wake_word">[wake_word]</h3>
-<p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns wake-word listening on or off; after an idle pause you can wake Wheelhouse by saying its wake word out loud.</p>
+<p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns wake-word listening on or off; in toggle mode, whenever listening is off, for any reason, saying the wake word out loud turns it back on; in push-to-talk mode it ends only the idle pause.</p>
 <p><strong>keyword</strong> <em>(default: <code>"computer"</code>)</em> -- The wake word.</p>
 <p><strong>sensitivity</strong> <em>(default: <code>0.5</code>)</em> -- Wake-word detection sensitivity, range 0-1. Lower it if saying the wake word often fails to wake Wheelhouse; raise it if ordinary conversation keeps waking it by accident.</p>
-<p><strong>mode</strong> <em>(default: <code>"idle_recovery"</code>)</em> -- What the wake word is used for -- waking Wheelhouse from an idle pause. Valid values: "idle_recovery".</p>
+<p><strong>mode</strong> <em>(default: <code>"idle_recovery"</code>)</em> -- What the wake word is used for -- in toggle mode, turning listening back on whenever it is off; in push-to-talk mode, ending only the idle pause, after which the next hold of the floating button is the way back. Valid values: "idle_recovery".</p>
 <p><strong>model_dir</strong> <em>(default: <code>"../shared/data/wake_words"</code>)</em> -- Where the wake-word listening model lives on disk; set by the installer, do not change it.</p>
 <h3 id="ui_actionstiming">[ui_actions.timing]</h3>
 <p><strong>clipboard_verification_timeout_ms</strong> <em>(default: <code>250</code>)</em> -- How long, in milliseconds, to wait for the clipboard to verify during text insertion. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
@@ -1631,7 +1583,7 @@
 <p><strong>selection_clear_delay_ms</strong> <em>(default: <code>20</code>)</em> -- Delay, in milliseconds, after clearing a selection during text insertion. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
 <p><strong>context_gather_delay_ms</strong> <em>(default: <code>10</code>)</em> -- Delay, in milliseconds, before gathering the text context around the caret. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
 <p><strong>post_paste_delay_ms</strong> <em>(default: <code>30</code>)</em> -- Delay, in milliseconds, after pasting text into the target application. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
-<p><strong>utterance_clipboard_timeout_seconds</strong> <em>(default: <code>60.0</code>)</em> -- How long, in seconds, a copied utterance stays available for the paste-that style of command.</p>
+<p><strong>utterance_clipboard_timeout_seconds</strong> <em>(default: <code>60.0</code>)</em> -- A safety limit, in seconds. Wheelhouse puts dictated text on the clipboard to paste it, and restores your own clipboard contents when the utterance ends. If the signal that the utterance has ended never arrives, Wheelhouse ends it after this long and restores your clipboard.</p>
 <h3 id="ui_actionsverified_unicode">[ui_actions.verified_unicode]</h3>
 <p><strong>max_chars</strong> <em>(default: <code>50</code>)</em> -- Dictations up to this length are typed directly, character by character, avoiding your clipboard; longer ones go through the clipboard. Lower it if a particular app mishandles direct typing; raise it to have more dictations bypass the clipboard.</p>
 <h3 id="ui_actionsforeground_check">[ui_actions.foreground_check]</h3>
@@ -1666,7 +1618,7 @@
 <p><strong>gpu_layers</strong> <em>(default: <code>99</code>)</em> -- How much of the model to place on the graphics card. Valid values: 99 places the whole model on the graphics card; 0 runs it entirely on the processor, which the installer chooses for a machine with enough system memory but no suitable graphics card. Values in between split it. Lower it if the server fails to start because the graphics card is out of memory.</p>
 <p><strong>startup_timeout_seconds</strong> <em>(default: <code>90</code>)</em> -- How long Wheelhouse waits for its model server to report itself ready before giving up and leaving the AI features off. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.</p>
 <h3 id="aihelp">[ai.help]</h3>
-<p><strong>gem_url</strong> <em>(default: <code>"https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"</code>)</em> -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured.</p>
+<p><strong>gem_url</strong> <em>(default: <code>"https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"</code>)</em> -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. If this still holds the address of the retired ChatGPT assistant that Wheelhouse used before version 1.2.0, the Wheelhouse Gem opens instead.</p>
 <p><strong>explain_before_open</strong> <em>(default: <code>true</code>)</em> -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back.</p>
 <p><strong>max_response_tokens</strong> <em>(default: <code>800</code>)</em> -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.</p>
 <h3 id="click">[click]</h3>
@@ -1678,7 +1630,7 @@
 <p><strong>overlay_badge_shadow</strong> <em>(default: <code>false</code>)</em> -- Whether each overlay number casts a drop shadow. Off by default; the bubble's border already separates it from the background. Turn it on if the numbers blend into busy screen content.</p>
 <p><strong>overlay_badge_theme</strong> <em>(default: <code>"auto"</code>)</em> -- The color of the numbered overlay's speech bubbles. The value names the bubble's own color, not the system theme: light is a white bubble with a black number, dark is a near-black bubble with a white number, and auto picks the opposite of the Windows theme so the bubbles stand out. Valid values: "auto" (follow the Windows theme, inverted for contrast), "light" (white bubble), or "dark" (near-black bubble). Pin it to light or dark if the automatic choice blends into the apps you use most.</p>
 <p><strong>response_timeout_ms</strong> <em>(default: <code>3000</code>)</em> -- How long, in milliseconds, Wheelhouse waits for a click command's search before giving up. Raise it on a slow machine if clicks time out in complex windows.</p>
-<p><strong>walk_deadline_ms</strong> <em>(default: <code>2500</code>)</em> -- How long, in milliseconds, Wheelhouse searches a window for the control a spoken click names before giving up. Raise it on a slow machine if clicks time out in complex windows.</p>
+<p><strong>walk_deadline_ms</strong> <em>(default: <code>2500</code>)</em> -- How long, in milliseconds, Wheelhouse searches a window for the control a spoken click names before giving up. Raise it on a slow machine if clicks time out in complex windows. Keep it more than 250 below response_timeout_ms: a value that is not switches voice clicking off, and the log names this key.</p>
 <p><strong>screen_read_timeout_ms</strong> <em>(default: <code>10000</code>)</em> -- How long, in milliseconds, Wheelhouse waits for a read of the window's clickable things (show numbers, the refresh after a focus change, and the re-read after a click) before giving up. Separate from response_timeout_ms, which limits a click reply. Raise it if the numbered overlay reports that it could not draw the numbers in windows that take several seconds to answer.</p>
 <p><strong>snapshot_ttl_seconds</strong> <em>(default: <code>30</code>)</em> -- How long the numbered overlay's snapshot stays valid, in seconds.</p>
 <p><strong>browser_processes</strong> <em>(default: <code>["brave.exe", "chrome.exe", "msedge.exe", "vivaldi.exe", "slack.exe", "discord.exe", "code.exe", "ms-teams.exe", "Teams.exe", "spotify.exe", "notion.exe", "obsidian.exe", "ChatGPT.exe"]</code>)</em> -- The browser-like apps (browsers, Slack, Discord, and similar) that need a deeper search for clickable elements.</p>
@@ -1688,9 +1640,16 @@
 <p><strong>drag_duration_ms</strong> <em>(default: <code>250</code>)</em> -- How long, in milliseconds, a mouse-grid drag takes to move from the marked point to the destination. Raise it if an application does not register the drag; many ignore a pointer that moves too fast.</p>
 <h3 id="actions">[actions]</h3>
 <p><strong>output_cap_chars</strong> <em>(default: <code>10000</code>)</em> -- The most characters a pattern step's captured text may hold -- the output a run_capture program prints or the reply an ask_ai step receives; longer output makes the step fail rather than insert an incomplete piece of it. Raise it (up to the 15360 ceiling) if a legitimate script prints more; lower it for a tighter guard against a runaway program filling your document.</p>
-<p><strong>run_capture_timeout_default_s</strong> <em>(default: <code>10</code>)</em> -- How many seconds a run_capture pattern step waits for its program to finish when the pattern gives no timeout number of its own. Raise it if your scripts legitimately run longer; 60 seconds is the most any waiting step will wait, because voice commands wait their turn while a step runs.</p>
-<hr />
-<p>Generated: 2026-09-21 for the v1.1.0 release</p>
-</main>
+<p><strong>run_capture_timeout_default_s</strong> <em>(default: <code>10</code>)</em> -- How many seconds a run_capture pattern step waits for its program to finish when the pattern gives no timeout number of its own. Raise it if your scripts legitimately run longer; 60 seconds is the most any waiting step will wait, because voice commands wait their turn while a step runs.</p></article></div></main>
+  <footer class="site-footer wrap">
+    <div><a class="brand" href="index.html">Wheelhouse.</a><p>Free and open source.</p></div>
+    <nav aria-label="Footer navigation">
+      <a href="https://github.com/wheelhouse-project/Wheelhouse">Source on GitHub</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/PRIVACY.md">Privacy</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
+      <a href="#top">Back to top ↑</a>
+    </nav>
+    <p class="fine-print">Documentation for Wheelhouse 1.2.0. Speech recognition runs on your computer by default; cloud options are optional.</p>
+  </footer>
 </body>
 </html>

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Get Wheelhouse running on Windows, check what you need, and try your first words and commands.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#151e19" media="(prefers-color-scheme: dark)">
+  <title>Get started · Wheelhouse</title>
+  <link rel="icon" href="favicon.ico">
+  <link rel="stylesheet" href="site.css">
+  
+</head>
+<body id="top">
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="site-header"><div class="header-inner wrap">
+    <a class="brand" href="index.html" aria-label="Wheelhouse home"><span class="wheel" aria-hidden="true">☸</span> Wheelhouse<span class="brand-dot" aria-hidden="true">.</span></a>
+    <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="start.html" aria-current="page">Get started</a><a href="guide.html">User guide</a><a href="reference.html">Commands</a><a href="install.html">Installation</a><a href="help.html">Get help</a></nav>
+    <a class="button small" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe" aria-label="Download for Windows">Download <span aria-hidden="true">↗</span></a>
+  </div></header>
+  <main id="main" tabindex="-1"><div class="page-heading wrap narrow"><h1>Get started</h1><p class="lead">I’d start with the default speech recognition. It runs on your own computer, and you don’t need an account. You can explore the other options later.</p></div>
+<div class="wrap reading-layout">
+  <aside class="reading-aside"><p>Allow about<br><strong class="time-estimate">10–20 minutes</strong>for installation.</p><p>Most of that time is spent downloading the speech model and the software it needs.</p><a href="install.html">Full installation guide →</a></aside>
+  <div class="reading-body">
+    <section id="requirements"><h2>What you’ll need</h2><ul class="requirements"><li><strong>A Windows PC.</strong> Windows 10 or 11, 64-bit. The installer checks whether your Windows version is supported.</li><li><strong>At least 8 GB of RAM.</strong> I recommend 16 GB. Setup won’t proceed below 8 GB, even if you choose cloud speech recognition.</li><li><strong>10 GB of free disk space.</strong> Leave room for the program and its speech model.</li><li><strong>A microphone.</strong> Your laptop’s built-in microphone may be enough. You can connect a microphone after installing.</li><li><strong>An internet connection for setup.</strong> The default speech recognition works offline afterward.</li></ul><p>Four or more CPU cores are recommended. A slower processor may take longer to turn speech into text.</p></section>
+    <section class="step" id="download"><span class="step-number">1</span><h2>Download Wheelhouse.</h2><p>This gets the Windows installer from the project’s GitHub release page. You don’t need a GitHub account.</p><a class="button" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe">Download Wheelhouse-Setup.exe <span aria-hidden="true">↗</span></a></section>
+    <section class="step"><span class="step-number">2</span><h2>Open the file and follow setup.</h2><p>The installer checks your computer and asks which options you want. Keep the default local speech recognition if you want speech to stay on your computer.</p><p>AI text rewriting is optional. The setup wizard offers a Google cloud option; you can skip it. The <a href="install.html#running-the-installer">full installation guide</a> explains the separate command-line setup for local AI.</p><p>Windows may ask an administrator to approve installation of Microsoft’s Visual C++ runtime if your computer needs it.</p><details class="notice"><summary>Windows is showing a security warning.</summary><p>The installer is digitally signed. Its publisher should be <strong>David Chesley Hite III</strong>—that’s me. Windows SmartScreen may still warn about a download it hasn’t seen often.</p><p>Open <strong>More info</strong> and check the publisher name before choosing <strong>Run anyway</strong>. If the publisher doesn’t match, stop and <a href="help.html#contact">get in touch</a>.</p><img src="smartscreen-warning.png" alt="Windows SmartScreen warning with the More info link and Don’t run button" width="450" loading="lazy"><p><a href="install.html#security-warnings">Read the full explanation of installation warnings.</a></p></details></section>
+    <section class="step" id="first-words"><span class="step-number">3</span><h2>Try your first few words.</h2><p>Start Wheelhouse from the Start menu if setup hasn’t already opened it. It starts listening in its default mode. Open Notepad and put the cursor in the empty document.</p><p>Try these one at a time, leaving a brief pause between commands:</p><ol class="first-commands"><li><span>Say <q>hello world</q></span><span>Your words appear.</span></li><li><span>Say <q>new line</q></span><span>The cursor moves to the next line.</span></li><li><span>Say <q>undo</q></span><span>That new line is removed.</span></li><li><span>Say <q>select all</q></span><span>Your text is selected.</span></li></ol><p>If those worked, you’re ready to start using Wheelhouse. If they didn’t, the <a href="guide.html#setup-verification">setup checks</a> will help you find where things stopped.</p></section>
+    <section class="soft-panel"><h2>Pausing and resuming listening</h2><p>You can pause listening with the floating button or tray icon and switch it back on the same way. Wheelhouse also has voice commands and listening modes for hands-free use; the guide explains when each applies.</p><div class="link-list"><a href="guide.html#interaction-modes">Choose how you start and stop listening →</a><a href="guide.html#voice-commands">Learn the commands →</a><a href="help.html">Get help →</a></div></section>
+  </div>
+</div>
+</main>
+  <footer class="site-footer wrap">
+    <div><a class="brand" href="index.html">Wheelhouse.</a><p>Free and open source.</p></div>
+    <nav aria-label="Footer navigation">
+      <a href="https://github.com/wheelhouse-project/Wheelhouse">Source on GitHub</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/PRIVACY.md">Privacy</a>
+      <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
+      <a href="#top">Back to top ↑</a>
+    </nav>
+    <p class="fine-print">Documentation for Wheelhouse 1.2.0. Speech recognition runs on your computer by default; cloud options are optional.</p>
+  </footer>
+</body>
+</html>

@@ -412,46 +412,77 @@ class StateManager:
 
                 # Broadcast update
                 if self.websocket_manager:
-                    message = self.websocket_manager.set_transcription_status(self.speech_enabled)
+                    message = self.websocket_manager.set_transcription_status(
+                        self.speech_enabled,
+                        reason=self._engine_status_reason(self.speech_enabled, None),
+                    )
                     self.loop.create_task(self.websocket_manager.broadcast(message))
 
                 self.send_state_update()
 
     async def _handle_wake_word_detected(self, event: WakeWordDetectedEvent):
-        """Re-enable transcription after a wake word ends the idle pause.
+        """Handle a wake word: in toggle mode, turn listening on whatever switched it off.
 
-        The idle pause is cleared outright, because the wake word proves the
-        user is there. A pause caused by sound playing is not ended here at
-        all: the sound is still playing, the audio monitor owns that answer,
-        and wh-audio-suppression-auto removed the bounded recovery window
-        that used to override it, together with the one command that window
-        existed to carry.
+        In toggle mode the wake word does what pressing the floating button
+        does while listening is off: it switches listening on and clears
+        every pause -- idle, sound from this computer, Sonos, the user's own
+        switch-off, and a start with listening off (wh-wake-word-stop-listening,
+        boss ruling R1). The provider arms the detector for each of those
+        reasons (shared_stt.wake_word_detector.WAKE_WORD_ARMED_REASONS). A
+        wake word heard while listening is already on changes nothing.
+
+        In push-to-talk mode the wake word ends only the idle pause and the
+        mode stays push-to-talk; during any other pause it changes nothing
+        (boss ruling option 2, 11:14 2026-09-22). Unlike the button, it never
+        leaves push-to-talk mode: a voice command that silently changed the
+        interaction mode would surprise a push-to-talk user.
         """
-        if self._speech_suppressed_by_idle:
-            old_speech_enabled = self.speech_enabled
-            self._speech_suppressed_by_idle = False
-            self._speech_enabled_before_idle = None
-            new_speech_enabled = self.speech_enabled
+        if self._speech_interaction_mode == "push_to_talk":
+            self._wake_word_ends_idle_pause_only(event)
+            return
+        if self.speech_enabled:
+            logger.info(f"Wake word '{event.keyword}' detected while listening is on - ignoring")
+            return
+        logger.info(f"[WAKE WORD] Wake word '{event.keyword}' detected while listening is off")
+        self.enable_speech_clearing_pauses("Wake Word", f"Keyword: {event.keyword}")
 
+    def _wake_word_ends_idle_pause_only(self, event: WakeWordDetectedEvent) -> None:
+        """The push-to-talk wake word: end the idle pause, nothing else.
+
+        This is the wake word's behaviour from before
+        wh-wake-word-stop-listening, kept for push-to-talk mode. The idle
+        pause is cleared outright, because the wake word proves the user is
+        there; the user's own field is untouched, so listening stays off
+        until the next hold. A sound or Sonos pause is left to its monitor.
+        """
+        if not self._speech_suppressed_by_idle:
             logger.info(
-                f"[WAKE WORD] Wake word '{event.keyword}' cleared idle suppression. "
-                f"Speech restored: {new_speech_enabled}"
+                f"Wake word '{event.keyword}' detected in push-to-talk mode "
+                f"but not idle-suppressed - ignoring"
+            )
+            return
+        old_speech_enabled = self.speech_enabled
+        self._speech_suppressed_by_idle = False
+        self._speech_enabled_before_idle = None
+        new_speech_enabled = self.speech_enabled
+
+        logger.info(
+            f"[WAKE WORD] Wake word '{event.keyword}' cleared idle suppression "
+            f"in push-to-talk mode. Speech restored: {new_speech_enabled}"
+        )
+
+        if old_speech_enabled != new_speech_enabled:
+            self.speech_notifier.notify_suppression_change(
+                "Wake Word",
+                False,
+                f"Keyword: {event.keyword}"
             )
 
-            if old_speech_enabled != new_speech_enabled:
-                self.speech_notifier.notify_suppression_change(
-                    "Wake Word",
-                    False,
-                    f"Keyword: {event.keyword}"
-                )
+        if self.websocket_manager:
+            message = self.websocket_manager.set_transcription_status(self.speech_enabled)
+            self.loop.create_task(self.websocket_manager.broadcast(message))
 
-            if self.websocket_manager:
-                message = self.websocket_manager.set_transcription_status(self.speech_enabled)
-                self.loop.create_task(self.websocket_manager.broadcast(message))
-
-            self.send_state_update()
-        else:
-            logger.info(f"Wake word '{event.keyword}' detected but not idle-suppressed - ignoring")
+        self.send_state_update()
 
     def set_wake_word_available(self, available: bool) -> None:
         """Record whether the connected provider has a wake-word detector.
@@ -596,6 +627,40 @@ class StateManager:
         except Exception as e:
             logger.error(f"Failed to send state update to GUI: {e}")
 
+    def _engine_status_reason(self, enabled: bool, push_to_talk_reason: Optional[str]) -> Optional[str]:
+        """The reason to send the engine with a transcription status.
+
+        The provider arms its wake-word detector from the reason in the last
+        status it received, and a reason of None or "ptt" disarms it
+        (shared_stt.wake_word_detector.should_listen_for_wake_word). In
+        toggle mode the wake word must be able to switch listening back on
+        whatever keeps it off (wh-wake-word-stop-listening.1.1), so every
+        disable sent in toggle mode names the pause that still holds it off:
+        the user's own switch-off first ("manual"), then sound from this
+        computer, Sonos, and the idle pause. The one disable with none of
+        those set is a hold's release over the hold's own mute (ptt_stop),
+        and that is the sound pause, so "audio".
+
+        In push-to-talk mode, and with transcription enabled, the call site's
+        own reason is returned unchanged (boss ruling R4: push-to-talk
+        behaviour stays as on eb2b2f7b).
+
+        Args:
+            enabled: the value the engine is about to be told.
+            push_to_talk_reason: what the call site sent before this fix.
+        """
+        if enabled or self._speech_interaction_mode == "push_to_talk":
+            return push_to_talk_reason
+        if not self._speech_enabled:
+            return "manual"
+        if self._speech_suppressed_by_audio and self._audio_suppression_active:
+            return "audio"
+        if self._speech_suppressed_by_sonos and self.config_service.get("ENABLE_SONOS_SUPPRESSION", True):
+            return "sonos"
+        if self._speech_suppressed_by_idle and self.config_service.get("ENABLE_IDLE_SUPPRESSION", True):
+            return "idle"
+        return "audio"
+
     def _set_speech_enabled_explicitly(self, value: bool):
         """Write the speech setting on behalf of an explicit user decision.
 
@@ -622,54 +687,88 @@ class StateManager:
         :description: Toggles speech state with intuitive behavior and clears suppression
         :data_in: Current speech_enabled computed property value
         :data_out: Updated _speech_enabled flag and cleared suppression flags
-        :notes: Handler for toggle_speech_enabled_state action from step 4. Implements intuitive toggle: if speech currently OFF (for any reason), enables it and clears ALL suppression flags (audio and Sonos). If speech currently ON, disables it. Broadcasts state via send_state_update() and WebSocket to STT clients. Sends speech_notifier notifications for enabled/disabled transitions. Maintains toggle counter for debugging.
+        :notes: Handler for toggle_speech_enabled_state action from step 4. Implements intuitive toggle: if speech currently OFF (for any reason), leaves push-to-talk mode when in it, then enables speech and clears ALL suppression flags (audio, Sonos and idle) through enable_speech_clearing_pauses. If speech currently ON, disables it through disable_speech_by_user. The wake word (in toggle mode only) and the "stop listening" command reach the same two methods. Broadcasts state via send_state_update() and WebSocket to STT clients. Sends speech_notifier notifications for enabled/disabled transitions. Maintains toggle counter for debugging.
         """
         self._toggle_counter += 1
-        old_speech_enabled = self.speech_enabled
-        
+
         # Intuitive toggle: if speech is currently OFF, turn it ON. If ON, turn it OFF.
-        if not old_speech_enabled:
-            # Speech is currently disabled - enable it and clear suppression
+        if not self.speech_enabled:
+            self.speech_notifier.notify_debug(f"Toggle #{self._toggle_counter}: Enabling speech (was disabled)")
+            # Only the button leaves push-to-talk mode; the wake word never
+            # does (boss ruling option 2, wh-wake-word-stop-listening).
             if self._speech_interaction_mode == "push_to_talk":
                 self.set_speech_interaction_mode("toggle")
-            self._set_speech_enabled_explicitly(True)
-            self._speech_suppressed_by_audio = False
-            self._speech_suppressed_by_sonos = False
-            self._speech_suppressed_by_idle = False
-
-            self.speech_notifier.notify_debug(f"Toggle #{self._toggle_counter}: Enabling speech (was disabled)")
-            logger.info(f"[USER TOGGLE] Speech ENABLED by user. Cleared all suppression. State: user_enabled={self._speech_enabled}, audio_suppressed={self._speech_suppressed_by_audio}, sonos_suppressed={self._speech_suppressed_by_sonos}, idle_suppressed={self._speech_suppressed_by_idle}")
-            
+            self.enable_speech_clearing_pauses("User toggle", "All suppression cleared")
         else:
-            # Speech is currently enabled - disable it
-            self._set_speech_enabled_explicitly(False)
-
             self.speech_notifier.notify_debug(f"Toggle #{self._toggle_counter}: Disabling speech (was enabled)")
-            logger.info(f"[USER TOGGLE] Speech DISABLED by user. State: user_enabled={self._speech_enabled}, audio_suppressed={self._speech_suppressed_by_audio}, sonos_suppressed={self._speech_suppressed_by_sonos}, idle_suppressed={self._speech_suppressed_by_idle}")
+            self.disable_speech_by_user("User toggle")
 
-        # Send appropriate notification
-        new_speech_enabled = self.speech_enabled
-        if new_speech_enabled and not old_speech_enabled:
-            self.speech_notifier.notify_speech_enabled("User toggle", "All suppression cleared")
-        elif not new_speech_enabled and old_speech_enabled:
-            self.speech_notifier.notify_speech_disabled("User toggle")
+    def enable_speech_clearing_pauses(self, source: str, details: str) -> None:
+        """Switch listening on and clear every pause.
+
+        The enabling half of the floating-button toggle. The toggle and the
+        wake word both call it (wh-wake-word-stop-listening, acceptance A6),
+        so the two cannot drift apart. It sets the user's own field and
+        clears the sound, Sonos and idle pauses, then tells the engine and
+        the GUI. It does not change the interaction mode: the toggle leaves
+        push-to-talk mode itself before calling it, and the wake word calls
+        it only in toggle mode (boss ruling option 2).
+
+        Args:
+            source: who switched listening on, for the log and the notifier.
+            details: the second notifier line.
+        """
+        old_speech_enabled = self.speech_enabled
+        self._set_speech_enabled_explicitly(True)
+        self._speech_suppressed_by_audio = False
+        self._speech_suppressed_by_sonos = False
+        self._speech_suppressed_by_idle = False
+        self._speech_enabled_before_idle = None
+
+        logger.info(f"[{source.upper()}] Speech ENABLED. Cleared all suppression. State: user_enabled={self._speech_enabled}, audio_suppressed={self._speech_suppressed_by_audio}, sonos_suppressed={self._speech_suppressed_by_sonos}, idle_suppressed={self._speech_suppressed_by_idle}")
+
+        if self.speech_enabled and not old_speech_enabled:
+            self.speech_notifier.notify_speech_enabled(source, details)
+        else:
+            # Unexpected state - every caller checks that listening is off
+            self.speech_notifier.notify_debug(f"Unexpected enable result: {old_speech_enabled} -> {self.speech_enabled}")
+
+        if self.websocket_manager:
+            message = self.websocket_manager.set_transcription_status(self.speech_enabled)
+            self.loop.create_task(self.websocket_manager.broadcast(message))
+
+        self.send_state_update()
+
+    def disable_speech_by_user(self, source: str) -> None:
+        """Switch listening off on the user's own decision.
+
+        The disabling half of the floating-button toggle. The toggle and the
+        "stop listening" command both call it (wh-wake-word-stop-listening,
+        acceptance A6). The engine is told reason "manual", which arms the
+        wake word in idle_recovery mode, so the wake word can switch
+        listening back on.
+
+        Args:
+            source: who switched listening off, for the log and the notifier.
+        """
+        old_speech_enabled = self.speech_enabled
+        self._set_speech_enabled_explicitly(False)
+
+        logger.info(f"[{source.upper()}] Speech DISABLED. State: user_enabled={self._speech_enabled}, audio_suppressed={self._speech_suppressed_by_audio}, sonos_suppressed={self._speech_suppressed_by_sonos}, idle_suppressed={self._speech_suppressed_by_idle}")
+
+        if old_speech_enabled and not self.speech_enabled:
+            self.speech_notifier.notify_speech_disabled(source)
             # The user's own speech-off. A hands-free user who switched
             # listening off by voice or by the button gets no other sign that
             # the microphone shut, and the same silence follows an automatic
             # pause, so the notice says which of the two this was.
             self.speech_notifier._send_notification(NOTICE_TITLE, SPEECH_OFF_NOTICE)
         else:
-            # Unexpected state - should not happen with new logic
-            self.speech_notifier.notify_debug(f"Unexpected toggle result: {old_speech_enabled} -> {new_speech_enabled}")
+            # Unexpected state - every caller checks that listening is on
+            self.speech_notifier.notify_debug(f"Unexpected disable result: {old_speech_enabled} -> {self.speech_enabled}")
 
-        # Update the central status and get the message to broadcast
         if self.websocket_manager:
-            if not self.speech_enabled:
-                message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="manual")
-            else:
-                message = self.websocket_manager.set_transcription_status(self.speech_enabled)
-
-            # Broadcast the new status to all STT clients
+            message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="manual")
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
         self.send_state_update()
@@ -903,7 +1002,8 @@ class StateManager:
         )
         if self.websocket_manager:
             message = self.websocket_manager.set_transcription_status(
-                told_the_engine, reason="ptt"
+                told_the_engine,
+                reason=self._engine_status_reason(told_the_engine, "ptt"),
             )
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
@@ -985,7 +1085,8 @@ class StateManager:
         # before the user speaks into a hold that cannot hear them.
         if self.websocket_manager:
             message = self.websocket_manager.set_transcription_status(
-                self.speech_enabled, reason="ptt"
+                self.speech_enabled,
+                reason=self._engine_status_reason(self.speech_enabled, "ptt"),
             )
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
@@ -1022,7 +1123,8 @@ class StateManager:
             return
         if self.websocket_manager:
             message = self.websocket_manager.set_transcription_status(
-                self.speech_enabled, reason="ptt"
+                self.speech_enabled,
+                reason=self._engine_status_reason(self.speech_enabled, "ptt"),
             )
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
@@ -1053,6 +1155,16 @@ class StateManager:
             if self.websocket_manager:
                 message = self.websocket_manager.set_transcription_status(False, reason="manual")
                 self.loop.create_task(self.websocket_manager.broadcast(message))
+        elif old_mode == "push_to_talk" and mode == "toggle" and self.websocket_manager:
+            # Listening was already off, so nothing above told the engine,
+            # and the last thing it heard may be a release's "ptt", which
+            # keeps the wake word disarmed in the toggle mode just entered
+            # (wh-wake-word-stop-listening.1.1).
+            message = self.websocket_manager.set_transcription_status(
+                self.speech_enabled,
+                reason=self._engine_status_reason(self.speech_enabled, None),
+            )
+            self.loop.create_task(self.websocket_manager.broadcast(message))
 
         # Persist to config. Nothing waits for this write, so a failure would
         # otherwise pass without a trace: report it here or the next start
@@ -1096,7 +1208,10 @@ class StateManager:
                 if is_suppressed:
                     message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="audio")
                 else:
-                    message = self.websocket_manager.set_transcription_status(self.speech_enabled)
+                    message = self.websocket_manager.set_transcription_status(
+                        self.speech_enabled,
+                        reason=self._engine_status_reason(self.speech_enabled, None),
+                    )
                 self.loop.create_task(self.websocket_manager.broadcast(message))
 
             # Update the GUI
@@ -1127,7 +1242,10 @@ class StateManager:
                 if is_suppressed:
                     message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="sonos")
                 else:
-                    message = self.websocket_manager.set_transcription_status(self.speech_enabled)
+                    message = self.websocket_manager.set_transcription_status(
+                        self.speech_enabled,
+                        reason=self._engine_status_reason(self.speech_enabled, None),
+                    )
                 self.loop.create_task(self.websocket_manager.broadcast(message))
 
             # Update the GUI

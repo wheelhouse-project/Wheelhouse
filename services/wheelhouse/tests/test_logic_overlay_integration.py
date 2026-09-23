@@ -149,6 +149,9 @@ def _controller(
     controller._overlay_focus_hooks = None
     controller._overlay_destroy_hook_active = False
     controller._overlay_tracked_identity = None
+    # wh-overlay-rewalk-after-filter.1.3: the window an in-flight build
+    # is for, until the pin makes the tracked identity truthful.
+    controller._overlay_pending_build_identity = None
     controller._overlay_snapshot_window_identity = {}
     # wh-overlay-slow-uia-stale-badges.2.2.1: the window a settle reply
     # reported it was read from, held between the commit fence and the pin.
@@ -10373,3 +10376,298 @@ def test_a_timer_armed_with_no_state_does_not_fire():
         "shows the machine is still where it was when the timer started"
     )
     _assert_timer_bookkeeping_cleared(controller)
+
+
+# ---------------------------------------------------------------------------
+# wh-overlay-rewalk-after-filter.1.3: the pending build target.
+#
+# ``_overlay_tracked_identity`` names the LATEST PIN, and the pin happens only
+# after a build response comes back. A Pattern Manager tree change that
+# arrives WHILE the build is in flight therefore had no truthful window to be
+# judged against: on the first session of a run the field is still None, and
+# on a cross-window refresh it still names the window that lost the focus.
+# ``_overlay_dispatch_build`` now samples the foreground once, at the single
+# build funnel, into ``_overlay_pending_build_identity``. Three paths end it:
+# the pin consumes it, entry to closed clears it, and the next dispatch
+# replaces it.
+# ---------------------------------------------------------------------------
+
+
+def test_build_dispatch_records_the_window_the_build_is_for():
+    machine = ClickOverlayStateMachine()
+    machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+    sid, gen = machine.overlay_session_id, machine.paint_generation
+    seen: dict[str, Any] = {}
+
+    async def _run():
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._capture_overlay_foreground_identity = MagicMock(  # type: ignore[method-assign]
+            return_value="IDENTITY"
+        )
+
+        def _respond(action, params):
+            if action == "start_overlay_walk":
+                # Read at the moment of the send: the walk is in flight, and
+                # this is exactly when a filter keystroke can arrive.
+                seen["pending"] = getattr(
+                    controller, "_overlay_pending_build_identity",
+                    "MISSING",
+                )
+                return _walk_response("snap-w", sid, gen, 1)
+            return _pin_response(action, params)
+
+        _wire_app(controller, _respond)
+        effect = Effect(
+            kind=EffectKind.DISPATCH_BUILD,
+            overlay_session_id=sid,
+            paint_generation=gen,
+            build_reason=BuildReason.SHOW_NUMBERS,
+        )
+        await controller._dispatch_overlay_effects((effect,), trace_id="tr")
+        await _settle(controller)
+
+    asyncio.run(_run())
+    assert seen["pending"] == "IDENTITY"
+
+
+def test_auto_open_build_dispatch_records_the_window_too():
+    # AUTO_OPEN repaints a snapshot that was walked earlier, but it is still a
+    # build the machine can supersede, so it owes the same target.
+    machine = ClickOverlayStateMachine()
+    machine.apply(
+        OverlayEvent(OverlayEventKind.AUTO_OPEN, snapshot_id="snap-a")
+    )
+    sid, gen = machine.overlay_session_id, machine.paint_generation
+    seen: dict[str, Any] = {}
+
+    async def _run():
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._capture_overlay_foreground_identity = MagicMock(  # type: ignore[method-assign]
+            return_value="IDENTITY"
+        )
+
+        def _respond(action, params):
+            if action == "show_numbered_overlay":
+                seen["pending"] = getattr(
+                    controller, "_overlay_pending_build_identity",
+                    "MISSING",
+                )
+                return _show_response("snap-a", sid, gen, 1)
+            return _pin_response(action, params)
+
+        _wire_app(controller, _respond)
+        effect = Effect(
+            kind=EffectKind.DISPATCH_BUILD,
+            overlay_session_id=sid,
+            paint_generation=gen,
+            build_reason=BuildReason.AUTO_OPEN,
+            snapshot_id="snap-a",
+        )
+        await controller._dispatch_overlay_effects((effect,), trace_id="tr")
+        await asyncio.sleep(0)
+        await asyncio.gather(*controller.background_tasks)
+
+    asyncio.run(_run())
+    assert seen["pending"] == "IDENTITY"
+
+
+def test_pin_consumes_the_pending_build_target():
+    controller = _controller()
+    _wire_app(controller, lambda a, p: _pin_response(a, p))
+    controller._capture_overlay_foreground_identity = MagicMock(  # type: ignore[method-assign]
+        return_value="IDENTITY"
+    )
+    controller._overlay_pending_build_identity = "PENDING"
+    effect = Effect(
+        kind=EffectKind.PIN_SNAPSHOT,
+        overlay_session_id=7,
+        paint_generation=0,
+        snapshot_id="snap-x",
+    )
+    asyncio.run(
+        controller._dispatch_overlay_effects((effect,), trace_id="tr")
+    )
+    # The pin is the moment the tracked identity becomes truthful, so the
+    # pending target has no further use.
+    assert controller._overlay_tracked_identity == "IDENTITY"
+    assert controller._overlay_pending_build_identity is None
+
+
+def test_entry_to_closed_clears_the_pending_build_target():
+    controller = _controller()
+    controller.click_overlay_state.state = OverlayState.CLOSED
+    controller._overlay_tracked_identity = "IDENTITY"
+    controller._overlay_pending_build_identity = "PENDING"
+
+    controller._reconcile_overlay_tracked_identity()
+
+    assert controller._overlay_tracked_identity is None
+    assert controller._overlay_pending_build_identity is None
+
+
+# ---------------------------------------------------------------------------
+# wh-overlay-rewalk-after-filter.1.4: a tree change queued ahead of the
+# AUTO_OPEN effect task.
+#
+# ``_perform_auto_open_ambiguous`` commits closed -> walk_in_flight
+# synchronously, but ``_perform_overlay_effects`` only SCHEDULES the effect
+# batch, and the pending build target is sampled inside that batch. A
+# Pattern Manager tree change already waiting on the loop runs in between.
+# AUTO_OPEN repaints the snapshot the ambiguous click walked BEFORE the
+# change, so a dropped event paints the pre-filter badges. The pair of tests
+# below differs only in when the event is delivered.
+# ---------------------------------------------------------------------------
+
+
+def _replay_auto_open_with_a_tree_change(*, event_ahead_of_effects: bool):
+    """Drive a first-session AUTO_OPEN with one Pattern Manager tree change.
+
+    ``event_ahead_of_effects`` True queues the event with ``loop.call_soon``
+    BEFORE the ambiguous-click reply is handled, so it runs after AUTO_OPEN
+    commits walk_in_flight but before the scheduled effect task starts --
+    the position of a GUI listener callback that is already ready on the
+    Logic loop. False delivers the same event from inside the
+    show_numbered_overlay send, after the effect task has sampled the
+    foreground window.
+
+    Returns the ordered actions sent to Input, the ``snapshot_id`` of every
+    ``paint_overlay`` put on the GUI queue, and the machine's final state.
+    """
+    from services.wheelhouse.overlay_focus_hooks import (
+        FocusChangeDebouncer,
+        ForegroundIdentity,
+    )
+
+    result: dict[str, Any] = {}
+
+    async def _run():
+        controller = _controller()
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        # A first session: nothing pinned, no build target recorded yet.
+        assert controller._overlay_tracked_identity is None
+        assert controller._overlay_pending_build_identity is None
+        controller._capture_overlay_foreground_identity = MagicMock(  # type: ignore[method-assign]
+            return_value=ForegroundIdentity(
+                hwnd=4242, pid=4321, process_name="python.exe",
+                window_creation_time=7,
+            )
+        )
+        controller._pm_tree_change_last_hwnd = 0
+        controller._pm_tree_change_last_sequence = 0
+        controller._overlay_focus_debouncer = FocusChangeDebouncer(
+            debounce_ms=0
+        )
+        tree_event = {
+            "action": "pattern_manager_tree_changed",
+            "hwnd": 4242,
+            "sequence": 1,
+        }
+
+        def _deliver_tree_change():
+            controller._handle_pattern_manager_tree_changed(tree_event)
+
+        def _respond(action, params):
+            sid = params.get("overlay_session_id", 0)
+            gen = params.get("paint_generation", 0)
+            if action == "show_numbered_overlay":
+                if not event_ahead_of_effects:
+                    _deliver_tree_change()
+                # AUTO_OPEN re-serves the snapshot the ambiguous click
+                # walked, which predates the tree change.
+                return _show_response("pre-filter", sid, gen, 1, 2)
+            if action == "start_overlay_walk":
+                return _walk_response("post-filter", sid, gen, 1)
+            return _pin_response(action, params)
+
+        sent = _wire_app(controller, _respond)
+        if event_ahead_of_effects:
+            controller.loop.call_soon(_deliver_tree_change)
+        response = ClickElementResponse.from_dict(
+            _ambiguous_response(
+                snapshot_id="pre-filter",
+                item_ids=("pre-filter-item-1", "pre-filter-item-2"),
+            )
+        )
+        assert controller._perform_auto_open_ambiguous(
+            response, "Cancel", "tr-1-4",
+        )
+        await _settle(controller)
+        machine = controller.click_overlay_state
+        controller._apply_overlay_event(
+            OverlayEvent(
+                OverlayEventKind.PAINT_ACK,
+                overlay_session_id=machine.overlay_session_id,
+                paint_generation=machine.paint_generation,
+                paint_state=PaintAckState.PAINTED,
+            ),
+            source="test GUI ack",
+        )
+        await _settle(controller)
+        result["sent"] = [action for action, _params in sent]
+        result["paints"] = [
+            item.get("snapshot_id")
+            for item in _gui_items(controller)
+            if item.get("action") == "paint_overlay"
+        ]
+        result["state"] = machine.state
+        for name in ("_overlay_timer", "_overlay_keepalive_timer"):
+            timer = getattr(controller, name, None)
+            if timer is not None:
+                timer.cancel()
+
+    asyncio.run(_run())
+    return result
+
+
+def test_tree_change_queued_ahead_of_the_auto_open_build_is_not_dropped():
+    """wh-overlay-rewalk-after-filter.1.4: an event queued before the build.
+
+    Ordering pinned: the ambiguous click commits AUTO_OPEN (closed ->
+    walk_in_flight) synchronously; a Pattern Manager tree change that was
+    already ready on the Logic loop runs NEXT; only then does the scheduled
+    effect task start and dispatch show_numbered_overlay. The event is for
+    the foreground window, so it must be accepted: the build restarts as a
+    fresh walk, and the badges that reach the screen come from the
+    post-change tree, not from the snapshot the click walked before it.
+    """
+    result = _replay_auto_open_with_a_tree_change(event_ahead_of_effects=True)
+
+    assert "start_overlay_walk" in result["sent"], (
+        "tree change queued ahead of the AUTO_OPEN effect task was dropped: "
+        f"no superseding walk was sent (sent={result['sent']})"
+    )
+    assert result["state"] is OverlayState.PAINTED
+    assert result["paints"] and result["paints"][-1] == "post-filter", (
+        "AUTO_OPEN painted the pre-filter snapshot after the tree change "
+        f"(paints={result['paints']})"
+    )
+
+
+def test_tree_change_after_the_auto_open_build_started_is_accepted():
+    """wh-overlay-rewalk-after-filter.1.4 control: the same event, delivered late.
+
+    Ordering pinned: the effect task has already started and sampled the
+    foreground window when the tree change arrives (inside the
+    show_numbered_overlay send). Everything else matches the test above, so
+    this passing while that one fails shows the only difference is the
+    delivery order.
+    """
+    result = _replay_auto_open_with_a_tree_change(
+        event_ahead_of_effects=False
+    )
+
+    assert "start_overlay_walk" in result["sent"], (
+        f"no superseding walk was sent (sent={result['sent']})"
+    )
+    assert result["sent"].index("start_overlay_walk") > result["sent"].index(
+        "show_numbered_overlay"
+    )
+    assert result["state"] is OverlayState.PAINTED
+    assert result["paints"] and result["paints"][-1] == "post-filter", (
+        f"paints={result['paints']}"
+    )

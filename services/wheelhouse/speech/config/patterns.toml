@@ -2613,6 +2613,17 @@ actions = [
     { function = "set_speech_interaction_mode", params = ["toggle"] }
 ]
 
+# Switches listening off the way the floating button does
+# (wh-wake-word-stop-listening). The wake word switches it back on; there is
+# no "start listening" phrase, because nothing is heard while listening is off.
+[[pattern]]
+pattern = '''^stop listening$'''
+doc_id = "stop-listening"
+whole_utterance_only = true
+actions = [
+    { function = "stop_listening" }
+]
+
 # Voice element clicking (wh-vjwdl). Hotword-required: "click" and "tap" are
 # common dictation words, and the capture group is greedy, so every utterance
 # that starts with either word would otherwise be parsed as a click command.

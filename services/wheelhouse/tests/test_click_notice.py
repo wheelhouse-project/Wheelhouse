@@ -1093,3 +1093,35 @@ def test_wording_numbers_updating_is_exact():
         "The numbers are updating -- say the number again when they "
         "reappear."
     )
+
+
+def test_wording_execution_failed_invoke_no_effect_then_sendinput_failed():
+    """wh-pattern-manager-tree-click: the tree row answered Invoke() with S_OK
+    and did not select, so the gated coordinate click was sent and it did not
+    land -- the same transient delivery failure as the other chain reasons,
+    so it shares the invoke_com_error copy."""
+    event = _event(
+        outcome="execution_failed",
+        reason="invoke_no_effect_then_sendinput_failed",
+        matched_name="Submit",
+    )
+    assert (
+        compose_click_notice_wording(event)
+        == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
+    )
+
+
+def test_wording_execution_failed_invoke_then_coordinate_no_effect():
+    """wh-pattern-manager-tree-click: both presses were DELIVERED (Invoke
+    returned success, the coordinate click landed) and the row still reads
+    unselected. The copy is the measured truth here, so the new tag reuses the
+    existing sentence and introduces no new user-visible wording."""
+    event = _event(
+        outcome="execution_failed",
+        reason="invoke_then_coordinate_no_effect",
+        matched_name="Submit",
+    )
+    assert (
+        compose_click_notice_wording(event)
+        == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
+    )

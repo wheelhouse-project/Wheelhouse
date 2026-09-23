@@ -1466,8 +1466,14 @@ def main(argv=None):
 
         Called by WSForwarder when WheelHouse sends set_transcription_status:
         - reason=None: transcription re-enabled -> stop listening for wake word
-        - reason="idle": transcription disabled due to idle timeout -> start listening
-        - reason="audio"/"sonos": transcription disabled for other reasons
+        - any other reason: transcription disabled -> listen for the wake word
+          when the mode arms that reason. WheelHouse sends "idle" (idle
+          pause), "manual" (the user's switch-off, "stop listening", or an
+          interaction-mode switch), "startup" (a start with listening off),
+          "audio" (sound from this computer), "sonos" (Sonos playback), and
+          "ptt" (a push-to-talk release). "idle_recovery" arms on all of
+          them except "ptt"; "push_to_talk" arms on "idle", "audio", and
+          "sonos".
 
         The wake_word_mode decides which reasons arm the detector, and the
         rule itself lives in one shared function so all three providers

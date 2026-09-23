@@ -1194,6 +1194,23 @@ ACTION_CATALOG = (
         "audience": "internal",
         "group": "Wheelhouse",
     },
+    {
+        "name": "stop_listening",
+        "label": "Stop listening",
+        "summary": (
+            "Switches listening off, as clicking the floating button does "
+            "while it listens. In toggle mode, say the wake word to switch "
+            "it back on; in push-to-talk mode the wake word ends only the "
+            "idle pause, so hold the floating button again."
+        ),
+        "params": [],
+        "example": (
+            'Trigger "^stop listening$": saying it by itself switches '
+            "listening off."
+        ),
+        "audience": "advanced",
+        "group": "Wheelhouse",
+    },
 )
 
 # Name -> entry index for O(1) lookup by consumers (picker, explainer,

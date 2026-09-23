@@ -14,7 +14,7 @@
 SPATIAL_SOUND_EXEC = ""
 SPATIAL_SOUND_FORMAT = "Dolby Atmos for home theater"
 
-# Network address the speech service connects to. 127.0.0.1 keeps the
+# Network address Wheelhouse's speech server listens on. 127.0.0.1 keeps the
 # speech websocket local to this machine; set a LAN bind address only if
 # you run STT on another machine (advanced, exposes the port on the LAN).
 SPEECH_WEBSOCKET_HOST = "127.0.0.1"
@@ -48,7 +48,8 @@ ENABLE_AUDIO_SUPPRESSION = "auto"
 # The check runs every polling_interval seconds, 2 in this file.
 # Listening also resumes when WheelHouse cannot reach the speaker.
 # Switching speech on resumes listening only until the next check finds music.
-# The wake word and a push-to-talk hold do not end this pause.
+# In toggle mode the wake word ends this pause the same way. In push-to-talk
+# mode neither the wake word nor a hold ends it.
 # An echo canceller cannot remove this music, because it never passes through
 # this computer.
 ENABLE_SONOS_SUPPRESSION = true
@@ -184,7 +185,8 @@ ignore_window_classes = [
 ]
 
 [wake_word]
-# Say this word to wake WheelHouse after an idle pause.
+# In toggle mode, say this word to turn listening back on, whatever turned it off.
+# In push-to-talk mode it ends only the idle pause; hold the floating button to talk again.
 enabled = true
 keyword = "computer"
 sensitivity = 0.5
@@ -297,7 +299,7 @@ gpu_layers = 99
 startup_timeout_seconds = 90
 
 [ai.help]
-gem_url = "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
+gem_url = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
 max_response_tokens = 800
 # Show the window that explains the Wheelhouse Assistant before the browser
 # opens. The window's "Do not show this again" check box sets this to false.

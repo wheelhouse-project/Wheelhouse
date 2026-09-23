@@ -115,6 +115,7 @@ def make_match(
     is_enabled: bool = True,
     bounds: tuple[int, int, int, int] = (100, 100, 40, 30),
     source_window_is_shell: bool = False,
+    control_type_id: int = 0,
 ) -> ElementMatch:
     return ElementMatch(
         item_id="item-1",
@@ -130,6 +131,7 @@ def make_match(
         is_enabled=is_enabled,
         control_ref=control,
         source_window_is_shell=source_window_is_shell,
+        control_type_id=control_type_id,
     )
 
 
@@ -196,6 +198,7 @@ def make_executor(
     overlay_bounds_tolerance_physical_px: Optional[int] = None,
     window_at_point=None,
     point_hits_winner=None,
+    selection_state_fn=None,
 ) -> ClickExecutor:
     if probe is None:
         probe = matching_probe()
@@ -223,6 +226,8 @@ def make_executor(
         # test_uia_walker.py (invoke_via_invoke_pattern).
         invoke_fn = lambda ref: ref.Invoke()
     kwargs: dict[str, Any] = {}
+    if selection_state_fn is not None:
+        kwargs["selection_state_fn"] = selection_state_fn
     if overlay_bounds_tolerance_physical_px is not None:
         kwargs["overlay_bounds_tolerance_physical_px"] = (
             overlay_bounds_tolerance_physical_px
@@ -2638,6 +2643,7 @@ def _budget_executor(
     on_screen=None,
     window_at_point=None,
     point_hits=None,
+    selection_state_fn=None,
 ):
     """Build a ClickExecutor wired to the fake clock (budget test surface)."""
     if foreground_probe is None:
@@ -2653,6 +2659,8 @@ def _budget_executor(
     kwargs: dict[str, Any] = {}
     if gesture_click is not None:
         kwargs["gesture_click_fn"] = gesture_click
+    if selection_state_fn is not None:
+        kwargs["selection_state_fn"] = selection_state_fn
     return ClickExecutor(
         coordinate_click_fn=coordinate_click,
         foreground_probe=foreground_probe,
@@ -3096,3 +3104,562 @@ def test_expand_collapse_reverification_failure_refuses_without_input(
     assert result.reason == "foreground_changed"
     assert coord_calls == []
     assert control.legacy.do_default_action_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# wh-pattern-manager-tree-click: the five bounds_invalid returns must be
+# distinguishable in the log.
+#
+# ui/ui_action_handler.py:4627 prints only the reason, and all five pre-click
+# re-read failures return the same reason string "bounds_invalid". David's
+# 2026-09-22 report could not be diagnosed from wheelhouse.log for exactly
+# that reason. Each of the five now writes a log line that names its source,
+# and the two COM-error sources also print the HRESULT. The RETURNED reason is
+# unchanged, so no notice wording moves.
+# ---------------------------------------------------------------------------
+
+def test_isenabled_raise_logs_its_source_and_hresult(caplog):
+    control = FakeControl(raise_on_enabled=True)
+    ex = make_executor()
+    with caplog.at_level(logging.WARNING, logger="ui.click_executor"):
+        result = ex.click(make_match(control), snap(), QUERY)
+    assert result.reason == "bounds_invalid"
+    assert "bounds_invalid_source=isenabled_read_raised" in caplog.text
+    assert hex(NON_ALLOWLISTED_HRESULT) in caplog.text.lower()
+
+
+def test_bounding_rectangle_raise_logs_its_source_and_hresult(caplog):
+    control = FakeControl(raise_on_bounds=True)
+    ex = make_executor()
+    with caplog.at_level(logging.WARNING, logger="ui.click_executor"):
+        result = ex.click(make_match(control), snap(), QUERY)
+    assert result.reason == "bounds_invalid"
+    assert (
+        "bounds_invalid_source=bounding_rectangle_read_raised" in caplog.text
+    )
+    assert hex(NON_ALLOWLISTED_HRESULT) in caplog.text.lower()
+
+
+def test_unparsable_rect_logs_its_source(caplog):
+    # A rect that is neither tagRECT-like nor a 4-sequence: _parse_rect
+    # returns None and the caller fails closed.
+    control = FakeControl(rect=object())
+    ex = make_executor()
+    with caplog.at_level(logging.WARNING, logger="ui.click_executor"):
+        result = ex.click(make_match(control), snap(), QUERY)
+    assert result.reason == "bounds_invalid"
+    assert "bounds_invalid_source=rect_unparsable" in caplog.text
+
+
+def test_empty_rect_logs_its_source(caplog):
+    control = FakeControl(rect=FakeRect(100, 100, 100, 100))
+    ex = make_executor()
+    with caplog.at_level(logging.WARNING, logger="ui.click_executor"):
+        result = ex.click(make_match(control), snap(), QUERY)
+    assert result.reason == "bounds_invalid"
+    assert "bounds_invalid_source=rect_empty" in caplog.text
+
+
+def test_malformed_cached_bounds_logs_its_source(caplog):
+    control = FakeControl()
+    ex = make_executor()
+    match = make_match(control)
+    object.__setattr__(match, "bounds", None)
+    with caplog.at_level(logging.WARNING, logger="ui.click_executor"):
+        result = ex.click(match, snap(), QUERY)
+    assert result.reason == "bounds_invalid"
+    assert "bounds_invalid_source=cached_bounds_malformed" in caplog.text
+
+
+def test_bounds_invalid_log_names_the_matched_control(caplog):
+    # The log line must carry the control name, so a wheelhouse.log reader can
+    # tie the source to the row the user asked for.
+    control = FakeControl(raise_on_enabled=True)
+    ex = make_executor()
+    with caplog.at_level(logging.WARNING, logger="ui.click_executor"):
+        ex.click(make_match(control, name="boost"), snap(), QUERY)
+    assert "boost" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Tree-item Invoke outcome check (wh-pattern-manager-tree-click, Mode B).
+#
+# Measured on the Pattern Manager's QTreeWidget: InvokePattern.Invoke()
+# returns S_OK and changes nothing -- the row is not selected. The Qt
+# accessibility bridge reports a press it never performed. The fix reads
+# SelectionItem.IsSelected around the Invoke and, only for a TreeItem that
+# read FALSE before the press, falls through to the already-gated coordinate
+# click when the state did not move. Bounds (a)-(d) come from the 2026-09-22
+# ruling recorded on the bead.
+# ---------------------------------------------------------------------------
+
+TREE_QUERY = ElementQuery(
+    name="boost", role=None, ordinal=None, spatial=None,
+    raw_utterance="click 3",
+)
+
+
+class FakeSelection:
+    """Scripted SelectionItem.IsSelected seam.
+
+    ``states`` is read one entry per call; the last entry repeats. An entry
+    may be True, False, None (the control exposes no SelectionItem pattern),
+    or an exception INSTANCE, which is raised. ``calls`` counts the reads.
+    """
+
+    def __init__(self, *states: Any) -> None:
+        self._states = list(states)
+        self.calls = 0
+
+    def __call__(self, _ref: Any) -> Optional[bool]:
+        index = min(self.calls, len(self._states) - 1)
+        self.calls += 1
+        state = self._states[index]
+        if isinstance(state, BaseException):
+            raise state
+        return state
+
+
+def tree_match(control: Any, *, name: str = "boost") -> ElementMatch:
+    return make_match(
+        control, name=name, role="treeitem", control_type_id=50024
+    )
+
+
+def counting_coordinate_click(result=(True, 2)):
+    """A coordinate seam that records its calls and returns ``result``."""
+    calls: list[tuple[int, int]] = []
+
+    def click(x: int, y: int):
+        calls.append((x, y))
+        return result
+
+    return click, calls
+
+
+def test_treeitem_invoke_that_does_not_select_falls_back_to_coordinate():
+    """Invoke reported success, the row did not select -> coordinate click."""
+    control = FakeControl()
+    selection = FakeSelection(False, False, True)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "coordinate"
+    assert control.invoke_calls == 1
+    assert len(calls) == 1
+
+
+def test_treeitem_invoke_that_selects_sends_no_coordinate_click():
+    """The Invoke worked -- nothing else may be pressed."""
+    control = FakeControl()
+    selection = FakeSelection(False, True)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert calls == []
+
+
+def test_non_treeitem_never_reads_the_selection_state():
+    """Bound (a): the check is scoped to TreeItem and costs others nothing."""
+    control = FakeControl()
+    selection = FakeSelection(False, False)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(make_match(control), snap(), QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert selection.calls == 0
+    assert calls == []
+
+
+def test_treeitem_selected_before_the_invoke_sends_no_coordinate_click():
+    """Bound (a): a row already selected has no unchanged-state signal."""
+    control = FakeControl()
+    selection = FakeSelection(True)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert selection.calls == 1
+    assert calls == []
+
+
+def test_treeitem_without_selectionitem_sends_no_coordinate_click():
+    """Bound (a): no SelectionItem pattern -> no way to judge the outcome.
+
+    The reads after the press answer "not selected" so the test measures the
+    PRE-read decision: a pattern absent before the press must not arm the
+    check, whatever a later read would say.
+    """
+    control = FakeControl()
+    selection = FakeSelection(None, False, False)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert calls == []
+
+
+def test_selection_read_raising_before_the_invoke_presses_once():
+    """A pre-read that raises leaves today's behaviour exactly as it was.
+
+    The reads AFTER the press succeed and say "not selected" on purpose: if
+    a raising pre-read armed the check, those answers would send a second
+    press. The assertion below is that none was sent.
+    """
+    control = FakeControl()
+    selection = FakeSelection(
+        FakeComError(NON_ALLOWLISTED_HRESULT), False, False
+    )
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert calls == []
+
+
+def test_selection_read_raising_after_the_invoke_reports_ok():
+    """Bound (b): the element stopped resolving -- the Invoke acted."""
+    control = FakeControl()
+    selection = FakeSelection(False, FakeComError(NON_ALLOWLISTED_HRESULT))
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert calls == []
+
+
+def test_selection_pattern_gone_after_the_invoke_reports_ok():
+    """Bound (b): the element was replaced -- treat the Invoke as acted."""
+    control = FakeControl()
+    selection = FakeSelection(False, None)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert calls == []
+
+
+def test_foreground_change_after_the_invoke_reports_ok():
+    """Bound (b): a navigating Invoke moved the foreground -- press nothing."""
+    control = FakeControl()
+    selection = FakeSelection(False, False)
+    click, calls = counting_coordinate_click()
+    # _verify takes probe 1; the post-Invoke identity check takes probe 2.
+    probes = [matching_probe(), matching_probe(window=7777)]
+    seen = {"n": 0}
+
+    def probe():
+        index = min(seen["n"], len(probes) - 1)
+        seen["n"] += 1
+        return probes[index]
+
+    executor = ClickExecutor(
+        coordinate_click_fn=click,
+        foreground_probe=probe,
+        on_screen_fn=always_on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=lambda ref: ref.Invoke(),
+        selection_state_fn=selection,
+        window_at_point_fn=lambda _x, _y: 1000,
+        point_hits_winner_fn=lambda _w, _x, _y: True,
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert calls == []
+
+
+def test_ineligible_treeitem_match_sends_no_coordinate_click():
+    """Bound (c): the existing _coord_eligible gate still decides."""
+    control = FakeControl()
+    selection = FakeSelection(False, False)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+    substring_only = ElementQuery(
+        name="oos", role=None, ordinal=None, spatial=None,
+        raw_utterance="click 3",
+    )
+
+    result = executor.click(tree_match(control), snap(), substring_only)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert calls == []
+
+
+def test_treeitem_unselected_after_the_coordinate_click_fails_with_its_tag():
+    """Bound (d): both presses landed, the row never selected."""
+    control = FakeControl()
+    selection = FakeSelection(False, False, False)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "invoke_then_coordinate_no_effect"
+    assert len(calls) == 1
+
+
+def test_coordinate_click_that_does_not_land_after_the_invoke_has_its_tag():
+    """A delivery failure is not the same tag as a landed-but-inert press."""
+    control = FakeControl()
+    selection = FakeSelection(False, False)
+    click, _calls = counting_coordinate_click(result=(False, 2))
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "invoke_no_effect_then_sendinput_failed"
+
+
+def test_verification_failure_between_the_presses_returns_its_own_reason():
+    """Bound (c): the coordinate path's re-verification stays in front.
+
+    The on-screen check passes for the pre-click verification and fails for
+    the coordinate fallback's re-verification, so the world moves BETWEEN the
+    two presses. The refusal must carry the verification's own reason, and no
+    mouse input may be sent.
+    """
+    control = FakeControl()
+    selection = FakeSelection(False, False)
+    click, calls = counting_coordinate_click()
+    screen_checks = {"n": 0}
+
+    def on_screen_once(_x: int, _y: int) -> bool:
+        screen_checks["n"] += 1
+        return screen_checks["n"] == 1
+
+    executor = make_executor(
+        coordinate_click=click,
+        on_screen=on_screen_once,
+        selection_state_fn=selection,
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "target_moved_offscreen"
+    assert control.invoke_calls == 1
+    assert calls == []
+
+
+# --- The tree-item selection pre-read is inside the verification budget -----
+# wh-pattern-manager-tree-click.2.1 (Codex round 1). The pre-Invoke
+# SelectionItem read is a LIVE cross-process COM property read, and it sits
+# between _verify's last budget check and the Invoke. Without a check after
+# it, a slow tree provider lets a press go out after the click's verification
+# deadline has already passed -- the one thing the budget exists to stop
+# ("once the budget has expired the executor refuses and sends no input").
+# The check is armed only for a TreeItem, because only a TreeItem performs
+# that read; every other control type reaches Invoke exactly as it did before
+# this bead.
+
+
+def _clock_burning_selection(clock: FakeClock, seconds: float, state: Any):
+    """A selection seam that consumes ``seconds`` of budget, then answers."""
+
+    def _selection(_ref: Any) -> Optional[bool]:
+        clock.advance(seconds)
+        return state
+
+    return _selection
+
+
+def test_treeitem_selection_pre_read_that_overruns_the_budget_sends_nothing():
+    # The defect Codex reproduced: the selection read alone eats the whole
+    # 2000ms budget, and the Invoke still went out afterwards.
+    clock = FakeClock()
+    control = TimedControl(clock)
+    click, calls = counting_coordinate_click()
+    executor = _budget_executor(
+        clock,
+        coordinate_click=click,
+        selection_state_fn=_clock_burning_selection(clock, 2.5, False),
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "verification_timeout"
+    assert control.invoke_calls == 0
+    assert calls == []
+
+
+def test_treeitem_selection_pre_read_that_raises_past_the_budget_sends_nothing():
+    # The same overrun, reached through the read that RAISES. That path
+    # returns None (the outcome check stays off), so the press would otherwise
+    # go out with no budget check at all.
+    clock = FakeClock()
+    control = TimedControl(clock)
+    click, calls = counting_coordinate_click()
+
+    def _raising(_ref: Any) -> Optional[bool]:
+        clock.advance(2.5)
+        raise FakeComError(0x80040201)
+
+    executor = _budget_executor(
+        clock, coordinate_click=click, selection_state_fn=_raising
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "execution_failed"
+    assert result.reason == "verification_timeout"
+    assert control.invoke_calls == 0
+    assert calls == []
+
+
+def test_treeitem_selection_pre_read_inside_the_budget_still_invokes():
+    # The other half: a read that costs real time but stays inside the budget
+    # must NOT start refusing. This is what stops the new check from becoming
+    # an over-refusal on every tree row.
+    clock = FakeClock()
+    control = TimedControl(clock)
+    click, calls = counting_coordinate_click()
+    executor = _budget_executor(
+        clock,
+        coordinate_click=click,
+        selection_state_fn=_clock_burning_selection(clock, 0.5, True),
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# wh-pattern-manager-tree-click D1: the pre-read arms only on a CACHED Invoke
+# ---------------------------------------------------------------------------
+# A File Explorer navigation-pane folder is a TreeItem (control type 50024)
+# that exposes no Invoke pattern. Arming the selection pre-read on the control
+# type alone made every such folder pay a live cross-process SelectionItem
+# read, and let it return verification_timeout where the base went straight to
+# the InvokePatternUnavailable / DDA / coordinate path (wh-explorer-navpane-
+# click). The arm is the walk-time cached-Invoke answer carried on the match.
+# The budget check lives inside the same arm, and it is unreachable without
+# the pre-read: the pre-read is the only work between _verify's last budget
+# check and the press, so nothing else can consume the budget there.
+
+
+def test_treeitem_without_cached_invoke_skips_the_selection_pre_read():
+    # The File-Explorer-shaped seam: a tree row with no cached Invoke pattern
+    # must not perform the SelectionItem read at all. Before D1 that read ran,
+    # burned the whole budget, and refused with verification_timeout.
+    import dataclasses
+
+    clock = FakeClock()
+    control = TimedControl(clock)
+    click, calls = counting_coordinate_click()
+    selection_calls: list[Any] = []
+
+    def _selection(ref: Any) -> Optional[bool]:
+        selection_calls.append(ref)
+        clock.advance(2.5)
+        return False
+
+    executor = _budget_executor(
+        clock, coordinate_click=click, selection_state_fn=_selection
+    )
+    navpane_row = dataclasses.replace(
+        tree_match(control, name="This PC"), invoke_supported=False
+    )
+
+    result = executor.click(navpane_row, snap(), TREE_QUERY)
+
+    assert selection_calls == []
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert control.invoke_calls == 1
+    assert calls == []
+
+
+def test_treeitem_with_cached_invoke_still_gets_the_selection_pre_read():
+    # The other half of the arm: a Qt row (cached Invoke present) keeps the
+    # pre-read and the outcome check. This fails if the guard is inverted.
+    control = FakeControl()
+    selection = FakeSelection(False, False, True)
+    click, calls = counting_coordinate_click()
+    executor = make_executor(
+        coordinate_click=click, selection_state_fn=selection
+    )
+
+    result = executor.click(tree_match(control), snap(), TREE_QUERY)
+
+    assert selection.calls >= 1
+    assert result.outcome == "ok"
+    assert result.clicked_via == "coordinate"
+    assert calls != []
+
+
+def test_selection_state_helper_returns_none_for_a_non_treeitem():
+    # Bound (a) AT THE HELPER. _invoke_path's arm (hard gate D1) now also
+    # tests the control type, so a non-TreeItem no longer reaches this helper
+    # through the public click path: breaking the helper's own scope guard
+    # stopped changing anything observable from the outside, and two gate
+    # mutations that aim at that guard became false survivors. This calls the
+    # helper directly so the guard keeps a catcher of its own. Both layers
+    # are kept on purpose -- the helper is the one that promises "None for
+    # anything but a TreeItem", and _invoke_outcome_retry reads the same seam.
+    control = FakeControl()
+    selection = FakeSelection(False)
+    executor = make_executor(selection_state_fn=selection)
+
+    state = executor._selection_state_before_invoke(make_match(control))
+
+    assert state is None
+    assert selection.calls == 0

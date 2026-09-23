@@ -427,3 +427,167 @@ class TestABrowserThatReportsFailureByReturningFalse:
 
         browser.assert_called_once_with("https://example.test/help")
         assert _queued(controller) == []
+
+
+class TestTheRetiredChatGPTAddressOpensTheGemInstead:
+    """wh-gem-replaces-gpt-assistant.2.3, the Codex finding.
+
+    Releases before 1.2.0 shipped the ChatGPT custom GPT address as the
+    gem_url default. The installer preserves the user's settings file across
+    an update, and start_help_online reads ai.help.gem_url with an empty
+    default, so every installation that exists today keeps opening a custom
+    GPT that OpenAI stops running on 2026-12-11. Nothing else on this branch
+    reaches those users.
+
+    The fix reads only the exact retired address. A user who chose their own
+    address, and a user who blanked the setting, are both left alone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_retired_address_opens_the_gem(self):
+        import main
+
+        controller = _controller()
+        _settings(controller, gem_url=main._RETIRED_CHATGPT_HELP_URL, explain=False)
+
+        with patch("webbrowser.open") as browser:
+            await controller.start_help_online()
+
+        browser.assert_called_once_with(main._WHEELHOUSE_GEM_URL)
+        assert _queued(controller) == []
+
+    @pytest.mark.asyncio
+    async def test_surrounding_whitespace_does_not_defeat_the_check(self):
+        """A hand-edited settings file can carry a stray space."""
+        import main
+
+        controller = _controller()
+        _settings(
+            controller,
+            gem_url="  " + main._RETIRED_CHATGPT_HELP_URL + "  ",
+            explain=False,
+        )
+
+        with patch("webbrowser.open") as browser:
+            await controller.start_help_online()
+
+        browser.assert_called_once_with(main._WHEELHOUSE_GEM_URL)
+
+    @pytest.mark.asyncio
+    async def test_a_custom_address_opens_unchanged(self):
+        """Only the one retired address is replaced, never anything else."""
+        controller = _controller()
+        _settings(controller, gem_url="https://example.test/my-own-help", explain=False)
+
+        with patch("webbrowser.open") as browser:
+            await controller.start_help_online()
+
+        browser.assert_called_once_with("https://example.test/my-own-help")
+
+    @pytest.mark.asyncio
+    async def test_another_chatgpt_address_opens_unchanged(self):
+        """A different ChatGPT address is a choice, not the shipped default."""
+        controller = _controller()
+        _settings(
+            controller,
+            gem_url="https://chatgpt.com/g/g-0000000000000000000000000000-other",
+            explain=False,
+        )
+
+        with patch("webbrowser.open") as browser:
+            await controller.start_help_online()
+
+        browser.assert_called_once_with(
+            "https://chatgpt.com/g/g-0000000000000000000000000000-other"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_blank_address_still_shows_the_notice(self):
+        """Blanking the setting is still how a user turns online help off.
+
+        The substitution must not resurrect help for someone who switched it
+        off, so this pins the blank path against the new code.
+        """
+        controller = _controller()
+        _settings(controller, gem_url="", explain=True)
+
+        with patch("webbrowser.open") as browser:
+            await controller.start_help_online()
+
+        browser.assert_not_called()
+        queued = _queued(controller)
+        assert len(queued) == 1
+        # The action is checked before the message so a mutation that queues
+        # the explanation window here fails on a named assertion rather than
+        # a KeyError, which the mutation gate reports as an error, not a
+        # catch.
+        assert queued[0]["action"] == "show_notification"
+        assert queued[0]["message"] == (
+            "Online help is not configured. Set gem_url under [ai.help]."
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_substitution_is_logged_without_an_address(self, caplog):
+        """The same redaction rule as every other line here.
+
+        wh-assistant-button-explainer.1.1: the address is a user setting and
+        does not belong in the log.
+        """
+        import main
+
+        controller = _controller()
+        _settings(controller, gem_url=main._RETIRED_CHATGPT_HELP_URL, explain=False)
+
+        with caplog.at_level(logging.INFO):
+            with patch("webbrowser.open"):
+                await controller.start_help_online()
+
+        messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.INFO
+        ]
+        substitutions = [m for m in messages if "retired" in m.lower()]
+        assert len(substitutions) == 1
+        assert "chatgpt.com" not in substitutions[0]
+        assert "gemini.google.com" not in substitutions[0]
+
+    @pytest.mark.asyncio
+    async def test_the_explanation_window_still_comes_first(self, caplog):
+        """The substitution happens at the browser, not before the window.
+
+        A user who has not turned the window off must still see it, and the
+        log must not claim a substitution that has not happened yet.
+        """
+        import main
+
+        controller = _controller()
+        _settings(controller, gem_url=main._RETIRED_CHATGPT_HELP_URL, explain=True)
+
+        with caplog.at_level(logging.INFO):
+            with patch("webbrowser.open") as browser:
+                await controller.start_help_online()
+
+        browser.assert_not_called()
+        assert _queued(controller) == [{"action": "open_help_explainer"}]
+        messages = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.INFO
+        ]
+        assert [m for m in messages if "retired" in m.lower()] == []
+
+    def test_the_gem_constant_equals_the_shipped_default(self):
+        """The two copies of the Gem address cannot drift apart.
+
+        One lives in services/wheelhouse/config.toml.example as the shipped
+        gem_url default; the other is the constant this fallback opens. A
+        change to either alone would silently send updated users somewhere
+        the fresh installs never go.
+        """
+        import pathlib
+        import tomllib
+
+        import main
+
+        example = (
+            pathlib.Path(main.__file__).resolve().parent / "config.toml.example"
+        )
+        shipped = tomllib.loads(example.read_text(encoding="utf-8"))
+        assert shipped["ai"]["help"]["gem_url"] == main._WHEELHOUSE_GEM_URL

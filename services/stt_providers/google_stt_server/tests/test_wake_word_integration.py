@@ -297,7 +297,8 @@ class TestWakeWordActivateCallback:
     The callback is what WSForwarder calls when transcription status changes:
     - reason=None -> transcription enabled (stop listening for wake word)
     - reason="idle" -> transcription disabled after an idle pause
-    - reason="audio"/"sonos" -> transcription disabled for the other reasons
+    - reason="manual"/"startup"/"audio"/"sonos"/"ptt" -> transcription
+      disabled for the other reasons
 
     Which reasons arm the detector is one shared rule,
     shared_stt.wake_word_detector.should_listen_for_wake_word; the shared
@@ -316,24 +317,32 @@ class TestWakeWordActivateCallback:
         assert listening_state(callback) is True
         detector.reset.assert_called_once()
 
-    def test_audio_reason_does_not_activate_in_idle_recovery(self):
-        """wh-audio-suppression-auto: the sound pause has no voice way out.
+    @pytest.mark.parametrize("reason", ["manual", "startup", "audio", "sonos"])
+    def test_every_pause_reason_activates_in_idle_recovery(self, reason):
+        """wh-wake-word-stop-listening R2: the wake word ends any pause.
 
-        The detector armed on "audio" so the user could say the command
-        that switched audio suppression off. That command is gone, and so
-        is the recovery window it was spoken into.
+        idle_recovery arms on every disable reason WheelHouse sends except
+        "ptt", so the wake word turns listening on whatever switched it off.
         """
         callback, detector = real_activate_callback("idle_recovery")
 
-        callback("audio")
+        callback(reason)
+        assert listening_state(callback) is True
+        detector.reset.assert_called_once()
+
+    def test_ptt_reason_does_not_activate_in_idle_recovery(self):
+        """A push-to-talk release is not a pause the wake word ends."""
+        callback, detector = real_activate_callback("idle_recovery")
+
+        callback("ptt")
         assert listening_state(callback) is False
         detector.reset.assert_not_called()
 
-    def test_sonos_reason_does_not_activate_in_idle_recovery(self):
-        """The Sonos pause keeps the behaviour it has today in this mode."""
-        callback, detector = real_activate_callback("idle_recovery")
+    def test_manual_reason_does_not_activate_in_push_to_talk(self):
+        """push_to_talk keeps its own list, which names no "manual"."""
+        callback, detector = real_activate_callback("push_to_talk")
 
-        callback("sonos")
+        callback("manual")
         assert listening_state(callback) is False
         detector.reset.assert_not_called()
 

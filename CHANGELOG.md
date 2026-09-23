@@ -5,6 +5,57 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-23
+
+### Added
+
+- You can now say "stop listening" to turn listening off. A notice
+  confirms it. The words must be the whole thing you say; inside a
+  longer sentence they are typed as usual.
+
+### Changed
+
+- In toggle mode, the wake word "computer" now turns listening back on
+  whatever turned it off, not only an idle pause. That includes the
+  floating button, "stop listening", and sound from this computer. In
+  push-to-talk mode the wake word still ends only the idle pause; hold
+  the floating button to talk again.
+- The Wheelhouse Assistant now runs inside Google Gemini instead of
+  ChatGPT, because OpenAI stops running custom GPTs on 11 December 2026.
+  The window before your browser opens now says that Gemini asks you to
+  sign in, and that a Google account, an Apple account, or an email
+  address will do. If your settings still hold the old ChatGPT address,
+  Help opens the Gemini assistant instead. An address you chose yourself
+  opens as written. The privacy notice now describes Gemini.
+- The Wheelhouse website has a new design and now has six pages instead
+  of three.
+
+### Fixed
+
+- In the Pattern Manager, "click" with a number on a pattern or category
+  row now selects that row and shows its details. Before this fix, the
+  click often did nothing and showed no message. If a row does not
+  respond, Wheelhouse now clicks it with the mouse, and tells you when
+  the row still does not respond.
+- Numbers shown over the Pattern Manager now follow its list. When you
+  filter, add, remove, edit, expand, or collapse rows, Wheelhouse
+  numbers the list again. Before this fix, numbers stayed on hidden rows
+  until you said "show numbers" again.
+
+### Known issues
+
+- Over Remote Desktop, when the microphone comes from the remote
+  connection, speech recognition can stop as soon as it starts. The log
+  shows "AudioGraph creation failed: status=3". Until this is fixed, run
+  Wheelhouse on the computer you sit at.
+- On a computer with less memory than the installer requires, the
+  installer stops before it asks for a speech engine. Its message
+  suggests the Google Cloud engine, but the installer does not offer that
+  engine on such a computer.
+- In Visual Studio Code, the rows of an open menu such as File get no
+  numbers, and a click on a row by its name is refused. Visual Studio Code
+  reports those rows as off-screen, so Wheelhouse does not find them.
+
 ## [1.1.0] - 2026-09-21
 
 ### Added

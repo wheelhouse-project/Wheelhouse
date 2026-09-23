@@ -133,6 +133,11 @@ BLANK_WHEN_EXPLAINED = "test_a_blank_address_gives_the_notice_when_explained_is_
 LOG_WINDOW = "test_asking_for_the_window_is_logged_with_its_source"
 LOG_BROWSER = "test_opening_the_browser_is_logged_with_its_source"
 LOG_NOTICE = "test_the_unconfigured_notice_is_logged_with_its_source"
+RETIRED_OPENS_GEM = "test_the_retired_address_opens_the_gem"
+RETIRED_WHITESPACE = "test_surrounding_whitespace_does_not_defeat_the_check"
+RETIRED_LOGGED = "test_the_substitution_is_logged_without_an_address"
+CUSTOM_UNCHANGED = "test_a_custom_address_opens_unchanged"
+OTHER_GPT_UNCHANGED = "test_another_chatgpt_address_opens_unchanged"
 
 _NON_BOOL = "test_a_non_boolean_explained_field_takes_the_full_decision"
 # Only these four ids fail under the bool() form. The other four cases
@@ -506,6 +511,49 @@ MUTATIONS = [
         "old": '        await lc.start_help_online(source="spoken")',
         "new": "        await lc.start_help_online()",
         "catchers": {HANDS_OVER: NO_AWAIT},
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 6: an installation made before 1.2.0 still names the
+    # retired ChatGPT assistant, and the Gem opens instead
+    # (wh-gem-replaces-gpt-assistant.2.3).
+    # ---------------------------------------------------------------
+    {
+        # The substitution never fires, so every installation that
+        # predates 1.2.0 opens the retired ChatGPT assistant. This is the
+        # defect exactly as Codex reported it.
+        "name": "the-retired-address-is-opened-as-written",
+        "file": MAIN,
+        "old": "        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:",
+        "new": "        if False:",
+        "catchers": {
+            RETIRED_OPENS_GEM: "AssertionError: expected call not found",
+            RETIRED_WHITESPACE: "AssertionError: expected call not found",
+            RETIRED_LOGGED: "assert 0 == 1",
+        },
+    },
+    {
+        # strip() is dropped, so a settings file with a stray space around
+        # the address keeps opening the retired assistant. A hand-edited
+        # file is the ordinary way that space gets there.
+        "name": "the-comparison-stops-stripping",
+        "file": MAIN,
+        "old": "        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:",
+        "new": "        if gem_url == _RETIRED_CHATGPT_HELP_URL:",
+        "catchers": {
+            RETIRED_WHITESPACE: "AssertionError: expected call not found",
+        },
+    },
+    {
+        # The exact comparison becomes a prefix test, so any address on
+        # chatgpt.com is replaced -- including one the user chose on
+        # purpose, which the fix promised to leave alone.
+        "name": "the-comparison-stops-being-exact",
+        "file": MAIN,
+        "old": "        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:",
+        "new": '        if gem_url.strip().startswith("https://chatgpt.com/"):',
+        "catchers": {
+            OTHER_GPT_UNCHANGED: "AssertionError: expected call not found",
+        },
     },
 ]
 

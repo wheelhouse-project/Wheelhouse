@@ -54,6 +54,10 @@ jobs:
           enable-cache: true
       # The wrapper cds into the service, runs `uv run pytest` (which
       # syncs the service's own venv on first use), and parses the JUnit
-      # XML so results survive output truncation.
+      # XML so results survive output truncation. --split runs the
+      # wheelhouse suite as two pytest processes, because one process
+      # running all of it can crash with 0xC0000374 near its end; the
+      # other services run in one process as before. A failure in any
+      # part fails this step.
       - name: Run tests
-        run: python scripts/run_tests.py --service ${{ matrix.service }}
+        run: python scripts/run_tests.py --service ${{ matrix.service }} --split

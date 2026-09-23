@@ -32,7 +32,7 @@ never piped through `tail`/`grep` (the wrapper parses JUnit XML so results
 survive pipe truncation):
 
 ```bash
-python scripts/run_tests.py                        # full main-app suite
+python scripts/run_tests.py --split                # full main-app suite, in parts
 python scripts/run_tests.py -k <pattern>           # targeted tests
 python scripts/run_tests.py --service <name>       # another service
 ```

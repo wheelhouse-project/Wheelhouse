@@ -34,6 +34,9 @@ from PySide6.QtCore import Qt, QTimer, QRect, QSize, Signal
 from PySide6.QtGui import QFont, QGuiApplication, QKeySequence, QShortcut
 
 from speech.pattern_explainer import explain_pattern, pattern_kind
+from services.wheelhouse.shared.pattern_manager_tree_changed import (
+    PatternManagerTreeChangedEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,10 +196,21 @@ class PatternManagerDialog(QDialog):
     Signals:
         pattern_action(dict): Emitted to request an action from the Logic
             process (e.g. get patterns, create, delete).
+        tree_changed(dict): Emitted when the tree changes what a UI Automation
+            walk of this window would return, so the numbered overlay can
+            re-walk (wh-overlay-rewalk-after-filter).
     """
 
     # Signal emitted when we need to send a command to Logic process
     pattern_action = Signal(dict)
+
+    # wh-overlay-rewalk-after-filter: emitted when the tree's visible rows
+    # change, carrying a pattern_manager_tree_changed wire dict. The window
+    # announces nothing UI Automation or a WinEvent hook can see when the
+    # filter hides rows (measured on the bead: zero structure events per filter
+    # change), so this signal IS the notification the overlay's badges are out
+    # of date.
+    tree_changed = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -238,6 +252,17 @@ class PatternManagerDialog(QDialog):
         # older phrase never renders against newer input
         # (wh-pattern-editor-r6.1).
         self._try_seq = 0
+        # wh-overlay-rewalk-after-filter: monotonic counter stamped on every
+        # tree_changed event, bumped before each send, so Logic can drop one
+        # that arrives behind a newer one for this same window.
+        self._tree_seq = 0
+        # wh-overlay-rewalk-after-filter.1.2: set while populate() rebuilds the
+        # tree. populate()'s own expandAll() fires itemExpanded once per
+        # category, and contract C1 wants ONE event per model change -- the one
+        # populate sends from its tail. A dedicated flag rather than
+        # QWidget.blockSignals so currentItemChanged keeps working during the
+        # rebuild, which _clear_detail and the selection panel depend on.
+        self._suppress_tree_changed = False
         # The open editor dialog, while one is up: create/update/test-draft
         # results are forwarded to it (wh-pattern-editor-dialog).
         self._editor_dialog = None
@@ -604,6 +629,14 @@ class PatternManagerDialog(QDialog):
             "its details"
         )
         self._tree.currentItemChanged.connect(self._on_selection_changed)
+        # wh-overlay-rewalk-after-filter.1.2: contract C1 lists expand/collapse
+        # of a category beside the filter change. Collapsing unrealizes the
+        # category's child rows the same way the filter's setHidden does, so a
+        # walk stops returning them and painted badges float over rows that
+        # are gone. Both signals carry the item; the handle and the sequence
+        # are all the wire payload needs, so the item is discarded.
+        self._tree.itemExpanded.connect(self._on_tree_item_expanded)
+        self._tree.itemCollapsed.connect(self._on_tree_item_collapsed)
         layout.addWidget(self._tree, stretch=1)
 
         # Empty state when the filter matches nothing (spec section 13).
@@ -1080,13 +1113,31 @@ class PatternManagerDialog(QDialog):
                     child.setToolTip(0, "\n".join(tips))
                 child.setData(0, Qt.ItemDataRole.UserRole, pat)
 
-        # Expand all by default
-        self._tree.expandAll()
+        # Expand all by default.
+        #
+        # wh-overlay-rewalk-after-filter.1.2: expandAll() fires itemExpanded
+        # once per category, and those are not changes the user made -- the
+        # tail of this method already reports the whole rebuild as ONE event,
+        # which is what contract C1 asks for. The flag is cleared before the
+        # filter re-apply below, because that IS a separate change and keeps
+        # its own event.
+        self._suppress_tree_changed = True
+        try:
+            self._tree.expandAll()
+        finally:
+            self._suppress_tree_changed = False
 
         # Re-apply any active filter
         filter_text = self._filter_input.text().strip()
         if filter_text:
             self._on_filter_changed(filter_text)
+
+        # The whole tree was rebuilt -- every add / edit / duplicate /
+        # customize / delete lands here -- so the overlay's badges are stale
+        # (wh-overlay-rewalk-after-filter). A populate that re-applied a filter
+        # sends a second event; Logic collapses the pair through the same
+        # debounce window that collapses a typing burst.
+        self._emit_tree_changed("populate")
 
     def handle_response(self, message: dict):
         """Handle IPC response from Logic process.
@@ -1249,6 +1300,73 @@ class PatternManagerDialog(QDialog):
             f"No patterns match '{text.strip()}'" if show_empty else ""
         )
         self._tree_empty_label.setVisible(show_empty)
+
+        # The rows a walk would find just changed; tell Logic so the numbered
+        # overlay re-walks (wh-overlay-rewalk-after-filter).
+        self._emit_tree_changed("filter")
+
+    def _on_tree_item_expanded(self, _item) -> None:
+        """A category opened: its child rows are walkable again.
+
+        wh-overlay-rewalk-after-filter.1.2. The item is discarded -- Logic's
+        answer is "re-walk this window" whichever category moved.
+        """
+        self._emit_tree_changed("expand")
+
+    def _on_tree_item_collapsed(self, _item) -> None:
+        """A category closed: its child rows left the walk.
+
+        wh-overlay-rewalk-after-filter.1.2. Same shape as the expand slot; the
+        two are kept apart so the log line names which way the tree moved.
+        """
+        self._emit_tree_changed("collapse")
+
+    def _emit_tree_changed(self, reason: str) -> None:
+        """Tell Logic this window's walkable tree changed.
+
+        wh-overlay-rewalk-after-filter. Nothing outside this process can see
+        the change: the measurement on that bead counted zero UIA
+        StructureChanged events and zero WinEvents 0x8000..0x8004 while the
+        filter hid rows, against a probe control of 150 of each over a page
+        that adds and removes a control every 200 ms. So the dialog reports it
+        itself.
+
+        Sends nothing while the dialog is not shown: no overlay is painted over
+        a window the user cannot see, and Logic would only drop the event
+        (contract C6(a)).
+
+        Sends nothing either while ``_suppress_tree_changed`` is set, which
+        populate() holds across its own expandAll() so that one rebuild puts
+        one event on the wire rather than one per category
+        (wh-overlay-rewalk-after-filter.1.2).
+
+        ``reason`` names the call site in the log line and travels no further;
+        the wire payload carries the window handle and the sequence only, since
+        Logic's answer -- re-walk this window -- is the same either way.
+
+        The whole body is guarded. Reading a window handle can fail while the
+        dialog is closing, and a lost notification must never break the filter
+        box the user is typing into: the worst outcome of a swallowed error is
+        the stale badges this bead set out to fix, and the best outcome of an
+        unguarded raise is a broken filter.
+        """
+        try:
+            if self._suppress_tree_changed:
+                return
+            if not self.isVisible():
+                return
+            self._tree_seq += 1
+            # window() is the TOP-LEVEL window -- the handle Logic compares
+            # against the window the overlay was painted over.
+            hwnd = int(self.window().winId())
+            event = PatternManagerTreeChangedEvent(
+                hwnd=hwnd, sequence=self._tree_seq
+            )
+            self.tree_changed.emit(event.to_dict())
+        except Exception as exc:  # noqa: BLE001 - the notification is optional
+            logger.debug(
+                "tree_changed (%s) not sent: %s", reason, exc,
+            )
 
     # ------------------------------------------------------------------ #
     #  Detail Panel Helpers
