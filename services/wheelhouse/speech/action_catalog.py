@@ -879,8 +879,8 @@ ACTION_CATALOG = (
                 "summary": (
                     "Optional leading timeout in seconds. It must be an "
                     "unquoted TOML number and is clamped from 0.1 to 60 "
-                    "seconds. A quoted numeric string is passed to the "
-                    "program as an argument."
+                    "seconds. A quoted number is not a timeout; in the "
+                    "leading position it is used as the program path."
                 ),
                 "kind": "number",
             },

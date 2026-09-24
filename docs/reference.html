@@ -1708,7 +1708,7 @@
 <p>Runs a program without a shell and stores the text it prints for a later step. An optional leading, unquoted TOML number sets the timeout in seconds and is clamped from 0.1 to 60; failures, including output over the configured cap, stop the pattern.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
-<li><code>timeout</code> (number) -- Optional leading timeout in seconds. It must be an unquoted TOML number and is clamped from 0.1 to 60 seconds. A quoted numeric string is passed to the program as an argument.</li>
+<li><code>timeout</code> (number) -- Optional leading timeout in seconds. It must be an unquoted TOML number and is clamped from 0.1 to 60 seconds. A quoted number is not a timeout; in the leading position it is used as the program path.</li>
 <li><code>program</code> (path) -- Program path to run. It is run directly, without a shell.</li>
 <li><code>argument</code> (text) -- Repeatable program argument. Add one separate field for each argument; no shell parsing is performed.</li>
 </ul>

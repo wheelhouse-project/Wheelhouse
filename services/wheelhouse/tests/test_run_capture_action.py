@@ -492,4 +492,9 @@ class TestRunCaptureCatalog:
         assert "repeatable" in entry["params"][2]["summary"].lower()
         assert "timeout" in entry["summary"].lower()
         assert "toml number" in entry["params"][0]["summary"].lower()
-        assert "quoted numeric string" in entry["params"][0]["summary"].lower()
+        timeout_summary = entry["params"][0]["summary"].lower()
+        # actions.py pops the first parameter only for an unquoted int or
+        # finite float; a quoted number stays and becomes the program path.
+        assert "a quoted number is not a timeout" in timeout_summary
+        assert "program path" in timeout_summary
+        assert "passed to the program as an argument" not in timeout_summary

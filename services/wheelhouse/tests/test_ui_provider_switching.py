@@ -7,16 +7,23 @@ TDD: These tests are written FIRST per CLAUDE.md requirements.
 """
 import asyncio
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from queue import Queue
 
 import pytest
 
-# wh-pytest-flaky-segfault: these tests construct GuiManager, which
-# builds real Qt widgets; without a QApplication Qt aborts the whole
-# interpreter (no traceback, output lost). The session-scoped qapp
-# fixture guarantees one exists even when this file runs in isolation.
+# wh-pytest-flaky-segfault: these tests construct GuiManager, a QObject
+# whose construction can build real Qt widgets, and a real widget built
+# with no QApplication aborts the whole interpreter (no traceback, output
+# lost). The session-scoped qapp fixture guarantees one exists even when
+# this file runs in isolation. With _patched_gui_manager's patches the
+# build needs no QApplication (measured 2026-09-24: a fresh interpreter
+# with none built GuiManager and exited 0); the fixture stays as the
+# guard for a later change to GuiManager.__init__. Because that qapp is
+# real, _patched_gui_manager patches gui.QGuiApplication as well
+# (wh-ci-gui-heap-crash).
 pytestmark = pytest.mark.usefixtures("qapp", "mock_editor_window")
 
 # Add parent directories to path for imports
@@ -364,28 +371,34 @@ class TestRemoteProviderSwitching:
         remote_launcher.start_provider.assert_called_once_with("parakeet_tdt")
 
 
+@contextmanager
+def _patched_gui_manager(commands_queue=None):
+    """Build a GuiManager with its Qt pieces mocked; yield it while patched."""
+    from gui import GuiManager
+
+    # Mock Qt components to avoid GUI initialization. QGuiApplication too:
+    # the session qapp is real, so an unpatched QGuiApplication lets
+    # _watch_the_screen_layout make native screen calls (wh-ci-gui-heap-crash).
+    with patch("gui.QApplication"), patch("gui.QGuiApplication"):
+        with patch("gui.FloatingButton"):
+            with patch("gui.pystray.Icon"):
+                with patch("gui.WorkingDialog"):
+                    yield GuiManager(
+                        MagicMock(),
+                        Queue() if commands_queue is None else commands_queue,
+                        Queue(),
+                    )
+
+
 class TestGuiProviderDisplay:
     """Tests for GUI displaying providers with correct names."""
 
     @pytest.fixture
     def gui_manager(self):
         """Create GuiManager with mocked dependencies."""
-        from gui import GuiManager
-
-        shutdown_event = MagicMock()
-        commands_queue = Queue()
-        state_queue = Queue()
-
-        # Mock Qt components to avoid GUI initialization
-        with patch("gui.QApplication"):
-            with patch("gui.FloatingButton"):
-                with patch("gui.pystray.Icon"):
-                    with patch("gui.WorkingDialog"):
-                        manager = GuiManager(
-                            shutdown_event, commands_queue, state_queue
-                        )
-                        manager.initial_state_received = True
-                        yield manager
+        with _patched_gui_manager() as manager:
+            manager.initial_state_received = True
+            yield manager
 
     def test_gui_uses_display_names_from_state_update(self, gui_manager):
         """GUI should use display_names dict from state update."""
@@ -414,6 +427,24 @@ class TestGuiProviderDisplay:
         assert not isinstance(gui_manager._te_window, QDialog)
         assert not isinstance(gui_manager.working_dialog, QDialog)
 
+    def test_construction_asks_the_real_qt_for_no_screens(self):
+        """With QApplication mocked, GuiManager must not enumerate the real
+        screens. Public CI run 35996040889 died with heap corruption
+        0xC0000374 inside QGuiApplication.screens() in this file's fixture
+        (wh-ci-gui-heap-crash): the session qapp is real, so without this
+        patch the fixture made a native Qt call it does not need."""
+        from PySide6.QtGui import QGuiApplication
+
+        with patch.object(QGuiApplication, "screens",
+                          return_value=[]) as real_screens:
+            with _patched_gui_manager():
+                pass
+
+        assert real_screens.call_count == 0, (
+            "the fixture called the real QGuiApplication.screens() "
+            f"{real_screens.call_count} time(s)"
+        )
+
     def test_gui_falls_back_to_title_case_if_no_display_name(self, gui_manager):
         """GUI should fall back to title case if display name not in mapping."""
         gui_manager.stt_provider_display_names = {}
@@ -430,19 +461,10 @@ class TestProviderSwitchCommand:
 
     def test_gui_sends_switch_command_with_provider_name(self):
         """GUI switch_stt_provider() sends command with provider name."""
-        from gui import GuiManager
-
-        shutdown_event = MagicMock()
         commands_queue = Queue()
-        state_queue = Queue()
 
-        with patch("gui.QApplication"):
-            with patch("gui.FloatingButton"):
-                with patch("gui.pystray.Icon"):
-                    with patch("gui.WorkingDialog"):
-                        manager = GuiManager(
-                            shutdown_event, commands_queue, state_queue
-                        )
+        with _patched_gui_manager(commands_queue) as manager:
+            pass
 
         # Call switch
         manager.switch_stt_provider("parakeet_tdt")

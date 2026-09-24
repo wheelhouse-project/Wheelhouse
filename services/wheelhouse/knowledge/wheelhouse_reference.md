@@ -646,7 +646,7 @@ Runs a program without a shell and stores the text it prints for a later step. A
 
 Parameters, in the order a pattern passes them:
 
-- `timeout` (number) -- Optional leading timeout in seconds. It must be an unquoted TOML number and is clamped from 0.1 to 60 seconds. A quoted numeric string is passed to the program as an argument.
+- `timeout` (number) -- Optional leading timeout in seconds. It must be an unquoted TOML number and is clamped from 0.1 to 60 seconds. A quoted number is not a timeout; in the leading position it is used as the program path.
 - `program` (path) -- Program path to run. It is run directly, without a shell.
 - `argument` (text) -- Repeatable program argument. Add one separate field for each argument; no shell parsing is performed.
 
