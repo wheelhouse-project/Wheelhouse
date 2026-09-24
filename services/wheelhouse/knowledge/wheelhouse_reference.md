@@ -1,6 +1,6 @@
 # Wheelhouse Voice Command and Configuration Reference
 
-This is the automatically generated reference for every Wheelhouse voice command and for every user-facing setting that the shipped config.toml contains. Optional settings that the file leaves commented out are described in the help document instead. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using Wheelhouse, see the help document (wheelhouse_help.md); for installation, see the installation guide (wheelhouse_install.md).
+This is the automatically generated reference for every Wheelhouse voice command, for every action a pattern step can perform, for the notices and windows that Wheelhouse shows, and for every user-facing setting that the shipped config.toml contains. Optional settings that the file leaves commented out are described in the help document instead. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using Wheelhouse, see the help document (wheelhouse_help.md); for installation, see the installation guide (wheelhouse_install.md).
 
 ## Voice Command Reference
 
@@ -327,6 +327,593 @@ This is the automatically generated reference for every Wheelhouse voice command
 | x-ray translate to [language] | Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese". Keeps every fact and leaves names and numbers as they are. | Same AI server and same safeguards as "x-ray fix"; say the language in English and in lower case, as one or more plain words with no punctuation. How good the translation is depends on the model you have configured. |
 | x-ray cancel fix | Cancels an in-progress fix or rewrite |  |
 | boost | Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | See "Selected Commands in Detail" in the Voice Commands section -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation |
+
+## Action Reference
+
+Every action a pattern step can perform, generated from the action catalog that the Pattern Manager's action list and its help page read. Each entry gives the label the Pattern Manager shows, the action name that a pattern file uses, what the action does, its parameters in the order a pattern passes them, and a worked example. The word in parentheses after a parameter is its kind, which sets the field the Pattern Manager's editor shows for it: choice is a fixed list, group_ref is a list of the pattern's capture groups (g1, g2, and so on) that also accepts typed text, and every other kind is a text field.
+
+### AI
+
+#### Ask AI
+
+Action name: `ask_ai`. The Pattern Manager lists it under Advanced actions, AI.
+
+Sends one prompt to the configured AI and stores its reply for a later step. Capture groups and earlier step results substitute into the prompt; failures stop the pattern.
+
+Parameters, in the order a pattern passes them:
+
+- `prompt` (text) -- Question or instruction for the AI. It may include a capture group or an earlier step's result name.
+
+It stores the text it produces for the steps after it: a later step's parameter that is exactly `ask_ai`, or exactly the result name set on this step, receives that text.
+
+Example: `Trigger "^ask (.+)$" with params ["Answer in one short sentence, no preamble: g1"] and result "answer", then use params ["answer"] in a following insert_text step.`
+
+#### Cancel AI fix
+
+Action name: `cancel_fix`. The Pattern Manager lists it under Advanced actions, AI.
+
+Cancels an in-progress AI text correction before it pastes anything back.
+
+Parameters: none.
+
+Example: `Trigger "^cancel fix$" with no params: saying "x-ray cancel fix" stops the running correction.`
+
+#### Fix text with AI
+
+Action name: `fix_text_ai`. The Pattern Manager lists it under Advanced actions, AI.
+
+Captures the text in the focused field, sends it to the configured AI for correction, and pastes the corrected version back.
+
+Parameters: none.
+
+Example: `Trigger "^fix" with no params: saying "x-ray fix" corrects the text in the focused field.`
+
+#### Rewrite text with AI
+
+Action name: `rewrite_text_ai`. The Pattern Manager lists it under Advanced actions, AI.
+
+Captures the text in the focused field, sends it to the configured AI to be rewritten in the style you describe, and pastes the rewritten version back. You write the style sentence and nothing else: Wheelhouse adds the wording that keeps the layout intact and the wording that stops the highlighted text from redirecting the AI.
+
+Parameters, in the order a pattern passes them:
+
+- `instruction` (text) -- One sentence describing the style, addressed to the AI, ending with "Return only the rewritten text." For example: "Rewrite this text in plain language. Keep every fact. Return only the rewritten text."
+
+Example: `Trigger "^simplify$" with params ["Rewrite this text in plain language. Keep every fact. Return only the rewritten text."]: saying "simplify" by itself rewrites the highlighted text in plain language.`
+
+### Clicking
+
+#### Click a control by name
+
+Action name: `click_element`. The Pattern Manager lists it under Advanced actions, Clicking.
+
+Finds a control in the focused window by its spoken name (optionally with a role word like button) and clicks it.
+
+Parameters, in the order a pattern passes them:
+
+- `target` (group_ref) -- Capture group holding the spoken control name, usually g1.
+
+Example: `Trigger "^(?:click|tap)\s+(.+)$" with params ["g1"]: saying "x-ray click submit button" clicks the button labeled Submit. This one needs the hotword first.`
+
+#### Hide numbered click overlay
+
+Action name: `hide_overlay_command`. The Pattern Manager lists it under Advanced actions, Clicking.
+
+Removes the numbered badges painted by the show-numbers command.
+
+Parameters: none.
+
+Example: `Trigger "^(?:hide|dismiss) numbers$" with no params: saying "hide numbers" hides the badges. "dismiss numbers" does the same.`
+
+#### Right- or double-click a control by name
+
+Action name: `click_element_command`. The Pattern Manager lists it under Advanced actions, Clicking.
+
+Parses a full gesture click command (right click X, double click X) and clicks the named control with that mouse gesture.
+
+Parameters, in the order a pattern passes them:
+
+- `utterance` (group_ref) -- Capture group holding the whole spoken command including the gesture words, usually g1.
+
+Example: `Trigger "^((?:right|double)[\s-]+click\s+.+)$" with params ["g1"]: saying "right click recycle bin" opens the context menu of the Recycle Bin icon.`
+
+#### Show numbered click overlay
+
+Action name: `show_overlay_command`. The Pattern Manager lists it under Advanced actions, Clicking.
+
+Paints a number badge on every clickable control on screen so you can say "click" plus a number.
+
+Parameters: none.
+
+Example: `Trigger "^(?:show|apply) numbers$" with no params: saying "show numbers" shows the badges; then "x-ray click 4" clicks control number 4. "apply numbers" does the same.`
+
+### Clipboard
+
+#### Capture clipboard
+
+Action name: `capture_clipboard`. The Pattern Manager's action list does not offer this action.
+
+Reads the current clipboard text and stores it under the name capture_clipboard for a later step to use.
+
+Parameters: none.
+
+It stores the text it produces for the steps after it: a later step's parameter that is exactly `capture_clipboard`, or exactly the result name set on this step, receives that text.
+
+Example: `Trigger "^search$" copies the selection, calls capture_clipboard, then gs uses the stored value as the search query.`
+
+#### Skip clipboard restore
+
+Action name: `skip_clipboard_restore`. The Pattern Manager's action list does not offer this action.
+
+Marks this utterance so the original clipboard content is not restored afterward; used as the first step of copy and cut commands.
+
+Parameters: none.
+
+Example: `First step of "^copy$": [skip_clipboard_restore, then hk ctrl+c] so the copied text stays on the clipboard.`
+
+### Date and pauses
+
+#### Format the current date
+
+Action name: `date`. The Pattern Manager lists it under Advanced actions, Date and pauses.
+
+Formats the current date and time and stores the result under the name date for a later step to insert.
+
+Parameters, in the order a pattern passes them:
+
+- `format` (text) -- Python strftime format string (for example %Y-%m-%d); defaults to the ISO date.
+
+It stores the text it produces for the steps after it: a later step's parameter that is exactly `date`, or exactly the result name set on this step, receives that text.
+
+Example: `Steps [{date, params ["%Y-%m-%d"]}, {insert_text, params ["date"]}]: inserts today's date, like 2026-07-09.`
+
+#### Pause between steps
+
+Action name: `sleep`. The Pattern Manager lists it under Advanced actions, Date and pauses.
+
+Waits the given number of seconds before the next action step runs.
+
+Parameters, in the order a pattern passes them:
+
+- `seconds` (number) -- How long to wait, in seconds; fractions like 0.5 are allowed.
+
+Example: `Steps [{run, params ["notepad.exe"]}, {sleep, params ["1.5"]}, {type_text, params ["hello"]}]: waits 1.5 seconds for Notepad to open before typing.`
+
+### Keyboard
+
+#### Move the cursor by voice
+
+Action name: `cursor_navigate`. The Pattern Manager lists it under Advanced actions, Keyboard.
+
+Parses a spoken navigation phrase like "go right two words" and executes it as keystrokes; unrecognized phrases fall through to dictation.
+
+Parameters, in the order a pattern passes them:
+
+- `utterance` (text) -- The navigation phrase, normally the template "go g1" so the words spoken after "go" are parsed.
+
+Example: `Trigger "^go (.+)" with params ["go g1"]: saying "go home then grab to end" moves to line start then selects to the end of the line.`
+
+#### Press a hotkey
+
+Action name: `hk`. The Pattern Manager lists it under Basic actions.
+
+Presses several keys together as one combination, optionally repeated a number of times.
+
+Parameters, in the order a pattern passes them:
+
+- `keys` (keys) -- Key names held down together, listed in order (for example ctrl, z).
+- `repeat` (number) -- Optional last value: how many times to press the combination (capped at 50); often a capture group like g1 so the spoken number is used.
+
+Example: `Trigger "^undo\s*(\d+)?$" with params ["ctrl", "z", "g1"]: saying "undo 3" presses Ctrl+Z three times.`
+
+#### Press a spoken key sequence
+
+Action name: `press_keys`. The Pattern Manager lists it under Advanced actions, Keyboard.
+
+Turns spoken key names into a key combination and presses it; if any name is unrecognized the whole phrase falls through to dictation.
+
+Parameters, in the order a pattern passes them:
+
+- `key_sequence` (keys) -- Space-separated spoken key names in any order (for example control alt delete); usually the capture group g1.
+
+Example: `Trigger "^press\s*(.+)$" with params ["g1"]: saying "press control alt delete" presses Ctrl+Alt+Delete.`
+
+#### Press one key
+
+Action name: `press`. The Pattern Manager lists it under Advanced actions, Keyboard.
+
+Presses a single key, optionally repeated a number of times.
+
+Parameters, in the order a pattern passes them:
+
+- `key` (key) -- The key to press (for example del or backspace).
+- `repeat` (number) -- Optional repeat count as digits or a number word (capped at 50); often a capture group like g1.
+
+Example: `Trigger "^delete\s*(\d+)?$" with params ["del", "g1"]: saying "delete 3" presses the Delete key three times.`
+
+### Mouse grid
+
+#### Dismiss the mouse grid
+
+Action name: `grid_dismiss_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
+
+Closes the mouse grid without clicking anything.
+
+Parameters: none.
+
+Example: `Trigger "^(?:hide|dismiss) grid$" with no params: saying "hide grid" removes the grid. "dismiss grid" does the same.`
+
+#### Mouse-grid action word
+
+Action name: `grid_action_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
+
+Runs one grid-only action word (mark, drag, or move_here) at the grid's current cell; with the grid closed the word types as normal dictation.
+
+Parameters, in the order a pattern passes them:
+
+- `action` (text) -- Fixed action name: mark, drag, or move_here.
+- `utterance` (group_ref) -- Capture group holding the spoken word for the dictation fallback, usually g1.
+
+Example: `Trigger "^(mark[.!?]?)$" with params ["mark", "g1"]: with the grid open, saying "mark" pins the drag start point; with it closed, "mark" just types the word.`
+
+#### Mouse-grid bare click
+
+Action name: `grid_click_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
+
+Clicks at the open mouse grid's current cell center (click, right click, or double click); with the grid closed the words type as normal dictation.
+
+Parameters, in the order a pattern passes them:
+
+- `utterance` (group_ref) -- Capture group holding the spoken gesture words, usually g1.
+
+Example: `With the grid narrowed to the target, saying "right click" opens the context menu at the cell center.`
+
+#### Mouse-grid number
+
+Action name: `grid_number_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
+
+Narrows the open mouse grid to the spoken cell (1-9); with the grid closed the number types as normal dictation.
+
+Parameters, in the order a pattern passes them:
+
+- `utterance` (group_ref) -- Capture group holding the whole spoken text for the dictation fallback, usually g1.
+- `number_word` (group_ref) -- Capture group holding just the number word or digit, usually g2.
+
+Example: `Saying "five" with the grid open zooms the grid into cell 5; with the grid closed it types "five".`
+
+#### Move the mouse grid to the next monitor
+
+Action name: `grid_next_screen_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
+
+Moves the open mouse grid to the next monitor, resetting it to cover that whole screen.
+
+Parameters: none.
+
+Example: `Trigger "^grid next screen$" with no params: saying "grid next screen" jumps the grid to the other monitor.`
+
+#### Show the mouse grid
+
+Action name: `grid_show_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
+
+Opens the 3x3 mouse grid over the focused monitor; spoken numbers then narrow it to a point you can click, drag, or move to.
+
+Parameters: none.
+
+Example: `Trigger "^(?:show|apply) grid$" with no params: saying "show grid" or "apply grid" paints the grid; "5" then "click" clicks the center.`
+
+### Programs and web
+
+#### Google search
+
+Action name: `gs`. The Pattern Manager lists it under Advanced actions, Programs and web.
+
+Opens a Google search for the given query in the default browser.
+
+Parameters, in the order a pattern passes them:
+
+- `query` (text) -- Search text; may be a capture group, or the name of an earlier step whose stored result to search for (for example capture_clipboard).
+
+Example: `Trigger "^search$" copies the selection, captures the clipboard, then calls gs with params ["capture_clipboard"]: saying "search" by itself Googles the selected text.`
+
+#### Open a web address
+
+Action name: `open_url`. The Pattern Manager lists it under Advanced actions, Programs and web.
+
+Opens a web address in the default browser. Spoken words and earlier step results substitute into the address URL-encoded, so the address itself must start with http:// or https:// -- anything else fails the step and stops the pattern. The site part of the address (everything from http:// or https:// up to the first slash, question mark, or number sign) must be written out in the pattern: a capture group or result name there fails the step, and so does a capture group that did not match any spoken words. The address must use the normal form -- http:// or https:// followed directly by the site name, with no extra slashes and no control characters.
+
+Parameters, in the order a pattern passes them:
+
+- `url_template` (text) -- The full web address, starting with http:// or https://. Capture groups (g1) or an earlier step's result name embedded in it are replaced with their text, URL-encoded so the spoken words arrive as data.
+
+Example: `Trigger "^jira (.+)$" with params ["https://mycompany.atlassian.net/issues/?jql=text~%22g1%22"] searches Jira for the spoken words.`
+
+#### Run a program
+
+Action name: `run`. The Pattern Manager lists it under Basic actions.
+
+Launches a program or command line on the computer.
+
+Parameters, in the order a pattern passes them:
+
+- `command` (path) -- Program path or command line to run, including any arguments (for example explorer.exe ms-settings:).
+
+Example: `Trigger "^Windows? settings$" with params ["explorer.exe ms-settings:"]: saying "windows settings" opens the Windows Settings app.`
+
+#### Run a program and capture its text
+
+Action name: `run_capture`. The Pattern Manager lists it under Advanced actions, Programs and web.
+
+Runs a program without a shell and stores the text it prints for a later step. An optional leading, unquoted TOML number sets the timeout in seconds and is clamped from 0.1 to 60; failures, including output over the configured cap, stop the pattern.
+
+Parameters, in the order a pattern passes them:
+
+- `timeout` (number) -- Optional leading timeout in seconds. It must be an unquoted TOML number and is clamped from 0.1 to 60 seconds. A quoted numeric string is passed to the program as an argument.
+- `program` (path) -- Program path to run. It is run directly, without a shell.
+- `argument` (text) -- Repeatable program argument. Add one separate field for each argument; no shell parsing is performed.
+
+It stores the text it produces for the steps after it: a later step's parameter that is exactly `run_capture`, or exactly the result name set on this step, receives that text.
+
+Example: `Trigger "^look up (.+)$" with params [0.5, "C:\\Tools\\lookup.exe", "g1"] and result "answer", then use params ["answer"] in a following insert_text step.`
+
+#### Switch to a window
+
+Action name: `activate`. The Pattern Manager lists it under Basic actions.
+
+Brings a window to the front, found by program name (a target ending in .exe) or by window-title pattern; the reserved target default_browser resolves to your default browser.
+
+Parameters, in the order a pattern passes them:
+
+- `target` (exe_or_title) -- Program executable name (notepad.exe), a window-title pattern, or the reserved word default_browser.
+
+Example: `Trigger "^notepad$" with params ["notepad.exe"]: saying "notepad", and nothing else in that utterance, focuses the Notepad window.`
+
+### Scrolling
+
+#### Scroll the mouse wheel
+
+Action name: `scroll`. The Pattern Manager lists it under Advanced actions, Scrolling.
+
+Turns the mouse wheel a number of notches, up, down, left or right, without moving or pressing the mouse.
+
+Parameters, in the order a pattern passes them:
+
+- `direction` (choice: `up`, `down`, `left`, `right`) -- Which way to turn the wheel.
+- `clicks` (number) -- Optional last value: how many wheel notches to send (capped at 50); often a capture group like g1 so the spoken number is used.
+
+Example: `Trigger "^scroll down\s*(\d+)?$" with params ["down", "g1"]: saying "scroll down 3" turns the wheel three notches down.`
+
+#### Start scrolling and keep going
+
+Action name: `start_continuous_scroll`. The Pattern Manager lists it under Advanced actions, Scrolling.
+
+Starts turning the mouse wheel over and over, in one direction, until a stop command arrives or the time limit is reached.
+
+Parameters, in the order a pattern passes them:
+
+- `direction` (choice: `up`, `down`, `left`, `right`) -- Which way to keep turning the wheel.
+
+Example: `Trigger "^start scrolling down$" with params ["down"]: saying "start scrolling down" scrolls down until you say "stop scrolling".`
+
+#### Stop the scrolling
+
+Action name: `stop_continuous_scroll`. The Pattern Manager lists it under Advanced actions, Scrolling.
+
+Stops a scroll that was started with the continuous scroll command. It takes no direction and does nothing when no scroll is running.
+
+Parameters: none.
+
+Example: `Trigger "^stop scrolling$" with no params: saying "stop scrolling" ends the scroll that is running.`
+
+### Text
+
+#### Insert blank lines
+
+Action name: `insert_newlines`. The Pattern Manager lists it under Advanced actions, Text.
+
+Inserts the given number of newline characters (up to 50).
+
+Parameters, in the order a pattern passes them:
+
+- `count` (number) -- How many newlines to insert, as digits or a number word; capped at 50.
+
+Example: `Trigger "^blank lines (\d+)$" with params ["g1"]: saying "blank lines 3" inserts three newlines.`
+
+#### Insert raw text
+
+Action name: `insert_raw`. The Pattern Manager lists it under Advanced actions, Text.
+
+Inserts exact text at the cursor via paste, with no added space, capitalization, or cleanup.
+
+Parameters, in the order a pattern passes them:
+
+- `text` (text) -- The exact characters to insert; may be a capture group like g1.
+
+Example: `Trigger "^insert\s*(.+)$" with params ["g1"]: saying "insert TODO:" inserts "TODO:" exactly, no leading space.`
+
+#### Insert text
+
+Action name: `insert_text`. The Pattern Manager lists it under Basic actions.
+
+Inserts text at the cursor with intelligent spacing and capitalization.
+
+Parameters, in the order a pattern passes them:
+
+- `text` (text) -- The text to insert; may be a capture group like g1 to insert the spoken words.
+
+Example: `Trigger "literal (.+)$" with params ["g1"]: saying "literal submit" inserts the word "submit" as text instead of firing the submit command.`
+
+#### Numbered list item
+
+Action name: `number_point`. The Pattern Manager lists it under Advanced actions, Text.
+
+Converts a spoken number to the digit followed by a period, for numbered lists.
+
+Parameters, in the order a pattern passes them:
+
+- `number` (number) -- The number as a word (one) or digits (1); usually the capture group g1.
+
+Example: `Trigger "^item (\d+)$" with params ["g1"]: saying "item 5" inserts "5.".`
+
+#### Replace matched words with text
+
+Action name: `text`. The Pattern Manager lists it under Advanced actions, Text.
+
+The standard replacement action: inserts the given text with intelligent spacing, and an empty value silently discards the matched words.
+
+Parameters, in the order a pattern passes them:
+
+- `template` (text) -- Replacement text; may reference capture groups; an empty string swallows the match (used to filter phrases like "okay Google").
+
+Example: `Trigger "\bperiod\b" with params ["."]: saying "period" during dictation inserts "." instead of the word.`
+
+#### Select a spoken phrase
+
+Action name: `select_phrase`. The Pattern Manager lists it under Advanced actions, Text.
+
+Finds the first match of the spoken words in the focused text control and selects it. The match is exact apart from letter case.
+
+Parameters, in the order a pattern passes them:
+
+- `phrase` (text) -- The words to find; may be a capture group like g1.
+
+Example: `Trigger "^select (.+)$" with params ["g1"]: saying "x-ray select brown fox" selects the first "brown fox" in the document. This one needs the hotword first.`
+
+#### Transform selected text
+
+Action name: `transform_selection`. The Pattern Manager lists it under Advanced actions, Text.
+
+Changes the currently selected text: case conversion (snake case, title case, and so on) or wrapping in quotes or brackets.
+
+Parameters, in the order a pattern passes them:
+
+- `transformation` (choice: `quote`, `single_quote`, `bracket`, `parenthesis`, `angle_bracket`, `curly_bracket`, `uppercase`, `lowercase`, `capitalize`, `title_case`, `snake_case`, `camel_case`, `pascal_case`, `kebab_case`, `compress`) -- Which transformation to apply to the selection.
+
+Example: `Trigger "^snake case$" with params ["snake_case"]: with "hello world" selected, saying "snake case" replaces it with "hello_world".`
+
+#### Type captured words literally
+
+Action name: `literal`. The Pattern Manager lists it under Advanced actions, Text.
+
+Types the captured words exactly as spoken, bypassing all pattern processing and smart spacing.
+
+Parameters, in the order a pattern passes them:
+
+- `text` (group_ref) -- The words to type, usually the capture group g1.
+
+Example: `Trigger "^say (.+)$" with params ["g1"]: saying "say hello" types "hello" with no command matching or cleanup.`
+
+#### Type text exactly
+
+Action name: `type_text`. The Pattern Manager lists it under Advanced actions, Text.
+
+Types text character for character with no smart spacing or capitalization.
+
+Parameters, in the order a pattern passes them:
+
+- `text` (text) -- The exact text to type; may be a capture group like g1.
+
+Example: `Trigger "^find\s*(.*)$" presses Ctrl+F then calls type_text with params ["g1"]: saying "x-ray find hello" opens Find and types "hello".`
+
+#### Wrap in delimiters
+
+Action name: `wrap_or_insert`. The Pattern Manager lists it under Advanced actions, Text.
+
+Wraps the selection or the captured words in the given delimiters, or inserts an empty delimiter pair with the cursor between when there is nothing to wrap.
+
+Parameters, in the order a pattern passes them:
+
+- `left_fence` (text) -- Opening delimiter (for example ( or ").
+- `right_fence` (text) -- Closing delimiter (for example ) or ").
+- `text` (group_ref) -- Capture group holding the words to wrap (usually g1); may be empty.
+
+Example: `Trigger "\bparentheses(.*)$" with params ["(", ")", "g1"]: saying "parentheses hello" inserts "(hello)"; saying just "parentheses" wraps the selection or inserts "()".`
+
+### Wheelhouse
+
+#### Open online help
+
+Action name: `wheelhouse_help_online`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
+
+Opens the configured online help page in the default browser.
+
+Parameters: none.
+
+Example: `Trigger "^help$" with no params: saying "x-ray help" opens the help page.`
+
+#### Open the Pattern Manager
+
+Action name: `open_pattern_manager`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
+
+Opens the Pattern Manager window for viewing and editing voice patterns.
+
+Parameters: none.
+
+Example: `Trigger "^patterns?$" with no params: saying "x-ray patterns" opens the Pattern Manager.`
+
+#### Set speech interaction mode
+
+Action name: `set_speech_interaction_mode`. The Pattern Manager's action list does not offer this action.
+
+Switches how the microphone is engaged: click to talk (toggle) or push to talk.
+
+Parameters, in the order a pattern passes them:
+
+- `mode` (choice: `toggle`, `push_to_talk`) -- The interaction mode to switch to.
+
+Example: `Trigger "^push to talk mode$" with params ["push_to_talk"]: saying it switches the microphone to push-to-talk.`
+
+#### Stop listening
+
+Action name: `stop_listening`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
+
+Switches listening off, as clicking the floating button does while it listens. In toggle mode, say the wake word to switch it back on; in push-to-talk mode the wake word ends only the idle pause, so hold the floating button again.
+
+Parameters: none.
+
+Example: `Trigger "^stop listening$": saying it by itself switches listening off.`
+
+#### Teach WheelHouse your voice
+
+Action name: `open_calibration`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
+
+Opens the voice-teaching window, where WheelHouse learns how you sound so it stops missing short words. Only the Distil-Whisper speech engine uses it.
+
+Parameters: none.
+
+Example: `Trigger "^learn my voice$" with no params: saying "learn my voice" opens the voice-teaching window.`
+
+#### Teach word to speech engine
+
+Action name: `add_hint_to_stt`. The Pattern Manager's action list does not offer this action.
+
+Sends the clipboard text to the speech-recognition server as a vocabulary hint so it is transcribed correctly.
+
+Parameters: none.
+
+Example: `Trigger "^boost$": select a word, say "boost" by itself, and the word is copied and sent to the speech engine as a hint.`
+
+## Notice Reference
+
+The titles of the notices, message boxes, and windows that Wheelhouse shows, each written exactly as it appears on screen. Each row says when the title appears, what it means, and what to do. The words in parentheses after a title say what kind of notice or window it is.
+
+| Title | When it appears | What it means | What to do |
+|---|---|---|---|
+| **Open a program** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. The New Pattern window opens on the list "What do you want to happen?". This is the first choice. | This choice starts a voice command that opens a program, such as Notepad. | Click it, or select it with the arrow keys and press Enter. The editor opens with "Launch a program" selected. Type the words you will say. In the Program box, type the program name, or click Browse... to pick the file. Then click Create. |
+| **Switch to an app** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the second choice in the list "What do you want to happen?". | This choice starts a voice command that brings a window that is already open to the front. | Click it, or select it and press Enter. The editor opens with "Activate a window" selected. Type the words you will say. In the Window/process box, type the window title or program name, such as brave.exe. Then click Create. |
+| **Press a keyboard shortcut** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the third choice in the list "What do you want to happen?". | This choice starts a voice command that presses keys for you, such as Ctrl+S to save. | Click it, or select it and press Enter. The editor opens with "Press a key combination" selected. Type the words you will say. In the Keys box, type the keys joined with +, such as ctrl+s. Or click Record and press the shortcut; Escape cancels the recording. Then click Create. |
+| **Type a phrase you say often** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the fourth choice in the list "What do you want to happen?". | This choice makes a shortcut phrase. When you dictate the phrase, Wheelhouse types your saved text in its place, such as your email address. | Click it, or select it and press Enter. The editor opens with "Insert text" selected. Type the phrase you will say, such as my email. In the "Text to type:" box, type the exact text for Wheelhouse to type. Then click Create. |
+| **Correct a word the microphone keeps getting wrong** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the fifth choice in the list "What do you want to happen?". | This choice fixes a word that speech recognition keeps getting wrong. When dictation produces the wrong word, Wheelhouse types the right one. | Click it, or select it and press Enter. In "What does the microphone type by mistake?", type the wrong word, such as jason. In "What should it type instead?", type the right word, such as JSON. Then click Create. |
+| **Start from scratch** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the last choice in the list "What do you want to happen?". | This choice opens the editor with no goal filled in. Every option stays available. | Click it, or select it and press Enter. The editor opens with "Press a key combination" selected. Under "What should happen?", pick the action you want. Tick Advanced for the full editor. Then click Create. |
+| **Select Program** (file picker) | You click Browse... next to the Program box in the pattern editor. The Program box shows when "Launch a program" is selected. | This picker lets you choose the program file instead of typing its path. | Find the program's .exe file and click Open. To see other files, pick All Files in the file type list. Wheelhouse puts the full path in the Program box. |
+| **Pattern Manager Help** (help window) | You click the "? Help" button in the Pattern Manager. | This window explains patterns, commands and replacements, the wake word, the editor, and Advanced mode. It also lists every action the editor offers. | Read or scroll the page. A link to a part of the page jumps there. A web link opens in your browser. Click Close when you are done. |
+| **Change Wake Word** (input box) | You click Change... next to "Wake word:" in the Pattern Manager. | This box sets the wake word. You say the wake word before commands marked [hotword]. | Type one word with no spaces, and click OK. Click Cancel to keep the current word. For an empty entry or more than one word, Wheelhouse shows an error under the wake word row. |
+| **Error Creating Pattern** (message box) | You clicked Create in the pattern editor, then closed the editor before Wheelhouse answered. Wheelhouse then reported that it could not create the pattern. While the editor stays open, it shows such an error inside the editor instead. | The new pattern was not saved. The message text is the reason Wheelhouse gave. | Click OK. Open the editor again the same way and enter the pattern again. If the same message comes back, read its reason and fix that problem first. |
+| **Error Updating Pattern** (message box) | You clicked Save while you edited one of your patterns, then closed the editor before Wheelhouse answered. Wheelhouse then reported that it could not save the change. | Your change to the pattern was not saved. The message text is the reason Wheelhouse gave. | Click OK. Select the pattern, click Edit..., and make the change again. |
+| **Error Deleting Pattern** (message box) | You clicked Delete Pattern or Remove customization, then clicked Yes. Wheelhouse could not delete the pattern. | Wheelhouse did not delete the pattern. The message gives the reason, for example that the pattern was not found. | Click OK. Close and reopen the Pattern Manager to refresh the list. If the pattern is still in the list, try again. |
+| **WheelHouse settings** (notice) | You moved or resized the floating button, or turned Show Floating Button on or off. Wheelhouse shows it while it saves the change, and again if the save fails. The "Do not show this again" box in the "Ask the Wheelhouse Assistant" window also saves this way. | "Saving settings. Waiting for confirmation." means the save is in progress. The notice closes when the save succeeds. "Couldn't save settings" and "Couldn't send settings" mean the change was not saved. Wheelhouse then puts back the last saved values. "Settings outcome unknown" means no answer came within five seconds. Wheelhouse then reads the saved settings and uses them. It tries this up to three times. "Couldn't confirm the settings" means Wheelhouse got no answer, so the change may not be saved. | While it says "Saving settings" or "Settings outcome unknown", wait. After a message that starts with "Couldn't", make the change again. For "Couldn't change button visibility", select Show Floating Button in the menu again. |
+| **Terminal Dictation** (window) | You dictate while a terminal window is in front and waiting at its prompt. Windows Terminal, Command Prompt, and PowerShell count as terminals. Wheelhouse opens this window and types your words into it. The terminal inside Visual Studio Code does not open this window. A terminal that runs as administrator does not open this window either. | Wheelhouse collects your dictated command here, so you can check it before it reaches the terminal. | Check or edit the text. Press Enter or click Submit to paste the text into the terminal and run it. Press Shift+Enter for a new line. Press Escape or click Cancel to close the window and discard the text. |
+| **Terminal paste failed** (Windows notification) | You pressed Enter or clicked Submit in the Terminal Dictation window. Wheelhouse could not paste the text into the terminal. | Wheelhouse did not press Enter in the terminal, so the command did not run. The Terminal Dictation window closed and its text was cleared. In some cases the text already reached the terminal prompt. | Click the terminal and check its prompt. Then dictate the command again. Wheelhouse does not paste into a terminal that runs as administrator. Type the command there with the keyboard. |
+| **Wheelhouse: Speech setup** (Windows notification) | Wheelhouse checks each speech engine's installed files once, when it first starts a speech engine after launch. It shows this notice when an engine's files are out of date. It also shows it when Windows lacks a new enough Microsoft Visual C++ runtime. | Speech can fail to start, or the speech engine can crash. Wheelhouse shows one notice for each problem it finds. | If the message says "Speech environment is out of date", run the Wheelhouse installer again. For the Visual C++ runtime message, run the installer again and select Yes when Windows asks for permission. If you already did that, restart the computer. |
+| **Wheelhouse: STT Choice Not Saved** (Windows notification) | You picked a speech engine from STT Provider in the right-click menu. The settings file could not record the choice. | Wheelhouse already stopped the old engine and started the new one, so the new engine is running now. The settings file was not changed. It has a plain value where its stt section belongs, so it cannot store the choice. The next time Wheelhouse starts, it will not remember this choice. | Select Exit in the menu to close Wheelhouse. Open the settings file, %LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml, in Notepad. Find the line that sets stt to one value, such as stt = "whisper", and delete it. Or copy config.toml.example over config.toml to restore every default. Then start Wheelhouse and pick the engine again from STT Provider. |
 
 ## Configuration Reference
 

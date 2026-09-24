@@ -830,9 +830,14 @@ MUTATIONS = [
     {
         "name": "the-monitor-ignores-a-recorded-undeclared-failure",
         "file": LAUNCHER,
+        # The first line alone also guards the watchdog report in
+        # start_provider, so the line under it is what makes this the
+        # monitor's record read (wh-gate-remote-stt-patterns-repair).
         "old": """                if generation is not None:
+                    undeclared_failure = (
 """,
         "new": """                if False:
+                    undeclared_failure = (
 """,
         "selection": [LG, STOP],
         "catchers": [
@@ -1142,40 +1147,17 @@ MUTATIONS = [
         # Refreshed for wh-launch-signal-eviction: the stamp block
         # gained the slot creation and the monitor's hold, both of
         # which belong inside the same lock this mutation removes.
+        # Refreshed again for wh-gate-remote-stt-patterns-repair: the
+        # lock block now opens with the watchdog retry's own check, so
+        # the lock line is replaced in place rather than the stamp
+        # moved out below it. A stamp moved out still waits on the
+        # `with` line's acquire, and that mutant survived every catcher
+        # while the stamp stayed ordered against the guards.
         "old": """            with self._launch_signals_lock:
-                self._launch_generation_counter += 1
-                generation = self._launch_generation_counter
-                self._launch_generations[provider_name] = generation
-                self._current_launch_generation = generation
-                self._provider_ready_event.clear()
-                self._provider_startup_failed = False
-                self._open_launch_signal(generation)
-                # The startup monitor holds this slot for its whole
-                # bounded wait, but it does not begin until after the
-                # Popen and the port-file write below. Taking the hold
-                # here, under the lock that stamps the launch, is what
-                # stops the cap dropping the slot across that span
-                # (wh-launch-signal-eviction). Released by
-                # `_monitor_startup`'s `finally`, or by the handler
-                # below on the one path that returns without a monitor.
-                self._claim_launch_signal(generation)
+                if _watchdog_generation is not None:
 """,
-        "new": """            self._launch_generation_counter += 1
-            generation = self._launch_generation_counter
-            self._launch_generations[provider_name] = generation
-            self._current_launch_generation = generation
-            self._provider_ready_event.clear()
-            self._provider_startup_failed = False
-            self._open_launch_signal(generation)
-            # The startup monitor holds this slot for its whole
-            # bounded wait, but it does not begin until after the
-            # Popen and the port-file write below. Taking the hold
-            # here, under the lock that stamps the launch, is what
-            # stops the cap dropping the slot across that span
-            # (wh-launch-signal-eviction). Released by
-            # `_monitor_startup`'s `finally`, or by the handler
-            # below on the one path that returns without a monitor.
-            self._claim_launch_signal(generation)
+        "new": """            if True:
+                if _watchdog_generation is not None:
 """,
         "selection": [LG],
         "catchers": [
@@ -1209,14 +1191,18 @@ MUTATIONS = [
     {
         "name": "the-ready-wakes-the-current-launchs-slot-not-the-senders",
         "file": LAUNCHER,
+        # Refreshed for wh-gate-remote-stt-patterns-repair: the ready
+        # path now records on the slot whether the launch failed.
         "old": """        with self._launch_signals_lock:
             signal = self._launch_signal(generation)
             if signal is not None:
+                signal.ready = not signal.failed
                 signal.event.set()
 """,
         "new": """        with self._launch_signals_lock:
             signal = self._launch_signal(self._current_launch_generation)
             if signal is not None:
+                signal.ready = not signal.failed
                 signal.event.set()
 """,
         "selection": [LG],
@@ -2535,17 +2521,35 @@ MUTATIONS = [
         # assertion. Just before the lock is the same defect with the
         # same argument: the dialog names a launch that does not exist
         # yet, and `generation` is None there
-        # (wh-launch-addressed-notices).
+        # (wh-launch-addressed-notices). Refreshed for
+        # wh-gate-remote-stt-patterns-repair: the lock block now opens
+        # with the watchdog retry's own check, so the pattern carries
+        # that check to keep the insertion point before the lock.
         "name": "the-dialog-is-raised-before-its-launch-exists",
         "file": LAUNCHER,
         "old": """            with self._launch_signals_lock:
+                if _watchdog_generation is not None:
+                    previous = self._launch_signal(_watchdog_generation)
+                    if (
+                        self._launch_generations.get(provider_name) != _watchdog_generation
+                        or self._watchdog_shutdown or previous is None
+                        or previous.stop_requested
+                    ):
+                        return False
+                    # This callback only compares/writes StateManager's record
+                    # under its record lock. Publish BEFORE a fast failed spawn
+                    # can report the new generation. No notification, queue put,
+                    # process operation or await is allowed in this callback.
+                    if _on_restarting is None or not _on_restarting(self._launch_generation_counter + 1):
+                        return False
                 self._launch_generation_counter += 1
                 generation = self._launch_generation_counter
                 self._launch_generations[provider_name] = generation
                 self._current_launch_generation = generation
                 self._provider_ready_event.clear()
                 self._provider_startup_failed = False
-                self._open_launch_signal(generation)
+                new_signal = self._open_launch_signal(generation)
+                new_signal.watchdog_retry_used = _watchdog_generation is not None
                 # The startup monitor holds this slot for its whole
                 # bounded wait, but it does not begin until after the
                 # Popen and the port-file write below. Taking the hold
@@ -2572,13 +2576,24 @@ MUTATIONS = [
         "new": """            self._show_working(f"Loading {display_name}", generation)
 
             with self._launch_signals_lock:
+                if _watchdog_generation is not None:
+                    previous = self._launch_signal(_watchdog_generation)
+                    if (
+                        self._launch_generations.get(provider_name) != _watchdog_generation
+                        or self._watchdog_shutdown or previous is None
+                        or previous.stop_requested
+                    ):
+                        return False
+                    if _on_restarting is None or not _on_restarting(self._launch_generation_counter + 1):
+                        return False
                 self._launch_generation_counter += 1
                 generation = self._launch_generation_counter
                 self._launch_generations[provider_name] = generation
                 self._current_launch_generation = generation
                 self._provider_ready_event.clear()
                 self._provider_startup_failed = False
-                self._open_launch_signal(generation)
+                new_signal = self._open_launch_signal(generation)
+                new_signal.watchdog_retry_used = _watchdog_generation is not None
                 self._claim_launch_signal(generation)
 """,
         "selection": [LG],
@@ -2655,7 +2670,10 @@ MUTATIONS = [
     {
         "name": "the-notice-skips-its-delivery-time-check",
         "file": LAUNCHER,
-        "old": """            if not self.launch_is_current(generation):
+        # Refreshed for wh-gate-remote-stt-patterns-repair: the check
+        # now reads a `selected` answer that also covers a per-provider
+        # notice, so disabling the drop disables it for both kinds.
+        "old": """            if not selected:
 """,
         "new": """            if False:
 """,
@@ -2674,9 +2692,11 @@ MUTATIONS = [
         # no launch is refused instead of delivered.
         "name": "the-notice-check-drops-an-unstamped-notice",
         "file": LAUNCHER,
-        "old": """            if not self.launch_is_current(generation):
+        # Refreshed for wh-gate-remote-stt-patterns-repair: the
+        # launch-wide answer is now the `else` arm of `selected`.
+        "old": """                        else self.launch_is_current(generation))
 """,
-        "new": """            if generation != self._current_launch_generation:
+        "new": """                        else generation == self._current_launch_generation)
 """,
         "selection": [LG],
         "catchers": [
@@ -2772,19 +2792,21 @@ MUTATIONS = [
     {
         "name": "the-start-failure-notice-drops-its-launch",
         "file": LAUNCHER,
+        # Refreshed for wh-gate-remote-stt-patterns-repair: the line
+        # under the call is now the watchdog retry's branch.
         "old": """            self._notify(
                 display_name,
                 "Failed to start - try restarting Wheelhouse",
                 generation,
             )
-            self._provider_stopped(provider_name, generation=generation)
+            if _watchdog_generation is not None:
 """,
         "new": """            self._notify(
                 display_name,
                 "Failed to start - try restarting Wheelhouse",
                 None,
             )
-            self._provider_stopped(provider_name, generation=generation)
+            if _watchdog_generation is not None:
 """,
         "selection": [LG],
         "catchers": [

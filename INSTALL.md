@@ -32,13 +32,26 @@ If Windows shows a "Windows protected your PC" screen, see [Security warnings](#
 
 Wheelhouse installs for one user account. Administrator rights are not required. The one change outside your user account is the Microsoft Visual C++ runtime in step 3, which Windows installs for the whole computer after its permission prompt. If that prompt cannot be approved, setup still finishes, and its final page says that the runtime was not installed.
 
-**Command-line installation.** The same install runs as one PowerShell line, asking only the speech-engine, start-at-login (defaults to no), and start-now questions as text prompts. It asks nothing about the AI helper: the AI choice is given as an argument instead, or left out to install without AI. The one-line command cannot carry arguments; to pass one, download install-wheelhouse.ps1 from the release page and run it as a file, for example `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode local`.
+**Running the wizard again to update.** When Wheelhouse is already installed, the AI helper page shows "Leave my AI helper setting unchanged." in place of "Skip for now (recommended). You can set this up later." The wizard pre-selects it. It keeps the current AI helper setting and any saved access key as they are, including a local AI model set up from the command line. The other choice, the Google cloud model, replaces the current setting.
+
+**Command-line installation.** The same install runs as one PowerShell line, asking only the speech-engine, start-at-login, and start-now questions as text prompts; both start questions default to no. It asks nothing about the AI helper: the AI choice is given as an argument instead, or left out, which installs without AI on a first install and keeps the current AI setting on an update. The one-line command cannot carry arguments; to pass one, download install-wheelhouse.ps1 from the release page and run it as a file, for example `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode local`.
 
 ```
 irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
 ```
 
 **Setting up the AI helper on this machine.** Adding `-AiMode local` to the command-line installer sets up an AI model that runs on your own computer, with no account, no key, and no text leaving the machine. Setup measures the hardware before downloading anything: a graphics card of any make with 4 GB or more of video memory runs the model on the card, a machine with 16 GB or more of system memory runs it on the processor instead, which works but is slow -- about 3 seconds for a short correction and about 12 seconds for a long one -- and a machine with less than both is told why and left with the AI features switched off rather than having several gigabytes downloaded that could not run. `-AiMode cloud` selects the Google cloud model the wizard offers, `-AiMode off` installs without AI, and `-AiMode keep` leaves an existing AI configuration alone on a re-run.
+
+**Command-line switches.** The first three switches below answer the three text prompts in advance, so the installer does not ask them. The three AI switches give the details of the cloud AI helper and work only with `-AiMode cloud`. Pass them by running the script as a file, as described above.
+
+- `-SttProvider` chooses the speech engine: `parakeet_tdt` (Parakeet), `google_stt` (Google Cloud), or `distil_medium_en` (Distil-Whisper). Left out, the installer asks. Pressing Enter keeps Parakeet on a new install, or the current engine on an update when this computer can still run it. `distil_medium_en` on a computer without a suitable NVIDIA graphics card installs Parakeet instead and says so. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -SttProvider google_stt`
+- `-AutoStart` sets whether Wheelhouse starts when you log in: `yes` or `no`. Left out, the installer asks, and the default answer is no. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AutoStart yes`
+- `-StartNow` sets whether Wheelhouse starts when the install finishes: `yes` or `no`. Left out, the installer asks, and the default answer is no. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -StartNow yes`
+- `-AiApiKey` gives the access key for the cloud AI helper. Setup reads it only together with `-AiMode cloud` and ignores it otherwise. Setup saves the key in the user environment variable WHEELHOUSE_AI_API_KEY, never in the settings file. It has no default: with `-AiMode cloud` and no key, setup leaves AI off, clears any saved key, and says so. Other programs on the computer can read a command line while the install runs. To keep the key off the command line, set the environment variable WHEELHOUSE_AI_API_KEY_INPUT to the key in the same PowerShell window and leave `-AiApiKey` out. The command is `$env:WHEELHOUSE_AI_API_KEY_INPUT = '<your key>'`. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode cloud -AiApiKey <your key>`
+- `-AiBaseUrl` sets the address of the cloud AI service. Setup reads it only with `-AiMode cloud` and a key. The default is Google's address, `https://generativelanguage.googleapis.com/v1beta/openai/`. Another address must belong to an AI service that accepts requests in the same format as OpenAI's ChatGPT service. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode cloud -AiApiKey <your key> -AiBaseUrl https://example.com/v1/`
+- `-AiModel` sets the name of the cloud AI model. Setup reads it only with `-AiMode cloud` and a key. The default is `gemini-2.5-flash-lite`. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode cloud -AiApiKey <your key> -AiModel gemini-2.5-flash`
+
+Two further switches, `-Force` and `-KeepData`, apply only to uninstalling; see [Uninstalling Wheelhouse](#uninstalling-wheelhouse).
 
 ### What you need
 
@@ -113,6 +126,11 @@ The uninstaller will not run while Wheelhouse is running -- exit it first by rig
 2. **"Keep your personal data?"** -- the settings file, voice patterns, and the downloaded speech model.
 
 Removed through Windows instead, after a Setup.exe install, only the second question is asked: Windows has already asked whether to uninstall, so the wizard puts the keep-or-remove choice to you and then runs the same uninstaller without repeating the first question.
+
+Two switches answer those questions in advance. Both work only together with `-Uninstall`, and neither takes a value; left out, the uninstaller asks. Neither one skips the check that Wheelhouse is not running.
+
+- `-Force` skips both questions and removes everything, personal data included, unless `-KeepData` is also given. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -Uninstall -Force`
+- `-KeepData` answers the second question with keep. Without `-Force`, the first question is still asked. Example: `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -Uninstall -Force -KeepData` removes Wheelhouse without asking and keeps your personal data.
 
 What each answer does:
 
