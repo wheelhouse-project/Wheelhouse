@@ -269,6 +269,7 @@ def _make_controller(*, debounce_ms: int = 250, enabled: bool = True):
         "_on_overlay_foreground_change",
         "_on_overlay_focused_hwnd_destroyed",
         "_apply_overlay_event",
+        "_overlay_mark_visible_window_left",
         "_reconcile_overlay_destroy_hook",
         "overlay_snapshot_is_valid_on_resume",
         "_mint_overlay_trace_id",

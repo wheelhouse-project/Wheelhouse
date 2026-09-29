@@ -4,21 +4,33 @@ Run it from services/wheelhouse:
 
     python tests/mutation_gate_whole_utterance.py
 
-Stage 3 defers impossible buffers to the utterance end, judges
-whole_utterance_only patterns against the utterance's word list, and
-(item-20 R1) splits a trailing command word off dictation-bound
-payloads at marker-driven finalization. The mutations disable each of
-those pieces one at a time; the catchers are the Stage-3 suites
-(tests/test_whole_utterance_finalization.py,
-tests/e2e/test_e2e_trailing_at_utterance_end.py,
+Stage 3 defers impossible buffers to the utterance end and judges
+whole_utterance_only patterns against the utterance's word list. The
+mutations disable each of those pieces one at a time; the catchers are
+the Stage-3 suites (tests/test_whole_utterance_finalization.py,
 tests/test_router_gaps.py, tests/test_retraction_replay_guard.py) plus
-the absorbed bare-number suite.
+the absorbed bare-number suite, the held-tail suite and the badge-click
+suite.
+
+wh-remove-trailing-submit removed the item-20 R1 split, the trailing
+command it armed, and the eight mutations whose code went with them
+(r1-split-hotword-gate-dropped, r1-split-never,
+finalization-consume-skips-trailing, stale-gate-restored,
+split-site-sends-end-early, remainder-site-sends-end-early,
+marker-branch-post-consume-send-dropped, punctuated-rematch-dropped).
+Mutations whose code outlived the split were retargeted to the tests
+that still depend on that code. One more, flag-driven-split-dropped
+(the flagged-last-word arm of _utterance_end_is_confirmed), lost its
+only catcher with the split: measured by applying it and running all six
+files, 0 failures. BOSS RULING 02:27 2026-09-27 (Q3) restored it, with a
+new catcher in the badge-click suite: a multi-word badge number whose
+last word carries the in-process bridge's end_of_utterance flag.
 
 Run a subset with --only name1,name2 (the skill's run-scope rule:
 re-run only mutations added or whose target code / catching test
 changed this round; the full sweep runs once before the final commit).
 
-Thirty-one mutations across speech/router.py and
+Twenty-three mutations across speech/router.py and
 speech/speech_processor.py:
 
   deferral-restored-finalize   Step 3 finalizes impossible buffers at
@@ -35,13 +47,6 @@ speech/speech_processor.py:
   lifecycle-finalize-drop      The lifecycle-reset branch stops
                                finalizing a deferred buffer before the
                                end_utterance/start_utterance pair.
-  r1-split-hotword-gate-dropped  The R1 split stops exempting
-                               hotword-authorized dictation.
-  r1-split-never               The R1 split never recognizes a
-                               trailing last word.
-  finalization-consume-skips-trailing  The post-finalization consume
-                               stops firing a finalization-armed
-                               trailing word.
   marker-consume-skips-bare-number  The end-marker consume stops
                                clicking a held bare number (the
                                19(b) guard's hand-proven mutation,
@@ -54,22 +59,14 @@ speech/speech_processor.py:
   span-fused-head-exact-again  The span head check reverts to exact
                                string equality, rejecting a fused
                                "xray" (review finding .3.1.2).
-  flag-driven-split-dropped    _utterance_end_is_confirmed stops
-                               recognizing the flagged last word, so
-                               the R1 split misses the in-process
-                               bridge's ruled split (review finding
-                               .3.1.1; retargeted to the extracted
-                               helper by .1.5).
   marker-active-never-set      The end-marker branch stops declaring
-                               its finalization context, so the
-                               marker-driven split never applies.
-  stale-gate-restored          The split reads the stale
-                               _pending_utterance_end slot again
-                               instead of calling
-                               _utterance_end_is_confirmed, so a
-                               timeout finalization splits without a
-                               confirmed utterance end (review finding
-                               .3.1.3 instance 4; retargeted by .1.5).
+                               its finalization context.
+  flag-driven-split-dropped    _utterance_end_is_confirmed stops
+                               counting a flagged last real word as a
+                               confirmed end, so the in-process
+                               bridge's finalization types a
+                               multi-word badge number instead of
+                               clicking it.
   lifecycle-pair-skip-on-raise The lifecycle-reset branch stops
                                catching a finalization raise, so the
                                end/start pair is skipped (review
@@ -87,38 +84,22 @@ speech/speech_processor.py:
                                pair and a pre-held tail dictates
                                instead of acting (review findings
                                .3.1.4, .3.1.8).
-  split-site-sends-end-early   The DICTATE split site sends the
-                               deferred end_utterance before the
-                               armed action fires (review finding
-                               .3.1.5).
-  remainder-site-sends-end-early  The EXECUTE remainder site sends
-                               the deferred end_utterance before the
-                               armed action fires (review finding
-                               .3.1.5).
-  marker-branch-post-consume-send-dropped  The end-marker branch
-                               stops sending the deferred
-                               end_utterance a split site left
-                               pending (review finding .3.1.5).
   lifecycle-marker-active-never-set  The lifecycle-reset branch stops
                                declaring its finalization context, so
-                               the R1 split never applies to the
-                               Mode-1 close (review finding .3.1.6,
-                               boss ruling (a)).
+                               the Mode-1 close no longer counts as a
+                               confirmed utterance end (review finding
+                               .3.1.6, boss ruling (a)).
   lifecycle-consume-dropped    The lifecycle-reset branch stops
                                consuming the finalization-armed tail
                                before the pair (review finding
-                               .3.1.6, boss ruling (a)).
-  punctuated-rematch-dropped   The trailing-action re-match reads the
-                               raw token again, so STT terminal
-                               punctuation turns the fired command
-                               into dictation (review finding
-                               .3.1.7).
+                               .3.1.6, boss ruling (a);
+                               wh-spaced-punctuation-names-unresolved
+                               .3.1.4).
   lifecycle-preheld-flush-restored  The lifecycle-reset branch flushes
                                the pre-held tail as dictation again
                                instead of consuming it, so a pre-held
-                               trailing command types its word and a
-                               pre-held bare number dictates (review
-                               finding .3.1.8, boss ruling (a)).
+                               bare number dictates (review finding
+                               .3.1.8, boss ruling (a)).
   stale-utterance-end-survives-a-raise
                                The per-word exception handler stops
                                clearing _pending_utterance_end, so the
@@ -156,7 +137,7 @@ speech/speech_processor.py:
                                the count looks like part of it and
                                the pointless wait returns.
 
-All thirty-one must be caught, and "caught" means the expected test failed on
+All twenty-three must be caught, and "caught" means the expected test failed on
 its own assertion. Reported as errors, never as a verdict:
 pattern-not-found, an ambiguous pattern, a mutation that does not
 compile, a per-mutation timeout, a suite-timeout abort, any pytest
@@ -181,11 +162,12 @@ ROUTER = SERVICE / "speech" / "router.py"
 PROC = SERVICE / "speech" / "speech_processor.py"
 
 WHOLE = "tests/test_whole_utterance_finalization.py"
-E2E = "tests/e2e/test_e2e_trailing_at_utterance_end.py"
 GAPS = "tests/test_router_gaps.py"
 GUARD = "tests/test_retraction_replay_guard.py"
 BARE = "tests/test_speech_processor_bare_number.py"
-ALL_FILES = [WHOLE, E2E, GAPS, GUARD, BARE]
+HELD = "tests/test_held_tail.py"
+GRID = "tests/test_grid_number_badge_click.py"
+ALL_FILES = [WHOLE, GAPS, GUARD, BARE, HELD, GRID]
 
 PYTEST_ARGS = ["-p", "no:randomly", "-q", "-rfE", "--tb=line"]
 
@@ -276,75 +258,22 @@ MUTATIONS = [
         "expect": ["test_lifecycle_reset_closes_the_deferred_buffer"],
     },
     {
-        "name": "r1-split-hotword-gate-dropped",
-        "src": PROC,
-        "files": [E2E],
-        "old": """        if hotword_authorized:
-            return text, None
-""",
-        "new": """        if False:
-            return text, None
-""",
-        "expect": ["test_hotword_dictation_keeps_typing_the_trailing_word"],
-    },
-    {
-        "name": "r1-split-never",
-        "src": PROC,
-        "files": [E2E],
-        "old": """        if self.catalog.get_trailing_command(words[-1]) is None:
-            return text, None
-""",
-        "new": """        if True:
-            return text, None
-""",
-        "expect": [
-            "test_trailing_word_after_an_impossible_buffer_still_fires",
-            "test_backspace_submit_fires_enter_under_r1",
-        ],
-    },
-    {
-        "name": "finalization-consume-skips-trailing",
-        "src": PROC,
-        "files": [E2E],
-        # wh-spaced-punctuation-names-unresolved.3.1.4 (9becbc36) gave
-        # _consume_finalization_armed_tail a drain_replacement_prefix
-        # parameter, so its prefix arm is no longer a bare early
-        # return and the old anchor stopped matching. The trailing arm
-        # this mutation removes is unchanged.
-        "old": """        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._consume_pending_trailing_word_at_utterance_end()
-        else:
-            await self._consume_pending_bare_number()
-""",
-        "new": """        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            pass
-        else:
-            await self._consume_pending_bare_number()
-""",
-        "expect": [
-            "test_trailing_word_after_an_impossible_buffer_still_fires",
-            "test_backspace_submit_fires_enter_under_r1",
-        ],
-    },
-    {
         "name": "marker-consume-skips-bare-number",
         "src": PROC,
         "files": [GUARD, BARE],
         # wh-spaced-punctuation-names-unresolved.3 (cac374c3) put the
         # complete-name fire and the continued-hold check above the
         # flush, so the prefix arm is no longer one line. The elif /
-        # else dispatch this mutation targets is unchanged, and the
-        # elif is what keeps this anchor apart from the sibling block
-        # in _consume_finalization_armed_tail.
+        # else dispatch this mutation targets is unchanged. The prefix
+        # flush line is what keeps this anchor apart from the sibling
+        # block in _consume_finalization_armed_tail.
+        # wh-remove-trailing-submit removed the trailing elif between
+        # them; the else arm this mutation removes is unchanged.
         "old": """            await self._flush_pending_replacement_prefix_as_dictation()
-        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._consume_pending_trailing_word_at_utterance_end()
         else:
             await self._consume_pending_bare_number()
 """,
         "new": """            await self._flush_pending_replacement_prefix_as_dictation()
-        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._consume_pending_trailing_word_at_utterance_end()
         else:
             pass
 """,
@@ -386,21 +315,31 @@ MUTATIONS = [
         "expect": ["test_fused_hotword_head_still_counts_as_spanning"],
     },
     {
+        "name": "marker-active-never-set",
+        "src": PROC,
+        "files": [HELD, GRID],
+        "old": """                )
+                self._marker_finalization_active = True
+""",
+        "new": """                )
+                self._marker_finalization_active = False
+""",
+        # Its first catchers were the R1 split tests (removed by
+        # wh-remove-trailing-submit). The end-marker flag still decides
+        # the prefix hold's confirmed end and the multi-word badge click.
+        "expect": [
+            "test_a_complete_name_still_reaches_its_mark_at_an_end_marker",
+            "test_a_multiword_badge_number_led_by_a_grid_word_clicks_its_badge",
+        ],
+    },
+    {
         "name": "flag-driven-split-dropped",
         "src": PROC,
-        "files": [E2E],
-        # Retargeted for wh-overlay-count-homophones.1.5. The literal
-        # this named -- the split's own inline gate on
-        # (self._marker_finalization_active or flagged_last_word) --
-        # was replaced in 09bdf680 by a call to the extracted
-        # _utterance_end_is_confirmed, so flagged_last_word no longer
-        # appears in speech_processor.py at all and the entry reported
-        # "pattern matched 0 times". The behaviour is unchanged and
-        # still worth pinning, so the mutation now removes the same
-        # real-word arm from the helper's return. The helper serves the
-        # multi-word badge check too, but that path's tests live in
-        # tests/test_grid_number_badge_click.py, outside ALL_FILES, so
-        # nothing but the split can produce this catch.
+        "files": [GRID],
+        # Removes the flagged-last-word arm from the helper's return. Its
+        # first catcher was the trailing-command split (removed by
+        # wh-remove-trailing-submit); BOSS RULING 02:27 2026-09-27 (Q3)
+        # gave it the badge-click catcher below.
         "old": """        return self._marker_finalization_active or (
             word_event is not None
             and word_event.end_of_utterance
@@ -414,42 +353,7 @@ MUTATIONS = [
         "new": """        return self._marker_finalization_active
 """,
         "expect": [
-            "test_flagged_backspace_submit_fires_enter",
-            "test_flagged_backspace_hello_submit_fires_enter",
-        ],
-    },
-    {
-        "name": "marker-active-never-set",
-        "src": PROC,
-        "files": [E2E],
-        "old": """                )
-                self._marker_finalization_active = True
-""",
-        "new": """                )
-                self._marker_finalization_active = False
-""",
-        "expect": [
-            "test_trailing_word_after_an_impossible_buffer_still_fires",
-            "test_backspace_submit_fires_enter_under_r1",
-        ],
-    },
-    {
-        "name": "stale-gate-restored",
-        "src": PROC,
-        "files": [E2E],
-        # Retargeted for wh-overlay-count-homophones.1.5, same cause as
-        # flag-driven-split-dropped above. This one mutates the split's
-        # CALL of the helper rather than the helper itself, because the
-        # behaviour it pins is the whole gate being replaced by a read
-        # of the stale _pending_utterance_end slot -- which is what the
-        # pre-09bdf680 mutation did, and it keeps the mutation scoped to
-        # the split exactly as before.
-        "old": """        if not self._utterance_end_is_confirmed(word_event):
-""",
-        "new": """        if self._pending_utterance_end is None:
-""",
-        "expect": [
-            "test_timeout_finalization_ignores_the_stale_slot",
+            "test_a_flagged_last_word_confirms_the_end_and_clicks_the_badge",
         ],
     },
     {
@@ -481,7 +385,6 @@ MUTATIONS = [
         ):
 """,
         "expect": [
-            "test_lifecycle_preheld_trailing_word_fires_enter_before_the_pair",
             "test_lifecycle_preheld_bare_number_clicks_before_the_pair",
         ],
     },
@@ -497,7 +400,6 @@ MUTATIONS = [
                 # The ONE dispatch for holds standing when this marker
 """,
         "expect": [
-            "test_lifecycle_preheld_trailing_word_fires_enter_before_the_pair",
             "test_lifecycle_preheld_bare_number_clicks_before_the_pair",
         ],
     },
@@ -512,58 +414,13 @@ MUTATIONS = [
                 # wh-whole-utterance-command-matching.3: the deferral
 """,
         "expect": [
-            "test_lifecycle_preheld_trailing_word_fires_enter_before_the_pair",
             "test_lifecycle_preheld_bare_number_clicks_before_the_pair",
-        ],
-    },
-    {
-        "name": "split-site-sends-end-early",
-        "src": PROC,
-        "files": [WHOLE],
-        "old": """                    # the flagged-last-word path never set the slot.
-                    return
-""",
-        "new": """                    # the flagged-last-word path never set the slot.
-                    await self._send_pending_utterance_end()
-                    return
-""",
-        "expect": [
-            "test_dictate_split_fires_enter_before_end_utterance",
-        ],
-    },
-    {
-        "name": "remainder-site-sends-end-early",
-        "src": PROC,
-        "files": [WHOLE],
-        "old": """            if armed_trailing is None:
-                await self._send_pending_utterance_end()
-""",
-        "new": """            if True:
-                await self._send_pending_utterance_end()
-""",
-        "expect": [
-            "test_remainder_split_fires_enter_before_end_utterance",
-        ],
-    },
-    {
-        "name": "marker-branch-post-consume-send-dropped",
-        "src": PROC,
-        "files": [WHOLE],
-        "old": """                # sent and cleared it.
-                await self._send_pending_utterance_end()
-""",
-        "new": """                # sent and cleared it.
-                pass
-""",
-        "expect": [
-            "test_dictate_split_fires_enter_before_end_utterance",
-            "test_remainder_split_fires_enter_before_end_utterance",
         ],
     },
     {
         "name": "lifecycle-marker-active-never-set",
         "src": PROC,
-        "files": [WHOLE],
+        "files": [GRID],
         "old": """                    self._marker_finalization_active = True
                     try:
 """,
@@ -571,18 +428,20 @@ MUTATIONS = [
                     try:
 """,
         "expect": [
-            "test_lifecycle_remainder_split_fires_enter_before_the_pair",
-            "test_lifecycle_dictate_split_fires_enter_before_the_pair",
+            "test_a_lifecycle_reset_clicks_phrase_one_and_dictates_phrase_two",
         ],
     },
     {
         "name": "lifecycle-consume-dropped",
         "src": PROC,
-        "files": [WHOLE],
+        "files": [HELD],
         # wh-spaced-punctuation-names-unresolved.3.1.4 (9becbc36) made
         # this call pass drain_replacement_prefix=True, so the reset
         # delivers a prefix its own finalization armed. The mutation is
-        # unchanged: it still removes the whole consume.
+        # unchanged: it still removes the whole consume. Its first
+        # catchers were the R1 split tests (removed by
+        # wh-remove-trailing-submit); the drained name opening is what
+        # still depends on it.
         "old": """                    await self._consume_finalization_armed_tail(
                         drain_replacement_prefix=True,
                     )
@@ -592,22 +451,7 @@ MUTATIONS = [
             except Exception:
 """,
         "expect": [
-            "test_lifecycle_remainder_split_fires_enter_before_the_pair",
-            "test_lifecycle_dictate_split_fires_enter_before_the_pair",
-        ],
-    },
-    {
-        "name": "punctuated-rematch-dropped",
-        "src": PROC,
-        "files": [WHOLE],
-        "old": """        match = compiled.match(_normalize_lookup_word(word))
-""",
-        "new": """        match = compiled.match(word)
-""",
-        "expect": [
-            "test_punctuated_ordinary_trailing_word_fires_enter",
-            "test_punctuated_remainder_split_fires_enter",
-            "test_punctuated_dictate_split_fires_enter",
+            "test_the_reset_types_a_name_opening_its_own_finalization_held",
         ],
     },
     {

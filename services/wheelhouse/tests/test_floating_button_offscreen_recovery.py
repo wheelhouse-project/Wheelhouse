@@ -72,7 +72,7 @@ def _manager_patches():
     before the constructor runs, and repeating this list would let the two
     copies drift apart.
 
-    gui.send_notice MUST be patched here. _settings_show_status(failure=True)
+    gui.send_notice MUST be patched here. _settings_show_status
     calls it, and it delivers a real Windows notification to whoever is at
     the machine. The conftest guard does not cover it: that guard patches
     utils.speech_notifier.send_notice, while gui.py imports its own name from
@@ -568,7 +568,7 @@ class TestTheResizeClampMeasuresTheSameRectangle:
 
 
 class TestNoTestSendsARealDesktopNotice:
-    """_settings_show_status(failure=True) calls gui.send_notice, which puts a
+    """_settings_show_status calls gui.send_notice, which puts a
     real Windows notification in front of whoever is at the machine.
 
     This happened. Every run of the rollback test below showed David a

@@ -33,9 +33,11 @@ expression is untouched and the single step is basic) pushes the step back
 into the simple fields, so no edit is silently dropped.
 
 A fresh Add (no entry, no pattern_id) opens with the "What do you want to
-happen?" goal page (wh-pattern-editor-templates, spec section 11): six
+happen?" goal page (wh-pattern-editor-templates, spec section 11): five
 concrete goals that prefill the simple pane with the right action type,
-goal-appropriate wording/placeholders, and focus in the first empty field.
+goal-appropriate wording/placeholders, and focus in the first empty field,
+and a sixth, "Create an advanced command", that opens the advanced pane
+with focus in the expression field (wh-advanced-command-choice).
 Edit/Duplicate/Customize (entry passed) never see the page, and it never
 reappears once a goal is chosen -- it is a starting point, not a wizard.
 """
@@ -71,6 +73,7 @@ from speech.action_catalog import (
     picker_sections,
 )
 from speech.key_names import VALID_KEY_NAMES
+from speech.number_capture_rule import count_capture_error, number_form_error
 from speech.pattern_identity import DOC_ID_KEY, is_valid_doc_id
 from speech.phrase_expression import generate_expression, validate_phrases
 from speech.pattern_expression_budget import MAX_EXPRESSION_LENGTH, EXPRESSION_LENGTH_ERROR
@@ -256,8 +259,9 @@ _DEFAULT_TEXT_PLACEHOLDER = "e.g., GPT"
 # The "What do you want to happen?" goal list, in spec order. Each entry:
 # ``key`` (stable id, stored as item data), ``title`` (list row), ``help``
 # (one sentence of hover help), ``action`` (simple-mode radio to preselect;
-# None leaves the pane exactly as today -- start from scratch), and optional
-# wording overrides. The two text goals differ only in wording, placeholder
+# None leaves the pane's default), optional ``advanced`` (True ticks the
+# Advanced check box, wh-advanced-command-choice), and optional wording
+# overrides. The two text goals differ only in wording, placeholder
 # text, and hover help: the snippet goal teaches "phrase -> text to type",
 # the correction goal teaches the replacement idiom "what the microphone
 # hears -> what you meant" (the dialog already infers the replacement
@@ -326,10 +330,14 @@ _GOAL_TEMPLATES = [
         ),
     },
     {
-        "key": "scratch",
-        "title": "Start from scratch",
-        "help": "Opens the blank editor with every option available.",
+        "key": "advanced",
+        "title": "Create an advanced command",
+        "help": (
+            "Opens the full editor with Advanced ticked, so you can write "
+            "your own expression and add several actions."
+        ),
         "action": None,
+        "advanced": True,
     },
 ]
 
@@ -1953,9 +1961,11 @@ class CreatePatternDialog(QDialog):
         self._entry = dict(entry) if entry else None
         self._pattern_id = pattern_id
         self._edit_mode = pattern_id is not None
-        # A shipped positional pattern's position key must survive a
-        # Customize, or the user copy binds at the wrong place in the
-        # utterance (wh-pattern-editor-r8.5).
+        # An entry's position key is carried through a Customize
+        # unchanged, so a save never rewrites a key the dialog does not
+        # show (wh-pattern-editor-r8.5). Since the trailing position was
+        # removed, the loader warns about the key and loads a "trailing"
+        # row as whole-utterance-only (wh-remove-trailing-submit).
         raw_position = (entry or {}).get("position")
         self._entry_position = (
             raw_position if isinstance(raw_position, str) else None
@@ -2272,13 +2282,13 @@ class CreatePatternDialog(QDialog):
             f'Require "{self._hotword}" before command'
         )
         self._hotword_check.setChecked(True)
-        self._hotword_check.setAccessibleName("Require wake word")
+        self._hotword_check.setAccessibleName("Require safety word")
         self._hotword_check.setAccessibleDescription(
-            "When checked, the wake word must be said before this command "
+            "When checked, the safety word must be said before this command "
             "responds"
         )
         self._hotword_check.setToolTip(
-            "When enabled, you must say the wake word before the phrase.\n"
+            "When enabled, you must say the safety word before the phrase.\n"
             "Use for destructive commands (close window) or ambiguous "
             "ones (save)."
         )
@@ -2858,6 +2868,11 @@ class CreatePatternDialog(QDialog):
         self._on_type_changed()
         self._goal_page_pending = False
         self._root_stack.setCurrentWidget(self._editor_page)
+        if template.get("advanced"):
+            # The toggle's slot switches the mode and syncs the panes.
+            self._advanced_toggle.setChecked(True)
+            self._expression_edit.setFocus()
+            return
         self._focus_first_empty_field()
 
     def _focus_first_empty_field(self):
@@ -3198,12 +3213,19 @@ class CreatePatternDialog(QDialog):
         return None
 
     def _validate_advanced(self):
-        expr_error = self._advanced_expression_error()
+        compile_error = self._advanced_expression_error()
+        expr_error = compile_error
+        if expr_error is None:
+            # A command must capture every number with (\d+)
+            # (wh-number-capture-enforce, rule B).
+            expr_error = number_form_error(
+                self._expression_edit.text(), self._steps_editor.steps(),
+            )
         self._expression_error_label.setText(expr_error or "")
         self._expression_error_label.setVisible(expr_error is not None)
 
         # The anchoring check only makes sense once the expression exists.
-        type_error = None if expr_error else self._advanced_type_error()
+        type_error = None if compile_error else self._advanced_type_error()
         self._type_error_label.setText(type_error or "")
         self._type_error_label.setVisible(type_error is not None)
 
@@ -3247,7 +3269,7 @@ class CreatePatternDialog(QDialog):
                         "Run-capture timeout must be a number (a finite TOML "
                         f"number), not '{bad_timeout}'"
                     )
-            if steps_error is None and expr_error is None:
+            if steps_error is None and compile_error is None:
                 # Group-ref range check only once the expression compiles;
                 # with a broken expression the count would read 0 and this
                 # error would pile on top of the expression error
@@ -3255,6 +3277,12 @@ class CreatePatternDialog(QDialog):
                 steps_error = _group_ref_error(
                     self._steps_editor.steps(),
                     self._advanced_group_count(),
+                )
+            if steps_error is None and compile_error is None:
+                # A count parameter must read a (\d+) group
+                # (wh-number-capture-enforce, rule A).
+                steps_error = count_capture_error(
+                    self._expression_edit.text(), self._steps_editor.steps(),
                 )
         self._steps_error_label.setText(steps_error or "")
         self._steps_error_label.setVisible(steps_error is not None)

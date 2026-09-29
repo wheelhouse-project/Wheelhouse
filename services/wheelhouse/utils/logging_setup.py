@@ -28,6 +28,12 @@ from typing import Optional
 from concurrent_log_handler import ConcurrentRotatingFileHandler
 
 from utils.error_notifier import ErrorNotificationHandler
+from utils.log_rotation import (
+    LAUNCHER_ROTATED_ENV,
+    LOG_BACKUP_COUNT,
+    LOG_MAX_BYTES,
+    rotate_log_for_new_run,
+)
 from utils.notifier_worker import NotifierWorker
 from utils.queue_logging import (
     WheelHouseQueueListener,
@@ -108,26 +114,34 @@ def setup_logging(config) -> None:
     file_handler: Optional[ConcurrentRotatingFileHandler] = None
     log_file_path: Optional[str] = None
     _file_handler_error: Optional[BaseException] = None
+    _rotation_error: Optional[BaseException] = None
     try:
         project_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..")
         )
         log_file_path = os.path.join(project_root, "wheelhouse.log")
-        rotate_on_startup = (
-            os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 0
-        )
+        # One start rotates once (wh-log-triple-rotation). Under the
+        # launcher, the launcher has already rotated for this start and
+        # set LAUNCHER_ROTATED_ENV; the Logic, Input, and GUI processes
+        # start together, so each rotating here moved the file three
+        # times. A process started without the launcher rotates here,
+        # BEFORE the handler goes to the listener, so its first record
+        # writes to a fresh file.
+        if os.environ.get(LAUNCHER_ROTATED_ENV) != "1":
+            # A failed rotation leaves the log under its own name
+            # (wh-log-triple-rotation.1.2), so this run appends to it and
+            # keeps its file handler.
+            try:
+                rotate_log_for_new_run(log_file_path)
+            except Exception as exc:
+                _rotation_error = exc
         file_handler = ConcurrentRotatingFileHandler(
             log_file_path,
             mode="a",
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
             encoding="utf-8",
         )
-        if rotate_on_startup:
-            # Synchronous rollover on the calling thread BEFORE handing
-            # the handler to the listener so the new session's first
-            # record writes to a known-fresh file.
-            file_handler.doRollover()
         file_handler.setLevel(logging.NOTSET)
         file_handler.setFormatter(formatter)
     except Exception as exc:
@@ -210,6 +224,12 @@ def setup_logging(config) -> None:
         logger.info("Logging to file: %s", log_file_path)
     elif _file_handler_error is not None:
         logger.warning("Failed to create log file handler: %s", _file_handler_error)
+    if _rotation_error is not None:
+        logger.warning(
+            "Could not start a new wheelhouse.log for this run (%s); this run "
+            "appends to the previous run's log.",
+            _rotation_error,
+        )
 
     if error_notification_handler is not None:
         logger.info(

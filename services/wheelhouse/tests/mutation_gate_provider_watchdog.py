@@ -110,14 +110,11 @@ MUTATIONS = [
         name="retry-never",
         file="stt/remote_stt_launcher.py",
         proves="a first post-ready death gets one automatic restart",
-        old=(
-            "            retry_used = signal.watchdog_retry_used\n"
-            "        if retry_used:\n"
-        ),
-        new=(
-            "            retry_used = signal.watchdog_retry_used\n"
-            "        if True:\n"
-        ),
+        # wh-provider-native-crash-trace put the stderr copy between the
+        # assignment and this test, so the pattern is the test alone
+        # (it occurs once).
+        old="        if retry_used:\n",
+        new="        if True:\n",
         expect=[
             "test_post_ready_death_restarts_once_and_publishes_new_generation",
         ],
@@ -126,14 +123,8 @@ MUTATIONS = [
         name="retry-always",
         file="stt/remote_stt_launcher.py",
         proves="the retry budget is exactly one, not unlimited",
-        old=(
-            "            retry_used = signal.watchdog_retry_used\n"
-            "        if retry_used:\n"
-        ),
-        new=(
-            "            retry_used = signal.watchdog_retry_used\n"
-            "        if False:\n"
-        ),
+        old="        if retry_used:\n",
+        new="        if False:\n",
         expect=[
             "test_successful_retry_death_does_not_restart_a_second_time",
         ],
@@ -212,7 +203,9 @@ MUTATIONS = [
         old=(
             "            self._report_watchdog_stopped(provider_name, generation)\n"
             "            self._notify(\n"
-            "                provider_name,\n"
+            "                title,\n"
+            "                native_crash_message(title, exit_code, restarting=False)\n"
+            "                if native_crash else\n"
             '                "Speech provider stopped after its automatic restart - try restarting Wheelhouse",\n'
             "                generation, owner=provider_name,\n"
             "            )\n"
@@ -233,7 +226,9 @@ MUTATIONS = [
         old=(
             "            self._report_watchdog_stopped(provider_name, generation)\n"
             "            self._notify(\n"
-            "                provider_name,\n"
+            "                title,\n"
+            "                native_crash_message(title, exit_code, restarting=False)\n"
+            "                if native_crash else\n"
             '                "Speech provider could not restart - try restarting Wheelhouse",\n'
             "                generation, owner=provider_name,\n"
             "            )\n"

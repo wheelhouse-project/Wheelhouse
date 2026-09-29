@@ -142,6 +142,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from version_info import get_startup_banner
+from stt import parakeet_model
 
 
 logger = logging.getLogger(__name__)
@@ -1299,6 +1300,30 @@ _MALFORMED_SETTINGS_MESSAGE = (
 )
 
 
+def _send_parakeet_model_offer(state_manager, plan) -> None:
+    """Ask the GUI to show the Parakeet model offer (wh-parakeet-model-download-offer).
+
+    One action on the Logic -> GUI queue: kind "launch" when ``plan`` is an
+    InstallerLaunchPlan (the notice offers Download now), otherwise kind
+    "fallback" with the one-line install command (the notice offers Copy
+    command). The ruled notice texts live in the GUI process, which shows
+    them. Never raises.
+    """
+    if isinstance(plan, parakeet_model.InstallerLaunchPlan):
+        message = {"action": "parakeet_model_offer", "kind": "launch"}
+    else:
+        message = {
+            "action": "parakeet_model_offer",
+            "kind": "fallback",
+            "command": (getattr(plan, "command", "")
+                        or parakeet_model.ONE_LINE_INSTALL_COMMAND),
+        }
+    try:
+        state_manager.state_to_gui_queue.put_nowait(message)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Could not send the Parakeet model offer to the GUI: {exc}")
+
+
 def _store_setting(self, key: str, value) -> bool:
     """Write one setting in memory, refusing a malformed section instead
     of letting it close the program (wh-remote-stt-robustness).
@@ -1370,11 +1395,16 @@ def _get_stt_lifecycle_lock(self):
     return lock
 
 
-# The Wheelhouse Assistant's address, used by LogicController.start_help_online
-# when the settings file still names the retired ChatGPT assistant. This is the
-# same address config.toml.example ships as the gem_url default, and
-# test_the_gem_constant_equals_the_shipped_default keeps the two in step.
-_WHEELHOUSE_GEM_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+# The Wheelhouse Assistant's address: the chat view of a Gemini Notebook. Used by
+# LogicController.start_help_online when the settings file still names the
+# retired ChatGPT assistant or the old Gemini Gem. This is the same address
+# config.toml.example ships as the gem_url default, and
+# test_the_gem_constant_equals_the_shipped_default keeps the two in step. The
+# name predates the move from the Gem to the notebook.
+_WHEELHOUSE_GEM_URL = (
+    "https://notebook.google.com/notebook/"
+    "da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
+)
 
 # The address every release before 1.2.0 shipped as the gem_url default: a
 # ChatGPT custom GPT that OpenAI stops running on 2026-12-11. The installer
@@ -1386,6 +1416,130 @@ _WHEELHOUSE_GEM_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZ
 _RETIRED_CHATGPT_HELP_URL = (
     "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
 )
+
+# The address release 1.2.0 shipped as the gem_url default: a Gemini Gem that
+# Google stops running on 2026-11-17, when Gems become Skills. The installer
+# preserves the user's settings file across an update, so an installation made
+# with 1.2.0 still holds this value and would open a dead assistant
+# (wh-assistant-gemini-notebook). Delete this constant and its substitution in
+# start_help_online once no supported installation was made with 1.2.0.
+_OLD_GEM_HELP_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+
+
+def default_help_explainer_marker_path() -> Path:
+    """Return the file that records a choice in the explanation window.
+
+    A user who ticked "Do not show this again" in 1.2.0 holds
+    ai.help.explain_before_open = false. The assistant then moved to a
+    Gemini Notebook, which takes only a Google Account, and only the
+    explanation window says so (wh-assistant-explainer-once-more). While
+    this file is missing, start_help_online shows the window once more to
+    such a user. The Assistant button in the window writes the file. It
+    lives beside click_first_use_hint_shown.toml and uses the same reader
+    and writer, so config.toml is never written for this step.
+    """
+    return (
+        Path(__file__).resolve().parent
+        / "data"
+        / "help_explainer_notebook_shown.toml"
+    )
+
+
+# The notice for a choice in the explanation window that was not kept. It
+# says "can appear again": with no marker, and a setting that is true or
+# unchanged from false, the next Help shows the window.
+_HELP_CHOICE_NOT_SAVED_NOTICE = (
+    "Wheelhouse could not save your choice from the Assistant window. "
+    "The window can appear again when you choose Help."
+)
+
+
+async def _record_help_explainer_choice(
+    config, state_manager, do_not_show_again: bool
+) -> str | None:
+    """Record the choice made with the window's Assistant button. Never raises.
+
+    Returns None when the choice is kept, or the text of a notice for the
+    user when a write failed; the caller shows it. Before the choice moved
+    to Logic, the GUI sent this save through its acknowledged settings path,
+    which shows a notice on failure (wh-assistant-explainer-once-more.1.1).
+
+    The setting is saved first, and only when its value on disk differs
+    from the choice: every ConfigService.save rewrites the whole settings
+    file and drops the user's comments, so a ticked box with the setting
+    already false saves nothing. An unticked box turns the window back on,
+    which is what the check box says. The marker is written only after that
+    save succeeds, or when no save is needed: a marker written before a
+    failed save would keep a false setting the user asked to change, and
+    the window that offers the choice would not be shown again.
+
+    The comparison reads the value on disk (get_persisted), not the live
+    value, and the save is staged (save(values=...)), which changes the
+    live value only when the file was replaced. A save that changed the
+    live value first and then failed left the live value matching the
+    choice while the file did not; a second press in the same process then
+    saved nothing and wrote the marker, and after a restart the file's old
+    value plus the marker hid the choice for good (Codex round 2 on
+    wh-assistant-explainer-once-more.1.1).
+    """
+    from services.wheelhouse.click_first_use_hint import (
+        load_hint_shown,
+        mark_hint_shown,
+    )
+
+    key = "ai.help.explain_before_open"
+    wanted = not do_not_show_again
+    saved = False
+    if state_manager is None:
+        saved = bool(config.get_persisted(key, True)) == wanted
+        if not saved:
+            logger.warning(
+                "Help: no state manager, the window setting was not saved."
+            )
+    else:
+        try:
+            # The staged save StateManager._save_gui_settings makes for a
+            # GUI settings write, under the same lock, without its request
+            # ID: no GUI request waits for an acknowledgement here, so the
+            # notice returned below takes its place. The comparison is made
+            # under the lock too: the window hides at once, so a second
+            # choice can arrive while an earlier save is pending, and until
+            # that save ends the value on disk is the old one
+            # (wh-assistant-explainer-once-more.1.3).
+            if not hasattr(state_manager, "_gui_settings_lock"):
+                state_manager._gui_settings_lock = asyncio.Lock()
+            async with state_manager._gui_settings_lock:
+                if bool(config.get_persisted(key, True)) == wanted:
+                    saved = True
+                else:
+                    try:
+                        saved = bool(await config.save(values={key: wanted}))
+                        if not saved:
+                            logger.warning(
+                                "Help: the window setting was not saved to disk."
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "Help: the window setting could not be saved: %s", exc
+                        )
+                    state_manager.send_state_update()
+        except Exception as exc:
+            logger.warning("Help: the window setting save did not finish: %s", exc)
+    if not saved:
+        # No marker: the choice is not complete, so the next Help shows
+        # the window again and the user can choose again.
+        return _HELP_CHOICE_NOT_SAVED_NOTICE
+
+    try:
+        marker = default_help_explainer_marker_path()
+        if not await asyncio.to_thread(load_hint_shown, marker):
+            if not await asyncio.to_thread(mark_hint_shown, marker):
+                logger.warning("Help: the explanation window marker was not written.")
+                return _HELP_CHOICE_NOT_SAVED_NOTICE
+    except Exception as exc:
+        logger.warning("Help: the explanation window marker failed: %s", exc)
+        return _HELP_CHOICE_NOT_SAVED_NOTICE
+    return None
 
 
 class LogicController:
@@ -2226,6 +2380,91 @@ class LogicController:
             logger.info("Shutdown requested. Signaling main loop to exit...")
             self.shutdown_event.set()
 
+    async def _handle_parakeet_download_now(self) -> None:
+        """Download now on the Parakeet model offer: start the installer, then exit.
+
+        The installer refuses to run while Wheelhouse runs, so the launch
+        console (stt/parakeet_model.py launch_installer) first waits for
+        every Wheelhouse process to exit, then runs the Setup program's
+        installer with Parakeet chosen. This process starts that console
+        and then leaves through the same shutdown the tray's Exit starts:
+        the shared shutdown event (request_shutdown). With no restart flag
+        written, the launcher exits instead of restarting.
+
+        The locator is asked again here, because the Setup copy can have
+        changed since the offer was shown. If it now answers with the
+        one-line command, or the console does not start, the fallback
+        offer is shown instead and Wheelhouse keeps running
+        (wh-parakeet-model-download-offer A2).
+        """
+        if self.shutdown_event and self.shutdown_event.is_set():
+            logger.info("Download now ignored: Wheelhouse is already shutting down")
+            return
+        plan = parakeet_model.locate_installer()
+        if not isinstance(plan, parakeet_model.InstallerLaunchPlan):
+            logger.info(
+                "Download now: no installer to start "
+                f"({getattr(plan, 'reason', 'unknown')}); showing the install command"
+            )
+            _send_parakeet_model_offer(self.state_manager, plan)
+            return
+        pids = self._wheelhouse_process_ids()
+        started = await asyncio.to_thread(
+            parakeet_model.launch_installer, plan.script_path, pids,
+        )
+        if not started:
+            logger.warning(
+                "The Wheelhouse installer did not start; showing the install "
+                "command instead"
+            )
+            _send_parakeet_model_offer(
+                self.state_manager,
+                parakeet_model.InstallerFallback(
+                    command=parakeet_model.ONE_LINE_INSTALL_COMMAND,
+                    reason="launch_failed",
+                ),
+            )
+            return
+        logger.info(
+            "Started the Wheelhouse installer for the Parakeet model; "
+            "shutting down so it can run"
+        )
+        self.request_shutdown()
+
+    def _wheelhouse_process_ids(self) -> list[int]:
+        """Process ids of every Wheelhouse process this process can name.
+
+        This Logic process; its parent, the launcher (launcher.py starts
+        Logic, Input and GUI as its multiprocessing children); the
+        launcher's children, which are Input and GUI; and the running
+        speech providers (RemoteSTTLauncher.running_provider_pids). The
+        launch console waits for all of them, and then also for any
+        python.exe, pythonw.exe or uv.exe whose command line holds the app
+        folder, which covers anything this list misses. Never raises.
+        """
+        pids: list = [os.getpid()]
+        try:
+            import psutil
+
+            parent = psutil.Process(os.getpid()).parent()
+            if parent is not None:
+                pids.append(parent.pid)
+                pids.extend(child.pid for child in parent.children())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Could not list the Wheelhouse processes: {exc}")
+        launcher = getattr(self.service_manager, "remote_stt_launcher", None)
+        if launcher is not None:
+            try:
+                pids.extend(launcher.running_provider_pids())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Could not list the speech provider processes: {exc}")
+        result: list[int] = []
+        for pid in pids:
+            if (isinstance(pid, int) and not isinstance(pid, bool)
+                    and pid > 0 and pid not in result):
+                result.append(pid)
+        return result
+
     async def restart_program(self):
         """
         Initiates a program restart by creating a flag file and then shutting down.
@@ -2436,6 +2675,25 @@ class LogicController:
         # Check if we're already on the requested provider
         if provider == current_provider:
             logger.debug(f"Already using provider {provider}, no switch needed")
+            return
+
+        # Parakeet without its complete speech model cannot start. Offer
+        # the installer instead and change nothing: no engine is stopped,
+        # no setting is written, the current engine stays the user's
+        # engine (wh-parakeet-model-download-offer A1, A2). The model is
+        # checked at every pick, because it re-reads the model-path
+        # override file (boss ruling b). A complete model takes the
+        # ordinary switch below, unchanged (A4).
+        if (
+            provider == parakeet_model.PROVIDER_NAME
+            and not parakeet_model.parakeet_model_complete()
+        ):
+            plan = parakeet_model.locate_installer()
+            logger.info(
+                "Parakeet was picked but its speech model is not complete; "
+                f"offering the installer ({type(plan).__name__})"
+            )
+            _send_parakeet_model_offer(self.state_manager, plan)
             return
 
         if remote_launcher:
@@ -2874,7 +3132,7 @@ class LogicController:
         # wh-overlay-count-homophones (David's decision 2026-09-03): aliases
         # accepts the STT homophones "to", "too" and "for" as 2 and 4, the way
         # the command counts at actions.py:358 and the cursor moves at
-        # navigation/parser.py:186 already do. The engine really does return
+        # navigation/parser.py:193 already do. The engine really does return
         # those words for the spoken "two" and "four", so without this a
         # spoken "four" became a by-name search that found nothing. The
         # accepted cost is David's: a bare "to", "too" or "for" spoken while
@@ -4721,6 +4979,7 @@ class LogicController:
 
         Grid clicks are always PHYSICAL coordinate clicks (the design doc's
         "no UIA verification" rule), so INVOKE means a plain left click.
+        The pointer click (``handle_pointer_click``) uses the same map.
         ``ClickGesture`` subclasses str, so == also accepts the bare wire
         string.
         """
@@ -4730,7 +4989,53 @@ class LogicController:
             return ("right", 1)
         if gesture == ClickGesture.DOUBLE_CLICK:
             return ("left", 2)
+        if gesture == ClickGesture.TRIPLE_CLICK:
+            # wh-voice-access-parity.2.5 (R4): without this entry a triple
+            # click would fall through to a silent single click.
+            return ("left", 3)
         return ("left", 1)
+
+    async def handle_pointer_click(
+        self, gesture, trace_id: str, *, spoken: str = "",
+    ) -> bool:
+        """Click at the current pointer position (wh-voice-access-parity.2.5).
+
+        The speech actions call this when a bare click word ("click",
+        "tap", "right click", "double click", "triple click") was not
+        taken by the mouse grid, which means the grid is closed. It sends
+        the Input action ``click_at_pointer`` with the gesture's button and
+        count through ``_dispatch_mouse_action``, so the click shares the
+        grid's pointer lock, its suspect-channel probe, and the session
+        fence (``_pending_grid_mouse_actions``). Input reads the pointer
+        position itself: Logic is DPI-unaware and would read a virtualized
+        position on a scaled monitor.
+
+        Returns True when the click was dispatched. Returns False when the
+        ``[click] enabled`` master switch is off; the caller then dictates
+        the words, which is the behaviour before this bead. A failed click
+        shows the ``pointer_click_failed`` notice.
+        """
+        from utils.trace_context import set_trace
+
+        set_trace(trace_id)
+        if not self.click_config.enabled:
+            logger.info(
+                "pointer click: voice clicking disabled by config; the "
+                "words dictate (trace_id=%s)", trace_id,
+            )
+            return False
+        button, click_count = self._grid_gesture_buttons(gesture)
+        self._dispatch_mouse_action(
+            "click_at_pointer",
+            {"button": button, "click_count": click_count},
+            trace_id=trace_id, spoken=spoken,
+            failure_reason="pointer_click_failed",
+        )
+        logger.info(
+            "pointer click: %s x%d at the pointer dispatched (trace_id=%s)",
+            button, click_count, trace_id,
+        )
+        return True
 
     async def handle_grid_command(
         self, command: str, trace_id: str, *,
@@ -5236,7 +5541,8 @@ class LogicController:
         a non-timeout send failure, a malformed reply, and a non-ok
         outcome each surface an ``execution_failed`` notice under
         ``failure_reason`` (grid_click_failed / grid_move_failed /
-        grid_drag_failed) -- with two exceptions carrying their own tags:
+        grid_drag_failed, or pointer_click_failed for the no-grid pointer
+        click) -- with two exceptions carrying their own tags:
 
           * ``release_failed`` -> ``grid_button_release_failed``: the ONE
             Input reason meaning the mouse button may still be held --
@@ -8297,6 +8603,7 @@ class LogicController:
             return
         prev_state = machine.state
         prev_pair = (machine.overlay_session_id, machine.paint_generation)
+        event = self._overlay_mark_visible_window_left(machine, event)
         result = machine.apply(event)
         # wh-overlay-slow-uia-stale-badges.2.2.4 and .24. Wake a parked build
         # the transition just made stale, after EVERY apply on this path.
@@ -9174,6 +9481,55 @@ class LogicController:
         if current is None:
             return None
         return identity_matches(recorded, current)
+
+    def _overlay_mark_visible_window_left(self, machine, event):
+        """Mark a failed refresh whose visible numbers belong to a left window.
+
+        wh-overlay-failed-focus-read-keeps-numbers. A failed build response or
+        a timeout in REFRESH_IN_FLIGHT makes the machine fall back to the
+        numbers already on screen. After a focus change those numbers belong
+        to a window that is no longer in front and may be closed: on
+        2026-09-24 at 18:10:29 a desktop read got no reply, and Brave's
+        numbers stayed on the desktop until "hide numbers". This returns the
+        event with ``visible_window_left=True`` when
+        ``_overlay_refresh_visible_window_is_foreground`` answers False, so
+        the machine clears and closes instead. A same-window refresh
+        (keepalive, browser refresh, menu, Pattern Manager tree change)
+        answers True and keeps the fall-back. An undeterminable answer (None)
+        also keeps the fall-back, which is the behaviour before this bead.
+
+        The answer is taken when the failure is applied, not when the read
+        started. A later focus change supersedes the refresh and makes the
+        earlier failure stale, so the foreground at the failure is the window
+        the failed read was for.
+        """
+        import dataclasses
+
+        from services.wheelhouse.click_overlay_state import (
+            OverlayEventKind,
+            OverlayState,
+        )
+
+        if machine.state is not OverlayState.REFRESH_IN_FLIGHT:
+            return event
+        failed = event.kind is OverlayEventKind.TIMEOUT or (
+            event.kind is OverlayEventKind.BUILD_RESPONSE and not event.build_ok
+        )
+        if not failed:
+            return event
+        if (event.overlay_session_id, event.paint_generation) != (
+            machine.overlay_session_id, machine.paint_generation
+        ):
+            # A stale failure: the machine's generation gate rejects it.
+            return event
+        if self._overlay_refresh_visible_window_is_foreground(machine) is not False:
+            return event
+        logger.info(
+            "overlay: refresh %s at gen=(%s,%s) while the visible numbers "
+            "belong to a window no longer in front; clearing them",
+            event.kind.value, event.overlay_session_id, event.paint_generation,
+        )
+        return dataclasses.replace(event, visible_window_left=True)
 
     def _mint_overlay_trace_id(self) -> str:
         """Mint a click-scoped trace id (mirrors the click_element id shape)."""
@@ -10103,7 +10459,10 @@ class LogicController:
             self._in_flight_retry_tokens.discard(correlation_token)
 
     async def start_help_online(
-        self, explained: bool = False, source: str = "menu"
+        self,
+        explained: bool = False,
+        source: str = "menu",
+        do_not_show_again: bool | None = None,
     ) -> None:
         """Decide what Help does: the explanation window, or the browser.
 
@@ -10117,9 +10476,17 @@ class LogicController:
         The window's Assistant button sends the same command back with
         ``explained`` true, which is what stops the window appearing again in
         answer to its own button. Setting ai.help.explain_before_open to
-        false turns the window off for good; the window's check box is what
-        writes that setting, in the GUI process, through the settings path
-        that acknowledges the write.
+        false turns the window off. That command also carries the window's
+        check box state as ``do_not_show_again``; this method, in the Logic
+        process, saves the setting (only when the value changes) and then
+        writes the marker file, and a failed write shows the user a notice.
+        The GUI process writes nothing.
+
+        The one exception to "false turns the window off": while the marker
+        file is missing, a user whose setting is false sees the window once
+        more, with the check box ticked, because the assistant moved to a
+        Gemini Notebook that takes only a Google Account
+        (wh-assistant-explainer-once-more).
 
         Nothing here is allowed to raise. This runs as a background task in
         the process that routes speech, and a browser that will not start is
@@ -10129,6 +10496,16 @@ class LogicController:
         if not config:
             logger.warning("Help: no settings available, cannot open help.")
             return
+
+        if explained and do_not_show_again is not None:
+            # Before the blank-address check: the window is modeless, so the
+            # address can be blanked while it is open, and the choice made
+            # in the window is still the user's to keep.
+            notice = await _record_help_explainer_choice(
+                config, getattr(self, "state_manager", None), do_not_show_again
+            )
+            if notice:
+                self._send_gui_notification(notice)
 
         gem_url = config.get("ai.help.gem_url", "")
         if not gem_url:
@@ -10149,14 +10526,29 @@ class LogicController:
             )
             return
 
-        if not explained and config.get("ai.help.explain_before_open", True):
-            logger.info(
-                "Help: source=%s explained=%s, asking for the explanation window.",
-                source,
-                explained,
-            )
-            self._request_help_explainer()
-            return
+        if not explained:
+            explain = bool(config.get("ai.help.explain_before_open", True))
+            once_more = False
+            if not explain:
+                # Setting false: the window is shown once more while the
+                # marker is missing, with the box ticked to match the
+                # user's earlier choice. load_hint_shown never raises, and
+                # treats an unreadable marker as present.
+                from services.wheelhouse.click_first_use_hint import (
+                    load_hint_shown,
+                )
+                once_more = not await asyncio.to_thread(
+                    load_hint_shown, default_help_explainer_marker_path()
+                )
+            if explain or once_more:
+                logger.info(
+                    "Help: source=%s explained=%s, asking for the explanation "
+                    "window.",
+                    source,
+                    explained,
+                )
+                self._request_help_explainer(start_ticked=once_more)
+                return
 
         if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:
             # An installation made before 1.2.0 still holds the ChatGPT
@@ -10170,20 +10562,36 @@ class LogicController:
             #
             # crewcut: the settings file is not rewritten, so this
             # substitution runs on every Help for the life of the
-            # installation. Writing the new address once would need the
-            # acknowledged settings write path that the explanation window's
-            # check box uses for ai.help.explain_before_open: the GUI
-            # process sends a set_config_value command, and only that
-            # process writes the file. Doing it from here would mean a
-            # Logic-side write or a new command, which is a larger change
-            # than this finding needs.
+            # installation. Writing the new address once could use the
+            # Logic-side staged save that _record_help_explainer_choice
+            # makes for ai.help.explain_before_open (config.save(values=...)).
+            # It is not done: every ConfigService.save rewrites the whole
+            # settings file and drops the user's comments, and this
+            # substitution already opens the right address without a save.
             gem_url = _WHEELHOUSE_GEM_URL
             # No address in the line: it is a user setting, and every other
             # line in this method redacts it for the same reason
             # (wh-assistant-button-explainer.1.1).
             logger.info(
                 "Help: source=%s explained=%s, the configured address is the "
-                "retired ChatGPT assistant, opening the Wheelhouse Gem "
+                "retired ChatGPT assistant, opening the Wheelhouse Assistant "
+                "instead.",
+                source,
+                explained,
+            )
+        elif gem_url.strip() == _OLD_GEM_HELP_URL:
+            # An installation made with 1.2.0 still holds the Gemini Gem that
+            # release shipped, for the same reason as the ChatGPT address
+            # above: the installer preserves the settings file. Google ends
+            # Gems on 2026-11-17, so the notebook opens instead
+            # (wh-assistant-gemini-notebook). The comparison is exact after
+            # strip(), so a Gem the user chose is opened as written. The
+            # crewcut above applies here unchanged.
+            gem_url = _WHEELHOUSE_GEM_URL
+            # No address in the line, for the same reason as above.
+            logger.info(
+                "Help: source=%s explained=%s, the configured address is the "
+                "old Wheelhouse Gem, opening the Wheelhouse Assistant "
                 "instead.",
                 source,
                 explained,
@@ -10215,15 +10623,23 @@ class LogicController:
             logger.warning("Help: could not open the browser: %s", exc)
             self._send_gui_notification("Wheelhouse could not open your browser.")
 
-    def _request_help_explainer(self) -> None:
-        """Ask the GUI process for the explanation window. Never raises."""
+    def _request_help_explainer(self, start_ticked: bool = False) -> None:
+        """Ask the GUI process for the explanation window. Never raises.
+
+        ``start_ticked`` asks for the check box to start ticked; it is set
+        only for the once-more showing (wh-assistant-explainer-once-more).
+        Without it the message carries no flag and the box starts clear.
+        """
         state_manager = getattr(self, "state_manager", None)
         queue = getattr(state_manager, "state_to_gui_queue", None)
         if queue is None:
             logger.warning("Cannot show the help explanation, no GUI queue.")
             return
+        message = {"action": "open_help_explainer"}
+        if start_ticked:
+            message["start_ticked"] = True
         try:
-            queue.put_nowait({"action": "open_help_explainer"})
+            queue.put_nowait(message)
         except Exception as exc:
             logger.warning("Help explanation could not be queued: %s", exc)
 
@@ -11364,12 +11780,19 @@ class LogicController:
             "get_config_values": lambda: self.create_task_with_error_handling(self.state_manager.get_config_values(command.get('keys') or [], command.get('request_id')), "GetConfigValues"),
             "switch_stt_provider": lambda: self.create_task_with_error_handling(self._switch_stt_provider(command.get('provider')), "SwitchSTTProvider"),
             "switch_ai_provider": lambda: self.create_task_with_error_handling(self._switch_ai_provider(command.get('provider')), "SwitchAIProvider"),
+            # wh-parakeet-model-download-offer: Download now on the
+            # Parakeet model offer. The handler asks the locator again,
+            # starts the installer console, then shuts Wheelhouse down.
+            "parakeet_download_now": lambda: self.create_task_with_error_handling(self._handle_parakeet_download_now(), "ParakeetDownloadNow"),
             # The strict "is True" is deliberate. This command crosses a
             # process boundary, so the field is whatever the sender put
             # there, and bool("false") is True. Only the literal boolean
             # skips the explanation window; anything else takes the full
-            # decision (boss ruling on wh-assistant-button-explainer).
-            "open_help_online": lambda: self.create_task_with_error_handling(self.start_help_online(explained=command.get("explained") is True, source=str(command.get("source", "menu"))), "OpenHelpOnline"),
+            # decision (boss ruling on wh-assistant-button-explainer). The
+            # check box state follows the same rule: only a real boolean is
+            # a choice, and anything else records nothing
+            # (wh-assistant-explainer-once-more).
+            "open_help_online": lambda: self.create_task_with_error_handling(self.start_help_online(explained=command.get("explained") is True, source=str(command.get("source", "menu")), do_not_show_again=command.get("do_not_show_again") if isinstance(command.get("do_not_show_again"), bool) else None), "OpenHelpOnline"),
             "help_ask": lambda: self.create_task_with_error_handling(self._handle_help_ask(command.get("question", "")), "HelpAsk"),
             "help_reset": lambda: self._handle_help_reset(),
             "help_cancel": lambda: self._handle_help_cancel(),
@@ -11984,7 +12407,14 @@ def start_logic_process(shm_name: str, command_ready_event: Event, input_ready_e
         elevate_process_priority,
     )
     elevate_process_priority()
-    
+
+    # So the first paste starts no child process for pyperclip's OS
+    # detection (wh-input-first-paste-stall).
+    from services.wheelhouse.utils.clipboard_manager import (
+        select_windows_clipboard,
+    )
+    select_windows_clipboard()
+
     # Display startup banner with version info
     logger.info(f"{get_startup_banner('Wheelhouse')} - Starting")
 

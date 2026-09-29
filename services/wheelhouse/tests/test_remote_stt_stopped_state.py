@@ -27,6 +27,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+# These tests switch to Parakeet to exercise the ordinary switch. The
+# switch first checks the Parakeet model on disk
+# (wh-parakeet-model-download-offer), so the check is made to answer
+# "complete" rather than depend on this computer having the model.
+pytestmark = pytest.mark.usefixtures("parakeet_model_present")
+
 
 def _launcher(tmp_path):
     from stt.remote_stt_launcher import RemoteSTTLauncher

@@ -47,7 +47,9 @@ way ``PatternCatalog._build_structures`` would (``transform_pattern`` +
 IGNORECASE), then simulates the catalog merge per ``_merge_entries``' real
 rules: a draft whose trigger key (strip+casefold of the raw expression)
 matches an existing entry REPLACES that entry in place; a new key APPENDS
-after everything. ``exclude_pattern_id`` removes the pattern being edited
+after everything (the fallback ``_simulate_merge`` still does this; the real
+merge, which ``_simulate_save`` runs, now puts it in front of every shipped
+entry). ``exclude_pattern_id`` removes the pattern being edited
 from the simulation so it cannot shadow its own replacement; when the
 edited entry keeps no key match elsewhere, the draft takes its slot.
 
@@ -88,6 +90,10 @@ from .pattern_matcher import (
 )
 from .pattern_transform import transform_pattern
 from .safe_regex import RegexTimeout, match_bounded
+
+# The block key the save writes for the whole-utterance alias flag
+# (wh-int8-punctuation-mishears), and the key the editor's draft carries.
+WHOLE_UTTERANCE_KEY = "whole_utterance_only"
 
 # Pinned user-facing text for a draft that exceeds the match budget
 # (wh-pattern-editor-r0.4).
@@ -486,6 +492,11 @@ def _simulate_merge(
     rebuilding those tests on a real ``PatternCatalog`` over a temporary
     pair of TOML files, the way tests/test_pattern_tester_save_agreement.py
     does, and then dropping the ``catalog=None`` argument they pass.
+    It is also out of date on placement: it still appends a new draft
+    after everything, while the real merge now puts every entry that holds
+    no built-in's slot in front of every shipped entry
+    (wh-user-rule-precedence). The Logic process never uses this path, so
+    no person sees that difference; the same removal fixes it.
     """
     draft_key = runtime_entry_identity(draft_entry)
     target_key = draft_key
@@ -561,6 +572,7 @@ def _simulate_save(
     catalog,
     draft_block: Dict[str, Any],
     exclude_pattern_id: Optional[str],
+    whole_utterance_only: object = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Build the pattern list the save would produce, and find the draft.
 
@@ -577,6 +589,10 @@ def _simulate_save(
         draft_block: The block a save of this draft would write.
         exclude_pattern_id: The id of the block being edited, or None for
             a create.
+        whole_utterance_only: The draft's ``whole_utterance_only`` value,
+            which ``create_pattern`` receives as its argument. Used only
+            for a create: an edit takes the stored block's value, as
+            ``update_pattern`` does (wh-user-rule-precedence).
 
     Returns:
         ``(patterns, draft_row)``. ``draft_row`` is the built entry the
@@ -600,6 +616,20 @@ def _simulate_save(
             )
             if saved_id is None:
                 block.pop(DOC_ID_KEY, None)
+            # The same placement and whole-utterance decisions
+            # ``update_pattern`` makes, from the same inputs: the saved
+            # identity and the stored flag, never the draft's
+            # (wh-user-rule-precedence).
+            _set_true_key(
+                block, WHOLE_UTTERANCE_KEY,
+                PatternManager._whole_utterance_for_save(
+                    PatternManager._stands_in_front_for_save(
+                        block, system_entries,
+                    ),
+                    block["pattern"], system_entries,
+                    entry.get(WHOLE_UTTERANCE_KEY),
+                ),
+            )
             rebuilt.append(block)
             replaced = True
             continue
@@ -614,6 +644,19 @@ def _simulate_save(
             block.get(DOC_ID_KEY), block["pattern"], system_entries,
         ) is None:
             block.pop(DOC_ID_KEY, None)
+        # ``create_pattern``'s decisions: Add, Duplicate and a moved
+        # Customize stand in front and copy the flag; a Customize that
+        # keeps its built-in's words keeps the draft's value.
+        _set_true_key(
+            block, WHOLE_UTTERANCE_KEY,
+            PatternManager._whole_utterance_for_save(
+                PatternManager._stands_in_front_for_save(
+                    block, system_entries,
+                ),
+                block["pattern"], system_entries,
+                whole_utterance_only,
+            ),
+        )
         rebuilt.append(block)
 
     # crewcut: this call costs about 266 ms on the shipped catalog (320
@@ -657,6 +700,19 @@ def _simulate_save(
         if entry.get("is_user") and entry.get("raw_pattern") == expression:
             return simulated, entry
     return simulated, None
+
+
+def _set_true_key(block: Dict[str, Any], key: str, value: bool) -> None:
+    """Write or remove a ``key = true`` line on a simulated block.
+
+    Used for ``whole_utterance_only``. The block writer writes the key
+    only when true and never copies a stored value it did not decide, so
+    the simulated block carries it on exactly the same condition
+    (wh-user-rule-precedence).
+    """
+    block.pop(key, None)
+    if value:
+        block[key] = True
 
 
 def _edited_block(
@@ -775,6 +831,7 @@ def run_test_draft(
     if draft_block is not None:
         simulated, draft_row = _simulate_save(
             catalog, draft_block, exclude_id,
+            whole_utterance_only=draft.get(WHOLE_UTTERANCE_KEY),
         )
         if draft_row is not None:
             # The rest of this function identifies the draft by object

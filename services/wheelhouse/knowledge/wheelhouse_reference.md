@@ -1,332 +1,6 @@
-# Wheelhouse Voice Command and Configuration Reference
+# Wheelhouse Action, Notice, and Configuration Reference
 
-This is the automatically generated reference for every Wheelhouse voice command, for every action a pattern step can perform, for the notices and windows that Wheelhouse shows, and for every user-facing setting that the shipped config.toml contains. Optional settings that the file leaves commented out are described in the help document instead. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. For a guided introduction to using Wheelhouse, see the help document (wheelhouse_help.md); for installation, see the installation guide (wheelhouse_install.md).
-
-## Voice Command Reference
-
-### Dictation Control
-
-| Say this | What happens | Notes |
-|---|---|---|
-| literal [words] | Types the words after "literal" exactly, skipping all command and replacement processing. Takes effect wherever it appears in an utterance, not only as the first word. | The way to type a word that is also a command -- see "Selected Commands in Detail" in the Voice Commands section |
-| insert [text] | Inserts raw text with no capitalization, spacing, or formatting applied | Useful for exact fragments like an email address or a product code |
-| item [number] | Inserts a numbered list marker like "1." | e.g. "item 1", "item 5" |
-| submit | Presses Enter. Recognized at the trailing position of an utterance. | Also works as the last word of a sentence: "hello world submit" types "hello world" and then presses Enter. To type the word itself, say "literal submit" |
-| type [words] / dictate [words] | Types the words that follow as ordinary dictation, so a phrase that would otherwise run as a command is written out instead | e.g. "type delete all" writes those words rather than clearing the field |
-| enter | Presses the Enter key. Fires only when it is the whole utterance. | "submit" does the same and also works as the last word of a sentence |
-
-### Text Editing
-
-| Say this | What happens | Notes |
-|---|---|---|
-| backspace [number] | Deletes one character to the left, or that many with a number | e.g. "backspace 5" or "backspace twenty three" -- say the count as digits or as words; the number is optional, counts capped at 50. |
-| delete [number] | Deletes one character (or that many) to the right. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | e.g. "delete 5" or "delete twenty three" -- say the count as digits or as words; counts capped at 50. Say "erase" in place of "delete" here too, as in "erase 5". |
-| delete (or erase) word | Deletes the entire word under the cursor |  |
-| undo [number] | Undoes the last action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ctrl+Z; e.g. "undo 3". Common mishearings "undue" and "undu" also fire |
-| redo [number] | Redoes the last undone action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ctrl+Y; the common mishearing "redu" also fires |
-| new line | Inserts a line break without submitting the field | Works inline during dictation |
-| new paragraph | Inserts two line breaks | Works inline during dictation |
-| tab [number] | Presses Tab that many times | e.g. "tab 3" or "tab eleven" -- say the count as digits or as words; "indent 3" does the same. The number is required here; a bare "tab" spoken on its own presses Tab once, and "tab" inside a longer sentence is typed as the word |
-| shift tab | Outdents (Shift+Tab) | "outdent" does the same |
-| escape | Presses the Escape key. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "dismiss" also works. "dismiss the meeting invite" on its own is typed as ordinary text, not treated as this command. |
-| press [keys] | Presses any key or key combination by name | e.g. "press enter", "press alt f4", "press f5"; See the press-keys detail subsection of the Voice Commands section |
-| copy | Copies the current selection. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| copy line | Copies the entire current line |  |
-| copy all | Copies everything in the current field |  |
-| copy screen | Starts the Windows screenshot snipping tool |  |
-| cut | Cuts the current selection. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "cut that" also works. Say it as the whole sentence; "cut the vegetables" on its own is typed as ordinary text, not treated as this command. |
-| paste | Pastes the clipboard contents. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| x-ray replace all | Selects everything and pastes over it | Destructive -- requires the hotword |
-| select all | Selects everything in the current field |  |
-| delete (or erase) all | Selects everything in the current field and deletes it | Say it as the whole sentence. "delete all the files" on its own is typed as ordinary text, not treated as this command. |
-| select word | Selects the word under the cursor | "select this word" also works. "select word by word until it looks right" on its own is typed as ordinary text, not treated as this command. |
-| select line | Selects the line under the cursor | "select this line" also works. "select line six and copy it" on its own is typed as ordinary text, not treated as this command. |
-| select paragraph | Selects the paragraph under the cursor | "select this paragraph" also works. "select paragraph three of the contract" on its own is typed as ordinary text, not treated as this command. |
-| x-ray select [words] | Selects the first place those words appear in the document. The words must match the document exactly, apart from capital letters. | Wheelhouse shows a Windows notification when it selects nothing, so a screen reader can read the reason. |
-| save | Saves the current document (Ctrl+S). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| x-ray find [text] | Opens the app's find bar and types the search term | e.g. "x-ray find invoice" |
-| replace | Opens find-and-replace (Ctrl+H). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| search | Copies the current selection and runs a web search for it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Select the text first |
-| delete (or erase) next [number] characters | Selects that many characters to the right of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) next [number] words | Selects that many words to the right of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) next [number] lines | Moves to the start of the line, selects down that many lines, and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) next [number] paragraphs | Selects that many paragraphs below the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) previous / last [number] characters | Selects that many characters to the left of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) previous / last [number] words | Selects that many words to the left of the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) previous / last [number] lines | Moves to the start of the line, selects up that many lines, and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) previous / last [number] paragraphs | Selects that many paragraphs above the cursor and deletes them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| delete (or erase) this word | Moves to the start of the word under the cursor, selects the whole word, and deletes it. Fires only when it is the whole utterance. | "delete word" runs the same three keystrokes |
-| delete (or erase) line | Selects the whole line the cursor is on and deletes its text. Fires only when it is the whole utterance. | "delete this line" does the same; the line break stays, so the line is left empty |
-| delete (or erase) paragraph | Moves to the start of the paragraph the cursor is in, selects the whole paragraph, and deletes it. Fires only when it is the whole utterance. | "delete this paragraph" does the same |
-| cut next [number] characters | Selects that many characters to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| cut next [number] words | Selects that many words to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| cut next [number] lines | Moves to the start of the line, selects down that many lines, and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| cut next [number] paragraphs | Selects that many paragraphs below the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| cut previous / last [number] characters | Selects that many characters to the left of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| cut previous / last [number] words | Selects that many words to the left of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| cut previous / last [number] lines | Moves to the start of the line, selects up that many lines, and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| cut previous / last [number] paragraphs | Selects that many paragraphs above the cursor and cuts them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The cut text is left on the clipboard instead of being restored at the end of the utterance |
-| copy next [number] characters | Selects that many characters to the right of the cursor and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| copy next [number] words | Selects that many words to the right of the cursor and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| copy next [number] lines | Moves to the start of the line, selects down that many lines, and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| copy next [number] paragraphs | Selects that many paragraphs below the cursor and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| copy previous / last [number] characters | Selects that many characters to the left of the cursor and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| copy previous / last [number] words | Selects that many words to the left of the cursor and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| copy previous / last [number] lines | Moves to the start of the line, selects up that many lines, and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| copy previous / last [number] paragraphs | Selects that many paragraphs above the cursor and copies them to the clipboard. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. The copied text is left on the clipboard instead of being restored at the end of the utterance |
-| select next [number] characters | Selects that many characters to the right of the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| select next [number] words | Selects that many words to the right of the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| select next [number] lines | Selects down that many lines from the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| select next [number] paragraphs | Selects that many paragraphs below the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| select previous / last [number] characters | Selects that many characters to the left of the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| select previous / last [number] words | Selects that many words to the left of the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| select previous / last [number] lines | Selects up that many lines from the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| select previous / last [number] paragraphs | Selects that many paragraphs above the cursor. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| unselect that / clear selection | Drops the selection with a Right Arrow key press, leaving the cursor at the right-hand end of what was selected. Fires only when it is the whole utterance. | Nothing is deleted; with nothing selected the cursor moves one character right |
-| tab | Presses the Tab key once. Fires only when it is the whole utterance. | "tab [number]" presses it that many times |
-
-### Text Formatting
-
-| Say this | What happens | Notes |
-|---|---|---|
-| uppercase | Converts the selection to UPPERCASE. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "upper case" and "uppercase that" also work |
-| all caps that | Converts the selection to UPPERCASE. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. |  |
-| lowercase | Converts the selection to lowercase. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "lower case" and "lowercase that" also work |
-| no caps that | Converts the selection to lowercase. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. |  |
-| capitalize | Capitalizes the first letter of the selection and lowercases the rest. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "capitalize that" also works |
-| cap that | Capitalizes the first letter of the selection and lowercases the rest. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. |  |
-| title case | Converts the selection to Title Case |  |
-| snake case | Converts the selection to snake_case |  |
-| camel case | Converts the selection to camelCase |  |
-| pascal case | Converts the selection to PascalCase |  |
-| kebab case | Converts the selection to kebab-case |  |
-| compress | Removes the spaces from the selection, joining the words together. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| bold text | Bolds the selection (Ctrl+B) | "bold that" also works. Works in apps that support rich text |
-| italics | Italicizes the selection (Ctrl+I). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "italicize that" also works. Works in apps that support rich text |
-| underline | Underlines the selection (Ctrl+U). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "underline that" also works. Works in apps that support rich text |
-| parentheses [text] | Wraps the selection in ( ), inserts an empty ( ) pair, or inserts the spoken text wrapped | "parentheses hello" gives "(hello)" |
-| brackets [text] | Wraps the selection in [ ], inserts an empty pair, or wraps the spoken text |  |
-| braces [text] | Wraps the selection in { }, inserts an empty pair, or wraps the spoken text |  |
-| angle brackets [text] | Wraps the selection in < >, inserts an empty pair, or wraps the spoken text |  |
-| quotes [text] | Wraps the selection in double quotes, inserts an empty pair, or wraps the spoken text |  |
-| single quotes [text] | Wraps the selection in single quotes, inserts an empty pair, or wraps the spoken text |  |
-| bold next [number] characters | Selects that many characters to the right of the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| bold previous / last [number] characters | Selects that many characters to the left of the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| bold next [number] words | Selects that many words to the right of the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| bold previous / last [number] words | Selects that many words to the left of the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| bold next [number] lines | Selects down that many lines from the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| bold previous / last [number] lines | Selects up that many lines from the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| bold next [number] paragraphs | Selects that many paragraphs below the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| bold previous / last [number] paragraphs | Selects that many paragraphs above the cursor and makes them bold. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize next [number] characters | Selects that many characters to the right of the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize previous / last [number] characters | Selects that many characters to the left of the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize next [number] words | Selects that many words to the right of the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize previous / last [number] words | Selects that many words to the left of the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize next [number] lines | Selects down that many lines from the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize previous / last [number] lines | Selects up that many lines from the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize next [number] paragraphs | Selects that many paragraphs below the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| italicize previous / last [number] paragraphs | Selects that many paragraphs above the cursor and makes them italic. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline next [number] characters | Selects that many characters to the right of the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline previous / last [number] characters | Selects that many characters to the left of the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline next [number] words | Selects that many words to the right of the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline previous / last [number] words | Selects that many words to the left of the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline next [number] lines | Selects down that many lines from the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline previous / last [number] lines | Selects up that many lines from the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline next [number] paragraphs | Selects that many paragraphs below the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| underline previous / last [number] paragraphs | Selects that many paragraphs above the cursor and underlines them. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. Works in apps that support rich text |
-| uppercase next [number] characters | Selects that many characters to the right of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| uppercase previous / last [number] characters | Selects that many characters to the left of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| uppercase next [number] words | Selects that many words to the right of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| uppercase previous / last [number] words | Selects that many words to the left of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| uppercase next [number] lines | Selects down that many lines from the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| uppercase previous / last [number] lines | Selects up that many lines from the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| uppercase next [number] paragraphs | Selects that many paragraphs below the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| uppercase previous / last [number] paragraphs | Selects that many paragraphs above the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "upper case" also works |
-| lowercase next [number] characters | Selects that many characters to the right of the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| lowercase previous / last [number] characters | Selects that many characters to the left of the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| lowercase next [number] words | Selects that many words to the right of the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| lowercase previous / last [number] words | Selects that many words to the left of the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| lowercase next [number] lines | Selects down that many lines from the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| lowercase previous / last [number] lines | Selects up that many lines from the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| lowercase next [number] paragraphs | Selects that many paragraphs below the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| lowercase previous / last [number] paragraphs | Selects that many paragraphs above the cursor and converts them to lowercase. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50. "lower case" also works |
-| capitalize next [number] characters | Selects that many characters to the right of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| capitalize previous / last [number] characters | Selects that many characters to the left of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| capitalize next [number] words | Selects that many words to the right of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| capitalize previous / last [number] words | Selects that many words to the left of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| capitalize next [number] lines | Selects down that many lines from the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| capitalize previous / last [number] lines | Selects up that many lines from the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| capitalize next [number] paragraphs | Selects that many paragraphs below the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| capitalize previous / last [number] paragraphs | Selects that many paragraphs above the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-
-### Navigation
-
-| Say this | What happens | Notes |
-|---|---|---|
-| go [where] | Moves the cursor without touching the keyboard: go home / go end / go top / go bottom / go left / go right, with counts, word and paragraph units, and "then"-chained "grab" steps that select along the way | See the Navigation subsection of the Voice Commands section for the full move list |
-| go up [number] lines / move up [number] lines | Moves the cursor up that many lines. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go down [number] lines / move down [number] lines | Moves the cursor down that many lines. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go up [number] paragraphs / move up [number] paragraphs | Moves the cursor back that many paragraphs (Ctrl and Up Arrow). Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go down [number] paragraphs / move down [number] paragraphs | Moves the cursor forward that many paragraphs (Ctrl and Down Arrow). Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go left [number] characters / move left [number] characters | Moves the cursor left that many characters. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go right [number] characters / move right [number] characters | Moves the cursor right that many characters. Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go left [number] words / move left [number] words | Moves the cursor back that many words (Ctrl and Left Arrow). Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go right [number] words / move right [number] words | Moves the cursor forward that many words (Ctrl and Right Arrow). Fires only when it is the whole utterance. | The number is optional and defaults to 1; counts are capped at 50 |
-| go to home / go to the beginning of the line | Moves the cursor to the start of the current line (Home). Fires only when it is the whole utterance. | "go to the start of the line" also works |
-| go to the top / go to the top of the document | Moves the cursor to the very start of the document (Ctrl+Home). Fires only when it is the whole utterance. | "go to the beginning of the document" and "go to the start of the document" also work |
-| go to the bottom / go to the bottom of the document | Moves the cursor to the very end of the document (Ctrl+End). Fires only when it is the whole utterance. | "go to the end of the document" also works |
-| go to the end of the line / go to the end | Moves the cursor to the end of the current line (End). Fires only when it is the whole utterance. |  |
-| go to the beginning of the word | Moves the cursor back one word (Ctrl and Left Arrow). Fires only when it is the whole utterance. | "go to the start of the word" also works; each app decides where a word boundary falls |
-| go to the end of the word | Moves the cursor forward one word (Ctrl and Right Arrow). Fires only when it is the whole utterance. | Each app decides where a word boundary falls, so the cursor may land at the start of the next word |
-| go to the beginning of the paragraph | Moves the cursor back one paragraph (Ctrl and Up Arrow). Fires only when it is the whole utterance. | "go to the start of the paragraph" also works |
-| go to the end of the paragraph | Moves the cursor forward one paragraph (Ctrl and Down Arrow). Fires only when it is the whole utterance. | Each app decides where a paragraph boundary falls, so the cursor may land at the start of the next paragraph |
-| move to the beginning of the selection | Presses Left Arrow, which drops the selection and leaves the cursor at its left-hand end. Fires only when it is the whole utterance. | With nothing selected the cursor moves one character left |
-| move to the end of the selection | Presses Right Arrow, which drops the selection and leaves the cursor at its right-hand end. Fires only when it is the whole utterance. | With nothing selected the cursor moves one character right |
-| scroll down [number] | Turns the mouse wheel down, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | The number is how many wheel notches to send, up to 50; e.g. "scroll down 3". The count can be digits or spoken words, so "scroll down eleven" works whether your speech provider writes numbers as digits or as words. The command turns the wheel without moving the pointer, so it scrolls whatever a real wheel turn would scroll from where the pointer already sits |
-| scroll up [number] | Turns the mouse wheel up, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | The number is how many wheel notches to send, up to 50; e.g. "scroll up 3". The count can be digits or spoken words, so "scroll up eleven" works whether your speech provider writes numbers as digits or as words. |
-| scroll left [number] | Turns the sideways mouse wheel left, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | Needs an application that reads the sideways wheel; many do not. The number is how many wheel notches to send, up to 50. The count can be digits or spoken words, so "scroll left eleven" works whether your speech provider writes numbers as digits or as words. |
-| scroll right [number] | Turns the sideways mouse wheel right, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | Needs an application that reads the sideways wheel; many do not. The number is how many wheel notches to send, up to 50. The count can be digits or spoken words, so "scroll right eleven" works whether your speech provider writes numbers as digits or as words. |
-| start scrolling down | Keeps turning the mouse wheel down until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | The scroll keeps going with no further speech, so you can read a long page hands-free. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so, in case the stop command is not heard. If Windows refuses to move the wheel, which can happen over a window that runs as administrator, the scroll stops early and shows a different notification. Any scroll command you say while it runs replaces it, so only one scroll is ever going. |
-| start scrolling up | Keeps turning the mouse wheel up until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | The scroll keeps going with no further speech. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so. |
-| start scrolling left | Keeps turning the sideways mouse wheel left until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | Needs an application that reads the sideways wheel; many do not. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so. |
-| start scrolling right | Keeps turning the sideways mouse wheel right until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | Needs an application that reads the sideways wheel; many do not. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so. |
-| stop scrolling | Stops a scroll that was started with "start scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally. | The words are "stop scrolling" and not "stop" on its own. A command for the single word "stop" would take that word out of everything you dictate. Saying it when nothing is scrolling does nothing at all. |
-
-### Punctuation and Symbols
-
-| Say this | What happens | Notes |
-|---|---|---|
-| period | Types . inline during dictation | "full stop" also works |
-| comma | Types , inline during dictation |  |
-| colon | Types : inline during dictation |  |
-| semicolon | Types ; inline during dictation |  |
-| question mark | Types ? inline during dictation |  |
-| exclamation point | Types ! inline during dictation | "exclamation mark" also works |
-| apostrophe | Types ' inline during dictation |  |
-| hyphen | Types - inline during dictation | "minus sign" also works |
-| dash | Types an em dash (the long dash) inline during dictation |  |
-| slash | Types / inline during dictation | "forward slash" also works |
-| backslash | Types \\ inline during dictation |  |
-| backtick | Types \` inline during dictation |  |
-| at sign | Types @ inline during dictation |  |
-| hashtag | Types # inline during dictation | "number sign" and "pound sign" also work |
-| dollar sign | Types $ inline during dictation |  |
-| percent | Types % inline during dictation |  |
-| caret sign | Types ^ inline during dictation | Also fires if heard as "carrot sign" |
-| ampersand | Types & inline during dictation | Say "ampersand"; "and sign" types the words |
-| asterisk | Types * inline during dictation |  |
-| underscore | Types _ inline during dictation |  |
-| plus sign | Types + inline during dictation |  |
-| equal sign | Types = inline during dictation |  |
-| tilde | Types ~ inline during dictation | Also fires if heard as "tilda" |
-| vertical bar | Types the pipe character inline during dictation | "pipe character" also works |
-| ellipsis | Types ... inline during dictation | "dot dot dot" also works |
-| space bar | Types a single literal space inline during dictation |  |
-| open bracket | Types [ inline during dictation |  |
-| close bracket | Types ] inline during dictation |  |
-| open brace | Types { inline during dictation | "left brace" also works |
-| close brace | Types } inline during dictation | "right brace" also works |
-| open parentheses | Types ( inline during dictation | "left parentheses" also works |
-| close parentheses | Types ) inline during dictation | "right parentheses" also works |
-| open quotes | Types a double quote inline during dictation |  |
-| close quotes | Types a double quote inline during dictation |  |
-| open single quote | Types a single quote inline during dictation | "begin single quote" also works |
-| close single quote | Types a single quote inline during dictation | "end single quote" also works |
-| less than sign | Types < inline during dictation |  |
-| greater than sign | Types > inline during dictation |  |
-| euro sign | Types € inline during dictation |  |
-| yen sign | Types ¥ inline during dictation |  |
-| pound sterling sign | Types £ inline during dictation |  |
-| copyright sign | Types © inline during dictation |  |
-| registered sign | Types ® inline during dictation |  |
-| section sign | Types § inline during dictation |  |
-| paragraph sign | Types ¶ inline during dictation | "paragraph mark" also works |
-| degree symbol | Types ° inline during dictation |  |
-| multiplication sign | Types × inline during dictation |  |
-| division sign | Types ÷ inline during dictation |  |
-| colin | Mishear tolerance: inserts : when "colin" is the entire utterance. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| come | Mishear tolerance: inserts , when "come", "kama", "commer", or "come on" is the entire utterance. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-
-### Application Switching
-
-| Say this | What happens | Notes |
-|---|---|---|
-| x-ray activate [app name] | Brings the named application's window forward; when nothing by that name is open, Wheelhouse looks the name up among your installed programs and starts it | e.g. "x-ray activate outlook"; when more than one installed program matches the name, Wheelhouse starts none of them and lists them, so you can say the full name |
-| browser | Brings your default web browser to the front. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Wheelhouse looks up which browser is your Windows default at the moment you speak |
-| notepad | Brings Notepad to the front. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| switch to [app name] / go to [app name] / show [app name] | Brings the named application's window forward, starting it when nothing by that name is open. Needs the hotword first. | e.g. "x-ray switch to outlook"; the same action as "x-ray activate [app name]", including the program lookup |
-| close [app name] / exit [app name] / quit [app name] | Brings the named application's window forward and then closes it (Alt+F4). Needs the hotword first. | Destructive -- requires the hotword |
-| minimize [app name] | Brings the named application's window forward and then sends Windows and Down Arrow. Needs the hotword first. | That one keystroke has two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size. |
-| maximize [app name] | Brings the named application's window forward and then maximizes it (Windows and Up Arrow). Needs the hotword first. |  |
-
-### System
-
-| Say this | What happens | Notes |
-|---|---|---|
-| zoom in | Zooms in (Ctrl and plus) |  |
-| zoom out | Zooms out (Ctrl and minus) |  |
-| create tab | Sends Ctrl+N | New tab in most editors; note that in most browsers Ctrl+N opens a new window, not a tab |
-| create window | Sends Ctrl+Shift+N | New window in editors; opens a private/incognito window in most browsers |
-| x-ray close window | Closes the active window (Alt+F4) | Requires the hotword for safety |
-| maximize | Maximizes the active window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| minimize | Sends Windows and Down Arrow to the active window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | That one keystroke has two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size. "restore window" sends the same keystroke. |
-| desktop | Shows the desktop (Windows+D). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
-| Windows settings | Opens the Windows Settings app | Also fires if heard as "Window settings" |
-| close tab | Closes the current tab (Ctrl+W). Needs the hotword first. | What Ctrl+W closes is decided by the app |
-| restore window | Sends Windows and Down Arrow to the active window. Fires only when it is the whole utterance. | The same keystroke as "minimize", so it has the same two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size. |
-| snap window to the left | Snaps the active window to the left half of the screen (Windows and Left Arrow). Fires only when it is the whole utterance. |  |
-| snap window to the right | Snaps the active window to the right half of the screen (Windows and Right Arrow). Fires only when it is the whole utterance. |  |
-| snap window to the top | Snaps the active window to the top of the screen (Windows, Alt and Up Arrow). Fires only when it is the whole utterance. |  |
-| snap window to the bottom | Snaps the active window to the bottom of the screen (Windows, Alt and Down Arrow). Fires only when it is the whole utterance. |  |
-| minimize all windows | Minimizes every open window (Windows+M). Fires only when it is the whole utterance. | "minimize all" does the same |
-| show task switcher / list all windows / show all windows | Opens Task View, the Windows overview of every open window (Windows+Tab). Fires only when it is the whole utterance. |  |
-| keyboard | Toggles the Windows On-Screen Keyboard (Windows, Ctrl and O). Fires only when it is the whole utterance. | One word, both directions: it opens the keyboard when closed and closes it when open. The earlier show and hide phrasings were removed because they promised a direction the toggle cannot deliver |
-| search windows for [words] | Opens Windows Search and types what you say into it. Needs the hotword first. |  |
-| search on google for [words] / search for [words] | Opens a Google search for the words you say in your default browser. Needs the hotword first. | "search [words]" without "for" does the same |
-| search on bing for [words] | Opens a Bing search for the words you say in your default browser. Needs the hotword first. |  |
-| search on youtube for [words] | Opens a YouTube search for the words you say in your default browser. Needs the hotword first. |  |
-
-### Voice Element Clicking
-
-| Say this | What happens | Notes |
-|---|---|---|
-| click [name] | Clicks the button, link, menu item, or other control with that name; add a role word to narrow the search, or give the overlay number instead of a name while the numbered overlay is showing. Needs the hotword first, as "x-ray click cancel". | See the Voice Element Clicking subsection of the Voice Commands section |
-| show numbers | Paints a number on every clickable control in the front window | Numbers stay up until you say "hide numbers". "apply numbers" also works. "show numbers in the report" on its own is typed as ordinary text, not treated as this command. |
-| hide numbers | Removes the numbers | "dismiss numbers" also works. "hide numbers on the chart" on its own is typed as ordinary text, not treated as this command. |
-| right click [name] / double click [name] | Clicks the named control with a right click or a double click instead of a normal click; also works with a number while the numbered overlay is showing ("right click 3"). Presses a real mouse click at the control's center, with the same checks as a normal click. Useful where a normal click is not enough: File Explorer items open on a double click, and a right click opens the context menu. |  |
-
-### Mouse Grid
-
-| Say this | What happens | Notes |
-|---|---|---|
-| show grid | Lays a numbered three-by-three grid over the screen the front window is on, for moving the pointer by voice | Opening the grid removes the numbered overlay; the two are never on screen together. "apply grid" also works. "show grid lines on the chart" on its own is typed as ordinary text, not treated as this command. See the Mouse Control subsection of the Voice Commands section |
-| hide grid | Closes the grid without clicking anything | "dismiss grid" also works. "hide grid lines before printing" on its own is typed as ordinary text, not treated as this command. |
-| grid next screen | Moves the open grid to the next monitor, restarted at full size |  |
-| [number 1-9] | Redraws the open grid inside that cell, narrowing the target. With the grid closed and the numbered overlay showing, the number clicks the control with that label. With neither showing, numbers are ordinary dictation and are typed normally. |  |
-| number [1-9] | Same cell narrowing with the word "number" first ("number five"), which speech engines hear more reliably than a single word. With the grid closed and the numbered overlay showing, the phrase clicks the control with that label. With neither showing, the phrase is ordinary dictation and is typed normally. |  |
-| click / right click / double click | Clicks at the center of the grid's current cell and closes the grid; a number in the same utterance narrows first ("x-ray click 5") |  |
-| mark | Pins the start point of a drag at the current cell center and restarts the grid so you can navigate to the destination |  |
-| drag | Holds the left button at the marked point, moves gradually to the current cell center, and releases -- a complete drag and drop | Requires a "mark" first; without one, a notice explains the step |
-| move here | Moves the pointer to the current cell center without pressing anything, for hover menus and tooltips |  |
-
-### Wheelhouse Control
-
-| Say this | What happens | Notes |
-|---|---|---|
-| push to talk mode | Switches to press-and-hold listening: Wheelhouse listens only while you hold the floating button | A notification confirms the switch |
-| click to talk mode | Switches back to toggle listening (click to start, click to stop) -- the default |  |
-| stop listening | Switches listening off, as clicking the floating button does while it listens. Applies only when the words are the whole utterance; inside a longer sentence they dictate normally. | In toggle mode, say the wake word ("computer") to switch listening back on. In push-to-talk mode the wake word ends only the idle pause, so the way back is the next hold of the floating button. A notice confirms that listening is off |
-| help | Opens the Wheelhouse Assistant (the official online help) in your browser, after a short explanation window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured and no window appears. The explanation window is the same one the Help menu item shows, and both take the same route through the Logic process; ticking "Do not show this again" and selecting Assistant sets explain_before_open to false under [ai.help], which turns the window off for the command and the menu item alike. If Windows cannot start a browser, the notice "Wheelhouse could not open your browser." appears |
-| patterns | Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "pattern manager" also works; see "Selected Commands in Detail" in the Voice Commands section |
-| learn my voice | Opens the voice-teaching window, where Wheelhouse learns how you sound so it stops missing short words | "calibrate my voice" also works; only the Distil-Whisper speech engine uses it; See "Teaching Wheelhouse your voice" in the Speech Engines section |
-| x-ray fix | Sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- then replaces the selection with the result. The AI is told not to reword the text or add or remove words | Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure |
-| simplify | Rewrites the selected text in plain language, using shorter sentences and simpler words. Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix"; the selection comes back as plain text, so formatting applied in a word processor is lost |
-| shorten | Rewrites the selected text more briefly, cutting repetition and padding. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix" |
-| x-ray make formal | Rewrites the selected text in a formal register, avoiding contractions and casual wording | Same AI server and same safeguards as "x-ray fix" |
-| pirate | Rewrites the selected text the way a pirate would say it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Selected Commands in Detail" in the Voice Commands section for writing your own. |
-| x-ray translate to [language] | Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese". Keeps every fact and leaves names and numbers as they are. | Same AI server and same safeguards as "x-ray fix"; say the language in English and in lower case, as one or more plain words with no punctuation. How good the translation is depends on the model you have configured. |
-| x-ray cancel fix | Cancels an in-progress fix or rewrite |  |
-| boost | Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | See "Selected Commands in Detail" in the Voice Commands section -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation |
+This is the automatically generated reference for every action a pattern step can perform, for the notices and windows that Wheelhouse shows, and for every user-facing setting that the shipped config.toml contains. Optional settings that the file leaves commented out are described in the help document instead. It is built from the same sources the application uses, so it stays in step with what Wheelhouse actually does. Every voice command is listed in the Voice Commands section of the help document (wheelhouse_help.md), which is also the guided introduction to using Wheelhouse; for installation, see the installation guide (wheelhouse_install.md).
 
 ## Action Reference
 
@@ -362,17 +36,17 @@ Example: `Trigger "^cancel fix$" with no params: saying "x-ray cancel fix" stops
 
 Action name: `fix_text_ai`. The Pattern Manager lists it under Advanced actions, AI.
 
-Captures the text in the focused field, sends it to the configured AI for correction, and pastes the corrected version back.
+Captures the selected text, or all the text in the focused field when nothing is selected, sends it to the configured AI for correction, and pastes the corrected version back.
 
 Parameters: none.
 
-Example: `Trigger "^fix" with no params: saying "x-ray fix" corrects the text in the focused field.`
+Example: `Trigger "^fix" with no params: saying "x-ray fix" corrects the selected text, or all the text in the focused field when nothing is selected.`
 
 #### Rewrite text with AI
 
 Action name: `rewrite_text_ai`. The Pattern Manager lists it under Advanced actions, AI.
 
-Captures the text in the focused field, sends it to the configured AI to be rewritten in the style you describe, and pastes the rewritten version back. You write the style sentence and nothing else: Wheelhouse adds the wording that keeps the layout intact and the wording that stops the highlighted text from redirecting the AI.
+Captures the selected text, or all the text in the focused field when nothing is selected, sends it to the configured AI to be rewritten in the style you describe, and pastes the rewritten version back. You write the style sentence and nothing else: Wheelhouse adds the wording that keeps the layout intact and the wording that stops the highlighted text from redirecting the AI.
 
 Parameters, in the order a pattern passes them:
 
@@ -392,7 +66,7 @@ Parameters, in the order a pattern passes them:
 
 - `target` (group_ref) -- Capture group holding the spoken control name, usually g1.
 
-Example: `Trigger "^(?:click|tap)\s+(.+)$" with params ["g1"]: saying "x-ray click submit button" clicks the button labeled Submit. This one needs the hotword first.`
+Example: `Trigger "^(?:click|clicks|tap)\s+(.+)$" with params ["g1"]: saying "x-ray click submit button" clicks the button labeled Submit. This one needs the safety word first.`
 
 #### Hide numbered click overlay
 
@@ -424,7 +98,7 @@ Paints a number badge on every clickable control on screen so you can say "click
 
 Parameters: none.
 
-Example: `Trigger "^(?:show|apply) numbers$" with no params: saying "show numbers" shows the badges; then "x-ray click 4" clicks control number 4. "apply numbers" does the same.`
+Example: `Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no params: saying "show numbers" shows the badges; then "x-ray click 4" clicks control number 4. "apply numbers" and "show numbers here" do the same.`
 
 ### Clipboard
 
@@ -501,7 +175,7 @@ Presses several keys together as one combination, optionally repeated a number o
 Parameters, in the order a pattern passes them:
 
 - `keys` (keys) -- Key names held down together, listed in order (for example ctrl, z).
-- `repeat` (number) -- Optional last value: how many times to press the combination (capped at 50); often a capture group like g1 so the spoken number is used.
+- `repeat` (number) -- Optional last value: how many times to press the combination (capped at 30); often a capture group like g1 so the spoken number is used.
 
 Example: `Trigger "^undo\s*(\d+)?$" with params ["ctrl", "z", "g1"]: saying "undo 3" presses Ctrl+Z three times.`
 
@@ -514,8 +188,9 @@ Turns spoken key names into a key combination and presses it; if any name is unr
 Parameters, in the order a pattern passes them:
 
 - `key_sequence` (keys) -- Space-separated spoken key names in any order (for example control alt delete); usually the capture group g1.
+- `repeat` (number) -- Optional repeat count as digits or a number word (capped at 30); the capture group g2 in "press tab 3 times".
 
-Example: `Trigger "^press\s*(.+)$" with params ["g1"]: saying "press control alt delete" presses Ctrl+Alt+Delete.`
+Example: `Trigger "^press\s*(.+?)(?:\s+(\d+)\s+times?)?$" with params ["g1", "g2"]: saying "press control alt delete" presses Ctrl+Alt+Delete, and "press tab 3 times" presses Tab three times.`
 
 #### Press one key
 
@@ -559,26 +234,26 @@ Example: `Trigger "^(mark[.!?]?)$" with params ["mark", "g1"]: with the grid ope
 
 Action name: `grid_click_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
 
-Clicks at the open mouse grid's current cell center (click, right click, or double click); with the grid closed the words type as normal dictation.
+Clicks at the open mouse grid's current cell center (click, tap, right click, double click, or triple click); with the grid closed it clicks at the current pointer position. The words type as dictation only when voice clicking is turned off; say "literal click" to type the word.
 
 Parameters, in the order a pattern passes them:
 
 - `utterance` (group_ref) -- Capture group holding the spoken gesture words, usually g1.
 
-Example: `With the grid narrowed to the target, saying "right click" opens the context menu at the cell center.`
+Example: `With the grid narrowed to the target, saying "right click" opens the context menu at the cell center; with no grid open, saying "triple click" selects the line under the pointer.`
 
 #### Mouse-grid number
 
 Action name: `grid_number_command`. The Pattern Manager lists it under Advanced actions, Mouse grid.
 
-Narrows the open mouse grid to the spoken cell (1-9); with the grid closed the number types as normal dictation.
+Narrows the open mouse grid to the spoken cell (1-9). With the grid closed and the numbered overlay showing, the number clicks the control with that label; with neither showing, the number types as normal dictation.
 
 Parameters, in the order a pattern passes them:
 
 - `utterance` (group_ref) -- Capture group holding the whole spoken text for the dictation fallback, usually g1.
 - `number_word` (group_ref) -- Capture group holding just the number word or digit, usually g2.
 
-Example: `Saying "five" with the grid open zooms the grid into cell 5; with the grid closed it types "five".`
+Example: `Saying "five" with the grid open zooms the grid into cell 5; with the grid closed and the numbered overlay showing it clicks the control labeled 5; with neither showing it types "five".`
 
 #### Move the mouse grid to the next monitor
 
@@ -741,6 +416,18 @@ Parameters, in the order a pattern passes them:
 
 Example: `Trigger "literal (.+)$" with params ["g1"]: saying "literal submit" inserts the word "submit" as text instead of firing the submit command.`
 
+#### Insert text with no spaces
+
+Action name: `insert_raw_no_spaces`. The Pattern Manager lists it under Advanced actions, Text.
+
+Inserts text at the cursor via paste with every space removed, and no added space, capitalization, or cleanup.
+
+Parameters, in the order a pattern passes them:
+
+- `text` (text) -- The words to join; may be a capture group like g1.
+
+Example: `Trigger "^no space (.+)$" with params ["g1"]: saying "no space hello world" inserts "helloworld".`
+
 #### Numbered list item
 
 Action name: `number_point`. The Pattern Manager lists it under Advanced actions, Text.
@@ -775,7 +462,7 @@ Parameters, in the order a pattern passes them:
 
 - `phrase` (text) -- The words to find; may be a capture group like g1.
 
-Example: `Trigger "^select (.+)$" with params ["g1"]: saying "x-ray select brown fox" selects the first "brown fox" in the document. This one needs the hotword first.`
+Example: `Trigger "^select (.+)$" with params ["g1"]: saying "x-ray select brown fox" selects the first "brown fox" in the document. This one needs the safety word first.`
 
 #### Transform selected text
 
@@ -837,7 +524,7 @@ Opens the configured online help page in the default browser.
 
 Parameters: none.
 
-Example: `Trigger "^help$" with no params: saying "x-ray help" opens the help page.`
+Example: `Trigger "^help$" with no params: saying "help" opens the help page.`
 
 #### Open the Pattern Manager
 
@@ -847,7 +534,7 @@ Opens the Pattern Manager window for viewing and editing voice patterns.
 
 Parameters: none.
 
-Example: `Trigger "^patterns?$" with no params: saying "x-ray patterns" opens the Pattern Manager.`
+Example: `Trigger "^patterns?$" with no params: saying "patterns" opens the Pattern Manager.`
 
 #### Set speech interaction mode
 
@@ -902,14 +589,15 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 | **Press a keyboard shortcut** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the third choice in the list "What do you want to happen?". | This choice starts a voice command that presses keys for you, such as Ctrl+S to save. | Click it, or select it and press Enter. The editor opens with "Press a key combination" selected. Type the words you will say. In the Keys box, type the keys joined with +, such as ctrl+s. Or click Record and press the shortcut; Escape cancels the recording. Then click Create. |
 | **Type a phrase you say often** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the fourth choice in the list "What do you want to happen?". | This choice makes a shortcut phrase. When you dictate the phrase, Wheelhouse types your saved text in its place, such as your email address. | Click it, or select it and press Enter. The editor opens with "Insert text" selected. Type the phrase you will say, such as my email. In the "Text to type:" box, type the exact text for Wheelhouse to type. Then click Create. |
 | **Correct a word the microphone keeps getting wrong** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the fifth choice in the list "What do you want to happen?". | This choice fixes a word that speech recognition keeps getting wrong. When dictation produces the wrong word, Wheelhouse types the right one. | Click it, or select it and press Enter. In "What does the microphone type by mistake?", type the wrong word, such as jason. In "What should it type instead?", type the right word, such as JSON. Then click Create. |
-| **Start from scratch** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the last choice in the list "What do you want to happen?". | This choice opens the editor with no goal filled in. Every option stays available. | Click it, or select it and press Enter. The editor opens with "Press a key combination" selected. Under "What should happen?", pick the action you want. Tick Advanced for the full editor. Then click Create. |
+| **Create an advanced command** (choice in the new pattern list) | You click Add Pattern in the Pattern Manager. This is the last choice in the list "What do you want to happen?". | This choice opens the full editor with the Advanced check box already ticked. You write your own expression and can add more than one action. | Click it, or select it and press Enter. The editor opens with Advanced ticked. Type the expression in the "Regular expression:" box. Pick the first action, and click "Add step" for each further action. Then click Create. The Advanced check box usually stays ticked here, because the simple editor cannot show a hand-written expression. To use the simple editor instead, click Cancel, click Add Pattern again, and pick another choice. Cancel discards what you typed. |
 | **Select Program** (file picker) | You click Browse... next to the Program box in the pattern editor. The Program box shows when "Launch a program" is selected. | This picker lets you choose the program file instead of typing its path. | Find the program's .exe file and click Open. To see other files, pick All Files in the file type list. Wheelhouse puts the full path in the Program box. |
-| **Pattern Manager Help** (help window) | You click the "? Help" button in the Pattern Manager. | This window explains patterns, commands and replacements, the wake word, the editor, and Advanced mode. It also lists every action the editor offers. | Read or scroll the page. A link to a part of the page jumps there. A web link opens in your browser. Click Close when you are done. |
-| **Change Wake Word** (input box) | You click Change... next to "Wake word:" in the Pattern Manager. | This box sets the wake word. You say the wake word before commands marked [hotword]. | Type one word with no spaces, and click OK. Click Cancel to keep the current word. For an empty entry or more than one word, Wheelhouse shows an error under the wake word row. |
+| **Pattern Manager Help** (help window) | You click the "? Help" button in the Pattern Manager. | This window explains patterns, commands and replacements, the safety word, the editor, and Advanced mode. It also lists every action the editor offers. | Read or scroll the page. A link to a part of the page jumps there. A web link opens in your browser. Click Close when you are done. |
+| **Change Safety Word** (input box) | You click Change... next to "Safety word:" in the Pattern Manager. | This box sets the safety word. You say the safety word before commands marked [safety word]. | Type one word with no spaces, and click OK. Click Cancel to keep the current word. For an empty entry or more than one word, Wheelhouse shows an error under the safety word row. |
 | **Error Creating Pattern** (message box) | You clicked Create in the pattern editor, then closed the editor before Wheelhouse answered. Wheelhouse then reported that it could not create the pattern. While the editor stays open, it shows such an error inside the editor instead. | The new pattern was not saved. The message text is the reason Wheelhouse gave. | Click OK. Open the editor again the same way and enter the pattern again. If the same message comes back, read its reason and fix that problem first. |
 | **Error Updating Pattern** (message box) | You clicked Save while you edited one of your patterns, then closed the editor before Wheelhouse answered. Wheelhouse then reported that it could not save the change. | Your change to the pattern was not saved. The message text is the reason Wheelhouse gave. | Click OK. Select the pattern, click Edit..., and make the change again. |
 | **Error Deleting Pattern** (message box) | You clicked Delete Pattern or Remove customization, then clicked Yes. Wheelhouse could not delete the pattern. | Wheelhouse did not delete the pattern. The message gives the reason, for example that the pattern was not found. | Click OK. Close and reopen the Pattern Manager to refresh the list. If the pattern is still in the list, try again. |
-| **WheelHouse settings** (notice) | You moved or resized the floating button, or turned Show Floating Button on or off. Wheelhouse shows it while it saves the change, and again if the save fails. The "Do not show this again" box in the "Ask the Wheelhouse Assistant" window also saves this way. | "Saving settings. Waiting for confirmation." means the save is in progress. The notice closes when the save succeeds. "Couldn't save settings" and "Couldn't send settings" mean the change was not saved. Wheelhouse then puts back the last saved values. "Settings outcome unknown" means no answer came within five seconds. Wheelhouse then reads the saved settings and uses them. It tries this up to three times. "Couldn't confirm the settings" means Wheelhouse got no answer, so the change may not be saved. | While it says "Saving settings" or "Settings outcome unknown", wait. After a message that starts with "Couldn't", make the change again. For "Couldn't change button visibility", select Show Floating Button in the menu again. |
+| **WheelHouse settings** (notice) | You moved or resized the floating button, turned Show Floating Button on or off, or changed the Pattern Manager font size, and Wheelhouse could not save the change. | Wheelhouse shows no notice while it saves a setting or when the save succeeds. "Couldn't save settings" and "Couldn't send settings" mean the change was not saved. Wheelhouse then puts back the last saved values. "Couldn't confirm the settings" means Wheelhouse got no answer, even after it checked the saved settings, so the change may not be saved. | After a message that starts with "Couldn't", make the change again. For "Couldn't change button visibility", select Show Floating Button in the menu again. |
+| **Wheelhouse** (notice) | You selected Assistant in the "Ask the Wheelhouse Assistant" window, and Wheelhouse could not save your choice about the "Do not show this again" box. | The notice reads "Wheelhouse could not save your choice from the Assistant window. The window can appear again when you choose Help." Your choice was not kept, so the next Help shows the window again. Other short notices also use the title Wheelhouse. | Choose Help again. When the window appears, set the check box the way you want and select Assistant again. |
 | **Terminal Dictation** (window) | You dictate while a terminal window is in front and waiting at its prompt. Windows Terminal, Command Prompt, and PowerShell count as terminals. Wheelhouse opens this window and types your words into it. The terminal inside Visual Studio Code does not open this window. A terminal that runs as administrator does not open this window either. | Wheelhouse collects your dictated command here, so you can check it before it reaches the terminal. | Check or edit the text. Press Enter or click Submit to paste the text into the terminal and run it. Press Shift+Enter for a new line. Press Escape or click Cancel to close the window and discard the text. |
 | **Terminal paste failed** (Windows notification) | You pressed Enter or clicked Submit in the Terminal Dictation window. Wheelhouse could not paste the text into the terminal. | Wheelhouse did not press Enter in the terminal, so the command did not run. The Terminal Dictation window closed and its text was cleared. In some cases the text already reached the terminal prompt. | Click the terminal and check its prompt. Then dictate the command again. Wheelhouse does not paste into a terminal that runs as administrator. Type the command there with the keyboard. |
 | **Wheelhouse: Speech setup** (Windows notification) | Wheelhouse checks each speech engine's installed files once, when it first starts a speech engine after launch. It shows this notice when an engine's files are out of date. It also shows it when Windows lacks a new enough Microsoft Visual C++ runtime. | Speech can fail to start, or the speech engine can crash. Wheelhouse shows one notice for each problem it finds. | If the message says "Speech environment is out of date", run the Wheelhouse installer again. For the Visual C++ runtime message, run the installer again and select Yes when Windows asks for permission. If you already did that, restart the computer. |
@@ -1037,7 +725,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 **sensitivity** *(default: `0.5`)* -- Wake-word detection sensitivity, range 0-1. Lower it if saying the wake word often fails to wake Wheelhouse; raise it if ordinary conversation keeps waking it by accident.
 
-**mode** *(default: `"idle_recovery"`)* -- What the wake word is used for -- in toggle mode, turning listening back on whenever it is off; in push-to-talk mode, ending only the idle pause, after which the next hold of the floating button is the way back. Valid values: "idle_recovery".
+**mode** *(default: `"idle_recovery"`)* -- What the wake word is used for -- in toggle mode, turning listening back on whenever it is off; in push-to-talk mode, ending only the idle pause, after which the next hold of the floating button is the way back. Valid values: "idle_recovery" or "push_to_talk"; any other value turns the wake word off for every pause, and the log gives no warning about it.
 
 **model_dir** *(default: `"../shared/data/wake_words"`)* -- Where the wake-word listening model lives on disk; set by the installer, do not change it.
 
@@ -1093,13 +781,13 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ### [ai]
 
-**enabled** *(default: `true`)* -- The master switch for all AI features; today this means dictation text correction (it also gates the in-app help chat, which is currently disabled). New installs leave it off unless you chose the AI helper during setup.
+**enabled** *(default: `true`)* -- The master switch for all AI features: dictation text correction, and also the rewrite commands and Ask AI, which it switches on and off together (it also gates the in-app help chat, which is currently disabled). New installs leave it off unless you chose the AI helper during setup.
 
 **knowledge_base** *(default: `"knowledge/wheelhouse_help.md"`)* -- The document the in-app help assistant would consult; because the in-app help chat is currently disabled, this setting has no effect today.
 
 ### [ai.server]
 
-**base_url** *(default: `"http://127.0.0.1:8781/v1"`)* -- The address of the AI server Wheelhouse talks to, using the standard OpenAI-style interface; empty leaves AI off. Any OpenAI-compatible address works, local or hosted; the installer's AI-helper choice fills in Google's Gemini address.
+**base_url** *(default: `"http://127.0.0.1:8781/v1"`)* -- The address of the AI server Wheelhouse talks to, using the standard OpenAI-style interface; empty leaves AI off. Any OpenAI-compatible address works, local or hosted. The installer's local AI choice writes http://127.0.0.1:8781/v1, and only its cloud choice fills in Google's Gemini address.
 
 **model** *(default: `"gemma-4-e4b"`)* -- The model name to request from the AI server. Change it to whatever model your server has installed.
 
@@ -1123,9 +811,9 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ### [ai.help]
 
-**gem_url** *(default: `"https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"`)* -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. If this still holds the address of the retired ChatGPT assistant that Wheelhouse used before version 1.2.0, the Wheelhouse Gem opens instead.
+**gem_url** *(default: `"https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"`)* -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. If this still holds the address of the retired ChatGPT assistant that Wheelhouse used before version 1.2.0, the Wheelhouse Assistant opens instead. The same applies to the Gemini Gem address that version 1.2.0 shipped.
 
-**explain_before_open** *(default: `true`)* -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back.
+**explain_before_open** *(default: `true`)* -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back. While it is false and the file help_explainer_notebook_shown.toml is missing from the data folder next to the settings file, the window appears at every Help with the box already ticked. Only the Assistant button writes that file, so after Cancel the window appears again at the next Help; select Assistant with the box still ticked to keep the window off.
 
 **max_response_tokens** *(default: `800`)* -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.
 
@@ -1171,4 +859,4 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ---
 
-Generated: 2026-09-23 for the v1.2.0 release
+Generated: 2026-09-29 for the v1.2.1 release

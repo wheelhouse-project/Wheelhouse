@@ -14,7 +14,6 @@ from speech.speech_handler import SpeechHandler
 def _make_processor(hotword="x-ray"):
     catalog = MagicMock()
     catalog.command_hotword = hotword
-    catalog.get_trailing_command.return_value = None
     processor = SpeechProcessor(
         word_queue=asyncio.Queue(),
         catalog=catalog,

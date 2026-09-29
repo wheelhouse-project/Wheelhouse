@@ -4,11 +4,13 @@ Why this exists, and why it is a separate script from the recorder.
 wh-screen-reader-audio-suppression-conflict records one number as the thing
 that decides the whole plan: how much of NVDA's speech Wheelhouse's own
 detector calls speech. The baseline on that bead was measured on 2026-08-15
-with services/wheelhouse/stt/vad.py at threshold 0.5, so a comparison is only
-valid if it uses the same detector. That detector lives in this service and
-this virtual environment, while the shipped capture path lives in the
-stt_providers shared package with its own environment. Two environments, two
-scripts.
+with services/wheelhouse/stt/vad.py at threshold 0.5 (pysilero-vad 3.2.0).
+That copy of the detector was deleted with pysilero-vad (wh-vad-releases-gil),
+so this script now scores with the shipped detector,
+shared_audio.silero_vad.SileroVAD, which runs the same Silero v6.2 model
+through onnxruntime. Its decisions agree with pysilero-vad 3.2.0 on 99.91
+percent of 22,492 evaluation-corpus chunks at threshold 0.5, so the baseline
+comparison stays valid within that margin.
 
 Record first, from services/stt_providers/shared:
 
@@ -19,9 +21,9 @@ offered a second recording through sounddevice as the comparison case until
 the PortAudio capture path was deleted (wh-portaudio-capture-removal), so a
 comparison recording now has to be made outside this repository.
 
-Then score here, from services/wheelhouse:
+Then score it, from the same directory:
 
-    uv run python scripts/score_vad_leak.py C:/tmp/nvda-winrt.wav
+    uv run python tools/score_vad_leak.py C:/tmp/nvda-winrt.wav
 
 A lower speech percentage means less of NVDA's voice reaches the recogniser.
 """
@@ -35,16 +37,14 @@ from pathlib import Path
 
 import numpy as np
 
-# The script lives at services/wheelhouse/scripts/score_vad_leak.py and
-# imports the detector from services/wheelhouse/stt/vad.py, so the service
-# root has to be on sys.path the way it is inside the running process. Same
-# idiom as scripts/capture_rejected_controls.py.
-SCRIPT_DIR = Path(__file__).resolve().parent
-WHEELHOUSE_ROOT = SCRIPT_DIR.parent  # services/wheelhouse
-if str(WHEELHOUSE_ROOT) not in sys.path:
-    sys.path.insert(0, str(WHEELHOUSE_ROOT))
+# The script lives at services/stt_providers/shared/tools/score_vad_leak.py
+# and imports the shipped detector from shared_audio, so the shared root has
+# to be on sys.path when the script is run by path.
+SHARED_ROOT = Path(__file__).resolve().parent.parent  # services/stt_providers/shared
+if str(SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_ROOT))
 
-from stt.vad import SileroVAD  # noqa: E402
+from shared_audio.silero_vad import SileroVAD  # noqa: E402
 
 SAMPLE_RATE = 16000
 # Silero scores 512 samples at a time, which is 32 ms at 16 kHz. Feeding

@@ -8,12 +8,6 @@
 #   * ^ anchor at start = Must match from beginning of utterance (fullmatch mode)
 #   * $ anchor at end = Must match to end of utterance
 #   * No ^ anchor = Can match mid-utterance (search mode)
-# - position: "leading" (default) or "trailing". Trailing-position commands
-#   (wh-2vz) fire when the word is the LAST word of an utterance; the words
-#   BEFORE it are inserted as dictation, and the trailing word itself is
-#   stripped from the transcription. v1 only supports single-word literal
-#   trailing patterns (e.g. "submit"). The escape hatch for dictating the
-#   trailing word as text is the existing "literal (.+)$" pattern.
 # - requires_hotword: Boolean, whether pattern needs "x-ray" prefix (default: false)
 # - whole_utterance_only: Boolean (default: false). The pattern may fire ONLY
 #   when it matches the ENTIRE utterance: the router skips every early-execute
@@ -63,8 +57,6 @@ COMMAND_HOTWORD = "x-ray"
 
 # Literal bypass - insert text without any pattern processing
 # Must come FIRST to prevent "literal X" from matching other patterns.
-# This is also the escape hatch for trailing-position commands below:
-# "literal submit" inserts the word "submit" as text instead of firing Enter.
 [[pattern]]
 pattern = '''literal (.+)$'''
 doc_id = "literal-bypass"
@@ -89,20 +81,28 @@ actions = [
 
 
 # =============================================================================
-# COMMANDS - Trailing-position (wh-2vz)
+# COMMANDS - Submit
 # =============================================================================
 
-# Trailing-position commands fire when the word is the LAST word of an
-# utterance. The words BEFORE the trailing word are inserted as dictation;
-# the trailing word itself is NOT inserted. v1 supports single-word literals.
-#
-# "submit" -> press Enter. Example: dictating "hello world submit" inserts
-# "hello world" then presses Enter. Dictating just "submit" alone presses
-# Enter without inserting anything.
+# "submit" -> press Enter, but ONLY as the whole utterance
+# (wh-remove-trailing-submit). "hello world submit" and "submit the form"
+# are ordinary dictation.
 [[pattern]]
-pattern = '''submit'''
+pattern = '''^submit$'''
 doc_id = "submit-enter"
-position = "trailing"
+whole_utterance_only = true
+actions = [
+    { function = "press_keys", params = ["enter"] }
+]
+
+# "submitted" -> press Enter, but ONLY as the whole utterance
+# (wh-submitted-enter). The speech engine can hear "submit" as "submitted"
+# (wh-vad-lead-phrase-trial.3). This row is not trailing-position, so
+# "the form was submitted" stays ordinary dictation.
+[[pattern]]
+pattern = '''^submitted$'''
+doc_id = "submitted-enter"
+whole_utterance_only = true
 actions = [
     { function = "press_keys", params = ["enter"] }
 ]
@@ -307,7 +307,7 @@ actions = [
 # -----------------------------------------------------------------------
 
 [[pattern]]
-pattern = '''^snap window to the left$'''
+pattern = '''^snap window to (?:the )?left$'''
 doc_id = "snap-window-left"
 whole_utterance_only = true
 actions = [
@@ -315,7 +315,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^snap window to the right$'''
+pattern = '''^snap window to (?:the )?(?:right|write)$'''
 doc_id = "snap-window-right"
 whole_utterance_only = true
 actions = [
@@ -323,7 +323,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^snap window to the top$'''
+pattern = '''^snap window to (?:the )?top$'''
 doc_id = "snap-window-top"
 whole_utterance_only = true
 actions = [
@@ -331,7 +331,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^snap window to the bottom$'''
+pattern = '''^snap window to (?:the )?bottom$'''
 doc_id = "snap-window-bottom"
 whole_utterance_only = true
 actions = [
@@ -660,11 +660,19 @@ actions = [
 # Generic keystroke command - executes arbitrary key combinations
 # Examples: "press enter", "press control alt delete", "press F5"
 # Key order doesn't matter: "press delete control" = "press control delete"
+# An optional count ends the phrase: "press tab 3 times", "press control z
+# two times" (wh-voice-access-parity.2.12). The count is a (\d+) group so the
+# loader widens it to digits and number words (David's ruling 2026-09-27
+# 19:09). The key group is lazy so the count group can take the number; the
+# word "times" (or "time") is required, so "press control 2" still presses
+# Ctrl+2. press_keys reads "f" and a number as one function key, so "press
+# f 5" presses F5 and "press f 5 3 times" presses F5 three times; "press f 5
+# times" presses F five times (wh-press-f-number-function-key).
 [[pattern]]
-pattern = '''^press\s*(.+)$'''
+pattern = '''^press\s*(.+?)(?:\s+(\d+)\s+times?)?$'''
 doc_id = "press-keys"
 actions = [
-    { function = "press_keys", params = ["g1"] }
+    { function = "press_keys", params = ["g1", "g2"] }
 ]
 
 # Insert raw text at cursor without intelligent insertion.
@@ -692,10 +700,8 @@ actions = [
     { function = "insert_raw", params = ["g1"] }
 ]
 
-# "submit" lives in the trailing-position section near the top of this
-# file (wh-2vz). The previous leading-position entry was removed when
-# the trailing entry was added; a leading + trailing pair would
-# silently pre-empt the trailing intercept in single-word utterances.
+# "submit" lives in the Submit section near the top of this file, as a
+# whole-utterance-only row (wh-remove-trailing-submit).
 
 # "dismiss" is the Voice Access word for the Escape key
 # (wh-voice-access-parity.1.6). Widened rather than added as a second row:
@@ -715,9 +721,7 @@ actions = [
 
 # -----------------------------------------------------------------------
 # BLOCK 2 -- bare "enter". New entry, no placement constraint. See the
-# BARE ENTER / BARE TAB note above for the whole_utterance_only reasoning
-# and the SUBMIT CAUTION note for why this does not endanger the trailing
-# submit-enter entry.
+# BARE ENTER / BARE TAB note above for the whole_utterance_only reasoning.
 # -----------------------------------------------------------------------
 [[pattern]]
 pattern = '''^enter$'''
@@ -855,7 +859,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^scroll right\s*(\d+)?$'''
+pattern = '''^scroll (?:right|write)\s*(\d+)?$'''
 doc_id = "scroll-right"
 whole_utterance_only = true
 actions = [
@@ -887,7 +891,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^start scrolling right$'''
+pattern = '''^start scrolling (?:right|write)$'''
 doc_id = "scroll-start-right"
 whole_utterance_only = true
 actions = [
@@ -1270,9 +1274,11 @@ actions = [
 # ORDER MATTERS: every block below must stay ABOVE select-phrase, whose
 # ^select (.+)$ capture otherwise swallows every range form (fragment
 # ORDERING HAZARD, verified by first-match walk 2026-08-24). ---
+# "right" and "write" also mean forward, and "left" also means backward
+# (wh-direction-left-right-words): Parakeet can hear "right" as "write".
 # select next <n> characters -- forward, one character at a time.
 [[pattern]]
-pattern = '''^select next\s+(\d+)?\s*characters?$'''
+pattern = '''^select (?:next|forward|right|write)\s+(\d+)?\s*characters?$'''
 doc_id = "select-next-characters"
 whole_utterance_only = true
 actions = [
@@ -1283,27 +1289,27 @@ actions = [
 # "last" is a Voice Access synonym for "previous" (see DIRECTION MERGE
 # above), not a third direction, so it shares this doc_id and action.
 [[pattern]]
-pattern = '''^select (?:previous|last)\s+(\d+)?\s*characters?$'''
+pattern = '''^select (?:previous|last|backward|left)\s+(\d+)?\s*characters?$'''
 doc_id = "select-previous-characters"
 whole_utterance_only = true
 actions = [
     { function = "hk", params = ["shift", "left", "g1"] }
 ]
 
-# select next <n> words -- forward, by word boundary (shift+ctrl+right is
+# select next/forward <n> words -- forward, by word boundary (shift+ctrl+right is
 # the same combination the existing select-word entry uses to extend to a
 # word boundary).
 [[pattern]]
-pattern = '''^select next\s+(\d+)?\s*words?$'''
+pattern = '''^select (?:next|forward|right|write)\s+(\d+)?\s*words?$'''
 doc_id = "select-next-words"
 whole_utterance_only = true
 actions = [
     { function = "hk", params = ["shift", "ctrl", "right", "g1"] }
 ]
 
-# select previous/last <n> words -- backward, by word boundary.
+# select previous/last/backward <n> words -- backward, by word boundary.
 [[pattern]]
-pattern = '''^select (?:previous|last)\s+(\d+)?\s*words?$'''
+pattern = '''^select (?:previous|last|backward|left)\s+(\d+)?\s*words?$'''
 doc_id = "select-previous-words"
 whole_utterance_only = true
 actions = [
@@ -1313,7 +1319,7 @@ actions = [
 # select next <n> lines -- forward, one screen line at a time (shift+down,
 # per the bead's own MECHANISM example).
 [[pattern]]
-pattern = '''^select next\s+(\d+)?\s*lines?$'''
+pattern = '''^select (?:next|forward|right|write)\s+(\d+)?\s*lines?$'''
 doc_id = "select-next-lines"
 whole_utterance_only = true
 actions = [
@@ -1322,7 +1328,7 @@ actions = [
 
 # select previous/last <n> lines -- backward, one screen line at a time.
 [[pattern]]
-pattern = '''^select (?:previous|last)\s+(\d+)?\s*lines?$'''
+pattern = '''^select (?:previous|last|backward|left)\s+(\d+)?\s*lines?$'''
 doc_id = "select-previous-lines"
 whole_utterance_only = true
 actions = [
@@ -1349,11 +1355,13 @@ actions = [
     { function = "hk", params = ["shift", "ctrl", "up", "g1"] }
 ]
 
-# unselect that -- collapse the selection with a single arrow-key press.
+# unselect [that] -- collapse the selection with a single arrow-key press.
+# "that" is optional (wh-voice-access-parity.1.15); whole_utterance_only
+# keeps a bare "unselect" dictatable inside a sentence.
 # See the KNOWN APPROXIMATION note above: this moves the caret to the
 # selection's right edge, unlike Voice Access.
 [[pattern]]
-pattern = '''^unselect that$'''
+pattern = '''^unselect(?: that)?$'''
 doc_id = "unselect-that"
 whole_utterance_only = true
 actions = [
@@ -1461,11 +1469,16 @@ actions = [
 # right N characters/words" does not -- NavigationParser only accepts the
 # verbs "go" and "grab", so "move ..." never reaches it and falls through to
 # dictation. These blocks cover both verbs identically so they keep working
-# the same way once placed above cursor-navigate.
+# the same way once placed above cursor-navigate. Every entry where "right"
+# is a direction also accepts "write", because Parakeet can hear "right" as
+# "write" (wh-direction-left-right-words): here, and in snap window, scroll,
+# start scrolling, and move slider. "go backward" and "go forward" match
+# "move backward" and "move forward" (wh-go-synonym-for-move); the parser
+# has no forward or backward words, so cursor-navigate typed them as text.
 # -----------------------------------------------------------------------
 
 [[pattern]]
-pattern = '''^(?:go|move) left(?: (\d+))? characters?$'''
+pattern = '''^(?:go left|go backward|move left|move backward)(?: (\d+))? characters?$'''
 doc_id = "nav-left-characters"
 whole_utterance_only = true
 actions = [
@@ -1473,7 +1486,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^(?:go|move) right(?: (\d+))? characters?$'''
+pattern = '''^(?:go right|go write|go forward|move right|move write|move forward)(?: (\d+))? characters?$'''
 doc_id = "nav-right-characters"
 whole_utterance_only = true
 actions = [
@@ -1489,11 +1502,87 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^(?:go|move) right(?: (\d+))? words?$'''
+pattern = '''^(?:go|move) (?:right|write)(?: (\d+))? words?$'''
 doc_id = "nav-right-words"
 whole_utterance_only = true
 actions = [
     { function = "hk", params = ["ctrl", "right", "g1"] }
+]
+
+# -----------------------------------------------------------------------
+# Voice Access arrow-key repeats (wh-voice-access-parity.1.14):
+# "go|move up|down|left|right [n] times" and "go|move slider <direction>
+# [n] times" press that arrow key n times, once when no number is
+# spoken. One pattern per direction: hk takes literal key names and
+# cannot map a captured direction word to a key. They must stay ABOVE
+# cursor-navigate (^go (.+)), which otherwise captures the go forms.
+# Before this entry "go up" and "go down" were typed as text, because
+# NavigationParser rejects them; "go left" and "go right" reached
+# cursor-navigate and pressed the same key once.
+# -----------------------------------------------------------------------
+
+[[pattern]]
+pattern = '''^(?:go|move) up(?: (\d+) times?)?$'''
+doc_id = "nav-up-times"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["up", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) down(?: (\d+) times?)?$'''
+doc_id = "nav-down-times"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["down", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) left(?: (\d+) times?)?$'''
+doc_id = "nav-left-times"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["left", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) (?:right|write)(?: (\d+) times?)?$'''
+doc_id = "nav-right-times"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["right", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) slider up(?: (\d+) times?)?$'''
+doc_id = "move-slider-up"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["up", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) slider down(?: (\d+) times?)?$'''
+doc_id = "move-slider-down"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["down", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) slider left(?: (\d+) times?)?$'''
+doc_id = "move-slider-left"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["left", "g1"] }
+]
+
+[[pattern]]
+pattern = '''^(?:go|move) slider (?:right|write)(?: (\d+) times?)?$'''
+doc_id = "move-slider-right"
+whole_utterance_only = true
+actions = [
+    { function = "hk", params = ["right", "g1"] }
 ]
 
 # -----------------------------------------------------------------------
@@ -1529,7 +1618,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?top$'''
+pattern = '''^(?:go|move) to (?:the )?top$'''
 doc_id = "nav-go-top"
 whole_utterance_only = true
 actions = [
@@ -1537,7 +1626,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?bottom$'''
+pattern = '''^(?:go|move) to (?:the )?bottom$'''
 doc_id = "nav-go-bottom"
 whole_utterance_only = true
 actions = [
@@ -1574,7 +1663,7 @@ actions = [
 # -----------------------------------------------------------------------
 
 [[pattern]]
-pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?document$'''
+pattern = '''^(?:go|move) to (?:the )?(?:beginning|start) of (?:the )?document$'''
 doc_id = "nav-go-beginning-of-document"
 whole_utterance_only = true
 actions = [
@@ -1582,7 +1671,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?end of (?:the )?document$'''
+pattern = '''^(?:go|move) to (?:the )?end of (?:the )?document$'''
 doc_id = "nav-go-end-of-document"
 whole_utterance_only = true
 actions = [
@@ -1590,7 +1679,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?line$'''
+pattern = '''^(?:go|move) to (?:the )?(?:beginning|start) of (?:the )?line$'''
 doc_id = "nav-go-beginning-of-line"
 whole_utterance_only = true
 actions = [
@@ -1598,7 +1687,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?end of (?:the )?line$'''
+pattern = '''^(?:go|move) to (?:the )?end of (?:the )?line$'''
 doc_id = "nav-go-end-of-line"
 whole_utterance_only = true
 actions = [
@@ -1606,7 +1695,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?word$'''
+pattern = '''^(?:go|move) to (?:the )?(?:beginning|start) of (?:the )?word$'''
 doc_id = "nav-go-beginning-of-word"
 whole_utterance_only = true
 actions = [
@@ -1614,7 +1703,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?end of (?:the )?word$'''
+pattern = '''^(?:go|move) to (?:the )?end of (?:the )?word$'''
 doc_id = "nav-go-end-of-word"
 whole_utterance_only = true
 actions = [
@@ -1622,7 +1711,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?(?:beginning|start) of (?:the )?paragraph$'''
+pattern = '''^(?:go|move) to (?:the )?(?:beginning|start) of (?:the )?paragraph$'''
 doc_id = "nav-go-beginning-of-paragraph"
 whole_utterance_only = true
 actions = [
@@ -1630,7 +1719,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^go to (?:the )?end of (?:the )?paragraph$'''
+pattern = '''^(?:go|move) to (?:the )?end of (?:the )?paragraph$'''
 doc_id = "nav-go-end-of-paragraph"
 whole_utterance_only = true
 actions = [
@@ -1660,12 +1749,15 @@ actions = [
 # to the selection's start, an unshifted right-arrow press collapses to its
 # end (standard Windows text-control behavior). Neither NavigationParser nor
 # the existing cursor-navigate entry has any concept of "selection" as a
-# landmark, and the verb is "move" (not "go" or "grab"), so this never
-# reaches the parser today and falls through to dictation.
+# landmark, so the parser cannot handle it.
+# "go" works in place of "move" (wh-go-synonym-for-move). The go-to form
+# relies on these two entries sitting ABOVE switch-to-app, whose
+# hotword-gated "go to <tail>" capture would otherwise ask for an app named
+# "the beginning of the selection".
 # -----------------------------------------------------------------------
 
 [[pattern]]
-pattern = '''^move to (?:the )?beginning of (?:the )?selection$'''
+pattern = '''^(?:go|move) to (?:the )?beginning of (?:the )?selection$'''
 doc_id = "nav-move-beginning-of-selection"
 whole_utterance_only = true
 actions = [
@@ -1673,11 +1765,38 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^move to (?:the )?end of (?:the )?selection$'''
+pattern = '''^(?:go|move) to (?:the )?end of (?:the )?selection$'''
 doc_id = "nav-move-end-of-selection"
 whole_utterance_only = true
 actions = [
     { function = "hk", params = ["right"] }
+]
+
+# Mouse grid "go here" / "move here" (wh-go-synonym-for-move). This entry
+# belongs to the grid section's "Grid-open-only words" further down, and it
+# follows that section's rule: g1 captures the words (with any trailing STT
+# punctuation) so that with the grid closed grid_action_command types them
+# as text. It lives HERE, not in the grid section, because patterns are
+# tried in file order (speech/command_engine.py, TextParser.parse_and_execute
+# returns on the first match) and "go here" must be tried before the
+# '^go (.+)' cursor-navigate catch-all below, which would otherwise take it
+# and type it as text even with the grid open. It cannot be a second entry
+# with only the go form, because doc_ids must be unique
+# (scripts/release/helpdoc/pattern_ids.py). The $ anchor keeps longer
+# phrases such as "go here and there" on cursor-navigate, and switch-to-app
+# cannot take it, because "go here" has no "to". The verb group is a
+# capturing (go|move), the same shape as the grid section's (click|tap) and
+# (right|double): g1 is still the outer group, the whole utterance, and
+# nothing reads g2. A non-capturing (?:go|move) displays the same way in
+# the Pattern Manager trigger column but fails
+# tests/test_trigger_display_alternatives.py, which checks only
+# non-capturing groups.
+[[pattern]]
+pattern = '''^((go|move) here[.!?]?)$'''
+doc_id = "grid-move-here"
+whole_utterance_only = true
+actions = [
+    { function = "grid_action_command", params = ["move_here", "g1"], awaits_done = true }
 ]
 
 # --- Voice Access per-app window commands (wh-voice-access-parity.1.7).
@@ -1815,8 +1934,19 @@ actions = [
 # COMMANDS - Text Formatting
 # =============================================================================
 
+# bold / boldface / bold face, each with an optional "text" or "that"
+# (wh-voice-access-parity.1.15). "bold face" is an explicit alternative,
+# not "bold ?face": the first-word index does not expand a "?" inside a
+# group. Bare "bold" is whole_utterance_only, so it stays dictatable in a
+# sentence, and fullmatches none of the "bold next|previous ..." rows below.
+# The tail is the flat form the paste row uses, "(?: text| that)?", not a
+# nested "(?: (?:text|that))?". The two match the same utterances, and the
+# Pattern Manager displays both as "bold (or boldface, bold face)". The
+# display census in tests/test_trigger_display_alternatives.py treats a
+# group followed by "?" as optional; the nested form hides its inner group
+# from that rule (boss ruling 06:15 2026-09-26).
 [[pattern]]
-pattern = '''^bold (?:text|that)$'''
+pattern = '''^(?:bold|boldface|bold face)(?: text| that)?$'''
 doc_id = "bold"
 whole_utterance_only = true
 actions = [
@@ -1824,7 +1954,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^(?:italics|italicize that)$'''
+pattern = '''^(?:italics|italicize(?: that)?)$'''
 doc_id = "italics"
 whole_utterance_only = true
 actions = [
@@ -2364,7 +2494,7 @@ actions = [
 # Voice Access wording. "all" is an ordinary English word, so this
 # entry is whole_utterance_only and stays dictatable in a sentence.
 [[pattern]]
-pattern = '''^all caps that$'''
+pattern = '''^all caps(?: that)?$'''
 doc_id = "uppercase-all-caps-that"
 whole_utterance_only = true
 actions = [
@@ -2382,7 +2512,7 @@ actions = [
 # Voice Access wording. "no" is an ordinary English word, so this
 # entry is whole_utterance_only and stays dictatable in a sentence.
 [[pattern]]
-pattern = '''^no caps that$'''
+pattern = '''^no caps(?: that)?$'''
 doc_id = "lowercase-no-caps-that"
 whole_utterance_only = true
 actions = [
@@ -2400,7 +2530,7 @@ actions = [
 # Voice Access wording. "cap" is an ordinary English word, so this
 # entry is whole_utterance_only and stays dictatable in a sentence.
 [[pattern]]
-pattern = '''^cap that$'''
+pattern = '''^cap(?: that)?$'''
 doc_id = "capitalize-that"
 whole_utterance_only = true
 actions = [
@@ -2453,6 +2583,32 @@ doc_id = "compress"
 whole_utterance_only = true
 actions = [
     { function = "transform_selection", params = ["compress"], awaits_done = true }
+]
+
+# Voice Access "no space that" (wh-voice-access-parity.1.14): removes the
+# spaces from the SELECTED text, the same way "cap that" works. With
+# nothing selected it does not act on the last dictated words; that waits
+# for wh-voice-access-parity.2.2. Must stay ABOVE no-space, whose capture
+# would otherwise type "that". "that" is optional
+# (wh-voice-access-parity.1.15): a bare "no space" cannot fullmatch
+# no-space, which needs words after it.
+[[pattern]]
+pattern = '''^no space(?: that)?$'''
+doc_id = "no-space-that"
+whole_utterance_only = true
+actions = [
+    { function = "transform_selection", params = ["compress"], awaits_done = true }
+]
+
+# Voice Access "no space <words>" (wh-voice-access-parity.1.14): types the
+# words with every space removed, "no space hello world" -> "helloworld".
+# Same shape as insert-raw (^insert\s*(.+)$): no whole_utterance_only and
+# no awaits_done, for the reasons in the insert-raw comment.
+[[pattern]]
+pattern = '''^no space (.+)$'''
+doc_id = "no-space"
+actions = [
+    { function = "insert_raw_no_spaces", params = ["g1"] }
 ]
 
 # Add selected text to STT hints list - "x-ray boost"
@@ -2578,6 +2734,22 @@ actions = [
     { function = "open_pattern_manager" }
 ]
 
+# Voice Access wordings for the same window (wh-voice-access-parity.1.14).
+# A separate row, not more alternatives on pattern-manager: with all of
+# them in one expression the Pattern Manager explainer can no longer list
+# the wordings and shows the raw expression instead. Must stay ABOVE
+# show-app (^show\s+(.+)$, end of file), which otherwise captures "show
+# commands" with the hotword. The alternation stays flat: the Pattern
+# Manager's trigger display drops a nested "(?:all )?" group inside an
+# alternative and showed "commands|show command list".
+[[pattern]]
+pattern = '''^(?:what can i say|show commands|show all commands|show command list)$'''
+doc_id = "show-commands"
+whole_utterance_only = true
+actions = [
+    { function = "open_pattern_manager" }
+]
+
 # =============================================================================
 # COMMANDS - Voice Teaching (wh-7ou.7)
 # =============================================================================
@@ -2639,8 +2811,14 @@ actions = [
 # "water is safe to drink". David chose the hotword on 2026-08-17
 # (wh-voice-access-parity.1.6.1.1). The cost is that "click the file menu"
 # now needs the hotword spoken first.
+#
+# "clicks" is a second spoken form of "click" (wh-clicks-spoken-click,
+# David 2026-09-27): Parakeet revised "x-ray click show recently used
+# files" to "x-ray clicks ..." and the words were typed. Spelled as a third
+# alternative, not "clicks?", because the Pattern Manager display drops
+# the "?" and would show only "clicks". Bare "clicks" matches nothing.
 [[pattern]]
-pattern = '''^(?:click|tap)\s+(.+)$'''
+pattern = '''^(?:click|clicks|tap)\s+(.+)$'''
 doc_id = "click-element"
 requires_hotword = true
 actions = [
@@ -2663,8 +2841,12 @@ actions = [
 # "dismiss" pairs with "hide", which is the pairing they always had. The
 # doc_ids stay "show-numbers" and "hide-numbers": action_catalog.py,
 # knowledge/wheelhouse_help.md and the published reference all name those.
+#
+# The alternation stays flat: the Pattern Manager's trigger display drops a
+# nested "(?:show|apply)" group and showed "numbers|show numbers here"
+# (wh-voice-access-parity.1.14).
 [[pattern]]
-pattern = '''^(?:show|apply) numbers$'''
+pattern = '''^(?:show numbers|apply numbers|show numbers here)$'''
 doc_id = "show-numbers"
 requires_hotword = false
 whole_utterance_only = true
@@ -2691,12 +2873,16 @@ actions = [
 #   "drag", "move here" and the bare numbers stay ordinary dictation inside
 #   longer utterances (precedent: the mishear punctuation aliases). With the
 #   grid CLOSED the actions dictate the captured g1 verbatim, so single-word
-#   utterances keep typing normally too.
+#   utterances keep typing normally too -- EXCEPT the bare click words
+#   (click, tap, right/double/triple click): with the grid closed they click
+#   at the current pointer position (wh-voice-access-parity.2.5, David
+#   approved 2026-08-24), and they type only when [click] enabled is false.
+#   "literal click" is the way to type the word.
 # - First-word extraction constraint: the catalog indexes command patterns
 #   by literal first words, and its extractor only reads a LEADING plain
-#   alternation. That is why these use "(right|double)" (not "(?:...)"
-#   nested inside the outer capture) and why the digit numbers are an
-#   explicit "(1|2|...|9)" alternation.
+#   alternation. That is why these use "(right|double)" and
+#   "(right|double|triple)" (not "(?:...)" nested inside the outer capture)
+#   and why the digit numbers are an explicit "(1|2|...|9)" alternation.
 
 # "right click recycle bin" / "double click 5" -- full gesture command with
 # a target, routed through ClickCommandParser.parse_command so the gesture
@@ -2739,10 +2925,13 @@ actions = [
     { function = "grid_next_screen_command", awaits_done = true }
 ]
 
-# Grid-open-only words. Each captures g1 (with any trailing STT
-# punctuation) for the dictation fallback when the grid is closed.
+# Grid words. Each captures g1 (with any trailing STT punctuation) for the
+# dictation fallback when the grid is closed. The two click patterns act
+# with the grid closed too: they click at the pointer
+# (wh-voice-access-parity.2.5). "triple click" is spoken only here, as a
+# bare utterance; there is no "triple click <target>" form.
 [[pattern]]
-pattern = '''^((right|double)[\s-]+click[.!?]?)$'''
+pattern = '''^((right|double|triple)[\s-]+click[.!?]?)$'''
 doc_id = "grid-gesture-click"
 whole_utterance_only = true
 actions = [
@@ -2773,13 +2962,9 @@ actions = [
     { function = "grid_action_command", params = ["drag", "g1"], awaits_done = true }
 ]
 
-[[pattern]]
-pattern = '''^(move here[.!?]?)$'''
-doc_id = "grid-move-here"
-whole_utterance_only = true
-actions = [
-    { function = "grid_action_command", params = ["move_here", "g1"], awaits_done = true }
-]
+# "go here" / "move here" (grid-move-here) is a grid-open-only word too,
+# but its entry sits above cursor-navigate (search "Mouse grid \"go here\"")
+# so that "go here" reaches it (wh-go-synonym-for-move).
 
 # Bare grid numbers 1-9 (word or digit, optional leading "number"). A number
 # the grid consumes NEVER falls through to dictation. With the grid closed
@@ -3377,8 +3562,12 @@ actions = [
     { function = "text", params = ["+"] }
 ]
 
+# "sine" is how Parakeet hears "sign" (wh-voice-access-parity.1.15, David's
+# option 1, 2026-09-25): "equals sine" types "=". Accepted cost: dictating
+# "y equals sine x" types "y = x". The space before "=" comes from
+# ui/text_perfector.py SPACED_PUNCTUATION (wh-voice-access-parity.1.15.5).
 [[pattern]]
-pattern = '''\bequal sign\b'''
+pattern = '''\bequals? (?:sign|sine)\b'''
 doc_id = "punct-equal-sign"
 actions = [
     { function = "text", params = ["="] }

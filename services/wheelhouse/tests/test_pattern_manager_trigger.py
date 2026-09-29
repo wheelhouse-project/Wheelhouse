@@ -21,13 +21,19 @@ _SYSTEM_PATTERNS = _SERVICE_DIR / "speech" / "config" / "patterns.toml"
 
 
 def _open_pattern_manager_entry(catalog):
-    """The single shipped command whose action opens the Pattern Manager."""
+    """The shipped "pattern manager" command.
+
+    Two shipped commands open the Pattern Manager: this one and the Voice
+    Access alias "show commands" (doc_id show-commands,
+    wh-voice-access-parity.1.14), so the entry is chosen by its doc_id.
+    """
     entries = [
         p
         for p in catalog.get_all_patterns()
-        if any(a.get("function") == "open_pattern_manager" for a in p["actions"])
+        if p.get("doc_id") == "pattern-manager"
+        and any(a.get("function") == "open_pattern_manager" for a in p["actions"])
     ]
-    assert len(entries) == 1, "expected exactly one open_pattern_manager command"
+    assert len(entries) == 1, "expected exactly one pattern-manager command"
     return entries[0]
 
 

@@ -1,19 +1,19 @@
 """The single held tail (wh-whole-utterance-command-matching, Stage 2).
 
-Stage 2 replaces the three hold-slot attributes with ONE storage slot,
+Stage 2 replaces the hold-slot attributes with ONE storage slot,
 ``SpeechProcessor._held_tail``: a kind-tagged record of the words held
-back from dictation at the end of an utterance. The three old names
-(``_pending_replacement_prefix``, ``_pending_trailing_word``,
-``_pending_bare_number_words``) become properties over that slot, so
-every existing white-box test and call site keeps working -- but the
-storage, the top-of-loop advance, and the flush obligation for any NEW
-event type are one thing, not three. Forgetting to flush one slot of
-three on a new event type is the recurring bug class this design
-removes (Option C, part 2 of the design proposal on the parent bead).
+back from dictation at the end of an utterance. The old names
+(``_pending_replacement_prefix``, ``_pending_bare_number_words``) become
+properties over that slot, so every existing white-box test and call
+site keeps working -- but the storage, the top-of-loop advance, and the
+flush obligation for any NEW event type are one thing, not several.
+Forgetting to flush one slot on a new event type is the recurring bug
+class this design removes (Option C, part 2 of the design proposal on
+the parent bead). A third kind, the trailing-position command, was
+removed by wh-remove-trailing-submit.
 
-Behaviour is unchanged: the three absorbed suites
-(test_speech_processor_trailing_command.py,
-test_speech_processor_bare_number.py, and the two e2e
+Behaviour is unchanged: the absorbed suites
+(test_speech_processor_bare_number.py and the two e2e
 replacement-prefix files) are the proof of preservation. THESE tests
 pin only the new structure:
 
@@ -25,8 +25,8 @@ pin only the new structure:
 - arming a kind while a different kind is held evicts it loudly (no
   live sequence does this; the log line is the tripwire);
 - one unified flush dispatches per kind and preserves each kind's IPC
-  shape (prefix: one joined dictation; trailing: the word; bare
-  number: one dictation per word, in spoken order);
+  shape (prefix: one joined dictation; bare number: one dictation
+  per word, in spoken order);
 - stop() clears the single slot.
 """
 import sys
@@ -69,14 +69,6 @@ class TestHeldTailStorage:
         assert proc._held_tail.words == ["question"]
         assert proc._pending_replacement_prefix == ["question"]
 
-    def test_trailing_property_maps_to_tail(self):
-        proc = make_retraction_processor()
-        proc._pending_trailing_word = "submit"
-        assert proc._held_tail is not None
-        assert proc._held_tail.kind.name == "TRAILING_COMMAND"
-        assert proc._held_tail.words == ["submit"]
-        assert proc._pending_trailing_word == "submit"
-
     def test_bare_number_property_maps_to_tail(self):
         proc = make_retraction_processor()
         proc._pending_bare_number_words = ["twenty"]
@@ -91,37 +83,35 @@ class TestHeldTailStorage:
 
     def test_cross_kind_read_is_none(self):
         proc = make_retraction_processor()
-        proc._pending_trailing_word = "submit"
-        assert proc._pending_replacement_prefix is None
+        proc._pending_replacement_prefix = ["question"]
         assert proc._pending_bare_number_words is None
 
     def test_same_kind_none_set_clears(self):
         proc = make_retraction_processor()
-        proc._pending_trailing_word = "submit"
-        proc._pending_trailing_word = None
+        proc._pending_replacement_prefix = ["question"]
+        proc._pending_replacement_prefix = None
         assert proc._held_tail is None
 
     def test_cross_kind_none_set_preserves_tail(self):
         """The old attributes were independent: the bare-number flush
-        setting ITS slot to None must not clear a held trailing word.
+        setting ITS slot to None must not clear a held prefix.
         Every kind flush method ends with a None-assignment to its own
         name, so this is what keeps those methods kind-scoped."""
         proc = make_retraction_processor()
-        proc._pending_trailing_word = "submit"
+        proc._pending_replacement_prefix = ["question"]
         proc._pending_bare_number_words = None
-        proc._pending_replacement_prefix = None
         assert proc._held_tail is not None
-        assert proc._pending_trailing_word == "submit"
+        assert proc._pending_replacement_prefix == ["question"]
 
     def test_arming_second_kind_evicts_and_logs(self, caplog):
         """No live sequence arms a kind while a different kind is held
-        (trailing flushes on any non-marker event; a bare number arms
-        only on the utterance-opening word; the prefix pass runs and
-        flushes first at the top of the loop). If a future change
+        (a bare number arms only on the utterance-opening word; the
+        prefix pass runs and flushes first at the top of the loop). If
+        a future change
         breaks that, the eviction must be loud, not a silent word
         drop."""
         proc = make_retraction_processor()
-        proc._pending_trailing_word = "submit"
+        proc._pending_replacement_prefix = ["question"]
         with caplog.at_level(
             logging.ERROR, logger="wheelhouse.pipeline"
         ):
@@ -139,14 +129,14 @@ class TestHeldTailStorage:
         wh-whole-utterance-command-matching.2.1)."""
         monkeypatch.delenv("WHEELHOUSE_LOG_TRANSCRIPTS", raising=False)
         proc = make_retraction_processor()
-        proc._pending_trailing_word = "submit"
+        proc._pending_replacement_prefix = ["question"]
         with caplog.at_level(
             logging.ERROR, logger="wheelhouse.pipeline"
         ):
             proc._pending_bare_number_words = ["three"]
         messages = [r.getMessage() for r in caplog.records]
         assert any("held tail" in m for m in messages)
-        assert not any("submit" in m for m in messages)
+        assert not any("question" in m for m in messages)
 
 
 # ============================================================================
@@ -163,17 +153,6 @@ class TestUnifiedFlush:
         await proc._flush_held_tail_as_dictation()
         assert proc._send_to_dictation.await_args_list == [
             call("question mark"),
-        ]
-        assert proc._held_tail is None
-
-    @pytest.mark.asyncio
-    async def test_unified_flush_trailing_sends_word(self):
-        proc = make_retraction_processor()
-        proc._send_to_dictation = AsyncMock()
-        proc._pending_trailing_word = "submit"
-        await proc._flush_held_tail_as_dictation()
-        assert proc._send_to_dictation.await_args_list == [
-            call("submit"),
         ]
         assert proc._held_tail is None
 
@@ -213,7 +192,7 @@ class TestHeldTailLifecycle:
         (the crewcut comment in stop() names the trade-off); with one
         slot that is one clear, whatever the kind."""
         proc = make_retraction_processor()
-        proc._pending_trailing_word = "submit"
+        proc._pending_replacement_prefix = ["question"]
         await proc.stop()
         assert proc._held_tail is None
 

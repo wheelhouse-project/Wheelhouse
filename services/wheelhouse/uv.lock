@@ -854,15 +854,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pysilero-vad"
-version = "3.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/32/1c/7542c9e4e7e9137d429402d7b9d9f9de8a700b75032e8ff4528a64dc8428/pysilero_vad-3.2.0.tar.gz", hash = "sha256:ef1161b65b50cd25b63676d1119a6fb434c25f3aab3117e1d435e8eaf698e160", size = 1891082 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/a3/b6ae1c0df40f465fc0d48dcf61e87f4c0e345c7adbcefb12422ecb18cfee/pysilero_vad-3.2.0-cp39-abi3-win_amd64.whl", hash = "sha256:b45189322c8b1da1a79b693f9832d217304be0086cec4067ecdc0ab8a4ed49f8", size = 1123291 },
-]
-
-[[package]]
 name = "pystray"
 version = "0.19.5"
 source = { registry = "https://pypi.org/simple" }
@@ -1158,7 +1149,6 @@ dependencies = [
     { name = "pynput", marker = "sys_platform == 'win32'" },
     { name = "pyperclip", marker = "sys_platform == 'win32'" },
     { name = "pyside6", marker = "sys_platform == 'win32'" },
-    { name = "pysilero-vad", marker = "sys_platform == 'win32'" },
     { name = "pystray", marker = "sys_platform == 'win32'" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "pywinusb", marker = "sys_platform == 'win32'" },
@@ -1203,7 +1193,6 @@ requires-dist = [
     { name = "pynput", specifier = ">=1.8.1,<2" },
     { name = "pyperclip", specifier = ">=1.9.0,<2" },
     { name = "pyside6", specifier = ">=6.7.0,<7" },
-    { name = "pysilero-vad", specifier = ">=3.0.0,<3.3.0" },
     { name = "pystray", specifier = ">=0.19.5,<0.20" },
     { name = "pywin32", specifier = ">=310,<311" },
     { name = "pywinusb", specifier = ">=0.4.2,<0.5" },

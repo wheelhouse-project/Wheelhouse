@@ -1,12 +1,13 @@
 """MouseActionResponse IPC schema (wh-input-mouse-primitives).
 
 Defines the Input -> Logic reply shared by the three mouse-grid pointer
-actions: ``click_point``, ``move_pointer``, and ``perform_drag``. The
-authoritative feature spec is
+actions: ``click_point``, ``move_pointer``, and ``perform_drag``, and by
+``click_at_pointer``, the bare click words with no grid open
+(wh-voice-access-parity.2.5). The authoritative grid feature spec is
 ``docs/superpowers/specs/2026-08-09-mouse-grid-overlay-design.md`` under
 "Input process -- the only place that touches the mouse".
 
-One schema serves all three actions because all three answer the same
+One schema serves all four actions because all four answer the same
 question: did the pointer operation happen, and if not, why. The envelope's
 ``action`` key (attached by the handler alongside ``request_id``) says which
 operation the reply belongs to, so the payload does not repeat it.
@@ -38,7 +39,9 @@ Field meanings:
     ``ClickElementResponse.reason``. The tags the handlers emit today are:
     ``invalid_point``, ``invalid_button``, ``invalid_click_count``,
     ``invalid_duration``, ``disabled_by_config``, ``cursor_did_not_land``,
-    ``sendinput_short``, ``sendinput_error``, ``release_failed``, and
+    ``sendinput_short``, ``sendinput_error``, ``release_failed``,
+    ``pointer_unavailable`` (``click_at_pointer`` only: the pointer
+    position could not be read, so no input was sent), and
     ``unexpected_error``. ``release_failed`` is the one tag that means a
     mouse button may still be held down; every other failure guarantees no
     button is left pressed.

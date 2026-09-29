@@ -76,11 +76,12 @@ the Speech Processing flow that dequeues and evaluates WordEvents from step 1 (S
 :produces_for: Command and Dictation Routing
 """
 import asyncio
+import math
 import time
 import enum
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from utils.redact import redact_transcript
@@ -89,7 +90,6 @@ from .word_event import WordEvent
 from .pattern_catalog import (
     PatternCatalog,
     PatternType,
-    _normalize_lookup_word,
 )
 from services.wheelhouse.shared.grapheme import (
     count_grapheme_clusters,
@@ -152,25 +152,24 @@ def _build_default_focused_hwnd_provider():
 #
 # One utterance can end with words held back from dictation while the
 # processor waits to learn what the utterance's end proves about them.
-# Three narrow holds grew up side by side (a replacement prefix awaiting
-# its completing word, a trailing-position command candidate, a bare
-# number that may be a badge click), each with its own attribute and its
-# own flush obligations -- and every NEW event type had to remember to
-# flush all of them, or revive the leak bug class. Stage 2 keeps the
-# three kinds and their exact behaviour, but stores whichever one is
-# active in ONE slot, so an event type added later has ONE flush call
-# (_flush_held_tail_as_dictation) and ONE advance point
-# (_advance_held_tail). The kinds are mutually exclusive in every live
-# sequence: a trailing candidate flushes on any following non-marker
-# event, a bare number arms only on the utterance-opening word, and the
-# replacement-prefix pass runs (and on failure flushes) at the top of
-# the loop before anything later could arm.
+# The narrow holds grew up side by side (a replacement prefix awaiting
+# its completing word, a bare number that may be a badge click), each
+# with its own attribute and its own flush obligations -- and every NEW
+# event type had to remember to flush all of them, or revive the leak
+# bug class. Stage 2 keeps the kinds and their exact behaviour, but
+# stores whichever one is active in ONE slot, so an event type added
+# later has ONE flush call (_flush_held_tail_as_dictation) and ONE
+# advance point (_advance_held_tail). The kinds are mutually exclusive
+# in every live sequence: a bare number arms only on the
+# utterance-opening word, and the replacement-prefix pass runs (and on
+# failure flushes) at the top of the loop before anything later could
+# arm. (A third kind, the trailing-position command candidate of
+# wh-2vz, was removed with that feature: wh-remove-trailing-submit.)
 
 class _HeldTailKind(enum.Enum):
     """Which hold the single tail slot is carrying."""
 
     REPLACEMENT_PREFIX = "replacement_prefix"
-    TRAILING_COMMAND = "trailing_command"
     BARE_NUMBER = "bare_number"
 
 
@@ -216,7 +215,7 @@ class _CancelCommandRecognizer:
     This is deliberately NOT the truth table. The lane defers every event and
     acts on exactly one thing, so it needs to recognise one thing: the hotword
     followed by words that match a cancel pattern. Everything else -- greedy
-    timers, replacement prefixes, remainders, trailing words -- is left to the
+    timers, replacement prefixes, remainders -- is left to the
     real routing, which sees these same events again when the lane closes and
     _processing_loop replays them.
 
@@ -421,6 +420,7 @@ class SpeechProcessor:
         logic_controller=None,
         focus_redirect_policy=None,
         focused_hwnd_provider=None,
+        open_utterance_hold_ms: Optional[int] = None,
     ):
         """Initialize speech processor.
 
@@ -448,6 +448,21 @@ class SpeechProcessor:
                 ``should_redirect``. Defaults to a Win32
                 ``GetForegroundWindow`` callable when the policy is
                 wired; tests can inject a deterministic provider.
+            open_utterance_hold_ms: How long a command buffer or a
+                hotword buffer (COMMAND_BUFFERING or HOTWORD_BUFFERING,
+                including the empty buffer after the hotword alone) is
+                held after its command timer expires while the utterance
+                is still open (wh-command-wait-open-utterance,
+                wh-hotword-wait-open-utterance). None, the
+                default, means greedy_timeout_ms. 0 means no hold, the
+                pre-fix behaviour: the command timer finalizes the
+                buffer. The shipped app always uses the default
+                (speech_handler.py does not pass this argument); there
+                is no config key for it. A hotword buffer whose hold
+                began while it was empty keeps its command matching,
+                but if it becomes dictation the words are typed
+                without the wake word, as they were before the hold
+                (wh-hotword-wait-open-utterance A6).
 
         wh-g2-refactor.18: the legacy focus_redirect_path parameter was
         removed when the persistent hidden dictation editor replaced the
@@ -476,6 +491,12 @@ class SpeechProcessor:
         # utterance wins the race against the buffer timer when STT delivers
         # words one at a time.
         self.greedy_timeout_ms = greedy_timeout_ms
+        # wh-command-wait-open-utterance: the open-utterance hold length
+        # (see the constructor docstring). 0 turns the hold off.
+        self.open_utterance_hold_ms = (
+            greedy_timeout_ms if open_utterance_hold_ms is None
+            else open_utterance_hold_ms
+        )
         self.hotword = hotword.lower()  # Normalize to lowercase for case-insensitive matching
 
         # Router
@@ -523,7 +544,7 @@ class SpeechProcessor:
         # rulings, option (a)) declare that marker a confirmed
         # utterance end. tests/mutation_gate_whole_utterance.py pins
         # the lifecycle half with lifecycle-marker-active-never-set.
-        # The R1 trailing split reads this instead of
+        # _utterance_end_is_confirmed reads this instead of
         # _pending_utterance_end. The standing reason is the lifecycle
         # branch named above: it sets this flag and never sets that
         # slot, whose only assignment is in the end-marker branch, so a
@@ -541,13 +562,9 @@ class SpeechProcessor:
 
         # wh-whole-utterance-command-matching (Stage 2): the ONE slot
         # for words held back at the tail of the current utterance. The
-        # three hold kinds it can carry, each with the exact lifecycle
+        # two hold kinds it can carry, each with the exact lifecycle
         # it had as a separate attribute:
         #
-        # TRAILING_COMMAND (wh-2vz): a trailing-position command
-        #   candidate held until we know whether it is the actual last
-        #   word of the utterance. See the trailing-commands section
-        #   near the bottom of this file for the lifecycle.
         # BARE_NUMBER (wh-click-number-dictation): a bare-number
         #   candidate held while the overlay is showing badges, until
         #   we know whether the number is the WHOLE utterance.
@@ -555,8 +572,7 @@ class SpeechProcessor:
         #   finals, so the final arrives as a bare number; a
         #   whole-utterance number with badges on screen is consumed at
         #   the utterance-end marker as the click command "click N".
-        #   See the bare-number section next to the trailing-commands
-        #   section for the lifecycle.
+        #   See the bare-number section for the lifecycle.
         # REPLACEMENT_PREFIX (wh-trailing-question-mark-words): a
         #   replacement buffer that finalized as plain dictation, held
         #   back so a late completing word still gets one more
@@ -570,7 +586,7 @@ class SpeechProcessor:
         # white-box tests keep their exact shape while the storage,
         # the top-of-loop advance (_advance_held_tail), and the flush
         # obligation for any new event type
-        # (_flush_held_tail_as_dictation) are one thing, not three.
+        # (_flush_held_tail_as_dictation) are one thing, not one per kind.
         self._held_tail: Optional[_HeldTail] = None
         # wh-click-number-dictation: the word whose flush was deferred
         # because it may extend the held number ("twenty" then "three").
@@ -746,6 +762,62 @@ class SpeechProcessor:
         # live list.
         self._previous_utterance_words: list[str] = []
 
+        # wh-command-wait-open-utterance: the command wait holds a
+        # COMMAND_BUFFERING buffer past its timer while the utterance is
+        # still open. "Still open" is decided from this flag alone:
+        #   * set True in process_word_event when a REAL word arrives
+        #     (the Stage-1 arrival append; marker events carry word=""
+        #     and never set it);
+        #   * set False when the utterance-end marker or the
+        #     lifecycle-reset marker is handled (the top of each of
+        #     those two branches), and by stop().
+        # The timer sentinel and both markers ride the same word_queue,
+        # so a marker queued before a sentinel is handled first; the
+        # sentinel then finds the utterance closed (or the buffer
+        # already finalized, mode IDLE) and runs today's path. A
+        # lifecycle reset reuses its utterance id for phrase 2, which is
+        # why this is a flag and not a comparison of utterance ids:
+        # phrase 2's first real word opens it again.
+        self._utterance_open: bool = False
+        # wh-command-wait-open-utterance: time.monotonic() value at which
+        # the hold on the current command or hotword buffer ends
+        # (wh-hotword-wait-open-utterance added the hotword buffer; a
+        # fresh hotword clears it in _execute_decision). None means no
+        # hold has started for this buffer. Set at the buffer's FIRST
+        # held expiry to that moment plus open_utterance_hold_ms, and never
+        # moved later while the same buffer stands. It bounds only the
+        # hold. A new word is routed as always, and its own timer
+        # replaces the hold timer. If a command-length timer then
+        # expires before the deadline with the utterance still open, the
+        # hold resumes until the deadline, so the buffer can wait longer
+        # after that word than its own timer. A timer that expires after
+        # the deadline, or a greedy-length timer, finalizes the buffer
+        # as it would without the hold. Cleared by _reset_to_idle and by
+        # every other path that empties the buffer, so the next command
+        # buffer starts a fresh wait.
+        self._command_hold_deadline: Optional[float] = None
+        # wh-hotword-wait-open-utterance A6: True when the hold on the
+        # current HOTWORD_BUFFERING buffer began with that buffer EMPTY
+        # (the hotword alone timed out). Before the hotword hold, that
+        # expiry dropped the hotword state, and the words spoken after
+        # the pause were typed as plain dictation, without the wake
+        # word. When such a held buffer becomes dictation,
+        # _execute_decision removes the wake word the router puts in
+        # front of a hotword buffer's dictation, so the text stays what
+        # it was before the hold. A buffer that already held words at
+        # its first expiry ("x-ray hello" said without a pause) keeps
+        # the wake word: that expiry used to type "x-ray hello".
+        # Set only where the deadline is first set; cleared everywhere
+        # _command_hold_deadline is cleared.
+        self._hotword_hold_began_empty: bool = False
+        # wh-command-wait-open-utterance: duration of the timer
+        # _start_timeout armed last. A sentinel is handled only when its
+        # token matches the current timer, so at the sentinel this is
+        # the duration of the timer that expired. The hold starts only
+        # when that timer was shorter than greedy_timeout_ms: a timer
+        # that was already the greedy one has given the full wait.
+        self._timeout_duration_ms: Optional[int] = None
+
         logger.info(
             f"SpeechProcessor initialized: replacement_timeout={replacement_timeout_ms}ms, "
             f"command_timeout={command_timeout_ms}ms, "
@@ -857,18 +929,6 @@ class SpeechProcessor:
         self._set_tail(_HeldTailKind.REPLACEMENT_PREFIX, words)
 
     @property
-    def _pending_trailing_word(self) -> Optional[str]:
-        words = self._tail_words_if(_HeldTailKind.TRAILING_COMMAND)
-        return words[0] if words else None
-
-    @_pending_trailing_word.setter
-    def _pending_trailing_word(self, word: Optional[str]) -> None:
-        self._set_tail(
-            _HeldTailKind.TRAILING_COMMAND,
-            None if word is None else [word],
-        )
-
-    @property
     def _pending_bare_number_words(self) -> Optional[list[str]]:
         return self._tail_words_if(_HeldTailKind.BARE_NUMBER)
 
@@ -904,24 +964,16 @@ class SpeechProcessor:
         completing: the held words belong to the utterance that spoke
         them.
 
-        TRAILING_COMMAND (wh-2vz): any event that reaches here proves
-        the held trailing candidate is NOT the last word of the
-        utterance. Flush it as plain dictation before the new event is
-        processed. The utterance_end_marker branch consumes the
-        candidate instead and must NOT flush -- the caller's
-        end-marker exclusion is what keeps it away from here.
-        wh-2vz.1.2 (codex round 1): the sentinel exclusion is also
-        load-bearing. Queue sentinels are not spoken input; a stale or
-        fresh sentinel arriving between a held candidate and the
-        utterance_end_marker must not dictate the held word. The
-        sentinel branch either drops it as stale (token mismatch) or
-        returns early in IDLE mode (which is the mode the processor is
-        in whenever a trailing candidate is held, because the DICTATE
-        branch sets IDLE before holding the candidate).
+        The caller's two marker exclusions are load-bearing. The
+        utterance_end_marker branch consumes the held tail instead
+        (_consume_held_tail_at_utterance_end) and must NOT flush it
+        first. Queue sentinels are not spoken input, and the timeout
+        sentinel branch owns the release deadline of both kinds, so a
+        sentinel must never advance the tail here either.
 
-        BARE_NUMBER (wh-click-number-dictation): the same rule -- any
-        regular event after the held number proves it was not the
-        whole utterance, so it is ordinary dictation. A retraction
+        BARE_NUMBER (wh-click-number-dictation): any regular event
+        after the held number proves it was not the whole utterance,
+        so it is ordinary dictation. A retraction
         marker also flushes (typing the number first and then
         retracting is exactly what happened before the hold existed,
         so the baseline behaviour is preserved). One exception
@@ -976,9 +1028,6 @@ class SpeechProcessor:
             return await self._resolve_pending_replacement_prefix(
                 word_event
             )
-        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
-            return False
         # BARE_NUMBER
         if (
             not word_event.start_of_utterance
@@ -995,19 +1044,16 @@ class SpeechProcessor:
         THE one flush obligation for any code path that must not leave
         words held (today: the lifecycle-reset backstop). A future
         event type that ends an utterance early calls this once
-        instead of remembering three kind-specific flushes. Each kind
-        keeps its exact IPC shape: the prefix flush sends one joined
-        dictation, the trailing flush sends the single word, the
-        bare-number flush sends one dictation per held word in spoken
-        order and clears the deferred-word slot.
+        instead of remembering kind-specific flushes. Each kind keeps
+        its exact IPC shape: the prefix flush sends one joined
+        dictation, the bare-number flush sends one dictation per held
+        word in spoken order and clears the deferred-word slot.
         """
         tail = self._held_tail
         if tail is None:
             return
         if tail.kind is _HeldTailKind.REPLACEMENT_PREFIX:
             await self._flush_pending_replacement_prefix_as_dictation()
-        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
         else:
             await self._flush_pending_bare_number_as_dictation()
 
@@ -1016,10 +1062,9 @@ class SpeechProcessor:
     ) -> None:
         """Consume the held tail at the utterance-end marker.
 
-        Replaces the three sequential per-kind calls the end-marker
-        branch used to make. The trailing kind fires its command action
-        (the candidate really was the last word). The bare-number kind
-        clicks the badge (the number really was the whole utterance).
+        Replaces the sequential per-kind calls the end-marker branch
+        used to make. The bare-number kind clicks the badge (the number
+        really was the whole utterance).
 
         The prefix kind used to have no end-of-utterance action: the end
         marker proved no completing word was coming, so the held words
@@ -1069,8 +1114,6 @@ class SpeechProcessor:
             ):
                 return
             await self._flush_pending_replacement_prefix_as_dictation()
-        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._consume_pending_trailing_word_at_utterance_end()
         else:
             await self._consume_pending_bare_number()
 
@@ -1080,14 +1123,11 @@ class SpeechProcessor:
         """Consume a tail the end-marker finalization itself armed.
 
         wh-whole-utterance-command-matching.3 (boss 19(a)
-        regression-guard ruling + David's item-20 R1, 2026-08-29):
-        the deferral moves all buffer finalization inside the
+        regression-guard ruling, 2026-08-29): the deferral moves all buffer finalization inside the
         end-marker branch, AFTER _consume_held_tail_at_utterance_end
         has run, so a tail armed by that finalization -- a bare
-        number, or a trailing command word split off the
-        dictation-bound payload -- would otherwise survive into the
-        next utterance. Its end marker is THIS event, so consume it
-        now.
+        number -- would otherwise survive into the next utterance. Its
+        end marker is THIS event, so consume it now.
 
         The prefix kind stays held by default: a replacement prefix
         waits for a completing word or its release deadline, and that
@@ -1125,10 +1165,7 @@ class SpeechProcessor:
                 # False, so nothing survives the pair.
                 await self._consume_held_tail_at_utterance_end()
             return
-        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._consume_pending_trailing_word_at_utterance_end()
-        else:
-            await self._consume_pending_bare_number()
+        await self._consume_pending_bare_number()
 
     # ========================================================================
     # LIFECYCLE METHODS
@@ -1168,8 +1205,13 @@ class SpeechProcessor:
         # Drop any deferred end_utterance so it cannot be flushed across
         # shutdown.
         self._pending_utterance_end = None
-        # Drop the held tail, whatever its kind, on shutdown (wh-2vz,
-        # wh-click-number-dictation, wh-trailing-question-mark-words).
+        # wh-command-wait-open-utterance: no utterance and no command
+        # wait outlive the processor.
+        self._utterance_open = False
+        self._command_hold_deadline = None
+        self._hotword_hold_began_empty = False
+        # Drop the held tail, whatever its kind, on shutdown
+        # (wh-click-number-dictation, wh-trailing-question-mark-words).
         # Sending an IPC during stop() would race the shutdown sequence.
         # crewcut: the held words are typed nowhere -- they are
         # sacrificed so shutdown stays deterministic. To remove the
@@ -1260,6 +1302,8 @@ class SpeechProcessor:
                         self.mode = ProcessingMode.IDLE
                         self.buffer.clear()
                         self.hotword_active = False
+                        self._command_hold_deadline = None
+                        self._hotword_hold_began_empty = False
                     # wh-click-number-dictation.1.6: the bare-number defer and
                     # the decision it waits for are ONE event. Every normal
                     # path out of _execute_decision clears the deferred slot,
@@ -1486,6 +1530,10 @@ class SpeechProcessor:
                 self._previous_utterance_words = self._words_this_utterance
                 self._words_this_utterance = []
             self._words_this_utterance.append(word_event.word)
+            # wh-command-wait-open-utterance: a real word was handled,
+            # so its utterance is open until its end marker or a
+            # lifecycle-reset marker is handled (see __init__).
+            self._utterance_open = True
 
         # wh-spaced-punctuation-names-unresolved.3.1.2, codex round 3
         # case A. WebSocketManager sends the start_utterance IPC
@@ -1525,7 +1573,7 @@ class SpeechProcessor:
         # a flush IPC failure out here skipped the end_utterance/
         # start_utterance pair. The flush itself is unchanged: the
         # branch's own _flush_held_tail_as_dictation does identical
-        # work for all three hold kinds on an empty-word marker.
+        # work for both hold kinds on an empty-word marker.
         if (
             self._held_tail is not None
             and not word_event.is_utterance_end_marker
@@ -1602,13 +1650,105 @@ class SpeechProcessor:
                 # new utterance auto-finalize, retraction reset). The sentinel
                 # is redundant -- skip without running decide_timeout to avoid
                 # double-finalization. Empty buffer in a buffering mode (e.g.
-                # HOTWORD_BUFFERING with hotword alone) is NOT a skip case;
-                # decide_timeout returns IGNORE for it and _execute_decision
-                # resets back to IDLE, which is the correct behavior.
+                # HOTWORD_BUFFERING with hotword alone) is NOT a skip case:
+                # while the utterance is open the command wait below holds
+                # it; once the wait ends, decide_timeout returns IGNORE for
+                # it and _execute_decision resets back to IDLE.
                 logger.debug(
                     "Timeout sentinel ignored: mode=IDLE (already finalized)",
                 )
                 return
+            # wh-command-wait-open-utterance: the command wait. A
+            # command buffer whose timer expires while the user is
+            # still speaking is held, not finalized. That includes a
+            # buffer the router already deferred as impossible
+            # ("Impossible buffer deferred to utterance end"): its timer
+            # was only the no-end-marker fallback, and holding it keeps
+            # "select three" + pause + "words to the left" one piece of
+            # dictation instead of five. Before this, the 700 ms command
+            # timer cut "select" + pause + "left two characters" in half
+            # and typed both halves (wheelhouse.log 2026-09-26, trace
+            # T-17904526149). The hold ends at the first of three
+            # things: the next word (normal routing re-arms the timer and
+            # decides the grown buffer as always), the utterance end
+            # (the end-marker branch finalizes the buffer as always), or
+            # the deadline below, where this sentinel falls through to
+            # today's decide_timeout path unchanged.
+            #
+            # COMMAND_BUFFERING and HOTWORD_BUFFERING hold; both
+            # replacement modes keep today's path.
+            # wh-hotword-wait-open-utterance added HOTWORD_BUFFERING,
+            # including the empty buffer after the hotword alone. Before
+            # that, "x-ray" + 906 ms + "click personalization" lost the
+            # hotword at the 700 ms timer and typed "click" and
+            # "personalization" (wheelhouse.log 2026-09-27, UTT-203).
+            # A command buffer that is an incomplete replacement name
+            # ("open") does not hold here: the replacement-prefix hold
+            # below owns that case, with its own release window. A
+            # hotword buffer holds whatever it holds, because the
+            # replacement-prefix hold never takes a hotword buffer
+            # (_should_hold_replacement_prefix). "Still open" is
+            # _utterance_open; how it is decided is documented in
+            # __init__.
+            #
+            # Only an expiry of a timer shorter than greedy_timeout_ms
+            # holds (A1 names the command timer). When the router armed
+            # the greedy timer for this buffer (a greedy command such as
+            # "press enter"), its expiry finalizes as today with no
+            # second greedy wait. The hold's own re-arm expires at the
+            # deadline, where finalizing is already the rule, so it does
+            # not matter which side of greedy_timeout_ms it falls on.
+            # The hold lasts open_utterance_hold_ms; 0 turns it off.
+            #
+            # wh-hotword-wait-open-utterance A6: a hold that begins on
+            # an EMPTY hotword buffer (the hotword alone timed out)
+            # records that in _hotword_hold_began_empty. Commands still
+            # match with the hotword, but if the held buffer becomes
+            # dictation, _execute_decision types it without the wake
+            # word, as the dropped-hotword path did before this hold
+            # ("x-ray" + pause + "hello" types "hello"). A buffer that
+            # already held words at its first expiry keeps the wake
+            # word ("x-ray hello" + pause types "x-ray hello").
+            if (
+                self.open_utterance_hold_ms > 0
+                and self.mode in (
+                    ProcessingMode.COMMAND_BUFFERING,
+                    ProcessingMode.HOTWORD_BUFFERING,
+                )
+                and self._utterance_open
+                and self._timeout_duration_ms is not None
+                and self._timeout_duration_ms < self.greedy_timeout_ms
+                and not (
+                    self.mode == ProcessingMode.COMMAND_BUFFERING
+                    and self.router.is_incomplete_replacement_name(
+                        list(self.buffer)
+                    )
+                )
+            ):
+                now = time.monotonic()
+                if self._command_hold_deadline is None:
+                    self._command_hold_deadline = (
+                        now + self.open_utterance_hold_ms / 1000.0
+                    )
+                    self._hotword_hold_began_empty = (
+                        self.mode == ProcessingMode.HOTWORD_BUFFERING
+                        and not self.buffer
+                    )
+                remaining_ms = (self._command_hold_deadline - now) * 1000.0
+                if remaining_ms > 0:
+                    logger.info(
+                        "Command wait: utterance still open; holding %d "
+                        "buffered word(s), %.0f ms left",
+                        len(self.buffer), remaining_ms,
+                    )
+                    # Rounded up, so the next expiry lands at or after
+                    # the deadline and never re-arms for 0 ms.
+                    self._start_timeout(math.ceil(remaining_ms))
+                    return
+                logger.info(
+                    "Command wait: deadline reached with the utterance "
+                    "still open; finalizing the buffer",
+                )
             logger.info("Processing timeout-finalize sentinel")
             decision = self.router.decide_timeout(
                 self.buffer, self.hotword_active, mode=self.mode,
@@ -1645,7 +1785,9 @@ class SpeechProcessor:
             # could never reach the hold at any pause length. The extra
             # condition is the name test, not the mode alone, so an
             # ordinary command buffer that times out still dictates at
-            # once.
+            # once. (wh-command-wait-open-utterance: "times out" now means
+            # the command wait above has ended -- the utterance closed or
+            # its deadline passed.)
             if (
                 decision.action == Action.DICTATE
                 and (
@@ -1704,6 +1846,9 @@ class SpeechProcessor:
             logger.debug(
                 f"Processing lifecycle_reset marker for utterance {word_event.utterance_id}"
             )
+            # wh-command-wait-open-utterance: phrase 1 closes here, so the
+            # command wait must not hold its buffer any longer.
+            self._utterance_open = False
             # A raise during ANY of the pre-pair IPC below -- the held
             # flush, the deferred-buffer finalization, or the armed-tail
             # consume -- must not skip the end/start pair: the Input
@@ -1723,9 +1868,9 @@ class SpeechProcessor:
                 # (boss ruling, option (a)): this marker is a confirmed
                 # utterance end, so a pre-held tail takes the same
                 # end-of-utterance dispatch an ordinary end marker
-                # gives it -- the trailing command fires, the bare
-                # number clicks (each before the pair below), and the
-                # replacement prefix still flushes as dictation. Hold
+                # gives it -- the bare number clicks (before the pair
+                # below), and the replacement prefix still flushes as
+                # dictation. Hold
                 # timing (before vs during the close) must not change
                 # what a confirmed utterance end means. Either way the
                 # slot clears, so held words can never survive the
@@ -1749,15 +1894,17 @@ class SpeechProcessor:
                     # wh-whole-utterance-command-matching.3.1.6 (boss
                     # ruling, option (a)): this marker is a confirmed
                     # utterance end (the Mode-1 contract in
-                    # integrations/websocket_manager.py), so the
-                    # item-20 R1 split applies to this finalization
-                    # exactly as it does in the end-marker branch --
-                    # the same spoken words must not behave
-                    # differently by internal close path. The consume
-                    # fires the armed action BEFORE the pair, the
-                    # same ordering the end-marker path keeps
-                    # (.3.1.5): the action lands while phrase 1 is
-                    # still open.
+                    # integrations/websocket_manager.py), so this
+                    # finalization runs with the same confirmed-end
+                    # flag the end-marker branch sets -- the same
+                    # spoken words must not behave differently by
+                    # internal close path. (The item-20 R1 split this
+                    # first served was removed by
+                    # wh-remove-trailing-submit; the flag still decides
+                    # the prefix hold and the multi-word badge click.)
+                    # The consume below runs BEFORE the pair, the same
+                    # ordering the end-marker path keeps (.3.1.5), so
+                    # its effect lands while phrase 1 is still open.
                     self._marker_finalization_active = True
                     try:
                         await self._execute_decision(finalize_decision)
@@ -1781,6 +1928,8 @@ class SpeechProcessor:
                 self.buffer.clear()
                 self.mode = ProcessingMode.IDLE
                 self.hotword_active = False
+                self._command_hold_deadline = None
+                self._hotword_hold_began_empty = False
                 # A tail the failed finalization armed (or a hold whose
                 # flush raised before clearing) must not leak into
                 # phrase 2.
@@ -1802,11 +1951,14 @@ class SpeechProcessor:
         # - Buffering: Defer until buffer finalizes (prevents clipboard race condition)
         if word_event.is_utterance_end_marker:
             logger.debug(f"Processing utterance_end marker for utterance {word_event.utterance_id}")
+            # wh-command-wait-open-utterance: the utterance is closed; see
+            # __init__ for the whole "still open" rule.
+            self._utterance_open = False
             # wh-pkhrp / wh-g2-refactor.18 (slice 18.32.1): invalidate
             # the focus-redirect policy's per-utterance cache so the
             # next utterance starts with a fresh detector decision.
-            # Cheap synchronous call -- safe before the
-            # trailing-action / end_utterance handling below. No-op
+            # Cheap synchronous call -- safe before the held-tail /
+            # end_utterance handling below. No-op
             # when the policy is not wired (legacy fixtures).
             if self.focus_redirect_policy is not None:
                 try:
@@ -1820,8 +1972,7 @@ class SpeechProcessor:
             # machinery is gone. Consume the held tail now and proceed
             # with end-marker handling: the prefix kind types its held
             # words (no further word can complete the replacement), the
-            # trailing kind fires its action (the candidate really was
-            # the last word), the bare-number kind clicks the badge
+            # bare-number kind clicks the badge
             # (the number really was the whole utterance). Runs before
             # end_utterance below so the action or dictation lands
             # while the utterance is still open.
@@ -1859,21 +2010,7 @@ class SpeechProcessor:
                 # word opened the utterance). Its end marker is THIS
                 # event, so consume it now rather than leak it into the
                 # next utterance.
-                # wh-whole-utterance-command-matching.3: the same
-                # finalization can now also arm a trailing command
-                # word (the item-20 R1 split), so the consume covers
-                # both kinds.
                 await self._consume_finalization_armed_tail()
-                # wh-whole-utterance-command-matching.3.1.5 (codex
-                # round 2): when the finalization armed a trailing
-                # tail, its split site left _pending_utterance_end set
-                # so the consume above could fire the action while the
-                # utterance was still open (end_utterance restores the
-                # user's clipboard -- tests/test_ui/
-                # test_utterance_clipboard_race.py). Send it now.
-                # No-op on every other path: _execute_decision already
-                # sent and cleared it.
-                await self._send_pending_utterance_end()
             return
 
         # ====================================================================
@@ -1884,8 +2021,6 @@ class SpeechProcessor:
                 f"Processing retraction marker for utterance {word_event.utterance_id}: "
                 f"full_text='{redact_transcript(word_event.retraction_full_text)}'"
             )
-            # wh-2vz: any held trailing candidate was already flushed by
-            # the top-of-loop guard before this branch is reached.
             await self._handle_retraction(word_event)
             return
 
@@ -1966,6 +2101,35 @@ class SpeechProcessor:
 
         await self._execute_decision(decision, word_event=word_event)
 
+    def _drop_wake_word_after_empty_hotword_hold(
+        self, decision: Decision
+    ) -> Decision:
+        """Remove the wake word from a held hotword buffer's dictation.
+
+        wh-hotword-wait-open-utterance A6. The router's finalization
+        (router.py ``_resolve_finalization`` step 3) types a hotword
+        buffer's dictation as ``f"{_active_hotword} {buffer_text}"``.
+        Before the hotword hold, a hotword that timed out alone lost its
+        hotword state, and the words after the pause were typed without
+        the wake word. When the hold began on the empty buffer
+        (``_hotword_hold_began_empty``), this returns the decision with
+        exactly that prefix removed, so "x-ray" + pause + "hello" still
+        types "hello". Every other decision is returned unchanged,
+        including a buffer that held words at its first expiry, whose
+        dictation keeps the wake word as before.
+        """
+        if not (
+            decision.action == Action.DICTATE
+            and self.hotword_active
+            and self._hotword_hold_began_empty
+            and isinstance(decision.payload, str)
+        ):
+            return decision
+        prefix = f"{self.router._active_hotword} "
+        if not decision.payload.startswith(prefix):
+            return decision
+        return replace(decision, payload=decision.payload[len(prefix):])
+
     async def _execute_decision(
         self, decision: Decision, word_event: Optional[WordEvent] = None
     ):
@@ -1986,6 +2150,19 @@ class SpeechProcessor:
         """
         if decision.reason:
             logger.debug(f"Decision: {decision.action.name} ({decision.reason})")
+
+        # wh-hotword-wait-open-utterance A6: a hotword buffer whose hold
+        # began while it was empty is typed without the wake word when it
+        # becomes dictation. Every path that finalizes a hotword buffer
+        # passes its decision through here: the timeout sentinel
+        # (including the hold deadline), the utterance-end marker, the
+        # lifecycle-reset marker, the new-utterance auto-finalize, and a
+        # word-driven finalization. Done here, before the bare-number
+        # check below, so the rest of this method sees the same payload
+        # the dropped-hotword path produced before the hold. Only the
+        # payload changes; the router already matched commands with the
+        # hotword, so what commands match is unchanged.
+        decision = self._drop_wake_word_after_empty_hotword_hold(decision)
 
         # wh-click-number-dictation (multi-word): the flush guard
         # deferred one word because it could extend the held number.
@@ -2110,9 +2287,9 @@ class SpeechProcessor:
             # AFTER _maybe_hold_bare_number, so the single-word hold and
             # the spoken-click hold both keep their existing paths and
             # this is reached only once both have declined; and BEFORE
-            # the trailing-word split and the dictation send below, which
-            # are what typed the words. It runs on the FINALIZED payload,
-            # so no partial utterance can trigger it.
+            # the dictation send below, which is what typed the words.
+            # It runs on the FINALIZED payload, so no partial utterance
+            # can trigger it.
             #
             # The multi-word test is what keeps a mid-utterance number
             # dictating: a lone number reaching this point failed
@@ -2145,10 +2322,7 @@ class SpeechProcessor:
             # hold above never had this exposure -- it HOLDS and a later
             # word flushes it back to dictation -- so the gate is what
             # gives this check the same safety by a different means.
-            # _utterance_end_is_confirmed is the rule
-            # _split_trailing_word_at_marker_finalization already
-            # applied; it moved into a helper so both read one
-            # definition.
+            # _utterance_end_is_confirmed is that rule, in one helper.
             if (
                 decision.payload
                 and " " in decision.payload.strip()
@@ -2158,67 +2332,6 @@ class SpeechProcessor:
                 if await self.try_bare_number_badge_click(decision.payload):
                     await self._send_pending_utterance_end()
                     return
-            # wh-whole-utterance-command-matching.3 (item-20 R1): a
-            # marker-driven finalization's dictation payload ending
-            # in a trailing command word splits -- the head dictates,
-            # the trailing word is held, and
-            # _consume_finalization_armed_tail in the end-marker
-            # branch fires it in this same utterance.
-            if decision.payload:
-                head, trailing = (
-                    self._split_trailing_word_at_marker_finalization(
-                        decision.payload, hotword_at_finalization,
-                        word_event=word_event,
-                    )
-                )
-                if trailing is not None:
-                    if head:
-                        await self._send_to_dictation(head)
-                    self._pending_trailing_word = trailing
-                    pipeline_logger.info(
-                        "TRAILING candidate held word=%r site=%s "
-                        "elapsed_ms=%.1f",
-                        redact_transcript(trailing),
-                        "marker-finalization-dictate",
-                        elapsed_ms(),
-                    )
-                    # wh-whole-utterance-command-matching.3.1.5 (codex
-                    # round 2): deliberately NOT sending the pending
-                    # end_utterance here. The caller that armed this
-                    # tail consumes it next and fires the action, and
-                    # the action must land while the utterance is
-                    # still open (end_utterance restores the user's
-                    # clipboard -- the invariant in tests/test_ui/
-                    # test_utterance_clipboard_race.py). The end-marker
-                    # branch sends the deferred end AFTER its consume;
-                    # the flagged-last-word path never set the slot.
-                    return
-            # wh-2vz: if the payload is a single word matching the
-            # trailing-command map, hold it as a pending candidate
-            # instead of dispatching. The next regular event will
-            # either flush it as text (proving it was not the last
-            # word) or the utterance_end_marker branch will consume
-            # it as the trailing action.
-            if await self._maybe_hold_trailing_candidate(decision.payload):
-                # wh-2vz.2.2 (deepseek round 1): if the focus-redirect
-                # path is buffering, register a discard callable on
-                # the path so a fail-closed event (FOCUS_PENDING
-                # timeout, focus_lost, te_cancelled, mirror reject)
-                # arriving BEFORE the utterance_end marker clears the
-                # held word. Without this, the held word leaks past
-                # the failed redirect cycle and the next utterance's
-                # first word trips the top-of-loop flush guard,
-                # dictating "submit" as text in the wrong utterance.
-                # Only the buffering case needs the discard; outside
-                # of buffering, no fail-closed event will fire.
-                # wh-g2-refactor.18: the focus-redirect discard hook
-                # registration was removed with the redirect path.
-                # Pending end_utterance still has to flow even though
-                # we did not dispatch the word here, because the
-                # surrounding processing loop relies on the same
-                # ordering as the regular DICTATE path.
-                await self._send_pending_utterance_end()
-                return
             # wh-g2-refactor.18 (slice 18.32.1): _send_to_dictation
             # now consults the focus-redirect policy and routes to the
             # persistent editor when the policy says terminal-at-prompt.
@@ -2247,55 +2360,20 @@ class SpeechProcessor:
                 decision.payload, hotword_authorized=hotword_authorized
             )
             # Execute AFTER remainder last (content that arrived after the match)
-            armed_trailing = None
+            # wh-okay-prefix-splits-replacement (site 3, trace
+            # T-17877991226): only the AFTER remainder can hold. Text
+            # before the matched pattern arrived earlier in spoken
+            # order, so no word arriving next belongs to it.
             if decision.remainder:
-                # wh-whole-utterance-command-matching.3 (item-20 R1):
-                # split a trailing command word off the AFTER
-                # remainder at marker-driven finalization before the
-                # replacement-only remainder pass, so 'backspace
-                # hello submit' at the end marker fires submit
-                # instead of typing it. The head still gets the full
-                # replacement pass.
-                remainder_text = decision.remainder
-                head, trailing = (
-                    self._split_trailing_word_at_marker_finalization(
-                        remainder_text, hotword_authorized,
-                        word_event=word_event,
-                    )
+                await self._process_remainder(
+                    decision.remainder,
+                    word_event=word_event,
+                    hotword_active=hotword_authorized,
                 )
-                if trailing is not None:
-                    remainder_text = head
-                # wh-okay-prefix-splits-replacement (site 3, trace
-                # T-17877991226): only the AFTER remainder can hold. Text
-                # before the matched pattern arrived earlier in spoken
-                # order, so no word arriving next belongs to it.
-                if remainder_text:
-                    await self._process_remainder(
-                        remainder_text,
-                        word_event=word_event,
-                        hotword_active=hotword_authorized,
-                    )
-                if trailing is not None:
-                    self._pending_trailing_word = trailing
-                    armed_trailing = trailing
-                    pipeline_logger.info(
-                        "TRAILING candidate held word=%r site=%s "
-                        "elapsed_ms=%.1f",
-                        redact_transcript(trailing),
-                        "marker-finalization-remainder",
-                        elapsed_ms(),
-                    )
             # wh-g2-refactor.18: the focus-redirect transfer for
             # replacement inserts is gone with the redirect path.
             # Send deferred end_utterance AFTER command execution completes.
-            # wh-whole-utterance-command-matching.3.1.5 (codex round
-            # 2): unless this finalization armed a trailing tail -- the
-            # caller consumes it next, and its action must fire while
-            # the utterance is still open (the clipboard invariant in
-            # tests/test_ui/test_utterance_clipboard_race.py), so the
-            # caller sends the deferred end after its consume.
-            if armed_trailing is None:
-                await self._send_pending_utterance_end()
+            await self._send_pending_utterance_end()
 
         elif decision.action == Action.BUFFER:
             # Payload is the word to add
@@ -2311,276 +2389,12 @@ class SpeechProcessor:
             if decision.target_mode == ProcessingMode.HOTWORD_BUFFERING:
                 self.hotword_active = True
                 self.buffer.clear() # Hotword itself is not buffered
+                # wh-command-wait-open-utterance: a replaced buffer
+                # never inherits an earlier buffer's deadline.
+                self._command_hold_deadline = None
+                self._hotword_hold_began_empty = False
             if decision.timeout_ms:
                 self._start_timeout(decision.timeout_ms)
-
-    # ========================================================================
-    # TRAILING-POSITION COMMANDS (wh-2vz)
-    # ========================================================================
-    #
-    # A trailing-position command word fires its action AFTER the dictated
-    # prefix is inserted. The word itself is stripped from the transcription.
-    #
-    # The WebSocketManager reliably sends ``is_utterance_end_marker`` at
-    # the end of every utterance, so the trailing decision is anchored on
-    # that marker. Each real word
-    # that the router would dictate is first checked against the trailing-
-    # commands map; matches are held as a pending candidate instead of
-    # dispatched. The candidate is then either:
-    #   - flushed as plain dictation when ANY subsequent regular event
-    #     arrives (another word, a buffer mutation, a retraction), proving
-    #     the trailing word was not actually the last word of the utterance;
-    #   - consumed as the trailing action when ``is_utterance_end_marker``
-    #     arrives, proving the held word WAS the last word.
-    #
-    # The remote-path field ``WordEvent.end_of_utterance=True`` is NOT used
-    # as the trigger because remote STT only sets that flag on the
-    # ``is_utterance_end_marker`` (empty payload) event, never on the
-    # accompanying real words. The in-process path does set the flag on real
-    # words, but the design relies only on the marker so both paths share
-    # one code path.
-
-    def _split_trailing_word_at_marker_finalization(
-        self, text: str, hotword_authorized: bool,
-        word_event: Optional[WordEvent] = None,
-    ) -> tuple[str, Optional[str]]:
-        """R1 split (wh-whole-utterance-command-matching.3, David's
-        item-20 ruling 2026-08-29): at end-of-utterance finalization a
-        dictation-bound payload whose LAST word is a trailing command
-        splits -- the head dictates, the trailing word is held so
-        _consume_finalization_armed_tail (marker path) or the
-        end-marker first-consume (flagged-word path) fires it in its
-        own utterance. Returns (head, trailing_word); trailing_word
-        is None when no split applies.
-
-        Only a CONFIRMED utterance end splits, via two signals:
-        _marker_finalization_active covers BOTH marker-driven
-        finalizations -- the end-marker branch's and the Mode 1
-        lifecycle-reset branch's, each setting it around exactly its
-        own _execute_decision call -- and a word_event whose
-        end_of_utterance flag sits on a real
-        word covers the in-process bridge, which flags the utterance's
-        last real word and finalizes through router step 1 before the
-        queued marker arrives (wh-whole-utterance-command-matching
-        .3.1.1). Marker events themselves are excluded from the flag
-        path: the harness end marker and websocket_manager's
-        finalize/retraction markers carry flags of their own and are
-        not the utterance's last spoken word. Timeout and
-        auto-finalize payloads keep dictating whole -- their calls
-        pass no word_event and run outside both marker branches, so
-        with no confirmed end the trailing word was never proven to be
-        the utterance's last word, which preserves today's no-marker
-        outcomes. A lifecycle reset DOES split, deliberately:
-        wh-whole-utterance-command-matching.3.1.6 (boss ruling, option
-        (a)) requires the same spoken words to behave the same by
-        either internal close path, and
-        tests/mutation_gate_whole_utterance.py pins that with
-        lifecycle-marker-active-never-set. Hotword dictation keeps
-        typing every word ('x-ray
-        foo submit' stays literal text).
-        """
-        if hotword_authorized:
-            return text, None
-        if not self._utterance_end_is_confirmed(word_event):
-            return text, None
-        words = text.split()
-        if not words:
-            return text, None
-        if self._usable_trailing_command(words[-1]) is None:
-            return text, None
-        return " ".join(words[:-1]), words[-1]
-
-    def _usable_trailing_command(self, word: str):
-        """The trailing-command entry for ``word``, or None.
-
-        None also when the entry's actions save a hint and the running
-        speech engine does not apply hints (wh-boost-engine-qualification):
-        the word is then ordinary dictation, as for a leading pattern.
-        """
-        entry = self.catalog.get_trailing_command(word)
-        if _refused_for_hint_engine(entry, self.hint_engine):
-            return None
-        return entry
-
-    async def _maybe_hold_trailing_candidate(self, text: str) -> bool:
-        """If ``text`` is a single word matching the trailing-command map,
-        hold it as a pending candidate instead of dispatching it.
-
-        Returns True if the text was captured (caller MUST NOT dispatch it
-        to dictation); False otherwise. Captures only single-word DICTATE
-        decisions -- multi-word payloads (from buffer finalization) and
-        remainder text always flush through to dictation as today, so
-        utterances like "comma submit" continue to insert ", submit" as
-        text rather than fire Enter.
-        """
-        if not text:
-            return False
-        # Multi-word DICTATE payloads come from buffer finalization. Those
-        # are dictation of a phrase that already failed to match a leading
-        # pattern; do not retro-classify them as trailing.
-        if " " in text.strip():
-            return False
-        entry = self._usable_trailing_command(text)
-        if entry is None:
-            return False
-        # The top-of-loop guard in process_word_event has already
-        # flushed any prior pending candidate by the time we reach
-        # this branch. Belt-and-braces: assign unconditionally.
-        self._pending_trailing_word = text
-        pipeline_logger.info(
-            "TRAILING candidate held word=%r elapsed_ms=%.1f",
-            redact_transcript(text), elapsed_ms(),
-        )
-        return True
-
-    async def _flush_pending_trailing_word_as_dictation(self) -> None:
-        """Dispatch the held trailing candidate as ordinary dictation.
-
-        Called on every event that proves the held word was not actually
-        the last word of the utterance (a follow-up word, a buffer
-        mutation, retraction, lifecycle reset, a new utterance, processor
-        stop, etc.). Clears the pending slot before the IPC so a failure
-        cannot leak the word into the next consume path.
-        """
-        pending = self._pending_trailing_word
-        if pending is None:
-            return
-        self._pending_trailing_word = None
-        pipeline_logger.info(
-            "TRAILING candidate flushed-as-text word=%r elapsed_ms=%.1f",
-            redact_transcript(pending), elapsed_ms(),
-        )
-        # Use the same dictation routing the regular DICTATE branch
-        # uses so the trailing word follows the focus-redirect policy
-        # (wh-g2-refactor.18 slice 18.32.1) instead of going straight
-        # to intelligent_insert_text.
-        await self._send_to_dictation(pending)
-
-    def _clear_held_trailing_word(self) -> None:
-        """Synchronously clear the held trailing candidate.
-
-        wh-2vz.2.2 (deepseek round 1): registered on the
-        focus-redirect path via ``register_held_trailing_discard``
-        when a trailing candidate is held while the path is
-        buffering. The path's fail-closed paths call this so the
-        slot is cleared whether or not ``defer_trailing_action`` was
-        later called.
-
-        Logs at INFO so the audit trail records the drop. Safe to
-        call when the slot is already empty.
-        """
-        pending = self._pending_trailing_word
-        if pending is None:
-            return
-        self._pending_trailing_word = None
-        pipeline_logger.info(
-            "TRAILING candidate dropped word=%r elapsed_ms=%.1f",
-            redact_transcript(pending), elapsed_ms(),
-        )
-
-    async def _consume_pending_trailing_word_at_utterance_end(self) -> None:
-        """Fire the trailing action for the held word, then clear it.
-
-        Called from the ``is_utterance_end_marker`` handler so the
-        action runs while the utterance is still open. (Historical
-        note: this used to have a separate buffering branch driven by
-        the focus-redirect path; that path was removed in
-        wh-g2-refactor.18 and the trailing action now always fires
-        synchronously here.)
-
-        Reads the slot, clears it, then delegates the action-firing
-        body to :meth:`_fire_trailing_action_for_word` so both the
-        slot-based path here and the captured-word deferred path share
-        the same firing logic.
-        """
-        pending = self._pending_trailing_word
-        if pending is None:
-            return
-        self._pending_trailing_word = None
-        await self._fire_trailing_action_for_word(pending)
-
-    async def _fire_trailing_action_for_word(self, word: str) -> None:
-        """Fire the trailing-position action for ``word``.
-
-        Shared body for both the slot-based path
-        (:meth:`_consume_pending_trailing_word_at_utterance_end`) and
-        the captured-word deferred path used by the focus-redirect
-        drain chain. The caller is responsible for sourcing the word
-        -- this helper does not touch ``self._pending_trailing_word``.
-
-        On success, flips ``_command_executed_in_utterance`` so a
-        later STT revision cannot retract the irreversible side
-        effect. On any failure path (catalog reload dropped the
-        entry, registry-vs-pattern mismatch, action execution raised),
-        the word is dictated as text as a conservative fallback
-        rather than silently dropped.
-        """
-        entry = self.catalog.get_trailing_command(word)
-        if entry is None:
-            # Catalog reloaded between hold and consume and dropped the
-            # word. Fail closed: dictate the held word as text rather
-            # than silently drop it. Route through _send_to_dictation
-            # so the focus-redirect policy still applies
-            # (wh-g2-refactor.18 slice 18.32.1).
-            logger.warning(
-                "Trailing candidate %r no longer in catalog at "
-                "fire time; dictating as text instead",
-                redact_transcript(word),
-            )
-            await self._send_to_dictation(word)
-            return
-        if _refused_for_hint_engine(entry, self.hint_engine):
-            # wh-boost-engine-qualification: the engine reported that it
-            # does not apply hints between hold and fire. Same outcome as
-            # a refusal at hold time: the word is dictation.
-            logger.info(
-                "Trailing candidate %r saves a hint and the speech engine "
-                "does not apply hints; dictating as text",
-                redact_transcript(word),
-            )
-            await self._send_to_dictation(word)
-            return
-
-        compiled = entry["compiled_pattern"]
-        actions = entry["actions"]
-        # wh-whole-utterance-command-matching.3.1.7 (codex round 3):
-        # every producer stores the RAW token ("submit."), while
-        # get_trailing_command resolved it through
-        # _normalize_lookup_word -- re-match the same normalized form,
-        # or STT terminal punctuation turns the fired command into
-        # dictation. The raw token stays in the fallback dictations
-        # and the logs, so dictated text keeps its punctuation.
-        match = compiled.match(_normalize_lookup_word(word))
-        if match is None:
-            logger.warning(
-                "Trailing command registry mismatch for word=%r; "
-                "dictating as text instead",
-                redact_transcript(word),
-            )
-            await self._send_to_dictation(word)
-            return
-
-        pipeline_logger.info(
-            "TRAILING command fired word=%r elapsed_ms=%.1f",
-            redact_transcript(word), elapsed_ms(),
-        )
-        logger.info(f"Executing trailing command: '{redact_transcript(word)}'")
-        try:
-            executed = await self.text_parser._execute_rule(
-                match, actions, validation_group=None, pattern_type="command",
-            )
-        except Exception:
-            logger.exception(
-                "Trailing command execution raised for word=%r; "
-                "suppressing dictation of the word",
-                redact_transcript(word),
-            )
-            executed = False
-
-        if executed:
-            # Trailing commands are irreversible side effects. Block
-            # retraction for the rest of the utterance.
-            self._command_executed_in_utterance = True
 
     # ========================================================================
     # BARE-NUMBER CLICKS (wh-click-number-dictation)
@@ -2594,7 +2408,7 @@ class SpeechProcessor:
     # certainly a badge pick, so it is held back from dictation and, at
     # the utterance-end marker, executed as the click command "click N".
     #
-    # The lifecycle mirrors the trailing-command hold above:
+    # The lifecycle:
     #   - held only when the word opened its utterance, parses as a
     #     number 1..999, and the overlay state machine is in a
     #     badge-showing state (painted / refresh_in_flight);
@@ -2729,9 +2543,12 @@ class SpeechProcessor:
         )
         return True
 
-    # crewcut: these verbs mirror click_element's trigger "^(?:click|tap)"
-    # in action_catalog.py; a user-customized trigger is not consulted.
-    # Read them from the catalog entry once the catalog exposes its verbs.
+    # crewcut: these verbs mirror click_element's trigger
+    # "^(?:click|clicks|tap)" in action_catalog.py; a user-customized
+    # trigger is not consulted. Read them from the catalog entry once the
+    # catalog exposes its verbs. "clicks" is left out: without the hotword
+    # the router types a leading "clicks" at once, so this hold never sees
+    # it (wh-clicks-spoken-click).
     _SPOKEN_CLICK_VERBS = ("click", "tap")
 
     @staticmethod
@@ -2743,9 +2560,8 @@ class SpeechProcessor:
         spoken "click 74" arrives as "click 74." and
         ``parse_number_word("74.")`` is None. click_parser strips
         ``_TRAILING_PUNCT`` from its own final token for the same
-        reason, and the trailing-command hold re-matches a normalized
-        form (wh-whole-utterance-command-matching.3.1.7); this is that
-        rule for both holds, reusing click_parser's own constant
+        reason; this is that rule for both number holds, reusing
+        click_parser's own constant
         because the command text they build is what click_parser
         parses. Only the LAST token is stripped, so a
         payload whose other words carry punctuation ("click 74, please")
@@ -2799,8 +2615,8 @@ class SpeechProcessor:
         read the earlier wording here as describing a defect; the
         wording was wrong, not the code, and
         tests/test_grid_number_badge_click.py now pins the behaviour.
-        Extracted from
-        _split_trailing_word_at_marker_finalization for
+        First written for the trailing-command split (wh-2vz, removed
+        by wh-remove-trailing-submit) and extracted for
         wh-overlay-count-homophones.1.4, which needs the same rule.
         """
         return self._marker_finalization_active or (
@@ -3021,7 +2837,7 @@ class SpeechProcessor:
         deliberately
         NOT a caller: it drops the held tail whatever kind it carries,
         and routing it here would narrow that to BARE_NUMBER and strand a
-        trailing-command or replacement-prefix tail across shutdown.
+        replacement-prefix tail across shutdown.
 
         A hold survives a provider switch because nothing in the switch
         reaches the processor: the word queue and its consumer outlive
@@ -3237,8 +3053,8 @@ class SpeechProcessor:
     # HELD REPLACEMENT PREFIX (wh-trailing-question-mark-words)
     # ========================================================================
     #
-    # Third hold in this file, built on the same slot-plus-flush-plus-
-    # consume shape as the two above it.
+    # The second hold in this file, built on the same slot-plus-flush-
+    # plus-consume shape as the bare-number hold above it.
     #
     # The problem it solves is a timing race, not a matching one. The STT
     # server always holds back the last confirmed word
@@ -4205,9 +4021,8 @@ class SpeechProcessor:
           5. If no replacement matches, dictate the entire current
              text and stop.
 
-        Commands in the remainder are intentionally unreachable here.
-        Trailing-position commands belong to a separate product feature
-        (``wh-2vz``); this path stays replacement-only.
+        Commands in the remainder are intentionally unreachable here;
+        this path stays replacement-only.
 
         Args:
             remainder: Text remaining after a partial pattern match
@@ -4375,6 +4190,10 @@ class SpeechProcessor:
         self.buffer.clear()
         self.hotword_active = False
         self.mode = ProcessingMode.IDLE
+        # wh-command-wait-open-utterance: the buffer is gone, so is its
+        # hold; the next command buffer gets a fresh deadline.
+        self._command_hold_deadline = None
+        self._hotword_hold_began_empty = False
         logger.info("Returned to IDLE mode")
 
     async def _send_pending_utterance_end(self):
@@ -4429,6 +4248,10 @@ class SpeechProcessor:
         self.buffer.clear()
         self.hotword_active = False
         self.mode = ProcessingMode.IDLE
+        # wh-command-wait-open-utterance: the held buffer was just
+        # discarded (the replay below rebuilds it), so its deadline goes.
+        self._command_hold_deadline = None
+        self._hotword_hold_began_empty = False
 
         # 2. Check if utterance is retractable (no commands executed)
         if self._command_executed_in_utterance:
@@ -4642,20 +4465,13 @@ class SpeechProcessor:
             )
             await self.process_word_event(replay_event)
 
-        # wh-2vz: the replay does not produce its own
-        # is_utterance_end_marker, so a trailing word in the replayed
-        # text would otherwise stay held until the NEXT utterance and
-        # then leak into that utterance's dictation. Flush as text
-        # instead so the replayed word lands in the retracted
-        # utterance's IPC stream. Retraction-after-an-Enter-press is
-        # already destructive; firing Enter a second time would be
-        # worse, so dictating the word as text is the conservative
-        # outcome.
-        await self._flush_pending_trailing_word_as_dictation()
-        # wh-trailing-question-mark-words: belt-and-braces backstop for
-        # the same reason. The top-of-loop pass already flushes on the
-        # retraction marker that reached this handler, and the replay
-        # cannot hold a prefix of its own (holding needs a timeout
+        # wh-trailing-question-mark-words: belt-and-braces backstop.
+        # The replay does not produce its own is_utterance_end_marker,
+        # so a word held from the replayed text would otherwise stay
+        # held until the NEXT utterance and then leak into that
+        # utterance's dictation. The top-of-loop pass already flushes on
+        # the retraction marker that reached this handler, and the
+        # replay cannot hold a prefix of its own (holding needs a timeout
         # sentinel, and the replay loop runs to completion without
         # yielding to the timer), so this is the second lock on a slot
         # whose leak would type words into the next utterance.
@@ -4966,6 +4782,7 @@ class SpeechProcessor:
         # enqueued. The new task captures the post-bump value.
         self._cancel_timeout()
         snapshot_token = self.timeout_token
+        self._timeout_duration_ms = duration_ms
         self.timeout_task = asyncio.create_task(
             self._timeout_handler(duration_ms, snapshot_token)
         )

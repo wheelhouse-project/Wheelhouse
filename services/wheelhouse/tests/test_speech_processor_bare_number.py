@@ -113,7 +113,6 @@ def make_processor(overlay_state: Optional[OverlayState] = None,
     catalog = MagicMock()
     catalog.command_hotword = "x-ray"
     catalog.lookup.return_value = None
-    catalog.get_trailing_command.return_value = None
     text_parser = MockTextParser()
 
     if logic_controller == "from_state":

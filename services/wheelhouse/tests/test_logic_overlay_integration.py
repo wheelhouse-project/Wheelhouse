@@ -1434,6 +1434,174 @@ def test_refresh_visible_window_helper_none_when_unrecorded():
             is None)
 
 
+@pytest.mark.parametrize("failure", ["build_failed", "timeout"])
+@pytest.mark.parametrize(
+    "foreground, expect_closed",
+    [(2, True), (1, False), (None, False)],
+    ids=["window-left", "same-window", "foreground-unknown"],
+)
+def test_refresh_failure_clears_numbers_only_when_visible_window_left(
+    failure, foreground, expect_closed,
+):
+    """wh-overlay-failed-focus-read-keeps-numbers: David's 18:10:29 case.
+
+    The numbers were painted for window 1. A refresh is in flight and then
+    fails or times out. When window 1 is no longer in front, Logic must mark
+    the failure so the machine clears the numbers and closes. When window 1 is
+    still in front, or the foreground cannot be read, today's fall-back keeps
+    the numbers.
+    """
+
+    async def _run():
+        machine = ClickOverlayStateMachine()
+        sid, gen = _drive_to_refresh_in_flight(machine, "snap-w1")
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._perform_overlay_effects = MagicMock()  # type: ignore[method-assign]
+        controller._overlay_snapshot_window_identity["snap-w1"] = _identity(1)
+        controller._capture_overlay_foreground_identity = MagicMock(  # type: ignore[method-assign]
+            return_value=None if foreground is None else _identity(foreground)
+        )
+        if failure == "build_failed":
+            event = OverlayEvent(
+                OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+                paint_generation=gen, build_ok=False,
+            )
+        else:
+            event = OverlayEvent(
+                OverlayEventKind.TIMEOUT, overlay_session_id=sid,
+                paint_generation=gen,
+            )
+        controller._apply_overlay_event(event, source="test-failed-read")
+        if expect_closed:
+            assert machine.state is OverlayState.CLOSED
+            assert machine.pinned_snapshot_id is None
+            (effects,), _kw = controller._perform_overlay_effects.call_args
+            assert EffectKind.DISPATCH_CLEAR in [e.kind for e in effects]
+        else:
+            assert machine.state is OverlayState.PAINTED
+            assert machine.pinned_snapshot_id == "snap-w1"
+
+    asyncio.run(_run())
+
+
+def _replay_through_gui_gate(effects) -> tuple[Optional[tuple[int, int]], list]:
+    """Replay paint/clear effects in order through the REAL GUI gate.
+
+    Returns the pair left on screen (None when the last accepted effect was a
+    clear) and the per-effect verdicts as ``(kind, pair, accepted)``.
+    """
+
+    import overlay_paint_window
+
+    gate = overlay_paint_window.GenerationGate()
+    on_screen: Optional[tuple[int, int]] = None
+    verdicts = []
+    for e in effects:
+        pair = (e.overlay_session_id, e.paint_generation)
+        if e.kind is EffectKind.DISPATCH_PAINT:
+            ok = gate.accept_paint(*pair)
+            if ok:
+                on_screen = pair
+        elif e.kind is EffectKind.DISPATCH_CLEAR:
+            ok = gate.accept_clear(*pair)
+            if ok:
+                on_screen = None
+        else:
+            continue
+        verdicts.append((e.kind, pair, ok))
+    return on_screen, verdicts
+
+
+@pytest.mark.parametrize("failure", ["build_failed", "timeout"])
+@pytest.mark.parametrize(
+    "restart_kind",
+    [OverlayEventKind.FOCUS_CHANGE, OverlayEventKind.SHOW_NUMBERS],
+    ids=["focus-change", "show-numbers"],
+)
+def test_failed_read_after_restart_in_paint_in_flight_leaves_no_numbers(
+    restart_kind, failure,
+):
+    """wh-overlay-failed-focus-read-keeps-numbers.1.1.
+
+    The first read painted (the paint is on its way to the GUI), then a focus
+    change or a re-said "show numbers" restarted the read before the paint was
+    acknowledged, and the new read failed. The gen-0 paint must not stay on
+    screen: the restart's clear, stamped with the painted pair, removes it at
+    the real GUI gate, and a late copy of that paint is refused.
+    """
+
+    async def _run():
+        machine = ClickOverlayStateMachine()
+        stream = list(machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS)).effects)
+        sid, gen0 = machine.overlay_session_id, machine.paint_generation
+        stream += machine.apply(OverlayEvent(
+            OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+            paint_generation=gen0, snapshot_id="snap-w1",
+        )).effects
+        assert machine.state is OverlayState.PAINT_IN_FLIGHT
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._perform_overlay_effects = MagicMock()  # type: ignore[method-assign]
+        controller._apply_overlay_event(OverlayEvent(restart_kind), source="test-restart")
+        assert machine.state is OverlayState.WALK_IN_FLIGHT
+        gen1 = machine.paint_generation
+        if failure == "build_failed":
+            event = OverlayEvent(
+                OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+                paint_generation=gen1, build_ok=False,
+            )
+        else:
+            event = OverlayEvent(
+                OverlayEventKind.TIMEOUT, overlay_session_id=sid,
+                paint_generation=gen1,
+            )
+        controller._apply_overlay_event(event, source="test-failed-read")
+        assert machine.state is OverlayState.CLOSED
+        for (batch,), _kw in controller._perform_overlay_effects.call_args_list:
+            stream += batch
+        on_screen, verdicts = _replay_through_gui_gate(stream)
+        assert (EffectKind.DISPATCH_CLEAR, (sid, gen0), True) in verdicts
+        assert on_screen is None
+        # A late copy of the abandoned paint cannot re-present.
+        replay_late = stream + [
+            e for e in stream if e.kind is EffectKind.DISPATCH_PAINT
+        ]
+        late_screen, _ = _replay_through_gui_gate(replay_late)
+        assert late_screen is None
+
+    asyncio.run(_run())
+
+
+def test_new_walk_paint_after_restart_clear_passes_the_gui_gate():
+    """wh-overlay-failed-focus-read-keeps-numbers.1.1: the restart clear is
+    stamped with the OLD pair, so the new read's paint at the bumped pair
+    still presents. A clear at the new pair would refuse it."""
+
+    machine = ClickOverlayStateMachine()
+    stream = list(machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS)).effects)
+    sid = machine.overlay_session_id
+    stream += machine.apply(OverlayEvent(
+        OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+        paint_generation=machine.paint_generation, snapshot_id="snap-w1",
+    )).effects
+    stream += machine.apply(OverlayEvent(OverlayEventKind.FOCUS_CHANGE)).effects
+    stream += machine.apply(OverlayEvent(
+        OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+        paint_generation=machine.paint_generation, snapshot_id="snap-w2",
+    )).effects
+    assert machine.state is OverlayState.PAINT_IN_FLIGHT
+    on_screen, verdicts = _replay_through_gui_gate(stream)
+    assert on_screen == (sid, machine.paint_generation)
+    assert [k for k, _p, _ok in verdicts] == [
+        EffectKind.DISPATCH_PAINT, EffectKind.DISPATCH_CLEAR,
+        EffectKind.DISPATCH_PAINT,
+    ]
+    assert all(ok for _k, _p, ok in verdicts)
+
+
 def test_closed_clears_per_snapshot_window_identity_map():
     from services.wheelhouse.click_overlay_state import OverlayState
 

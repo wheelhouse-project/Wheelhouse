@@ -20,8 +20,13 @@ dependencies = [
     # dependency -- and then delete this comment.
     "sounddevice>=0.5",
     "numpy>=2.0",
-    # 3.3.0 has no Windows wheel, source build fails (LNK1104)
-    "pysilero-vad>=3.0,<3.3",
+    # The Silero VAD (shared_audio/silero_vad.py) runs its ONNX model
+    # through onnxruntime on one thread, which releases the GIL. It
+    # replaced pysilero-vad, whose ggml pool held the GIL and stalled the
+    # capture thread (wh-vad-releases-gil). Declared here, once, so every
+    # provider gets it as a requirement of wheelhouse-shared. The upper
+    # bound keeps the version whose GIL release was read in the source.
+    "onnxruntime>=1.25.1,<1.26",
     "openwakeword>=0.6.0,<0.7",
     # The WinRT AudioGraph capture path (shared_audio/capture/
     # winrt_capture.py) is the only capture path any provider may use, so

@@ -98,11 +98,6 @@ def make_processor(app=None, command_timeout_ms=1000, replacement_timeout_ms=700
     catalog = MagicMock()
     catalog.command_hotword = "x-ray"
     catalog.lookup.return_value = None
-    # wh-2vz: in real PatternCatalog, get_trailing_command returns None
-    # for any word that is not registered as a trailing-position command.
-    # MagicMock's default truthy return would make SpeechProcessor treat
-    # every word as a trailing candidate.
-    catalog.get_trailing_command.return_value = None
     text_parser = MockTextParser()
 
     processor = SpeechProcessor(

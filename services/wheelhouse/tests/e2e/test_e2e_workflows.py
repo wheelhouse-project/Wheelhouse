@@ -167,6 +167,67 @@ class TestDictationWithPunctuation:
         assert_first_word(delivered[0], "test")
         assert delivered[1:] == ["-", " word"]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("spoken", ["sign", "sine"])
+    async def test_equals_sign(self, harness, spoken):
+        """'total equals sign value' -> first word + ' =' + ' value' (wh-voice-access-parity.1.15.5).
+
+        "=" is the one punctuation-only insert that takes a leading space,
+        so the screen shows "total = value". "sine" is how Parakeet hears
+        "sign". The words have more than one letter because this harness
+        delivers no trailing one-letter word: "x equals sign y" gave
+        ['X', '='] here, while the real app typed "x= y".
+        """
+        await harness.send_utterance(["total", "equals", spoken, "value"])
+        await asyncio.sleep(0.3)
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 3, f"Expected 3 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "total")
+        assert delivered[1:] == [" =", " value"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("words, symbol", [
+        pytest.param(["plus", "sign"], "+", id="plus"),
+        pytest.param(["less", "than", "sign"], "<", id="less"),
+        pytest.param(["greater", "than", "sign"], ">", id="greater"),
+        pytest.param(["vertical", "bar"], "|", id="bar"),
+    ])
+    async def test_other_spaced_symbols(self, harness, words, symbol):
+        """'total plus sign value' -> first word + ' +' + ' value'.
+
+        David's answer to Question 7 (option 1): "+ < > |" take the same
+        leading space as "=" (wh-voice-access-parity.1.15.5).
+        """
+        await harness.send_utterance(["total", *words, "value"])
+        await asyncio.sleep(0.3)
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 3, f"Expected 3 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "total")
+        assert delivered[1:] == [" " + symbol, " value"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("words, first", [
+        pytest.param(["less", "than", "sign"], " <", id="less-equal"),
+        pytest.param(["exclamation", "mark"], "!", id="not-equal"),
+    ])
+    async def test_symbol_then_equals_sign_builds_an_operator(
+        self, harness, words, first
+    ):
+        """'total less than sign equals sign value' -> ' <' + '=' + ' value'.
+
+        An "=" right after an operator character joins it, so the screen
+        shows "total <= value" and "total!= value" as before the "="
+        change (Boss e8 rulings 11:47 and 11:49).
+        """
+        await harness.send_utterance(
+            ["total", *words, "equals", "sign", "value"]
+        )
+        await asyncio.sleep(0.3)
+        delivered = harness.recording.text_deliveries
+        assert len(delivered) == 4, f"Expected 4 deliveries, got {delivered}"
+        assert_first_word(delivered[0], "total")
+        assert delivered[1:] == [first, "=", " value"]
+
 
 # ============================================================================
 # TASK 6: Command-dictation switching
@@ -367,6 +428,56 @@ class TestMultiStepCommands:
         await harness.wait_for_timeout(200)
         keys = harness.recording.get_keystroke_keys()
         assert ("enter",) in keys, f"Expected ('enter',) from press enter, got {keys}"
+
+    @pytest.mark.asyncio
+    async def test_press_waits_for_a_two_word_count(self, harness):
+        """'press tab twenty one times', word by word, presses Tab 21 times.
+
+        wh-voice-access-parity.2.12. press-keys carries no
+        whole_utterance_only flag. A command that fired on "press tab"
+        would press Tab once and type "twenty one times" (the severed
+        count test_count_pattern_survey.py guards). At word speed the
+        required word "times" also holds the command until the count is
+        complete, so this test alone does not prove the greedy buffer;
+        test_press_count_survives_a_pause_longer_than_the_command_timer
+        does.
+        """
+        await harness.send_word("press", start_of_utterance=True)
+        for word in ("tab", "twenty", "one", "times"):
+            await harness.send_word(word, delay_before_ms=50)
+        await harness.send_utterance_end_marker(utterance_id=1)
+        # 21 presses with the 0.1 s pause between hotkey repeats.
+        await harness.wait_for_timeout(3000)
+        keys = harness.recording.get_keystroke_keys()
+        assert keys == [("tab",)] * 21, f"Expected 21 x ('tab',), got {keys}"
+        assert harness.recording.typed_texts == []
+        assert harness.recording.text_deliveries == []
+
+    @pytest.mark.asyncio
+    async def test_press_count_survives_a_pause_longer_than_the_command_timer(
+        self, harness
+    ):
+        """A 1500 ms pause inside the count still presses Tab 21 times.
+
+        wh-voice-access-parity.2.12. The greedy key group (.+?) puts
+        press-keys on the greedy buffer, whose timer (5000 ms) restarts on
+        every word. Without it, "press tab twenty" would sit on the
+        command timer (1000 ms in this harness) while the count group is
+        empty, and a pause longer than that timer would type the whole
+        phrase instead of pressing any key. The harness holds an open
+        utterance for 0 ms, so the command timer alone decides.
+        """
+        await harness.send_word("press", start_of_utterance=True)
+        await harness.send_word("tab", delay_before_ms=50)
+        await harness.send_word("twenty", delay_before_ms=50)
+        await harness.send_word("one", delay_before_ms=1500)
+        await harness.send_word("times", delay_before_ms=50)
+        await harness.send_utterance_end_marker(utterance_id=1)
+        await harness.wait_for_timeout(3000)
+        keys = harness.recording.get_keystroke_keys()
+        assert keys == [("tab",)] * 21, f"Expected 21 x ('tab',), got {keys}"
+        assert harness.recording.typed_texts == []
+        assert harness.recording.text_deliveries == []
 
     @pytest.mark.asyncio
     async def test_find_dispatches_type_text(self, harness):

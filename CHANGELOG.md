@@ -5,6 +5,66 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-09-29
+
+### Added
+
+- The Wheelhouse website has a seventh page, "Coming from Voice Access". Every page's menu links to it.
+- The Pattern Manager has an "Only my patterns" check box (Alt+M). When you tick it, the list shows only the patterns you added, duplicated, or customized. It works together with the filter box.
+- New commands from Windows Voice Access: "no space that", "no space [words]", "what can I say", "show commands", "show all commands" and "show command list". The last four open the Pattern Manager.
+- "go" or "move" with up, down, left or right and "[number] times" moves the cursor. "move slider [direction] [number] times" also works.
+- With no mouse grid open, "click", "tap", "right click", "double click" and the new "triple click" click at the mouse pointer. "literal click" still types the word.
+- "press [keys] [number] times" presses the keys that many times, up to 30.
+- If the Parakeet speech model is not installed, the tray menu shows "Parakeet (model not installed)". Picking it offers to start the installer or to copy the install command.
+- If the microphone disconnects, a notice says "Microphone lost". When it comes back, a notice says "Microphone is back".
+
+### Changed
+
+- The list of voice commands is now in the Voice Commands section of the User guide. The reference document no longer carries it. Its title is now "Wheelhouse Action, Notice, and Configuration Reference".
+- Your own patterns now run before the built-in patterns. If one of your patterns and a built-in pattern match the same words, your pattern runs.
+- The Wheelhouse Assistant now opens a Gemini Notebook instead of a Gemini Gem, because Google stops Gems on 17 November 2026. An old Gem address in your settings opens the notebook.
+- The window before your browser opens now says that the Assistant needs a Google Account. If you turned that window off, it shows once more, with "Do not show this again" already ticked.
+- On the website, a click on an Assistant link first shows the same explanation window.
+- The command prefix "x-ray" is now called the "safety word" in all text. The word is still "x-ray", and your saved patterns still load.
+- "submit" at the end of a longer sentence is now typed as a word. "submit" or "submitted", said alone, presses Enter.
+- More spoken forms work. "go" works wherever "move" does. "write" works wherever "right" is a direction. "left" and "right" select backward and forward. "clicks" works as "click".
+- "unselect", "italicize", "all caps", "no caps", "cap", "no space" and "bold" work without "that" when you say them alone. "bold face", "boldface" and "equals sine" also work.
+- "press f 5" and "press f five" now press F5. "press f five three times" presses F5 three times.
+- "equals sign" now has a space before it, so "x equals sign y" types "x = y". The same applies to +, <, > and |. Symbols dictated one after another join, for example "<=" and "!=".
+- Key combinations that repeat now pause 100 milliseconds between repeats. Before, a program such as Visual Studio Code could miss repeats. The largest count is now 30.
+- When you click a control by name and it has no normal press action, Wheelhouse first tries to switch it on or off, then to select it.
+- In Advanced mode, the pattern editor refuses Save if a number is not captured with (\d+). Such a pattern would not accept number words such as "five".
+- The last choice in the Add Pattern list is now "Create an advanced command". It opens the editor with Advanced ticked.
+- The Pattern Manager remembers its text size between sessions.
+- Wheelhouse no longer shows a notice while it saves a setting or when the save succeeds. It shows a notice only when a save fails.
+- When a speech engine stops because of an error in its program code, the notice says so and gives the exit code. The engine's error output now goes into wheelhouse.log.
+- The help documents now name the installer's command-line switches, every Pattern Manager action, the titles of notices and dialog boxes, and the location of user_patterns.toml.
+- The website home page links to the Quick start section of the guide.
+
+### Fixed
+
+- If the microphone disconnects for a moment, speech recognition now starts again when it comes back. Before this fix, you had to restart Wheelhouse.
+- A command with a short pause in it, such as "select" then "left two characters", now runs. Before this fix, the words were typed. This also applies after "x-ray".
+- On a computer with less memory than the offline speech engines need, the installer now installs the Google Cloud engine. It stops only below about 6 GB.
+- Number badges no longer cover the icons of small-icon toolbars, such as a browser's address bar. The badges now form a row below the toolbar.
+- When you change windows and Wheelhouse cannot read the new window, it now removes the old numbers and shows a notice. Before this fix, the old numbers stayed on screen.
+- The Ask the Wheelhouse Assistant window, the Pattern Manager and the voice calibration window now come to the front when you open them by voice.
+- An update no longer shows the one-time click hint again.
+- One start of Wheelhouse now moves wheelhouse.log aside once. Before this fix, one start could move it three times, so the previous run's log was hard to find.
+- The first paste after Wheelhouse starts no longer delays commands. On a slow computer, the delay was long enough for a spoken command to expire.
+- While Parakeet was busy, the speech detector could delay the microphone input for seconds. It now runs in a way that does not block the microphone.
+- After Wheelhouse closed unexpectedly, a later start could close an unrelated program. Wheelhouse now stops a process only when it is a Wheelhouse speech engine.
+
+### Known issues
+
+- Over Remote Desktop, when the microphone comes from the remote
+  connection, speech recognition can stop as soon as it starts. The log
+  shows "AudioGraph creation failed: status=3". Until this is fixed, run
+  Wheelhouse on the computer you sit at.
+- In Visual Studio Code, the rows of an open menu such as File get no
+  numbers, and a click on a row by its name is refused. Visual Studio Code
+  reports those rows as off-screen, so Wheelhouse does not find them.
+
 ## [1.2.0] - 2026-09-23
 
 ### Added

@@ -828,17 +828,23 @@ class TestPatternTesterHandlers:
             {"function": "hk", "params": ["ctrl", "d"]},
         ]
 
-    async def test_draft_round_trip_shadowed_by_builtin(self, tmp_path):
+    async def test_draft_round_trip_answers_ahead_of_a_builtin(self, tmp_path):
+        """A new rule on a built-in's words answers first.
+
+        Renamed from test_draft_round_trip_shadowed_by_builtin, which
+        expected the shipped "save" rule to win: a new rule used to follow
+        every built-in. It now stands in front of them
+        (QUESTIONS-2026-09-28.md item 12, option three;
+        wh-user-rule-precedence).
+        """
         controller = _make_controller(tmp_path)
         await controller._handle_pattern_manager_action(
             "pm_test_draft",
             {"data": {"draft": _draft(phrases=["save"]), "text": "save"}},
         )
         data = _results(controller, "pm_test_draft_result")[0]["data"]
-        assert data["winner"] == "existing"
-        assert data["shadowed_by"]["pattern_id"] == (
-            PatternManager.pattern_id("^save$")
-        )
+        assert data["winner"] == "draft"
+        assert data["shadowed_by"] is None
         assert data["draft_matches"] is True
 
     async def test_draft_round_trip_draft_error(self, tmp_path):

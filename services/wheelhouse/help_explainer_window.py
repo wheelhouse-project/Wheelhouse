@@ -1,10 +1,10 @@
 """The window shown before the Wheelhouse Assistant opens (wh-assistant-button-explainer).
 
-A new user who chooses Help reaches the Gemini sign-in page with no
-explanation. This window comes first: it says the assistant runs inside
-Google Gemini, that a sign-in is needed, that a free account works, and
-what signing in involves. An Assistant button then opens the assistant;
-a Cancel button opens nothing.
+A new user who chooses Help reaches the Google sign-in page with no
+explanation. This window comes first: it says the assistant runs on
+Google's Gemini Notebook, that a Google Account is needed, that the
+account is free, and how to create one. An Assistant button then opens
+the assistant; a Cancel button opens nothing.
 
 The window carries no settings and sends no message between processes.
 It reports the user's choice with the ``assistant_chosen`` signal, which
@@ -30,15 +30,16 @@ appears; two copies do not pay for the base class, and the extraction
 would have to re-prove the rejection window's own tests.
 
 The body wording is David's, approved word for word on 2026-09-19
-(bead wh-assistant-button-explainer, comment of 2026-09-20 00:56). One
-later change edited it: on 2026-09-22 the assistant moved from ChatGPT to
+(bead wh-assistant-button-explainer, comment of 2026-09-20 00:56). Two
+later changes edited it. On 2026-09-22 the assistant moved from ChatGPT to
 a Google Gemini Gem (wh-gem-replaces-gpt-assistant), which rewrote the
-assistant's name, the account sentence (it said a ChatGPT account is
-needed; Gemini asks for a sign-in instead), and the sign-up sentence (it
-said Sign up and named an email address or a Microsoft account; Gemini
-says Sign in and takes a Google account, an Apple account, or an email
-address). Do not reword any of it further without his approval; a test
-asserts every string.
+assistant's name, the account sentence, and the sign-up sentence. On
+2026-09-27 it moved from the Gem to a Gemini Notebook
+(wh-assistant-gemini-notebook), whose sign-in page takes only a Google
+Account: everything between the first sentence and the last paragraph is
+now David's approved Google Account text, word for word (bead comment of
+2026-09-27 20:48), split into paragraphs at sentence ends. Do not reword
+any of it further without his approval; a test asserts every string.
 """
 
 from __future__ import annotations
@@ -64,11 +65,14 @@ EXPLAINER_TITLE = "Ask the Wheelhouse Assistant"
 
 EXPLAINER_BODY_PARAGRAPHS = (
     "The Wheelhouse Assistant answers questions about Wheelhouse."
-    " It runs inside Google Gemini, in your web browser.",
-    "Gemini asks you to sign in first. A free account works.",
-    'No account yet? On the Gemini page, select "Sign in". You can use a'
-    " Google account, an Apple account, or an email address."
-    " Signing in takes about two minutes.",
+    " The Wheelhouse Assistant runs on Google's Gemini Notebook, so you must"
+    " sign in with a Google Account.",
+    "The account is free, and Google does not ask for a credit card."
+    " You can use an email address you already have; a Gmail address is not"
+    " necessary.",
+    'To create an account, click "Create account" on the Google sign-in page.',
+    "If you are signed in with a work or school account and the Assistant"
+    " does not open, sign in with a personal account instead.",
     "Then type or dictate your question in plain words.",
 )
 
@@ -205,14 +209,17 @@ class HelpExplainerWindow(QDialog):
             "QPushButton:hover { background: palette(midlight); }"
         )
 
-    def prepare_to_show(self) -> None:
-        """Clear the check box before the window is shown again.
+    def prepare_to_show(self, start_ticked: bool = False) -> None:
+        """Set the check box before the window is shown again.
 
         The GUI process keeps one instance and raises it, so a box left
         checked by an earlier reading must not travel with a later
-        Assistant press.
+        Assistant press: the box starts clear unless ``start_ticked`` asks
+        for it ticked. The Logic process asks for that only for the
+        once-more showing to a user who turned the window off
+        (wh-assistant-explainer-once-more).
         """
-        self._do_not_show_again.setChecked(False)
+        self._do_not_show_again.setChecked(bool(start_ticked))
 
     def _on_assistant(self) -> None:
         self.assistant_chosen.emit(self._do_not_show_again.isChecked())

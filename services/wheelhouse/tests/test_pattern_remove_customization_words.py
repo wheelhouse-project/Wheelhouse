@@ -70,11 +70,34 @@ def _data(**flags):
     }
 
 
+# Every dialog a test builds. A failed assertion keeps the test's frame, and
+# with it the dialog, alive in the failure report. Under the doc_id identity
+# gate's mutation the-tooltip-promises-restoration-to-every-copy, one test
+# failed and the NEXT dialog constructor died with Windows fatal exception
+# 0xc0000374 in _apply_screen_bounded_size, twice in two runs. The shipped
+# app builds one dialog and keeps it; these tests build one per test, so
+# each test deletes its own, the way test_pattern_manager_font_size_
+# persistence.py does.
+_DIALOGS = []
+
+
+@pytest.fixture(autouse=True)
+def _delete_dialogs():
+    yield
+    import shiboken6
+
+    while _DIALOGS:
+        dialog = _DIALOGS.pop()
+        if shiboken6.isValid(dialog):
+            shiboken6.delete(dialog)
+
+
 def _selected_dialog(**flags):
     """A dialog with the one user row already selected."""
     from pattern_manager_dialog import PatternManagerDialog
 
     dialog = PatternManagerDialog(parent=None)
+    _DIALOGS.append(dialog)
     dialog.populate(_data(**flags))
     item = dialog._tree.invisibleRootItem().child(0).child(0)
     dialog._on_selection_changed(item, None)

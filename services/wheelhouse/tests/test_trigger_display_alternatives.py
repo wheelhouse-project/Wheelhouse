@@ -226,11 +226,12 @@ class TestShippedPatternCensus:
     def test_no_alternation_row_displays_a_raw_expression(self):
         """Only the ruling's class is covered here.
 
-        Six shipped rows still display their expression verbatim, all of
+        Five shipped rows still display their expression verbatim, all of
         them through a CAPTURING group: ^(tab|indent)\\s+(\\d+)$,
-        ^(shift tab|outdent)$, ^(mark[.!?]?)$, ^(drag[.!?]?)$ and
-        ^(move here[.!?]?)$, plus the literal word "submit", whose display
-        equals its expression because the expression is the spoken word.
+        ^(shift tab|outdent)$, ^(mark[.!?]?)$ and ^(drag[.!?]?)$, plus the
+        literal word "submit", whose display equals its expression because
+        the expression is the spoken word. ^(move here[.!?]?)$ was a sixth
+        until wh-go-synonym-for-move made it ^((go|move) here[.!?]?)$.
         Every one of them displayed that way before this branch, and
         acceptance criterion D4 leaves a capturing group with today's
         handling, so this test measures the non-capturing class alone.

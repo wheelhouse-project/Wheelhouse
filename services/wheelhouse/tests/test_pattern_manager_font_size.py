@@ -3,16 +3,9 @@
 Covers acceptance criteria 1 (Ctrl+=/-/0 wired and applied to every pane:
 tree, detail, editor/try-it, help), 2 (clamped to sane bounds), and the
 apply-to-all-panes / bounds part of criterion 4. Persistence (criterion 3
-and the persistence-round-trip part of criterion 4) is BLOCKED -- see the
-bd comment on wh-pattern-font-size: no settings/preference reader-writer
-reachable from the GUI process exists anywhere in the codebase to reuse
-(QSettings is never used; no dialog persists geometry/preferences; the
-only two persistence idioms in the codebase -- config.toml via
-StateManager, and the small atomic-write data/*.toml files such as
-click_first_use_hint.py's -- are both owned exclusively by the Logic
-process and unreachable from the GUI process without a new IPC round
-trip). No persistence-round-trip test exists here because there is
-nothing to round-trip through.
+and the persistence-round-trip part of criterion 4) is tested in
+test_pattern_manager_font_size_persistence.py: the size is saved as
+PATTERN_MANAGER_FONT_SIZE through the GUI-to-Logic set_config_value route.
 """
 from __future__ import annotations
 
@@ -241,7 +234,7 @@ def test_try_result_keeps_the_zoomed_size_after_a_restyle():
     from pattern_manager_dialog import _OK_STYLE
     dialog = _make_dialog()
     dialog._on_zoom_in()
-    dialog._set_try_result("Matches 'save' (no wake word needed)", _OK_STYLE)
+    dialog._set_try_result("Matches 'save' (no safety word needed)", _OK_STYLE)
     assert (
         dialog._try_result_label.font().pointSize()
         == dialog._current_font_point_size

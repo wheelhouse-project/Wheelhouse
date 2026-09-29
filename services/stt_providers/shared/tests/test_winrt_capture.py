@@ -575,12 +575,23 @@ def _winrt_polling_a_node(capture, get_frame):
     The caller's get_frame is what decides whether the graph is healthy: it
     raises for a device that has gone away and returns None for a poll that
     found no frame waiting.
+
+    The sample stall of wh-mic-loss-capture-recovery is pushed out of reach.
+    None of these stand-in nodes ever delivers a sample, so at the real
+    CAPTURE_STALL_SECONDS the stall would end the poll and take readiness
+    back on its own clock. A test of the failure counter would then pass
+    with the counter's write removed: measured on the every-poll-raises
+    test, which went on passing under that mutant. The stall has its own
+    tests in TestMicrophoneLossRecovery.
     """
+    from shared_audio.capture import winrt_capture as mod
+
     node = Mock()
     node.get_frame = get_frame
     with patch.object(
                 capture, '_setup_graph',
                 side_effect=lambda: (Mock(), Mock(), node)), \
+            patch.object(mod, 'CAPTURE_STALL_SECONDS', 3600.0), \
             patch.object(capture, '_cleanup_graph'), \
             patch('shared_audio.capture.winrt_capture.'
                   'elevate_current_thread', return_value=True):
@@ -1879,10 +1890,19 @@ class TestCaptureCycleIsolation:
         live_node = Mock()
         live_node.get_frame = Mock(return_value=None)
 
+        from shared_audio.capture import winrt_capture as mod
+
         capture = WinRTAudioCapture()
         nodes = _CycleNodes(capture, [stale_node, live_node])
         stale = None
+        # The sample stall of wh-mic-loss-capture-recovery pushed out of
+        # reach. The stale node never delivers a sample and is held in
+        # get_frame past stop()'s 2.0 s join, so at the real
+        # CAPTURE_STALL_SECONDS the stall ended the stale loop on its own
+        # clock, and a loop that tests _running alone went on passing
+        # (measured: winrt-the-poll-loop-runs-on-running-alone survived).
         with patch.object(capture, '_setup_graph', side_effect=nodes), \
+                patch.object(mod, 'CAPTURE_STALL_SECONDS', 3600.0), \
                 patch.object(capture, '_cleanup_graph'), \
                 patch('shared_audio.capture.winrt_capture.'
                       'elevate_current_thread', return_value=True):
@@ -2521,6 +2541,26 @@ class TestAMissingAudioOutputDeviceHasItsOwnRefusal:
 
         assert str(excinfo.value) == APPROVED_AUDIO_DEVICE_REFUSAL
 
+    def test_a_rebuild_raises_the_same_words_without_the_error_line(
+            self, mock_winrt_available, mock_winrt_graph, caplog):
+        """wh-mic-loss-capture-recovery: the rebuild after a lost microphone
+        retries every REBUILD_RETRY_SECONDS, so it must not write the ERROR
+        line each time. The raised words stay the approved ones: the
+        rebuild's reminder line carries them.
+        """
+        from shared_audio.capture.winrt_capture import (
+            AUDIO_DEVICE_MISSING_LOG_LINE)
+        mocks = mock_winrt_graph
+        mocks['create_result'].status = 1
+        capture = WinRTAudioCapture()
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(RuntimeError) as rebuild:
+                capture._setup_graph(log_failure=False)
+
+        assert str(rebuild.value) == APPROVED_AUDIO_DEVICE_REFUSAL
+        assert _lines(caplog, AUDIO_DEVICE_MISSING_LOG_LINE) == []
+
     def test_the_missing_output_device_does_not_get_the_winsdk_words(
             self, mock_winrt_available, mock_winrt_graph):
         """The message CHOICE, which is the half an equality test cannot
@@ -3072,5 +3112,534 @@ class TestPollLoopWriteAtomicity:
 
                 assert _wait_until(
                     lambda: capture._capture_alive is False, 5.0) is True
+            finally:
+                capture.stop()
+
+
+
+# ---------------------------------------------------------------------------
+# wh-mic-loss-capture-recovery: a lost microphone rebuilds the AudioGraph.
+#
+# On 2026-09-24 the Scarlett Solo was "not present" in Windows for 0.9 s and
+# the provider's frame counter never moved again: get_frame() went on
+# answering without raising, so the poll loop polled a dead graph until
+# Wheelhouse was restarted. Boss ruling 20:56 2026-09-24: detect by the
+# graph's UnrecoverableErrorOccurred event and by a stall with no samples,
+# rebuild in the same capture thread, retry at a fixed interval, and log one
+# loss line, a reminder at most once per interval, and one recovery line.
+# ---------------------------------------------------------------------------
+
+
+def _dead_triple():
+    """A graph whose frame output answers without ever carrying samples.
+
+    That is what the lost Scarlett looked like from _poll_frames. The graph
+    records every handler given to add_unrecoverable_error_occurred, so a
+    test can raise the event the way WinRT would.
+    """
+    graph = Mock()
+    graph.handlers = []
+    graph.add_unrecoverable_error_occurred = Mock(
+        side_effect=lambda handler: graph.handlers.append(handler) or 'token')
+    node = Mock()
+    node.get_frame = Mock(return_value=None)
+    return graph, Mock(), node
+
+
+def _live_triple(capture, device_name='Microphone (4- Scarlett Solo USB)'):
+    """A graph that delivers one full chunk of samples on every poll."""
+    graph, mic_node, node = _dead_triple()
+    mic_node.device.name = device_name
+    chunk = _float32_chunk(capture)
+    node.get_frame = Mock(side_effect=lambda: _frame_carrying(chunk))
+    return graph, mic_node, node
+
+
+@contextlib.contextmanager
+def _rebuilding_capture(capture, builds, *, stall=0.2, retry=0.05,
+                        reminder=60.0):
+    """Run the real capture thread over a sequence of _setup_graph answers.
+
+    builds is a list whose items are a (graph, mic_node, frame_output) triple
+    or an exception to raise. Calls past the end repeat the last item. The
+    three timing constants are shrunk so a loss is detected in a fraction of
+    a second rather than in 3.0 s.
+    """
+    from shared_audio.capture import winrt_capture as mod
+
+    calls = []
+
+    def setup_graph(**_kwargs):
+        item = builds[min(len(calls), len(builds) - 1)]
+        calls.append(item)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    with patch.object(capture, '_setup_graph', side_effect=setup_graph), \
+            patch.object(capture, '_cleanup_graph') as cleanup, \
+            patch.object(mod, 'CAPTURE_STALL_SECONDS', stall), \
+            patch.object(mod, 'REBUILD_RETRY_SECONDS', retry), \
+            patch.object(mod, 'STILL_UNAVAILABLE_LOG_SECONDS', reminder), \
+            patch('shared_audio.capture.winrt_capture.'
+                  'elevate_current_thread', return_value=True):
+        yield calls, cleanup
+
+
+def _lines(caplog, text):
+    return [r for r in caplog.records if text in r.getMessage()]
+
+
+@pytest.mark.usefixtures('mock_winrt_available', '_mock_winsdk_modules')
+class TestMicrophoneLossRecovery:
+    def test_a_graph_that_stops_delivering_is_rebuilt_and_capture_resumes(
+            self, caplog):
+        """Acceptance 1 and 2: the stall is detected, the graph rebuilt,
+        audio flows again, and exactly one loss and one recovery line say so.
+        """
+        capture = WinRTAudioCapture()
+        dead = _dead_triple()
+        live = _live_triple(capture)
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [dead, live]) as (calls, cleanup):
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(lambda: capture.read(timeout=0.05), 5.0), (
+                    'no audio arrived after the dead graph was replaced')
+                assert _wait_until(
+                    lambda: _lines(caplog, 'Microphone recovered'), 5.0)
+            finally:
+                capture.stop()
+
+        assert len(calls) == 2
+        # The dead graph was closed by the thread that built it.
+        assert call(dead[0], dead[1], dead[2]) in cleanup.call_args_list
+        lost = _lines(caplog, 'Microphone lost')
+        assert len(lost) == 1
+        assert lost[0].levelno == logging.WARNING
+        assert 'no audio samples' in lost[0].getMessage()
+        recovered = _lines(caplog, 'Microphone recovered')
+        assert len(recovered) == 1
+        assert recovered[0].levelno == logging.INFO
+        # Ruling C4: the recovery line names the device the rebuild opened.
+        assert 'Microphone (4- Scarlett Solo USB)' in recovered[0].getMessage()
+        assert capture.setup_error is None
+
+    def test_the_unrecoverable_error_event_rebuilds_without_waiting_for_a_stall(
+            self, caplog):
+        """Signal A: the graph's own event ends the poll at once.
+
+        The stall threshold is set far beyond the test's waits, so only the
+        event can cause the rebuild.
+        """
+        capture = WinRTAudioCapture()
+        first = _live_triple(capture)
+        second = _live_triple(capture)
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [first, second], stall=60.0) \
+                as (calls, _cleanup):
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(lambda: first[0].handlers, 5.0), (
+                    'nothing subscribed to UnrecoverableErrorOccurred')
+                # AudioGraphUnrecoverableError.AUDIO_DEVICE_LOST is 1.
+                first[0].handlers[0](first[0], SimpleNamespace(error=1))
+                assert _wait_until(lambda: len(calls) == 2, 5.0), (
+                    'the event did not cause a rebuild')
+                assert _wait_until(
+                    lambda: _lines(caplog, 'Microphone recovered'), 5.0)
+            finally:
+                capture.stop()
+
+        lost = _lines(caplog, 'Microphone lost')
+        assert len(lost) == 1
+        assert 'AUDIO_DEVICE_LOST' in lost[0].getMessage()
+
+    def test_failed_rebuilds_retry_until_the_microphone_returns(
+            self, caplog):
+        """Acceptance 3: a missing device is retried; the handshake the
+        provider read at start-up is not rewritten by a failed rebuild.
+        """
+        capture = WinRTAudioCapture()
+        builds = [_dead_triple(),
+                  RuntimeError('AudioGraph creation failed: status=1'),
+                  RuntimeError('AudioGraph creation failed: status=1'),
+                  _live_triple(capture, device_name='USB Webcam Microphone')]
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, builds) as (calls, _cleanup):
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(
+                    lambda: _lines(caplog, 'Microphone recovered'), 5.0)
+                # The recovery line is written at the first samples, and
+                # readiness at the end of that same poll.
+                assert _wait_until(
+                    lambda: capture.wait_ready(timeout=0.0), 5.0) is True
+            finally:
+                capture.stop()
+
+        assert len(calls) == 4
+        assert len(_lines(caplog, 'Microphone lost')) == 1
+        recovered = _lines(caplog, 'Microphone recovered')
+        assert len(recovered) == 1
+        assert '3 attempts' in recovered[0].getMessage()
+        assert 'USB Webcam Microphone' in recovered[0].getMessage()
+        assert capture.setup_error is None
+
+    def test_a_rebuilt_graph_that_never_delivers_stays_one_outage(
+            self, caplog):
+        """Ruling C1: recovered means samples arrived, not that a graph
+        built. A device that opens but never delivers gives one loss line,
+        reminders at most once per interval, and no recovery line.
+        """
+        capture = WinRTAudioCapture()
+        reminder = 0.4
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [_dead_triple()], stall=0.1,
+                                    retry=0.02, reminder=reminder) \
+                as (calls, _cleanup):
+            started = time.monotonic()
+            capture.start()
+            try:
+                assert capture._setup_done.wait(5.0) is True
+                assert _wait_until(
+                    lambda: _lines(caplog, 'still unavailable'), 5.0)
+                assert _wait_until(lambda: len(calls) >= 4, 5.0), (
+                    'a graph that builds but delivers nothing was not rebuilt')
+                # Read readiness across several whole rebuild cycles, not
+                # once. A single read taken just after a rebuild lands in
+                # the moment between the loss clearing readiness and the
+                # new graph's first poll, so it answers False even when a
+                # rebuilt graph wrongly answers ready from its first poll
+                # onwards (measured: a single read passed that mutant).
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline:
+                    assert capture.wait_ready(timeout=0.0) is False, (
+                        'a rebuilt graph that has delivered no samples '
+                        'answered ready')
+                    time.sleep(0.005)
+            finally:
+                capture.stop()
+            elapsed = time.monotonic() - started
+
+        assert len(_lines(caplog, 'Microphone lost')) == 1
+        assert _lines(caplog, 'Microphone recovered') == []
+        reminders = _lines(caplog, 'still unavailable')
+        assert 1 <= len(reminders) <= int(elapsed / reminder) + 1
+        assert all(r.levelno == logging.WARNING for r in reminders)
+
+    def test_stop_during_the_retry_wait_returns_promptly(self):
+        """Ruling C2: the retry wait ends when stop() is called."""
+        capture = WinRTAudioCapture()
+        builds = [_dead_triple(), RuntimeError('status=1')]
+        with _rebuilding_capture(capture, builds, stall=0.1, retry=30.0) \
+                as (calls, _cleanup):
+            capture.start()
+            thread = capture._capture_thread
+            try:
+                assert _wait_until(lambda: len(calls) >= 2, 5.0), (
+                    'the first rebuild never ran')
+            finally:
+                started = time.monotonic()
+                capture.stop()
+                elapsed = time.monotonic() - started
+
+        assert thread.is_alive() is False, (
+            'the capture thread was still in its retry wait after stop()')
+        assert elapsed < 1.0
+
+    def test_stop_while_audio_flows_logs_no_loss(self, caplog):
+        """Ruling C3: a deliberate stop is not a lost microphone."""
+        capture = WinRTAudioCapture()
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [_live_triple(capture)],
+                                    stall=0.1) as (calls, _cleanup):
+            capture.start()
+            assert capture.wait_ready(timeout=5.0) is True
+            assert _wait_until(lambda: capture.read(timeout=0.05), 5.0)
+            capture.stop()
+            time.sleep(0.3)
+
+        assert len(calls) == 1
+        assert _lines(caplog, 'Microphone lost') == []
+
+    def test_a_full_queue_is_not_a_stall(self, caplog):
+        """Ruling C3: a consumer that stops reading drops chunks, but the
+        samples still arrive, so no rebuild happens.
+        """
+        capture = WinRTAudioCapture()
+        capture._q = queue.Queue(maxsize=1)
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [_live_triple(capture)],
+                                    stall=0.1) as (calls, _cleanup):
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(lambda: capture._drops >= 5, 5.0)
+                time.sleep(0.3)
+            finally:
+                capture.stop()
+
+        assert len(calls) == 1
+        assert _lines(caplog, 'Microphone lost') == []
+
+
+# ---------------------------------------------------------------------------
+# wh-mic-false-loss-stall-check: the stall test judges polls, not the clock.
+#
+# On 2026-09-25 wheelhouse.log held 39 'Microphone lost (no audio samples for
+# 3.0 s)' lines with no device lost. The Silero VAD held the GIL for seconds,
+# the capture thread waited for it after its sleep, and the stall test ran
+# before the next get_frame, which would have collected the waiting audio.
+# These tests drive the real _poll_frames inline on a fake clock, so the
+# order of poll, sleep and test is the only thing they measure.
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """A monotonic clock that moves only when a test moves it."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _poll_inline(monkeypatch, capture, get_frame, on_sleep):
+    """Run the real _poll_frames once on a fake clock, without a thread.
+
+    on_sleep(seconds, clock) runs for every time.sleep the loop makes. A
+    budget of sleeps ends a loop that never returns, and the answer is
+    refused, the way _poll_synthetic_frames refuses one.
+    """
+    from shared_audio.capture import winrt_capture as module
+
+    clock = _FakeClock()
+    # A stall ends after about 200 sleeps (3.0 s of 0.015 s polls); ten
+    # times that is enough, and a smaller budget keeps a mutant that never
+    # ends from logging a failed poll 100,000 times (the gate refuses a run
+    # whose output passes 8 MiB).
+    budget_left = [2_000]
+    bound_fired = []
+
+    def fake_sleep(seconds):
+        budget_left[0] -= 1
+        if budget_left[0] <= 0:
+            capture._running = False
+            bound_fired.append(seconds)
+            return
+        on_sleep(seconds, clock)
+
+    monkeypatch.setattr(module, '_monotonic', clock)
+    monkeypatch.setattr(module, 'time', SimpleNamespace(sleep=fake_sleep))
+    capture._running = True
+    result = capture._poll_frames(
+        capture._cycle, SimpleNamespace(get_frame=lambda: get_frame(clock)))
+    assert not bound_fired, 'the poll loop never returned on its own'
+    return result, clock
+
+
+@pytest.mark.usefixtures('mock_winrt_available', '_mock_winsdk_modules')
+class TestTheStallTestJudgesPollsNotTheClock:
+    def test_a_gil_wait_after_the_sleep_is_not_a_loss(self, monkeypatch):
+        """Acceptance 2: the clock passes CAPTURE_STALL_SECONDS while the
+        thread waits after its sleep, and the next poll returns samples.
+        That poll collects the waiting audio, so no loss is declared.
+        """
+        from shared_audio.capture import winrt_capture as module
+
+        capture = WinRTAudioCapture()
+        chunk = _float32_chunk(capture)
+        polls_started = []
+
+        def get_frame(clock):
+            polls_started.append(clock.now)
+            return _frame_carrying(chunk)
+
+        sleeps = [0]
+
+        def on_sleep(_seconds, clock):
+            sleeps[0] += 1
+            if sleeps[0] == 1:
+                # The GIL wait: the thread wakes past the threshold.
+                clock.now += module.CAPTURE_STALL_SECONDS + 1.0
+            else:
+                capture._running = False
+
+        result, _clock = _poll_inline(monkeypatch, capture, get_frame,
+                                      on_sleep)
+
+        assert result is None, (
+            f'a live microphone was judged lost ({result!r}) because the '
+            'stall test ran before the poll that would have collected its '
+            'audio')
+        assert len(polls_started) == 2
+        chunks = []
+        while not capture._q.empty():
+            chunks.append(capture._q.get_nowait())
+        assert len(chunks) == 2, 'the samples of both polls must reach the queue'
+
+    def test_empty_polls_for_the_stall_time_are_a_loss(self, monkeypatch):
+        """Acceptance 4: polls that answer with no samples still end the
+        loop with the stall reason, and only after a poll that started
+        CAPTURE_STALL_SECONDS after the last samples (acceptance 1).
+        """
+        from shared_audio.capture import winrt_capture as module
+
+        capture = WinRTAudioCapture()
+        polls_started = []
+
+        def get_frame(clock):
+            polls_started.append(clock.now)
+            return None
+
+        def on_sleep(seconds, clock):
+            clock.now += seconds
+
+        result, _clock = _poll_inline(monkeypatch, capture, get_frame,
+                                      on_sleep)
+
+        assert result == 'no audio samples for 3.0 s'
+        start = 1000.0
+        assert polls_started[-1] - start >= module.CAPTURE_STALL_SECONDS
+        assert polls_started[-2] - start < module.CAPTURE_STALL_SECONDS
+
+    def test_raising_polls_for_the_stall_time_are_a_loss(self, monkeypatch):
+        """Acceptance 4: polls that raise run the clock out the same way."""
+        from shared_audio.capture import winrt_capture as module
+
+        capture = WinRTAudioCapture()
+        polls_started = []
+
+        def get_frame(clock):
+            polls_started.append(clock.now)
+            raise RuntimeError('frame poll failed')
+
+        def on_sleep(seconds, clock):
+            clock.now += seconds
+
+        result, _clock = _poll_inline(monkeypatch, capture, get_frame,
+                                      on_sleep)
+
+        assert result == 'no audio samples for 3.0 s'
+        start = 1000.0
+        assert polls_started[-1] - start >= module.CAPTURE_STALL_SECONDS
+        assert polls_started[-2] - start < module.CAPTURE_STALL_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# wh-mic-loss-notice: the capture tells its provider about a loss and a
+# recovery through outage_callback, so the provider can put a notice on the
+# screen. One call per outage at the loss, none from the reminders, one at
+# the first samples after a rebuild. Ruling K1: a callback that raises is
+# logged at WARNING and never stops the recovery.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures('mock_winrt_available', '_mock_winsdk_modules')
+class TestMicrophoneOutageCallback:
+    def test_a_loss_and_its_recovery_each_call_the_callback_once(
+            self, caplog):
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [_dead_triple(),
+                                              _live_triple(capture)]):
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(
+                    lambda: _lines(caplog, 'Microphone recovered'), 5.0)
+                assert _wait_until(lambda: callback.call_count >= 2, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list == [
+            call('lost', None),
+            call('recovered', 'Microphone (4- Scarlett Solo USB)'),
+        ]
+
+    def test_the_loss_call_comes_before_the_microphone_returns(self):
+        """The notice goes out when the loss is seen, not when the
+        microphone returns: a device that stays away must still be
+        announced."""
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with _rebuilding_capture(
+                capture, [_dead_triple(), RuntimeError('status=1')],
+                stall=0.1, retry=30.0) as (calls, _cleanup):
+            capture.start()
+            try:
+                assert _wait_until(lambda: len(calls) >= 2, 5.0)
+                assert _wait_until(lambda: callback.call_count >= 1, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list == [call('lost', None)]
+
+    def test_reminders_never_call_the_callback(self, caplog):
+        """Ruling D3: remind() writes a log line and nothing else, so a
+        microphone that stays away gives one notice, not one a minute."""
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [_dead_triple()], stall=0.1,
+                                    retry=0.02, reminder=0.1):
+            capture.start()
+            try:
+                assert _wait_until(
+                    lambda: len(_lines(caplog, 'still unavailable')) >= 3,
+                    5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list == [call('lost', None)]
+
+    def test_a_raising_callback_is_logged_and_recovery_completes(
+            self, caplog):
+        """Ruling K1: a notice fault never stops or delays the recovery."""
+        callback = Mock(side_effect=RuntimeError('notice path broken'))
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [_dead_triple(),
+                                              _live_triple(capture)]) \
+                as (calls, _cleanup):
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(
+                    lambda: _lines(caplog, 'Microphone recovered'), 5.0)
+                assert _wait_until(
+                    lambda: capture.wait_ready(timeout=0.0), 5.0) is True
+                assert _wait_until(lambda: capture.read(timeout=0.05), 5.0), (
+                    'no audio arrived after a raising outage callback')
+            finally:
+                capture.stop()
+
+        assert len(calls) == 2
+        assert [c.args[0] for c in callback.call_args_list] == [
+            'lost', 'recovered']
+        failures = _lines(caplog, 'notice path broken')
+        assert len(failures) == 2
+        assert all(r.levelno == logging.WARNING for r in failures)
+        # The failure line is not a second loss or recovery line.
+        assert len(_lines(caplog, 'Microphone lost')) == 1
+        assert len(_lines(caplog, 'Microphone recovered')) == 1
+
+    def test_no_callback_is_the_default(self, caplog):
+        """A capture built without one recovers exactly as before."""
+        capture = WinRTAudioCapture()
+        assert capture.outage_callback is None
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [_dead_triple(),
+                                              _live_triple(capture)]):
+            capture.start()
+            try:
+                assert _wait_until(
+                    lambda: _lines(caplog, 'Microphone recovered'), 5.0)
             finally:
                 capture.stop()

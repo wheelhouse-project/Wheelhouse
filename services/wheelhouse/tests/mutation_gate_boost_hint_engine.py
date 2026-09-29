@@ -12,11 +12,10 @@ WHAT IT DEFENDS, in the four groups criterion B6 names:
      actions include add_hint_to_stt. Each refusal place is broken on its
      own by handing it None instead of the running value: match_complete,
      match_single_pattern, the can_continue probe, the router's greedy
-     prefix probe, SpeechProcessor._usable_trailing_command, the
-     hold-to-fire recheck, and _find_earliest_replacement. The catalog
+     prefix probe, and _find_earliest_replacement. The catalog
      derivation of requires_hint_engine from the actions is broken in both
-     stored copies (the first-word index and the built list) and in the
-     trailing entry.
+     stored copies (the first-word index and the built list). (The
+     trailing-position places were removed by wh-remove-trailing-submit.)
   2. The unknown value. None matches as today; the stream boundary in
      WebSocketManager._reset_retraction_policy_state resets to None, not
      False; _apply_capabilities stores a value only when the key is
@@ -165,7 +164,6 @@ _LOGIC_TESTS = (
     "tests/test_pattern_catalog_punctuation.py",
     "tests/test_pattern_catalog_reload.py",
     "tests/test_pattern_catalog_toml_error.py",
-    "tests/test_pattern_catalog_trailing.py",
     "tests/test_pattern_catalog_user_merge.py",
     "tests/test_pattern_catalog_whole_utterance.py",
     "tests/test_pattern_customize_keeps_identity.py",
@@ -372,7 +370,6 @@ _B1 = "TestB1EngineDoesNotApplyHints"
 _B2 = "TestB2EngineAppliesHints"
 _B3 = "TestB3ValueUnknown"
 _B4 = "TestB4ValueFollowsTheEngine"
-_TR = "TestUserMadeTrailingPattern"
 _RP = "TestUserMadeReplacementInARemainder"
 _HR = "TestHintEngineRefusal"
 _HH = "TestHintEngineHandlers"
@@ -425,21 +422,6 @@ MUTATIONS = [
        "            if _refused_for_hint_engine(data, None):\n"
        "                continue\n",
        [_t(_RT, "test_greedy_prefix_refused_when_false")]),
-    _m("trailing-usable-place", "logic", PROCESSOR,
-       "        if _refused_for_hint_engine(entry, self.hint_engine):\n"
-       "            return None\n",
-       "        if _refused_for_hint_engine(entry, None):\n"
-       "            return None\n",
-       # The hold-to-fire recheck backs this place up, so the word still
-       # ends as dictation; what differs is that it is held back as a
-       # command candidate first. Only the hold state shows it.
-       [_t(_TR, "test_false_is_not_held_as_a_candidate")]),
-    _m("hold-to-fire-recheck-place", "logic", PROCESSOR,
-       "        if _refused_for_hint_engine(entry, self.hint_engine):\n"
-       "            # wh-boost-engine-qualification: the engine reported",
-       "        if _refused_for_hint_engine(entry, None):\n"
-       "            # wh-boost-engine-qualification: the engine reported",
-       [_t(_TR, "test_false_between_hold_and_fire_refuses")]),
     _m("earliest-replacement-place", "logic", PROCESSOR,
        "            if _refused_for_hint_engine(pattern_data, self.hint_engine):\n",
        "            if _refused_for_hint_engine(pattern_data, None):\n",
@@ -455,12 +437,6 @@ MUTATIONS = [
        [_t(_CAT, "test_boost_needs_a_hint_engine_in_the_built_list"),
         _t(_CAT, "test_the_shipped_boost_entry_carries_the_flag"),
         _t(_PU, "test_the_execution_walk_refuses_when_false")]),
-    _m("catalog-trailing-entry-unflagged", "logic", CATALOG,
-       '            "requires_hint_engine": _actions_need_hint_engine(actions_list),\n',
-       '            "requires_hint_engine": False,\n',
-       [_t(_TR, "test_alone_refused_when_false"),
-        _t(_TR, "test_after_words_refused_when_false"),
-        _t(_TR, "test_false_between_hold_and_fire_refuses")]),
     _m("catalog-derivation-needs-every-step", "logic", CATALOG,
        "    return any(\n        isinstance(step, dict)",
        "    return all(\n        isinstance(step, dict)",
@@ -548,7 +524,6 @@ MUTATIONS = [
        "        self.router.hint_engine = value\n",
        "        self.router.hint_engine = value\n",
        [_t(_PU, "test_processor_pushes_to_its_router"),
-        _t(_TR, "test_after_words_refused_when_false"),
         _t(_RP, "test_the_finder_skips_it_when_false")]),
     _m("processor-skips-the-router", "logic", PROCESSOR,
        "        self.router.hint_engine = value\n"

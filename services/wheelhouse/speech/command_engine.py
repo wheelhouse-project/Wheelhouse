@@ -94,9 +94,11 @@ _TEXT_INSERTION_ACTIONS = frozenset(
 # be refused before the capture can queue behind an in-flight read. The
 # paste has its own late re-check in _run_ai_text_transform, because a
 # read can also begin during the model await.
+# wh-voice-access-parity.1.14 adds insert_raw_no_spaces: it pastes the
+# same payload as insert_raw.
 _FOREGROUND_TEXT_RULE_FUNCTIONS = frozenset(
     {
-        "literal", "type_text", "insert_raw",
+        "literal", "type_text", "insert_raw", "insert_raw_no_spaces",
         "wrap_or_insert", "transform_selection",
         "fix_text_ai", "rewrite_text_ai",
     }

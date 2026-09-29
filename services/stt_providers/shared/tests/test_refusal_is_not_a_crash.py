@@ -115,7 +115,7 @@ def _run_launcher_against_a_child_that_exits(tmp_path, exit_code):
     started = []
 
     class FakePopen:
-        def __init__(self, cmd, cwd=None):
+        def __init__(self, cmd, cwd=None, env=None, stderr=None):
             started.append(cmd)
             self.pid = 4242
             self.returncode = None
@@ -138,7 +138,9 @@ def _run_launcher_against_a_child_that_exits(tmp_path, exit_code):
          patch("shared_stt.launcher.get_pid_file_path",
                return_value=str(tmp_path / "refusalprobe.pid")), \
          patch("shared_stt.launcher.get_restart_flag_path",
-               return_value=str(tmp_path / "refusalprobe.restart")):
+               return_value=str(tmp_path / "refusalprobe.restart")), \
+         patch("shared_stt.launcher.get_stderr_log_path",
+               return_value=str(tmp_path / "refusalprobe.stderr.log")):
         run_launcher(config)
 
     return started

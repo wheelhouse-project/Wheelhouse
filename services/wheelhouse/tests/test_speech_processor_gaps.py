@@ -409,7 +409,13 @@ async def test_hotword_alone_times_out_to_ignore(processor, mock_app):
     wh-oe7u.4: timeout finalization runs through the word_queue, so the
     processing loop must be live for the sentinel to be consumed and the
     state machine to return to IDLE.
+
+    wh-hotword-wait-open-utterance: the utterance is still open here (no
+    end marker), so the 1000 ms command timer's expiry holds the hotword
+    state for open_utterance_hold_ms (300 ms in this test) before the
+    timeout decides IGNORE.
     """
+    processor.open_utterance_hold_ms = 300
     await processor.start()
     try:
         await processor.process_word_event(
@@ -417,8 +423,12 @@ async def test_hotword_alone_times_out_to_ignore(processor, mock_app):
         )
         assert processor.mode == ProcessingMode.HOTWORD_BUFFERING
 
-        # Wait for timeout to fire and for the sentinel to be processed.
+        # The command timer expired; the hold keeps the hotword state.
         await asyncio.sleep(1.1)
+        assert processor.mode == ProcessingMode.HOTWORD_BUFFERING
+
+        # Wait for the hold deadline and for the sentinel to be processed.
+        await asyncio.sleep(0.5)
 
         assert processor.mode == ProcessingMode.IDLE
         assert processor.hotword_active is False

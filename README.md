@@ -1,152 +1,88 @@
 # Wheelhouse
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
+Wheelhouse is a free, open-source voice control application for Windows. It supports dictation, keyboard and mouse actions, window management, and clicking on-screen controls by name or number.
 
-**Hands-free control of your Windows PC by voice.**
+It is designed for hands-free computer use, including by people who find using a keyboard or mouse difficult or impossible. Speech recognition runs locally by default, with optional GPU and cloud engines. The default setup needs no account or subscription.
 
-Wheelhouse is free, open-source voice control for everyone — dictation into
-any application, voice commands, and clicking things by name, often faster
-and more comfortable than reaching for the keyboard and mouse. It is
-equally serious assistive technology: if using a keyboard and mouse is
-painful, difficult, or impossible, Wheelhouse aims to give you the whole
-computer by voice. It runs entirely on your machine by default: no cloud
-account, no subscription, no telemetry.
+[Installation](https://github.com/wheelhouse-project/Wheelhouse/blob/main/INSTALL.md) · [User guide](https://wheelhouse-project.org/guide.html) · [Command list](https://wheelhouse-project.org/guide.html#voice-commands) · [Settings reference](https://wheelhouse-project.org/reference.html) · [Releases](https://github.com/wheelhouse-project/Wheelhouse/releases)
 
-## What it does
+## Features
 
-- **Dictate anywhere.** Speak into the focused application and watch the
-  words stream in as you talk — the first word typically lands in under two
-  seconds and the rest flow continuously, instead of appearing all at once
-  after you stop. Spoken punctuation ("comma", "new line") becomes symbols.
-- **Voice commands.** Switch windows, press keys, launch programs — driven
-  by a pattern catalog you can extend with your own commands through the
-  built-in Pattern Manager.
-- **Click by voice.** Say `x-ray click cancel` or `x-ray click the submit
-  button` and Wheelhouse finds the control in the focused window and clicks
-  it. The `x-ray` hotword is what separates the command from dictation. When
-  names are ambiguous or unlabeled, say `show numbers` to badge every
-  clickable control with a number and `x-ray click 5` to pick one.
-- **Offline by default.** The default speech engine (NVIDIA Parakeet,
-  running locally on your CPU) never sends audio or text anywhere.
-- **Careful about where text goes.** Before typing a word, Wheelhouse
-  checks that the focused control actually accepts text, so dictation
-  does not spray keystrokes into the wrong place.
+- **Dictation:** Insert text into the focused application as you speak, with spoken punctuation and line breaks.
+- **Desktop control:** Press keys, switch windows, launch applications, and control the mouse through voice commands.
+- **Control selection:** Find and activate controls by name, or display numbered labels and select a control by number.
+- **Text insertion checks:** Before typing, Wheelhouse checks that the focused control accepts text, so dictation does not go into the wrong place.
+- **Custom commands:** Add and edit voice command patterns through the built-in Pattern Manager.
+- **Text correction and rewriting:** Correct spelling and grammar or rewrite selected text using an optional language model, running locally or through a configured cloud service.
 
-## Install
+## Requirements
 
-One command, in any PowerShell window:
+- 64-bit Windows 10 or Windows 11. See the installation guide for supported editions.
+- 8 GB RAM minimum; 16 GB recommended.
+- 10 GB free disk space.
+- A microphone.
+- An internet connection for installation and model downloads. The default speech engine works offline afterward.
 
-```powershell
-irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
-```
+Four or more CPU cores are recommended. A dedicated GPU is not required for the default speech engine.
 
-The installer checks your hardware, installs its own Python environment
-(nothing global), downloads the offline speech model, and puts Wheelhouse
-in your Start menu. Details, prerequisites for the optional speech engines,
-troubleshooting, and uninstall instructions are in [INSTALL.md](./INSTALL.md).
+## Installation
 
-**Requirements:** Windows 10 or 11 (64-bit), a microphone, and a few GB of
-disk space for the speech model. See INSTALL.md for the exact hardware
-guidance.
+1. Download [Wheelhouse-Setup.exe](https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe) from the latest release.
+2. Run the installer and select a speech engine. Parakeet is selected by default.
+3. Start Wheelhouse from the Start menu or desktop shortcut.
 
-**A note on security warnings:** Wheelhouse releases are digitally signed;
-the installer's publisher shows as **David Chesley Hite III**, the project
-author. Windows SmartScreen may still warn for a while after each new
-release, until it has seen that exact file often enough — click **More
-info**, check the publisher name, then click **Run anyway**. INSTALL.md
-explains each warning, and the entire source code is in this repository if
-you would rather read the code and install from source (see
-CONTRIBUTING.md).
+The installer checks hardware requirements, creates isolated Python environments, downloads the selected speech model, and adds shortcuts. Python does not need to be installed beforehand.
+
+Wheelhouse installs for the current Windows account and needs no administrator rights. The one exception is the Microsoft Visual C++ runtime: if the computer lacks it or has an old copy, Windows asks for permission to install it. If that prompt is declined, setup still finishes, but speech may not start.
+
+The installer is digitally signed by the project's author, David Chesley Hite III. Windows SmartScreen may still warn about a new release until it has seen that file often enough. Select **More info**, check that the publisher reads David Chesley Hite III, then select **Run anyway**. [Security warnings](https://github.com/wheelhouse-project/Wheelhouse/blob/main/INSTALL.md#security-warnings) explains each warning.
+
+For command-line installation, optional AI setup, updates, removal, and troubleshooting, see [INSTALL.md](https://github.com/wheelhouse-project/Wheelhouse/blob/main/INSTALL.md).
 
 ## Speech engines
 
-| Engine | Where speech is processed | When to choose it |
-|--------|---------------------------|-------------------|
-| **Parakeet** (default) | On your machine, CPU | No account, no cloud, works offline. The default for everyone. |
-| **Distil-Whisper** (opt-in) | On your machine, NVIDIA GPU | You have a CUDA-capable GPU and want lower latency. |
-| **Google Cloud STT** (opt-in) | Google's servers | You have a Google Cloud account and prefer its recognition quality; audio streams to Google while you dictate. |
+| Engine | Processing | Requirements |
+| --- | --- | --- |
+| Parakeet (default) | Local CPU | Model download during installation; no account required |
+| Distil-Whisper | Local NVIDIA GPU | NVIDIA GPU with at least 4 GB of dedicated video memory; the model downloads the first time the engine starts |
+| Google Cloud Speech-to-Text | Google Cloud | Internet connection, a Google Cloud account, and credentials; Google charges for use beyond its free tier |
+
+The local engines keep speech audio and transcripts on the computer. Google Cloud Speech-to-Text sends audio to Google for recognition. Engine setup and switching are covered in the installation guide.
 
 ## Privacy
 
-Privacy is a safety property for a voice-control system — dictation can
-include passwords and medical text. The short version:
+The desktop application sends no telemetry, analytics, or automatic crash reports. Recognized speech is redacted from logs by default; transcript logging can be enabled for troubleshooting.
 
-- **No telemetry.** Nothing is reported to the project or anyone else.
-- **Offline by default.** With the default engine, audio and transcripts
-  never leave your machine. Only the engines and AI features you opt into
-  make network connections, and [PRIVACY.md](./PRIVACY.md) states exactly
-  what each one sends.
-- **Logs don't contain what you dictate.** By default, log lines record
-  placeholders instead of recognized speech, at every log level.
-- **Broad local powers, disclosed plainly.** Hands-free control requires
-  the microphone, global input listeners, clipboard access, synthetic
-  input, and reading the UI of the focused window. PRIVACY.md lists each
-  power, why it is needed, and its limits.
+Optional cloud speech recognition and hosted AI features send their inputs to the configured provider. AI processing is separate from speech recognition: choosing a local speech engine does not make a hosted AI service local.
 
-## Documentation
+Desktop control uses microphone access, global input listeners, clipboard access, synthetic keyboard and mouse input, and Windows accessibility interfaces. See [PRIVACY.md](https://github.com/wheelhouse-project/Wheelhouse/blob/main/PRIVACY.md) for data flows, logging settings, and local permissions.
 
-| Document | What's in it |
-|----------|--------------|
-| [INSTALL.md](./INSTALL.md) | Installation in detail, optional engines, troubleshooting, uninstall |
-| [User help](./services/wheelhouse/knowledge/wheelhouse_help.md) | What Wheelhouse is and how each feature works, for daily use |
-| [Command and setting reference](./services/wheelhouse/knowledge/wheelhouse_reference.md) | Every voice command and configuration setting, one row each |
-| [llm/README.md](./llm/README.md) | Load the user help into your own AI chat (ChatGPT, Gemini, Claude, Perplexity) |
-| [PRIVACY.md](./PRIVACY.md) | Data flow, logging, and the capability disclosure |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Process model, IPC, and the speech pipeline |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | Development setup, tests, and the contribution workflow |
-| [SECURITY.md](./SECURITY.md) | Reporting vulnerabilities |
+## Documentation and support
 
-## Wheelhouse help in your AI chat
+| Resource | Contents |
+| --- | --- |
+| [User guide](https://wheelhouse-project.org/guide.html) | Daily use, dictation, every voice command, and settings |
+| [Action, notice, and configuration reference](https://wheelhouse-project.org/reference.html) | Pattern actions, notices, and configuration options |
+| [Architecture](https://github.com/wheelhouse-project/Wheelhouse/blob/main/ARCHITECTURE.md) | Processes, communication, and the speech pipeline |
+| [Wheelhouse Assistant](https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview) | Answers questions from the latest documentation. It runs on Google's Gemini Notebook and needs a free Google Account. |
+| [AI-assisted help](https://github.com/wheelhouse-project/Wheelhouse/blob/main/llm/README.md) | Using the documentation with your own AI chat service |
 
-The fastest path is the official
-[Wheelhouse Assistant on Google Gemini](https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A),
-which always answers from the latest documentation. Gemini asks you to sign
-in first. A Google account, an Apple account, or an email address works, and
-the free tier is enough (no credit card required).
+Report bugs through [GitHub Issues](https://github.com/wheelhouse-project/Wheelhouse/issues). Include the Windows version, speech engine, affected application, and steps to reproduce the problem. Questions can also be sent to [help@wheelhouse-project.org](mailto:help@wheelhouse-project.org).
 
-Prefer your own AI service? The user documentation is written so any AI
-chat service can answer questions from it. If you already use ChatGPT,
-Gemini, Claude, or Perplexity, you can turn it into a personal Wheelhouse
-support assistant. Upload three files: the
-[help document](./services/wheelhouse/knowledge/wheelhouse_help.md), which
-covers what Wheelhouse is and how each feature works, the
-[installation guide](./services/wheelhouse/knowledge/wheelhouse_install.md),
-which covers installation, updates, and removal, and the
-[command and setting reference](./services/wheelhouse/knowledge/wheelhouse_reference.md),
-which is the exhaustive list of every voice command and configuration
-setting. Upload all three, or the assistant cannot answer exact command and
-setting questions. The assistant rules are embedded at the top of the help
-document, so there is nothing to paste. The
-[llm/ folder](./llm/README.md) explains the setup, and the steps for each
-service live on the project site:
-[ChatGPT](https://wheelhouse-project.org/help.html#llm-chatgpt) ·
-[Gemini](https://wheelhouse-project.org/help.html#llm-gemini) ·
-[Claude](https://wheelhouse-project.org/help.html#llm-claude) ·
-[Perplexity](https://wheelhouse-project.org/help.html#llm-perplexity).
+## Project status and limitations
 
-## Project status
+Wheelhouse is actively developed by a single primary author and has been tested on a limited range of hardware and applications. Compatibility and recognition performance can vary between systems.
 
-Wheelhouse is a young open-source project with a single primary author. It
-has been the author's daily driver for years and reliability is the
-project's first value — but it has so far been validated on a small set of
-machines, so expect rough edges on hardware and applications it has not
-met yet. Bug reports are genuinely welcome, especially from users who
-depend on hands-free input: if Wheelhouse fails you, that is exactly the
-report the project needs.
+Voice control depends in part on the accessibility information applications expose. Some controls may not be discoverable by name or number. Windows also restricts input into applications running with higher privileges; UAC prompts on the secure desktop cannot be controlled by Wheelhouse. [Administrator windows and UAC prompts](https://github.com/wheelhouse-project/Wheelhouse/blob/main/INSTALL.md#administrator-windows-and-uac-prompts) explains how to dictate into programs that run as administrator.
 
-Questions, or stuck on something? Email
-<help@wheelhouse-project.org> or open a GitHub issue.
+## Contributing
 
-## Acknowledgements
+Bug reports, documentation improvements, and code contributions are welcome. Read [CONTRIBUTING.md](https://github.com/wheelhouse-project/Wheelhouse/blob/main/CONTRIBUTING.md) for development setup, testing, and the pull request workflow. Wheelhouse uses Python and uv, with separate environments for its services.
 
-- The default speech model is [NVIDIA Parakeet TDT 0.6B](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
-  (CC-BY-4.0, NVIDIA NeMo), served through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx).
-- Wake-word detection uses [openWakeWord](https://github.com/dscripka/openWakeWord)
-  community models.
-- Notification sounds are from [Pixabay](https://pixabay.com/sound-effects/).
-- Full third-party attribution lives in [NOTICE](./NOTICE) and
-  [PROVENANCE.toml](./PROVENANCE.toml).
+Changes must preserve hands-free operation and include tests for changed behavior. Report security vulnerabilities using the process in [SECURITY.md](https://github.com/wheelhouse-project/Wheelhouse/blob/main/SECURITY.md).
 
-## License
+## License and acknowledgements
 
-Apache License 2.0 — see [LICENSE](./LICENSE).
+Wheelhouse is licensed under the [Apache License 2.0](https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE).
+
+The default speech engine uses NVIDIA Parakeet through sherpa-onnx. Wake-word detection uses openWakeWord, and notification sounds include audio from Pixabay. Third-party licenses and attribution are documented in [NOTICE](https://github.com/wheelhouse-project/Wheelhouse/blob/main/NOTICE) and [PROVENANCE.toml](https://github.com/wheelhouse-project/Wheelhouse/blob/main/PROVENANCE.toml).

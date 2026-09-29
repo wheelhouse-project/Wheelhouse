@@ -1325,6 +1325,51 @@ class TestNotificationHandling:
         launcher.signal_provider_startup_failed.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_starting", [True, False],
+                             ids=["starting", "running"])
+    # Explicit ids: the default id carries the message, whose spaces cut
+    # the node id short in a mutation gate's failure parser
+    # (tests/mutation_gate_mic_loss_notice.py in stt_providers/shared).
+    @pytest.mark.parametrize("kind, message", [
+        pytest.param(
+            "mic_lost",
+            "Microphone lost. Speech recognition is waiting for it to come "
+            "back.",
+            id="mic_lost"),
+        pytest.param(
+            "mic_recovered",
+            "Microphone is back (USB Webcam Microphone). Speech recognition "
+            "works again.",
+            id="mic_recovered"),
+    ])
+    async def test_microphone_notices_toast_even_during_startup(
+        self, manager, kind, message, is_starting
+    ):
+        """wh-mic-loss-notice ruling D5: a microphone lost during a launch
+        is a real reason speech fails, so both kinds are exempt from the
+        startup suppression and reach the plain toast path, and neither
+        ends or completes the launch."""
+        launcher = MagicMock()
+        launcher.is_starting = is_starting
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        messages = [{
+            "type": "notification",
+            "title": "Parakeet v3 (GPU)",
+            "message": message,
+            "kind": kind,
+        }]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        mock_notifier._send_notification.assert_called_once_with(
+            "Parakeet v3 (GPU)", message)
+        launcher.signal_provider_ready.assert_not_called()
+        launcher.signal_provider_startup_failed.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_plain_notification_is_still_suppressed_during_startup(
         self, manager
     ):

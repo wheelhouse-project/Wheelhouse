@@ -20,9 +20,11 @@ changes:
   further down (the recorded read-before-reset ordering caveat).
 
 The absorbed suites (test_e2e_replacement_prefix_after_command.py,
-test_speech_processor_trailing_command.py,
 test_speech_processor_bare_number.py, test_router_command_prefix.py)
-stay green unmodified and are the behaviour-preservation proof.
+stay green unmodified and are the behaviour-preservation proof. The
+trailing-position command and its suite were removed later by
+wh-remove-trailing-submit; the tests below that used 'submit' after
+other words now pin that it is typed.
 """
 import sys
 from pathlib import Path
@@ -328,29 +330,30 @@ class TestDeferralAtThePipeline:
         pair must still send. Before the .3.1.4 fix the top-of-loop
         advance ran the held-tail flush outside the lifecycle branch's
         recovery guard, so the raise skipped the pair. Since the
-        .3.1.8 fix the in-guard dispatch consumes (fires the trailing
-        action) instead of flushing, so the raise is injected into the
-        action-firing body the consume reaches."""
-        await running_harness.send_word("submit", start_of_utterance=True)
-        await asyncio.sleep(0.1)
+        .3.1.8 fix the in-guard dispatch consumes instead of flushing, so
+        the raise is injected into the click the consume of a held bare
+        number reaches (the trailing hold this test first used was
+        removed by wh-remove-trailing-submit)."""
         processor = running_harness.processor
-        assert processor._pending_trailing_word == "submit"
+        processor.logic_controller = _PaintedOverlayController()
 
-        original = processor._fire_trailing_action_for_word
+        async def boom(text, return_remainder=False,
+                       authorized_command=False):
+            raise RuntimeError("held-tail IPC failed (test)")
 
-        async def boom(_word):
-            raise RuntimeError("trailing-action IPC failed (test)")
+        processor.text_parser.parse_and_execute = boom
+        processor.text_parser.last_executed_pattern_type = "command"
 
-        processor._fire_trailing_action_for_word = boom
-        try:
-            await running_harness.send_word(
-                "",
-                is_lifecycle_reset_marker=True,
-                utterance_id=running_harness._utterance_counter,
-            )
-            await running_harness.wait_for_timeout(100)
-        finally:
-            processor._fire_trailing_action_for_word = original
+        await running_harness.send_word("70", start_of_utterance=True)
+        await asyncio.sleep(0.1)
+        assert processor._pending_bare_number_words == ["70"]
+
+        await running_harness.send_word(
+            "",
+            is_lifecycle_reset_marker=True,
+            utterance_id=running_harness._utterance_counter,
+        )
+        await running_harness.wait_for_timeout(100)
 
         actions = running_harness.mock_app.get_all_actions()
         assert 'end_utterance' in actions
@@ -358,8 +361,16 @@ class TestDeferralAtThePipeline:
 
 
 # ============================================================================
-# PIPELINE -- the armed trailing action fires while the utterance is open
+# PIPELINE -- 'submit' after other words is typed inside its utterance
 # ============================================================================
+#
+# These shapes first pinned that the trailing action the R1 split armed
+# fired BEFORE the end_utterance (wh-whole-utterance-command-matching
+# .3.1.5, .3.1.6). The trailing position was removed by
+# wh-remove-trailing-submit: 'submit' after other words is now typed, and
+# the typing must still land before the end_utterance, because the Input
+# process restores the user's clipboard there (the invariant
+# test_ui/test_utterance_clipboard_race.py pins).
 
 def _enter_indexes(outputs):
     return [
@@ -375,119 +386,50 @@ def _end_utterance_indexes(outputs):
     ]
 
 
-class TestMarkerFinalizationOrdering:
-    """The end-marker path must run its work while the utterance is
-    still open: the Input process restores the user's clipboard at
-    end_utterance (the invariant test_ui/test_utterance_clipboard_race.py
-    pins), so the trailing action the R1 split arms has to fire BEFORE
-    the deferred end_utterance goes out
-    (wh-whole-utterance-command-matching.3.1.5)."""
-
-    @pytest.mark.asyncio
-    async def test_remainder_split_fires_enter_before_end_utterance(
-        self, running_harness
-    ):
-        """'backspace submit' at the end marker: the EXECUTE branch's
-        remainder split arms submit. Enter must precede the single
-        end_utterance. 'backspace' also presses a key, so the filter
-        matches the enter params, not just the action name."""
-        await running_harness.send_word("backspace", start_of_utterance=True)
-        await running_harness.send_word("submit", delay_before_ms=50)
-        await asyncio.sleep(0.15)
-        await running_harness.send_utterance_end_marker(
-            running_harness._utterance_counter
-        )
-        await running_harness.wait_for_timeout(200)
-
-        outputs = running_harness.mock_app.outputs
-        enters = _enter_indexes(outputs)
-        ends = _end_utterance_indexes(outputs)
-        assert enters, "the armed trailing action never fired"
-        assert len(ends) == 1
-        assert enters[-1] < ends[0]
-
-    @pytest.mark.asyncio
-    async def test_dictate_split_fires_enter_before_end_utterance(
-        self, running_harness
-    ):
-        """'save submit' at the end marker: the whole_utterance_only
-        suppression sends the payload down the DICTATE branch, whose
-        split arms submit. Same ordering requirement as the remainder
-        site."""
-        await running_harness.send_word("save", start_of_utterance=True)
-        await running_harness.send_word("submit", delay_before_ms=50)
-        await asyncio.sleep(0.15)
-        await running_harness.send_utterance_end_marker(
-            running_harness._utterance_counter
-        )
-        await running_harness.wait_for_timeout(200)
-
-        outputs = running_harness.mock_app.outputs
-        enters = _enter_indexes(outputs)
-        ends = _end_utterance_indexes(outputs)
-        assert enters, "the armed trailing action never fired"
-        assert len(ends) == 1
-        assert enters[-1] < ends[0]
-        assert any(
-            "save" in text
-            for text in running_harness.get_dictation_texts()
-        )
+def _submit_insert_indexes(outputs):
+    return [
+        i for i, out in enumerate(outputs)
+        if "submit" in str(out.params).lower()
+        and out.action != "hotkey_action"
+    ]
 
 
-class TestLifecycleCloseTakesTheSplit:
-    """The lifecycle-reset marker IS phrase 1 closing (the Mode-1
-    contract in integrations/websocket_manager.py), so the R1 split
-    applies to the finalization it runs: the same spoken words must
-    not behave differently by internal close path. Boss ruling on
-    wh-whole-utterance-command-matching.3.1.6, option (a): both split
-    sites, trailing action before the end/start pair."""
-
-    @pytest.mark.asyncio
-    async def test_lifecycle_remainder_split_fires_enter_before_the_pair(
-        self, running_harness
-    ):
-        await running_harness.send_word("backspace", start_of_utterance=True)
-        await running_harness.send_word("submit", delay_before_ms=50)
-        await asyncio.sleep(0.15)
-        await running_harness.send_word(
+async def _close(harness, how):
+    if how == "marker":
+        await harness.send_utterance_end_marker(harness._utterance_counter)
+    else:
+        await harness.send_word(
             "",
             is_lifecycle_reset_marker=True,
-            utterance_id=running_harness._utterance_counter,
+            utterance_id=harness._utterance_counter,
         )
-        await running_harness.wait_for_timeout(200)
+    await harness.wait_for_timeout(200)
 
-        outputs = running_harness.mock_app.outputs
-        enters = _enter_indexes(outputs)
-        ends = _end_utterance_indexes(outputs)
-        assert enters, "the trailing action never fired"
-        assert ends
-        assert enters[-1] < ends[0]
-        combined = " ".join(running_harness.get_dictation_texts())
-        assert "submit" not in combined
+
+class TestSubmitAfterOtherWordsIsTypedBeforeTheClose:
 
     @pytest.mark.asyncio
-    async def test_lifecycle_dictate_split_fires_enter_before_the_pair(
-        self, running_harness
+    @pytest.mark.parametrize("how", ["marker", "lifecycle"])
+    @pytest.mark.parametrize("first", ["backspace", "save"])
+    async def test_submit_is_typed_before_the_end_utterance(
+        self, running_harness, first, how
     ):
-        await running_harness.send_word("save", start_of_utterance=True)
+        """'backspace submit' (the EXECUTE remainder shape) and 'save
+        submit' (the whole_utterance_only DICTATE shape), closed by the
+        end marker or by the lifecycle reset: no Enter, and 'submit' is
+        typed before the first end_utterance."""
+        await running_harness.send_word(first, start_of_utterance=True)
         await running_harness.send_word("submit", delay_before_ms=50)
         await asyncio.sleep(0.15)
-        await running_harness.send_word(
-            "",
-            is_lifecycle_reset_marker=True,
-            utterance_id=running_harness._utterance_counter,
-        )
-        await running_harness.wait_for_timeout(200)
+        await _close(running_harness, how)
 
         outputs = running_harness.mock_app.outputs
-        enters = _enter_indexes(outputs)
+        assert _enter_indexes(outputs) == []
+        typed = _submit_insert_indexes(outputs)
         ends = _end_utterance_indexes(outputs)
-        assert enters, "the trailing action never fired"
+        assert typed, "'submit' was never typed"
         assert ends
-        assert enters[-1] < ends[0]
-        combined = " ".join(running_harness.get_dictation_texts())
-        assert "save" in combined
-        assert "submit" not in combined
+        assert typed[-1] < ends[0]
 
 
 class _PaintedOverlayController:
@@ -509,40 +451,12 @@ class _PaintedOverlayController:
 class TestLifecycleCloseConsumesPreHeldTail:
     """A tail held BEFORE the lifecycle marker arrives (the processor
     already back to IDLE) must take the same end-of-utterance dispatch
-    an ordinary end marker gives it: the trailing command fires, the
-    bare number clicks -- both before the end/start pair. Boss ruling
+    an ordinary end marker gives it: the bare number clicks before the
+    end/start pair. (A second kind, the trailing command, was removed
+    by wh-remove-trailing-submit.) Boss ruling
     on wh-whole-utterance-command-matching.3.1.8, option (a): the
     Mode-1 marker is a confirmed utterance end, and hold timing
     (before vs during the close) cannot change what that end means."""
-
-    @pytest.mark.asyncio
-    async def test_lifecycle_preheld_trailing_word_fires_enter_before_the_pair(
-        self, running_harness
-    ):
-        await running_harness.send_word("submit", start_of_utterance=True)
-        await asyncio.sleep(0.15)
-        processor = running_harness.processor
-        # The mechanism claim: a pre-held tail exists only with the
-        # processor idle, so the lifecycle branch's held-tail call is
-        # the only path that can dispatch it.
-        assert processor._pending_trailing_word == "submit"
-        assert processor.mode == ProcessingMode.IDLE
-
-        await running_harness.send_word(
-            "",
-            is_lifecycle_reset_marker=True,
-            utterance_id=running_harness._utterance_counter,
-        )
-        await running_harness.wait_for_timeout(200)
-
-        outputs = running_harness.mock_app.outputs
-        enters = _enter_indexes(outputs)
-        ends = _end_utterance_indexes(outputs)
-        assert enters, "the trailing action never fired"
-        assert ends
-        assert enters[-1] < ends[0]
-        combined = " ".join(running_harness.get_dictation_texts())
-        assert "submit" not in combined
 
     @pytest.mark.asyncio
     async def test_lifecycle_preheld_bare_number_clicks_before_the_pair(
@@ -590,71 +504,6 @@ class TestLifecycleCloseConsumesPreHeldTail:
         assert click_idxs[-1] < ends[0]
         combined = " ".join(running_harness.get_dictation_texts())
         assert "70" not in combined
-
-
-class TestPunctuatedTrailingWord:
-    """STT/ITN attaches terminal punctuation to finals ("submit."), and
-    PatternCatalog.get_trailing_command deliberately normalizes it away
-    at lookup. Every producer then stores the RAW token, and
-    _fire_trailing_action_for_word re-matched the raw token against the
-    anchored ^submit$ pattern -- the mismatch fallback dictated the
-    token instead of firing Enter
-    (wh-whole-utterance-command-matching.3.1.7, codex round 3)."""
-
-    @pytest.mark.asyncio
-    async def test_punctuated_ordinary_trailing_word_fires_enter(
-        self, running_harness
-    ):
-        await running_harness.send_word("submit.", start_of_utterance=True)
-        await asyncio.sleep(0.1)
-        await running_harness.send_utterance_end_marker(
-            running_harness._utterance_counter
-        )
-        await running_harness.wait_for_timeout(200)
-
-        outputs = running_harness.mock_app.outputs
-        assert _enter_indexes(outputs), "the trailing action never fired"
-        combined = " ".join(running_harness.get_dictation_texts())
-        assert "submit" not in combined
-
-    @pytest.mark.asyncio
-    async def test_punctuated_remainder_split_fires_enter(
-        self, running_harness
-    ):
-        await running_harness.send_word("backspace", start_of_utterance=True)
-        await running_harness.send_word("submit.", delay_before_ms=50)
-        await asyncio.sleep(0.15)
-        await running_harness.send_utterance_end_marker(
-            running_harness._utterance_counter
-        )
-        await running_harness.wait_for_timeout(200)
-
-        outputs = running_harness.mock_app.outputs
-        enters = _enter_indexes(outputs)
-        ends = _end_utterance_indexes(outputs)
-        assert enters, "the trailing action never fired"
-        assert len(ends) == 1
-        assert enters[-1] < ends[0]
-        combined = " ".join(running_harness.get_dictation_texts())
-        assert "submit" not in combined
-
-    @pytest.mark.asyncio
-    async def test_punctuated_dictate_split_fires_enter(
-        self, running_harness
-    ):
-        await running_harness.send_word("save", start_of_utterance=True)
-        await running_harness.send_word("submit.", delay_before_ms=50)
-        await asyncio.sleep(0.15)
-        await running_harness.send_utterance_end_marker(
-            running_harness._utterance_counter
-        )
-        await running_harness.wait_for_timeout(200)
-
-        outputs = running_harness.mock_app.outputs
-        assert _enter_indexes(outputs), "the trailing action never fired"
-        combined = " ".join(running_harness.get_dictation_texts())
-        assert "save" in combined
-        assert "submit" not in combined
 
 
 # ============================================================================

@@ -1394,7 +1394,7 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1405,7 +1405,7 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1424,7 +1424,7 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1435,7 +1435,7 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1455,7 +1455,7 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1466,7 +1466,7 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1497,14 +1497,14 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
 """,
         "new": """        if self.launch_is_current(generation):
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
 """,
@@ -1553,7 +1553,7 @@ MUTATIONS = [
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1565,7 +1565,7 @@ MUTATIONS = [
                 self._hide_working(generation)
                 self._notify(
                     display_name,
-                    "Failed to start - try restarting Wheelhouse",
+                    failure_text,
                     generation,
                 )
             self._provider_stopped(
@@ -2748,13 +2748,13 @@ MUTATIONS = [
         "file": LAUNCHER,
         "old": """                self._notify(
                     display_name,
-                    "Failed to start - try restarting Wheelhouse",
+                    failure_text,
                     generation,
                 )
 """,
         "new": """                self._notify(
                     display_name,
-                    "Failed to start - try restarting Wheelhouse",
+                    failure_text,
                     None,
                 )
 """,
@@ -2771,14 +2771,14 @@ MUTATIONS = [
         "file": LAUNCHER,
         "old": """            self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
 """,
         "new": """            self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 None,
             )
         self._provider_stopped(

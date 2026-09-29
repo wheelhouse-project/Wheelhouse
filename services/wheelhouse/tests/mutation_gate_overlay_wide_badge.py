@@ -21,6 +21,33 @@ Run from services/wheelhouse:
 
     python tests/mutation_gate_overlay_wide_badge.py --check
     python tests/mutation_gate_overlay_wide_badge.py
+
+Those two commands are unchanged and still start pytest through
+scripts/run_tests.py (``uv run``). Two optional switches were added later
+(wh-overlay-toolbar-badges-cover-icons); each is removed from the argument
+list before the name filters are read, and without them nothing about a run
+changes:
+
+  --direct-pytest  start ``<this interpreter> -m pytest`` in the service
+                   directory instead of scripts/run_tests.py, the launcher of
+                   tests/mutation_gate_pattern_manager_tree_changed.py. In a
+                   git worktree ``uv run`` builds a .venv inside the tree,
+                   which makes the worktree undeletable; run the gate with
+                   the main checkout's interpreter instead:
+
+        <main>/services/wheelhouse/.venv/Scripts/python.exe \\
+            tests/mutation_gate_overlay_wide_badge.py --direct-pytest
+
+  --native-qt      run pytest on the native Windows Qt platform instead of
+                   QT_QPA_PLATFORM=offscreen. The offscreen platform measures
+                   the numeral font about 35 percent larger (8 pt at dpr
+                   1.0: a one-digit badge is 31 x 29 px offscreen, 23 x 25 px
+                   native, measured 2026-09-24), and the interior-run tests
+                   of TestInteriorToolbarRunRow place their rows from the
+                   real badge size. Since 8b66c0db those tests derive their
+                   layouts from the measured badge size and pass on both
+                   platforms; this flag runs the gate at the size the app
+                   uses, because the app always runs on the native platform.
 """
 from pathlib import Path
 import sys
@@ -257,12 +284,53 @@ from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 
+def _direct_launch(service, test_file, report, collect):
+    """Start pytest directly, never through ``uv run`` (--direct-pytest).
+
+    Copied from tests/mutation_gate_pattern_manager_tree_changed.py. The same
+    owned Job, timeout, marker and output parsing apply; only the argv and
+    the working directory differ.
+    """
+    command = [
+        sys.executable, "-m", "pytest",
+        *runner._targets(test_file),
+        f"--junitxml={report}",
+        *(["--collect-only", "-q"] if collect
+          else ["-q", "-rf", "-p", "no:randomly"]),
+    ]
+    return command, service
+
+
+class _NativeQt:
+    """Remove QT_QPA_PLATFORM for the duration of a block (--native-qt).
+
+    ``patch.dict`` restores the caller's environment on exit, as the
+    offscreen patch it replaces does.
+    """
+
+    def __enter__(self):
+        self._patch = patch.dict(os.environ)
+        self._patch.__enter__()
+        os.environ.pop("QT_QPA_PLATFORM", None)
+        return self
+
+    def __exit__(self, *exc):
+        return self._patch.__exit__(*exc)
+
+
 class OwnedGate:
-    def __init__(self, evidence_dir):
+    def __init__(self, evidence_dir, native_qt=False):
         self.evidence_dir = Path(evidence_dir)
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self.reports = []
         self.original = {}
+        self.native_qt = native_qt
+
+    def _qt_platform(self):
+        """The environment patch for a run: offscreen unless --native-qt."""
+        if self.native_qt:
+            return _NativeQt()
+        return patch.dict(os.environ, QT_QPA_PLATFORM="offscreen")
 
     @property
     def cleanup_confirmed(self):
@@ -284,7 +352,7 @@ class OwnedGate:
         report = dict(label=label, collect=collect)
         self.reports.append(report)
         try:
-            with patch.dict(os.environ, QT_QPA_PLATFORM="offscreen"):
+            with self._qt_platform():
                 result = runner._invoke(service, selection, collect=collect)
         except BaseException as exc:
             report["exception"] = type(exc).__name__
@@ -322,7 +390,7 @@ class OwnedGate:
     def run(self, mutations, argv=None):
         self.snapshot(mutations)
         try:
-            with patch.dict(os.environ, QT_QPA_PLATFORM="offscreen"), \
+            with self._qt_platform(), \
                  patch.object(runner, "_run_pytest", self.call):
                 status = runner.run(mutations, argv)
         finally:
@@ -334,11 +402,18 @@ class OwnedGate:
 
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    # The optional switches (module docstring) are taken out before the
+    # runner reads the rest as name filters.
+    native_qt = "--native-qt" in args
+    if "--direct-pytest" in args:
+        runner.LAUNCH = _direct_launch
+    args = [a for a in args if a not in ("--direct-pytest", "--native-qt")]
     if "--check" in args:
         return runner.run(MUTATIONS, args)
     from datetime import datetime, timezone
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    return OwnedGate(ROOT / ".tmp/overlay-wide-badge-mutations" / stamp).run(MUTATIONS, args)
+    return OwnedGate(ROOT / ".tmp/overlay-wide-badge-mutations" / stamp,
+                     native_qt=native_qt).run(MUTATIONS, args)
 
 
 if __name__ == "__main__":

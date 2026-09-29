@@ -61,6 +61,14 @@ import threading
 import time
 from multiprocessing import shared_memory
 
+from utils.log_rotation import (
+    LAUNCHER_ROTATED_ENV,
+    LOG_BACKUP_COUNT,
+    LOG_MAX_BYTES,
+    log_has_content,
+    rotate_log_for_new_run,
+)
+
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
@@ -743,9 +751,13 @@ def _configure_launcher_logging(project_root):
     file_handler = None
     try:
         from concurrent_log_handler import ConcurrentRotatingFileHandler
+        # The same five backups as setup_logging: a size rotation by this
+        # handler with fewer would drop the older backups
+        # (wh-log-triple-rotation, boss ruling 13:36 condition 1).
         file_handler = ConcurrentRotatingFileHandler(
             log_file, mode='a',
-            maxBytes=10 * 1024 * 1024, backupCount=2, encoding='utf-8'
+            maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT,
+            encoding='utf-8'
         )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(log_formatter)
@@ -781,6 +793,41 @@ def _configure_launcher_logging(project_root):
     return listener
 
 
+def _rotate_log_for_new_cycle(project_root):
+    """Rotate wheelhouse.log once for a new start cycle (wh-log-triple-rotation).
+
+    Returns None on success or when there was nothing to rotate, and the
+    exception when the rotation failed. It never raises: a failed rotation
+    must not stop the start. After a failure nobody rotates for that cycle,
+    because the children still inherit LAUNCHER_ROTATED_ENV; the new run
+    appends to the previous run's log, and no backup is lost.
+
+    rotate_log_for_new_run returns False without raising when the log
+    itself cannot move (on Windows, when another program holds it open),
+    so a log that had content and did not move counts as a failure too
+    (wh-log-triple-rotation.1.1).
+    """
+    log_file_path = os.path.join(project_root, "wheelhouse.log")
+    had_content = log_has_content(log_file_path)
+    try:
+        moved = rotate_log_for_new_run(log_file_path)
+    except Exception as exc:
+        return exc
+    if had_content and not moved:
+        return OSError(
+            "wheelhouse.log could not be renamed; another program may "
+            "hold it open"
+        )
+    return None
+
+
+def _warn_log_rotation_failed(exc):
+    logger.warning(
+        "Could not start a new wheelhouse.log for this run (%s); this run "
+        "appends to the previous run's log.", exc,
+    )
+
+
 def _read_transcript_logging_flag(config_path) -> bool:
     """Read the single LOG_TRANSCRIPTS switch from config.toml.
 
@@ -811,12 +858,21 @@ def _run_supervisor():
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+    # --- Start this run's log file (wh-log-triple-rotation) ---
+    # One rotation per start cycle, done here before the launcher writes its
+    # first line, so the launcher's start lines open the new log instead of
+    # closing the previous run's. Later cycles rotate at the top of the
+    # supervisor loop. A failure is reported once logging is configured.
+    _first_rotation_error = _rotate_log_for_new_cycle(project_root)
+
     # --- Configure logging IMMEDIATELY ---
     # Launcher can't use setup_logging() (needs config dict + heavier imports);
     # _configure_launcher_logging gives it the same queue/listener split with
     # the same format and file (wh-console-write-resilience).
     _listener = _configure_launcher_logging(project_root)
     atexit.register(_listener.stop, 5.0)
+    if _first_rotation_error is not None:
+        _warn_log_rotation_failed(_first_rotation_error)
 
     # --- Transcript-logging switch (wh-transcript-log-defaults) ---
     # Exported before any child spawn so all processes inherit it; see
@@ -830,6 +886,13 @@ def _run_supervisor():
             "Transcript logging ENABLED (LOG_TRANSCRIPTS = true): dictated "
             "text will appear in logs."
         )
+
+    # --- Log rotation belongs to the launcher (wh-log-triple-rotation) ---
+    # Exported before any child spawn, like WHEELHOUSE_LOG_TRANSCRIPTS: the
+    # launcher rotates once per cycle, so setup_logging in the Logic, Input,
+    # and GUI processes must not rotate again. Set even after a failed
+    # rotation, so one start never moves the file more than once.
+    os.environ[LAUNCHER_ROTATED_ENV] = "1"
 
     # --- Raise this process's priority class before spawning children ---
     # A Task Scheduler launch starts the tree at Below Normal (task XML
@@ -894,8 +957,20 @@ def _run_supervisor():
 
     crash_count = 0
     should_restart = True
+    first_cycle = True
 
     while should_restart and crash_count < MAX_CRASHES:
+        # A restart cycle starts a new log, once, before this cycle's first
+        # launcher line; the first cycle rotated before logging started.
+        # crewcut: records the previous cycle queued on the launcher's log
+        # listener and not yet written can land in the new file, because
+        # the listener has no flush call. To remove the limit, add a flush
+        # to WheelHouseQueueListener and call it before this rotation.
+        if not first_cycle:
+            _rotation_error = _rotate_log_for_new_cycle(project_root)
+            if _rotation_error is not None:
+                _warn_log_rotation_failed(_rotation_error)
+        first_cycle = False
         start_time = time.time()
         
         # Using a unique name for the SHM block to avoid collisions from stale runs

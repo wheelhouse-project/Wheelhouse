@@ -59,7 +59,7 @@ SHIPPED_PATTERNS = Path(__file__).parent.parent / "speech" / "config" / "pattern
 #: The count of shipped patterns that carry a numeric capture. Pinned so that
 #: adding or removing a count command is a deliberate edit here, with the new
 #: command's probe proven by this module in the same commit.
-EXPECTED_COUNT_PATTERNS = 113
+EXPECTED_COUNT_PATTERNS = 122
 
 #: What the count sounds like, and the integer it must become. The last
 #: three probe the two ends of the widened body, which is where it can
@@ -206,11 +206,36 @@ class TestACountCommandWaitsForTheWholeCount:
     #: decision behind it.
     FIRST_WORD_COUNT_PATTERNS = [r"^back ?space\s*(\d+)?$"]
 
+    #: Count patterns that wait WITHOUT the flag, because their greedy
+    #: group puts them on the greedy buffer. Its timer (5000 ms) restarts
+    #: on every word, and the command runs at the end of the utterance or
+    #: when that timer expires. "press tab twenty one times"
+    #: (wh-voice-access-parity.2.12) is proven word by word in
+    #: tests/e2e/test_e2e_workflows.py, and
+    #: test_press_count_survives_a_pause_longer_than_the_command_timer
+    #: proves the greedy buffer holds it through a pause longer than the
+    #: command timer. A pause longer than 5000 ms still ends the command:
+    #: measured in the e2e harness, the whole phrase is then typed and no
+    #: key is pressed. The flag is not added to
+    #: press-keys: it has never carried it, and its fullmatch anchors
+    #: already keep it out of a longer sentence.
+    GREEDY_BUFFER_COUNT_PATTERNS = [r"^press\s*(.+?)(?:\s+(\d+)\s+times?)?$"]
+
+    def test_the_greedy_buffer_exemptions_are_greedy(self):
+        by_raw = {entry["raw_pattern"]: entry for entry in COUNT_ENTRIES}
+        for raw in self.GREEDY_BUFFER_COUNT_PATTERNS:
+            assert raw in by_raw, f"{raw!r} is no longer a shipped count pattern"
+            assert by_raw[raw].get("is_greedy") is True, (
+                f"{raw!r} lost its greedy group, so it no longer waits for "
+                "the end of the utterance; add whole_utterance_only = true"
+            )
+
     def test_only_backspace_fires_before_the_count_is_finished(self):
         firing_early = sorted(
             entry["raw_pattern"]
             for entry in COUNT_ENTRIES
             if not entry.get("whole_utterance_only")
+            and entry["raw_pattern"] not in self.GREEDY_BUFFER_COUNT_PATTERNS
         )
         assert firing_early == self.FIRST_WORD_COUNT_PATTERNS, (
             "a count command that does not wait for the whole utterance "

@@ -346,12 +346,12 @@ add("non-top-level-window-handle", DIALOG_SRC, UI,
     "            hwnd = int(self.winId())\n",
     UI_HANDLE_RAISES)
 add("filter-tail-emit-removed", DIALOG_SRC, UI,
-    "        self._tree_empty_label.setVisible(show_empty)\n"
+    "            self._tree_empty_label.setVisible(show_empty)\n"
     "\n"
     "        # The rows a walk would find just changed; tell Logic so the numbered\n"
     "        # overlay re-walks (wh-overlay-rewalk-after-filter).\n"
     '        self._emit_tree_changed("filter")\n',
-    "        self._tree_empty_label.setVisible(show_empty)\n",
+    "            self._tree_empty_label.setVisible(show_empty)\n",
     UI_FILTER_ONE, UI_SECOND_FILTER, UI_CLEARING)
 add("populate-tail-emit-removed", DIALOG_SRC, UI,
     '        self._emit_tree_changed("populate")\n',
@@ -627,6 +627,76 @@ add("handoff-sample-deferred-one-loop-turn", MAIN_SRC, BUILD,
     "                )\n"
     "            self.loop.call_soon(_late_sample)\n",
     Q_AHEAD)
+
+
+# --- the Pattern Manager comes to the front (wh-voice-access-parity.1.15 F4) --
+#
+# Every trigger ("show commands", "what can I say", the tray items) goes
+# through GuiManager._open_pattern_manager. It clears only the minimized bit
+# of the window state, then show / raise_ / activateWindow, then asks the
+# terminal editor's _steal_foreground for the Windows foreground, inside a
+# try/except so a failure there cannot reach the Qt slot or queue handler.
+
+F4_RESTORE = "test_open_pattern_manager_restores_a_minimized_dialog"
+F4_MAXIMIZED = "test_open_pattern_manager_keeps_a_maximized_dialog_maximized"
+F4_NORMAL = "test_open_pattern_manager_leaves_a_normal_dialog_state_alone"
+F4_FOREGROUND = "test_open_pattern_manager_takes_the_foreground_with_the_dialog_hwnd"
+F4_FAILURE = "test_open_pattern_manager_survives_a_foreground_failure"
+
+F4_RESTORE_BRANCH = (
+    "        if state & Qt.WindowState.WindowMinimized:\n"
+    "            self._pm_dialog.setWindowState(\n"
+    "                (state & ~Qt.WindowState.WindowMinimized)\n"
+    "                | Qt.WindowState.WindowActive\n"
+    "            )\n"
+)
+F4_STEAL_CALL = "            _steal_foreground(int(self._pm_dialog.winId()))\n"
+F4_STEAL_GUARD = (
+    "        try:\n"
+    "            from terminal_editor_window import _steal_foreground\n"
+    "\n"
+    + F4_STEAL_CALL
+    + "        except Exception as exc:\n"
+    '            logger.debug("Pattern Manager foreground request failed: %s", exc)\n'
+)
+
+add("pm-open-minimized-restore-dropped", GUI_SRC, UI,
+    F4_RESTORE_BRANCH,
+    "        if state & Qt.WindowState.WindowMinimized:\n"
+    "            pass\n",
+    F4_RESTORE, F4_MAXIMIZED)
+# showNormal's effect: the maximized bit is lost with the minimized one.
+add("pm-open-restore-loses-maximized", GUI_SRC, UI,
+    F4_RESTORE_BRANCH,
+    "        if state & Qt.WindowState.WindowMinimized:\n"
+    "            self._pm_dialog.setWindowState(\n"
+    "                Qt.WindowState.WindowActive\n"
+    "            )\n",
+    F4_MAXIMIZED)
+# Input-level: the restore applied whatever the state is.
+add("pm-open-restore-runs-for-every-state", GUI_SRC, UI,
+    F4_RESTORE_BRANCH,
+    F4_RESTORE_BRANCH.replace(
+        "        if state & Qt.WindowState.WindowMinimized:\n",
+        "        if True:\n"),
+    F4_NORMAL)
+add("pm-open-foreground-call-dropped", GUI_SRC, UI,
+    F4_STEAL_CALL,
+    "            pass\n",
+    F4_FOREGROUND, F4_FAILURE)
+add("pm-open-foreground-gets-a-zero-handle", GUI_SRC, UI,
+    F4_STEAL_CALL,
+    "            _steal_foreground(0)\n",
+    F4_FOREGROUND)
+# The catcher's contract is "does not raise", so under this mutant it fails
+# on the OSError its stand-in raises -- that exception IS the defect here,
+# not an unrelated crash upstream of the assertion.
+add("pm-open-foreground-guard-removed", GUI_SRC, UI,
+    F4_STEAL_GUARD,
+    "        from terminal_editor_window import _steal_foreground\n"
+    "\n"
+    "        _steal_foreground(int(self._pm_dialog.winId()))\n",
+    F4_FAILURE)
 
 
 if __name__ == "__main__":

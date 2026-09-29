@@ -293,6 +293,31 @@ def test_click_point_double_sends_two_down_up_pairs(patch_win32):
     assert batch[3]["flags"] & wis.MOUSEEVENTF_LEFTUP
 
 
+def test_click_point_triple_sends_three_down_up_pairs_in_one_batch(
+    patch_win32,
+):
+    """wh-voice-access-parity.2.5: a triple click is ONE SendInput batch.
+
+    Windows reads a line (or paragraph) selection from three down/up pairs
+    that arrive inside the double-click time at the same point. Sending
+    them in one batch is what keeps them inside that window, so the test
+    pins a single six-event button batch, not three separate clicks.
+    """
+    fake, _t = patch_win32(FakeUser32())
+
+    ok, reason = wis.click_point(960, 540, click_count=3)
+
+    assert (ok, reason) == (True, None)
+    batches = fake.button_batches()
+    assert len(batches) == 1
+    batch = batches[0]
+    assert len(batch) == 6
+    for index in (0, 2, 4):
+        assert batch[index]["flags"] & wis.MOUSEEVENTF_LEFTDOWN
+        assert batch[index + 1]["flags"] & wis.MOUSEEVENTF_LEFTUP
+    assert all(e["dx"] == 32768 and e["dy"] == 32768 for e in batch)
+
+
 @pytest.mark.parametrize("button", ["middle", "LEFT", "", None, 1])
 def test_click_point_rejects_unknown_button(patch_win32, button):
     fake, _t = patch_win32(FakeUser32())
@@ -304,7 +329,9 @@ def test_click_point_rejects_unknown_button(patch_win32, button):
     assert fake.sendinput_batches == []
 
 
-@pytest.mark.parametrize("count", [0, 3, -1, True, 1.0, "1"])
+# 4 is the first count above the triple click (wh-voice-access-parity.2.5
+# raised the ceiling from 2 to 3).
+@pytest.mark.parametrize("count", [0, 4, -1, True, 1.0, "1"])
 def test_click_point_rejects_bad_click_count(patch_win32, count):
     fake, _t = patch_win32(FakeUser32())
 

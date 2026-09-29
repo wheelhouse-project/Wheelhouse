@@ -95,6 +95,35 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def _collect_garbage_before_qt_tests(request):
+    """Free the Qt objects earlier tests left in reference cycles, now.
+
+    Left to the automatic collector, such an object is destroyed at
+    whatever allocation next starts a collection, which can be inside a Qt
+    call of a later test. With such objects left behind, public CI test
+    (wheelhouse) part 2 died with heap corruption (0xc0000374) at
+    gui.py:3678 (wh-ci-gui-heap-hunt). Collecting before each test that
+    uses qapp destroys them at a point where no Qt call is running. With
+    the command in tests/gc_stress_plugin.py, the same crash came in 2 of 2
+    runs without this fixture and in 0 of 3 with it.
+
+    crewcut: this costs about 50 s of CI time per part-2 run (222 tests,
+    30.2 s measured on Ikon). The known objects it covers are the
+    TerminalDictationEditorWindow dialogs that
+    tests/test_terminal_editor_window.py only close(), and the GuiManagers
+    that _patched_gui_manager in tests/test_ui_provider_switching.py builds
+    without a teardown. To remove it: tear those objects down explicitly,
+    prove the crash is gone with tests/gc_stress_plugin.py, then delete
+    this fixture.
+    """
+    if "qapp" in request.fixturenames:
+        import gc
+
+        gc.collect()
+    yield
+
+
 @pytest.fixture
 def mock_editor_window():
     """Replace TerminalDictationEditorWindow with a Mock while a test runs.
@@ -112,6 +141,20 @@ def mock_editor_window():
     must NOT use this fixture."""
     with patch("terminal_editor_window.TerminalDictationEditorWindow") as cls:
         yield cls
+
+
+@pytest.fixture
+def parakeet_model_present(monkeypatch):
+    """Make the Parakeet model check answer "complete" while a test runs.
+
+    A switch to Parakeet first checks the speech model on disk
+    (wh-parakeet-model-download-offer). A test that switches to Parakeet to
+    exercise the ordinary switch would otherwise pass only on a computer
+    that has the model. Test files that switch to Parakeet opt in via
+    ``pytest.mark.usefixtures("parakeet_model_present")``."""
+    monkeypatch.setattr(
+        "stt.parakeet_model.parakeet_model_complete", lambda *a, **k: True,
+    )
 
 
 # ---------------------------------------------------------------------------

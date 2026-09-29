@@ -4015,7 +4015,7 @@ class TestAHyphenAfterTheCaptureBelongsToTheCaller:
         assert self._bodies(transformed)["plain"] == 1
 
     def test_the_shipped_catalog_keeps_the_hyphen_on_every_capture(self):
-        """All 113 shipped numeric captures take the plain body."""
+        """All 122 shipped numeric captures take the plain body."""
         catalog = (
             Path(__file__).resolve().parent.parent
             / "speech" / "config" / "patterns.toml"
@@ -4043,9 +4043,11 @@ class TestAHyphenAfterTheCaptureBelongsToTheCaller:
             for key, value in self._bodies(transformed).items():
                 totals[key] += value
 
-        assert len(entries) == 320, len(entries)
+        assert len(entries) == 332, len(entries)
+        # 122: the press pattern's "<number> times" repeat count added the
+        # 122nd numeric capture (wh-voice-access-parity.2.12).
         assert totals == {
-            "plain": 113, "atomic": 0, "no_hyphen": 0, "atomic_no_hyphen": 0,
+            "plain": 122, "atomic": 0, "no_hyphen": 0, "atomic_no_hyphen": 0,
         }, totals
 
 

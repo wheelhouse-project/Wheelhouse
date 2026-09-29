@@ -868,9 +868,14 @@ class CaptureLoadReporter:
         wh-stt-load-metrics.2 the capture takes the readiness answer back
         when capture ends: WinRTAudioCapture answers False once its setup
         wait expires, once the capture thread has ended, or once
-        POLL_FAILURES_BEFORE_DEAD consecutive frame polls have raised. So
-        a microphone that opened and then died already marks its own
-        window through this condition. The earlier text here called that
+        POLL_FAILURES_BEFORE_DEAD consecutive frame polls have raised.
+        Since wh-mic-loss-capture-recovery there is a fourth way: a lost
+        microphone (the graph's UnrecoverableErrorOccurred event, or
+        CAPTURE_STALL_SECONDS with no samples) takes the answer back, and
+        it stays False while the capture thread rebuilds the graph, until
+        a rebuilt graph delivers samples. So a microphone that opened and
+        then died already marks its own window through this condition,
+        and so does every window inside the outage that follows. The earlier text here called that
         answer sticky, which the readiness work made false
         (wh-stt-load-metrics.2.1.10), then named the wrong class, and then
         listed only two of the three ways readiness says no. It also
@@ -882,7 +887,11 @@ class CaptureLoadReporter:
 
         The second catches what the first still cannot: a capture source
         that is alive by every measure its provider has, and delivers no
-        frame at all (wh-stt-load-metrics.1.15). The third catches what the
+        frame at all (wh-stt-load-metrics.1.15). The WinRT stall now
+        takes readiness back for most such sources after
+        CAPTURE_STALL_SECONDS, but the frame counter does not depend on
+        the provider detecting its own loss, and it still sees a silence
+        shorter than that threshold. The third catches what the
         second cannot: one frame at either end makes the endpoint difference
         positive however long the silence between them is
         (wh-stt-load-metrics.1.16).

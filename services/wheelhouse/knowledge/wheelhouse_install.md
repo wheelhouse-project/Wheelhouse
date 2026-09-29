@@ -19,12 +19,13 @@ Behavior rules:
   oversell.
 - For Wheelhouse-specific questions: answer only from the Wheelhouse documents
   provided to you -- this help document, the installation guide, and the separate Wheelhouse
-  command and configuration reference when they are provided. Never invent features,
+  action, notice, and configuration reference when they are provided. Never invent features,
   commands, or settings that none of the provided documents describe. For the
-  exact wording of a voice command, or a configuration setting and its default
-  value, use the command and configuration reference when it is available: this
-  help document explains the features in prose, but the complete list of every
-  command and setting now lives in that reference.
+  exact wording of a voice command, use the tables in the Voice Commands section
+  of this help document, which list every command. For a configuration setting
+  and its default value, use the configuration reference when it is available:
+  this help document explains the settings in prose, but the complete list of
+  every setting lives in that reference.
 - For installation, updates, removal, or installer troubleshooting, use the
   separate installation guide (wheelhouse_install.md).
 - For general computing questions (microphone setup, Windows settings,
@@ -39,7 +40,7 @@ Behavior rules:
   download sizes, feature availability), tell the user which release this
   document describes -- read it from the "Generated" line in the footer at
   the very end ("for the vX.Y.Z release"). Ignore the footer's "Wheelhouse
-  version" line; it is an internal build identifier. The separate command and
+  version" line; it is an internal build identifier. The separate action, notice, and
   configuration reference names its own release in its own "Generated" footer
   line the same way.
 - When describing voice commands, always give an example of what to say.
@@ -66,7 +67,7 @@ https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelh
 If Windows shows a "Windows protected your PC" screen, see [Security warnings](#security-warnings) below. The whole process takes about 10 to 20 minutes, most of it downloading (roughly 3 GB in total). The wizard:
 
 1. Asks its questions up front: which speech engine to use (the pre-selected answer suits most installations -- see [Speech Engines](#speech-engines)), whether to set up the optional AI helper (the wizard offers one AI choice, a cloud model from Google, and skipping; the model that runs on your own machine is set up from the command line instead, described below), and whether Wheelhouse starts when you log in and right after setup finishes (both pre-selected). It also asks you to turn on microphone access for desktop apps, but only when that Windows setting is currently off; when it is already on, setup says nothing about it.
-2. Checks the requirements listed under [What you need](#what-you-need). Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and the memory floor. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count and a connected microphone -- produce a notice and setup continues.
+2. Checks the requirements listed under [What you need](#what-you-need). Four of them stop setup when they are not met: 64-bit Windows, the Windows version, free disk space, and enough memory for the chosen speech engine. In each case setup states on screen what is missing and what to do about it. The rest -- the processor core count and a connected microphone -- produce a notice and setup continues.
 3. Installs the Microsoft Visual C++ runtime that the speech engine needs, but only when the computer does not have it or has a copy that is too old. Windows asks for permission first, and then Microsoft's own progress window appears. If you decline, or the runtime install fails, setup continues and its final page says so and what to do.
 4. Installs uv, the environment manager Wheelhouse uses, into the user profile.
 5. Downloads the Wheelhouse application, verifies the download against its published fingerprint, and creates Wheelhouse's own Python environments. Those environments are self-contained and separate from any other Python installation on the computer.
@@ -78,7 +79,7 @@ Wheelhouse installs for one user account. Administrator rights are not required.
 
 **Running the wizard again to update.** When Wheelhouse is already installed, the AI helper page shows "Leave my AI helper setting unchanged." in place of "Skip for now (recommended). You can set this up later." The wizard pre-selects it. It keeps the current AI helper setting and any saved access key as they are, including a local AI model set up from the command line. The other choice, the Google cloud model, replaces the current setting.
 
-**Command-line installation.** The same install runs as one PowerShell line, asking only the speech-engine, start-at-login, and start-now questions as text prompts; both start questions default to no. It asks nothing about the AI helper: the AI choice is given as an argument instead, or left out, which installs without AI on a first install and keeps the current AI setting on an update. The one-line command cannot carry arguments; to pass one, download install-wheelhouse.ps1 from the release page and run it as a file, for example `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode local`.
+**Command-line installation.** The same install runs as one PowerShell line, asking only the speech-engine, start-at-login, and start-now questions as text prompts; both start questions default to no. On a computer with less than 8 GB of memory, a question that offers the Google Cloud engine replaces the speech-engine question. An update of an install that already uses the Google Cloud engine asks neither question on such a computer and keeps that engine. It asks nothing about the AI helper: the AI choice is given as an argument instead, or left out, which installs without AI on a first install and keeps the current AI setting on an update. The one-line command cannot carry arguments; to pass one, download install-wheelhouse.ps1 from the release page and run it as a file, for example `powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -AiMode local`.
 
 ```
 irm https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/install-wheelhouse.ps1 | iex
@@ -101,7 +102,7 @@ Two further switches, `-Force` and `-KeepData`, apply only to uninstalling; see 
 
 - Windows 10 or Windows 11, 64-bit. Any Windows 11 edition; most Windows 10 editions.
 - 10 GB of free disk space.
-- 8 GB of memory (RAM), a hard minimum; 16 GB recommended. Below 8 GB the installer stops and cannot proceed with any speech engine, including the cloud one.
+- Memory (RAM): 8 GB for the offline speech engines, Parakeet and Distil-Whisper; 6 GB for the Google Cloud speech engine, which is the minimum for any engine; 16 GB recommended. Below 8 GB, the installer stops for an offline engine but still installs the Google Cloud engine. In the setup wizard, choose Google Cloud at the speech-engine question. The one-line command-line installer, when no engine was chosen, asks one question in place of the speech-engine question: yes installs the Google Cloud engine, and no stops the install. An update of an install that already uses the Google Cloud engine does not ask this question and keeps that engine. Below 6 GB, the installer stops for every speech engine, including the cloud one, and adding memory is the only fix.
 - 4 or more CPU cores recommended. With fewer, Wheelhouse installs and runs, but speech recognition may respond slowly.
 - A microphone. One can be connected after installing.
 - An internet connection during installation. The default speech engine operates offline afterward.
@@ -115,7 +116,7 @@ The wizard reports its progress step by step, and the PowerShell installer repor
 Installer failure messages contain no personal data and can be included in a help request. When the wizard stops, a window states what went wrong and what to try. If the setup log can be found, the same window names the file and in most cases offers to open it; when the log cannot be found, the window omits any reference to a log. Either way it gives an address to write to, `help@wheelhouse-project.org`. The PowerShell installer prints the same two lines as text. The common messages:
 
 - **"Wheelhouse appears to be running"** (during an update): the installer refuses to replace an application that is running. Exit Wheelhouse first (right-click the floating button or the tray icon -- both open the same menu -- and choose Exit), then run the installer again. If it reports that it could not check, restart the computer and try again.
-- **"This computer has N GB of memory"**: your machine is below the 8 GB minimum. This check stops the install for every speech engine, including the cloud one, so adding memory is the only fix.
+- **"This computer has N GB of memory"**: your machine has less memory than the chosen speech engine needs. When the message says the offline speech engine needs about 8 GB, install with the Google Cloud engine instead: choose Google Cloud in the setup wizard, or run install-wheelhouse.ps1 as a file with `-SttProvider google_stt`. For the offline engines, adding memory is the only fix. When the message says Wheelhouse needs about 6 GB for any speech engine, no choice of engine helps, and adding memory is the only fix.
 - **"Not enough free disk space"**: free up 10 GB on the Windows drive and run the installer again.
 - **"Putting the speech model in place failed"**: the step that assembles the model stopped, and the message includes its exit code and the last lines it printed. Run the installer again -- the downloads themselves are kept and do not repeat. If it fails the same way twice, include the message in a help request.
 - **"Could not install uv"**: usually a blocked network -- corporate proxies can block the download. Install uv manually from https://docs.astral.sh/uv/getting-started/installation/ and run the installer again.
@@ -146,7 +147,8 @@ An update replaces the application and preserves user data:
 
 - The settings file (config.toml)
 - Personal voice patterns
-- Approved and declined dictation targets
+- Approved and declined dictation targets, and the retry counts kept for targets not yet decided
+- Two marker files that record a one-time message as already shown: the Assistant explanation window (help_explainer_notebook_shown.toml) and the first-click hint (click_first_use_hint_shown.toml)
 - Saved speech hints
 - The downloaded speech model -- it is stored outside the part an update replaces, so the 2.5 GB download does not repeat.
 
@@ -181,7 +183,7 @@ powershell -ExecutionPolicy Bypass -File install-wheelhouse.ps1 -Uninstall
 The uninstaller will not run while Wheelhouse is running -- exit it first by right-clicking the floating button or the tray icon and choosing Exit. Run from the command line as above, it asks two questions before removing anything:
 
 1. **"Remove Wheelhouse from this computer?"** -- nothing is removed until this is answered yes.
-2. **"Keep your personal data?"** -- the settings file, voice patterns, and the downloaded speech model.
+2. **"Keep your personal data?"** -- the settings file, voice patterns, and the downloaded speech model. Keeping also holds the other files an update preserves: the dictation-target files, the two marker files, and the saved speech hints.
 
 Removed through Windows instead, after a Setup.exe install, only the second question is asked: Windows has already asked whether to uninstall, so the wizard puts the keep-or-remove choice to you and then runs the same uninstaller without repeating the first question.
 
@@ -192,10 +194,10 @@ Two switches answer those questions in advance. Both work only together with `-U
 
 What each answer does:
 
-- **Keeping personal data:** the application, all its shortcuts, and its bookkeeping folder are removed. The settings file, personal voice patterns, and the speech model remain in `%LOCALAPPDATA%\Wheelhouse`, with the settings and patterns gathered into a subfolder there named preserved-user-data. On a machine where the local AI helper was set up, the AI model and the program that runs it -- several gigabytes -- also remain there. A later reinstall starts from defaults; copy files back from that folder to restore the previous settings and patterns.
+- **Keeping personal data:** the application, all its shortcuts, and its bookkeeping folder are removed. The speech model remains in `%LOCALAPPDATA%\Wheelhouse`. The eight files an update preserves (the settings file, personal voice patterns, the three dictation-target files, the two marker files, and the saved speech hints) are gathered into a subfolder there named preserved-user-data. On a machine where the local AI helper was set up, the AI model and the program that runs it -- several gigabytes -- also remain there. A later reinstall starts from defaults; copy files back from that folder to restore the previous settings and patterns.
 - **Keeping nothing:** the entire `%LOCALAPPDATA%\Wheelhouse` folder, the `%APPDATA%\Wheelhouse` folder, and all shortcuts (Start menu, desktop, and the start-at-login entry) are removed. A configured cloud AI access key is also cleared from the user environment.
 
-Those two folders, plus a small `WheelhouseSetup` folder used by the graphical installer's uninstaller, hold everything Wheelhouse itself stores. Setup writes in up to four further places. It removes two of them: the shortcuts it created and the start-at-login entry. It leaves the others, deliberately: uv, the environment manager, installed in the user profile, and, where setup installed it, the Microsoft Visual C++ runtime. Other programs may also be using either one. The graphical installer additionally leaves its own log in the Windows temporary folder. `%APPDATA%\Wheelhouse` holds no personal data -- only bookkeeping such as helper-process ID files -- and is removed under either answer. Run from the command line, the uninstaller prints both folder paths when it finishes; removed through Windows, it runs hidden, so those paths never reach the screen. A removal through Windows shows a message only when something went wrong, and several different ones are possible. Three of them concern the saved AI key. Two say that the key could not be cleared, or that setup could not read the removal step's output at all; both of those ask you to check WHEELHOUSE_AI_API_KEY yourself in Windows Environment Variables. The third says the key changed but running programs could not be told, and its remedy is different: sign out of Windows and back in once. Two further messages report a removal that could not run as intended. Setup stops with "Wheelhouse could not be fully removed" when the removal step fails, most often because Wheelhouse is still running; close it and run the uninstall again. Setup finishes but asks you to delete the `%LOCALAPPDATA%\Wheelhouse` folder by hand when the removal helper itself is missing.
+Those two folders, plus a small `WheelhouseSetup` folder used by the graphical installer's uninstaller, hold everything Wheelhouse itself stores. Setup writes in up to four further places. It removes two of them: the shortcuts it created and the start-at-login entry. It leaves the others, deliberately: uv, the environment manager, installed in the user profile, together with the entry for uv's folder that setup adds to your user PATH when uv's own installer has not added it, and, where setup installed it, the Microsoft Visual C++ runtime. Other programs may also be using either one. The graphical installer additionally leaves its own log in the Windows temporary folder. `%APPDATA%\Wheelhouse` holds no personal data -- only bookkeeping such as helper-process ID files -- and is removed under either answer. Run from the command line, the uninstaller prints both folder paths when it finishes; removed through Windows, it runs hidden, so those paths never reach the screen. A removal through Windows shows a message only when something went wrong, and several different ones are possible. Three of them concern the saved AI key. Two say that the key could not be cleared, or that setup could not read the removal step's output at all; both of those ask you to check WHEELHOUSE_AI_API_KEY yourself in Windows Environment Variables. The third says the key changed but running programs could not be told, and its remedy is different: sign out of Windows and back in once. Two further messages report a removal that could not run as intended. Setup stops with "Wheelhouse could not be fully removed" when the removal step fails, most often because Wheelhouse is still running; close it and run the uninstall again. Setup finishes but asks you to delete the `%LOCALAPPDATA%\Wheelhouse` folder by hand when the removal helper itself is missing.
 
 <!-- install-doc:end -->
 
@@ -210,7 +212,7 @@ One Windows rule follows from this. Windows does not allow a program to send key
 - **Programs running as administrator.** A program started with "Run as administrator", or one that elevated itself as some system tools do, cannot receive typed text, key presses, or clicks from Wheelhouse.
 - **UAC prompts.** The dimmed "Do you want to allow this app to make changes to your device?" screen is more restricted still: Windows displays it on a separate secure desktop that no ordinary program can reach or observe.
 
-**Observed behavior:** dictation into an administrator window is detected before any keystroke is sent, and a notice appears in the corner of the screen: "Wheelhouse can't type into administrator apps." Repeating the same attempt within a minute shows no second notice. Nothing is typed either way. The same notice appears for a terminal running as administrator. Click commands produce their own notice: the contents of a protected window are not visible to Wheelhouse, so "x-ray click cancel" reports no match. Spoken key presses such as "press enter" produce no notice -- Windows discards them silently.
+**Observed behavior:** dictation into an administrator window is detected before any keystroke is sent, and a notice titled "Wheelhouse can't type into administrator apps" appears in the corner of the screen. Repeating the same attempt within a minute shows no second notice. Nothing is typed either way. The same notice appears for a terminal running as administrator. Click commands produce their own notice: the contents of a protected window are not visible to Wheelhouse, so "x-ray click cancel" reports no match. Spoken key presses such as "press enter" produce no notice -- Windows discards them silently.
 
 **Available options:**
 
@@ -224,7 +226,7 @@ No Wheelhouse setting removes this limit. Windows enforces it, and the UAC scree
 
 ### First run
 
-Starting Wheelhouse starts five programs: **the launcher** (started from the shortcut; supervises the others and restarts any that crash), **the logic process** (interprets recognized speech and routes it to an action), **the input process** (types text, presses keys, performs clicks), **the GUI process** (the tray icon and the floating status button), and **the speech engine** (a separate helper that converts audio to text). Within a few seconds the Wheelhouse icon appears in the system tray, near the clock; if it does not, see [Troubleshooting](wheelhouse_help.md#troubleshooting).
+Starting Wheelhouse starts five programs: **the launcher** (started from the shortcut; it watches the logic, input, and GUI processes, and when one of them exits it shuts all three down; it starts Wheelhouse again only when you choose Restart Wheelhouse from the menu), **the logic process** (interprets recognized speech and routes it to an action), **the input process** (types text, presses keys, performs clicks), **the GUI process** (the tray icon and the floating status button), and **the speech engine** (a separate helper that converts audio to text; if it stops, Wheelhouse restarts it once automatically, and a second stop needs the Restart Wheelhouse menu item). Within a few seconds the Wheelhouse icon appears in the system tray, near the clock; if it does not, see [Troubleshooting](wheelhouse_help.md#troubleshooting).
 
 ### Microphone verification
 
@@ -234,13 +236,13 @@ Confirm Windows itself receives audio before diagnosing recognition problems. Th
 2. **The input meter.** Right-click the taskbar speaker icon, choose Sound settings, scroll to Input. The intended microphone should be selected and the level meter should move while you speak; if it stays flat, select a different input device.
 3. **A dictation test.** Open Notepad, confirm Wheelhouse is listening, and say "hello world". On current hardware the words appear within about two seconds.
 
-### The hotword ("x-ray")
+### The safety word ("x-ray")
 
-The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands run only when the utterance begins with "x-ray": "close window" is transcribed as ordinary dictation, "x-ray close window" closes the active window. Common commands such as "undo", "copy", and "select all" need no hotword. Throughout this document a command that requires it is written with the "x-ray" prefix; the command reference states the requirement for every command.
+The safety word protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands run only when the utterance begins with "x-ray": "close window" is transcribed as ordinary dictation, "x-ray close window" closes the active window. Common commands such as "undo", "copy", and "select all" need no safety word. Throughout this document a command that requires it is written with the "x-ray" prefix; the Voice Commands section of the help guide (the User guide page on the website) marks every command that requires it.
 
 ### The wake word ("computer")
 
-Whenever listening is off, saying "computer" turns it back on, no keyboard or mouse needed. That holds whatever switched it off: the floating button, the "stop listening" command, a start with listening off, sound playing on this computer, Sonos playback, or an idle pause. In push-to-talk mode the wake word ends only the idle pause, and listening then waits for the next hold of the floating button. After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input, not silence, so a film watched without touching either triggers the pause. The wake word and the hotword differ: "computer" turns listening back on, "x-ray" runs a protected command. While sound plays, a recording that says "computer" can also turn listening back on. Wake-word behavior is configurable in the wake_word section of the settings file, enabled by default. The idle pause comes from the Idle Monitor plugin ([Plugins](wheelhouse_help.md#plugins)), also enabled by default; with that plugin disabled, listening does not pause when idle.
+Whenever listening is off, saying "computer" turns it back on, no keyboard or mouse needed. That holds whatever switched it off: the floating button, the "stop listening" command, a start with listening off, sound playing on this computer, Sonos playback, or an idle pause. In push-to-talk mode the wake word ends only the idle pause, and listening then waits for the next hold of the floating button. After a period with no keyboard or mouse activity, Wheelhouse pauses listening -- the measure is input, not silence, so a film watched without touching either triggers the pause. The wake word and the safety word differ: "computer" turns listening back on, "x-ray" runs a protected command. While sound plays, a recording that says "computer" can also turn listening back on. Wake-word behavior is configurable in the wake_word section of the settings file, enabled by default. The idle pause comes from the Idle Monitor plugin ([Plugins](wheelhouse_help.md#plugins)), also enabled by default; with that plugin disabled, listening does not pause when idle.
 
 ---
 
@@ -252,7 +254,7 @@ Whenever listening is off, saying "computer" turns it back on, no keyboard or mo
 
 No account is required for the default configuration. Wheelhouse ships with the **Parakeet** engine as its default: it runs on the local processor, works offline, costs nothing, and transmits no audio. The installer downloads its model, and it is preselected in the settings.
 
-An account is required in one case: the **Google Cloud** speech engine, selected at the installer's speech-engine question. That engine processes speech on Google's servers and requires a Google Cloud account and a one-time credentials setup. The account is free and most personal use stays within Google's free tier; Google charges for use beyond it. One limitation: on a computer with less than 8 GB of memory the installer stops before installing anything. Its closing message mentions the cloud engine, but the installer cannot set that engine up on such a machine either, so the remedy is more memory or a different computer.
+An account is required in one case: the **Google Cloud** speech engine, selected at the installer's speech-engine question. That engine processes speech on Google's servers and requires a Google Cloud account and a one-time credentials setup. The account is free and most personal use stays within Google's free tier; Google charges for use beyond it. The Google Cloud engine needs less memory than the offline engines. On a computer with less than 8 GB of memory, the installer stops for an offline engine but still installs the Google Cloud engine: in the setup wizard, choose Google Cloud; the one-line command-line installer, when no engine was chosen, asks one question and installs the Google Cloud engine when the answer is yes; an update of an install that already uses the Google Cloud engine keeps it without the question. On a computer with less than 6 GB of memory, the installer stops before installing anything, for every engine, and adding memory is the only fix.
 
 A third engine, **Distil-Whisper**, runs locally on an NVIDIA graphics card with at least 4 GB of dedicated memory. The two installers differ here. The setup wizard lists it whatever graphics hardware is present; without a suitable card the install sets up Parakeet instead and says so on its final page, among the notices shown there. The command-line installer checks the hardware first and offers Distil-Whisper only when it finds a suitable card. It downloads its own model on first start, so the first launch takes several minutes.
 
@@ -297,7 +299,11 @@ There is a second method, and it needs no file editing: set an environment varia
 
 To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open **STT Provider**, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. The choice is recorded as soon as the new engine's process starts. If that process cannot be started at all, the choice is not recorded and the next start returns to the previous engine. If the process starts and the engine then fails its own startup, the choice stays recorded and the next start tries that engine again; select a working engine from the menu to change it. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.
 
-To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up what that engine requires, except that Distil-Whisper's model is downloaded by the engine itself the first time it starts. For example, moving from Google Cloud to Parakeet requires the re-run, because that is what downloads Parakeet's speech model; selecting it from the menu alone is not sufficient. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.
+To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up what that engine requires, except that Distil-Whisper's model is downloaded by the engine itself the first time it starts. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.
+
+Parakeet can also be requested from the menu. When the installer turned Parakeet off because its speech model is missing, **STT Provider** lists it as **Parakeet (model not installed)**. Selecting that item, or selecting Parakeet while its model is missing or incomplete, keeps the current engine and shows the notice "Parakeet speech model not installed", which gives the download size, about 2.5 GB. **Not now**, or closing the notice, changes nothing.
+
+If Wheelhouse was installed or last updated with the setup wizard, the notice offers **Download now**: Wheelhouse closes and the installer runs again with Parakeet chosen. It repeats its whole setup for several minutes, downloads the model, and starts Wheelhouse with Parakeet. If Wheelhouse has not closed within two minutes, the installer does not start. On a computer that uses the Google Cloud engine and has less than 8 GB of memory, Wheelhouse still closes, and the installer stops at its memory check, before any download, with a message that the built-in offline engine needs about 8 GB of memory. It downloads nothing and does not start Wheelhouse; start Wheelhouse again from the Start menu. When Download now is not possible, the notice offers **Copy command** instead, which copies the install command: exit Wheelhouse, run the command in PowerShell, and choose Parakeet at the speech-engine question. That command installs the latest release, which can be newer than the installed version.
 
 The same re-run repairs a missing or incomplete speech model, for example after an interrupted download. The installer detects an incomplete model and reinstalls it. Re-running the installer is safe at any time, and the speech-engine question defaults to the engine already installed, so pressing Enter keeps it. If the current engine is no longer available on this hardware, the PowerShell installer reports that before asking; the setup wizard does not.
 
@@ -315,5 +321,5 @@ Each installer failure message and its action is listed under [Installation fail
 
 ---
 
-Generated: 2026-09-23 for the v1.2.0 release
-Wheelhouse version: 1.2.0
+Generated: 2026-09-29 for the v1.2.1 release
+Wheelhouse version: 1.2.1

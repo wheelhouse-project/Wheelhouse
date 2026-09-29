@@ -162,6 +162,155 @@ def test_click_point_without_a_request_id_omits_the_key(handler):
 
 
 # ---------------------------------------------------------------------------
+# click_at_pointer (wh-voice-access-parity.2.5)
+# ---------------------------------------------------------------------------
+
+
+def test_click_at_pointer_clicks_where_the_pointer_is(handler):
+    """The handler reads the pointer and clicks there through the seam."""
+    handler._pointer_position_seam = MagicMock(return_value=(-300, 250))
+    seam = MagicMock(return_value=(True, None))
+    handler._mouse_click_seam = seam
+    handler.buffer_manager = MagicMock()
+
+    handler.click_at_pointer(
+        button="left", click_count=3,
+        trace_id="trace-p", request_id="req-p1",
+    )
+
+    handler._pointer_position_seam.assert_called_once_with()
+    seam.assert_called_once_with(-300, 250, "left", 3)
+    handler.buffer_manager.invalidate.assert_called_once_with()
+    response = _one_response(
+        handler, action="click_at_pointer", request_id="req-p1",
+    )
+    assert response.status == "ok"
+    assert response.outcome == "ok"
+    assert response.reason is None
+    assert response.trace_id == "trace-p"
+
+
+def test_click_at_pointer_defaults_to_a_single_left_click(handler):
+    handler._pointer_position_seam = MagicMock(return_value=(5, 6))
+    seam = MagicMock(return_value=(True, None))
+    handler._mouse_click_seam = seam
+
+    handler.click_at_pointer(request_id="req-p2")
+
+    seam.assert_called_once_with(5, 6, "left", 1)
+
+
+def test_click_at_pointer_short_circuits_when_clicking_is_disabled(handler):
+    handler._pointer_position_seam = MagicMock(return_value=(5, 6))
+    seam = MagicMock(return_value=(True, None))
+    handler._mouse_click_seam = seam
+    _disable_clicking(handler)
+
+    handler.click_at_pointer(request_id="req-p3")
+
+    seam.assert_not_called()
+    response = _one_response(
+        handler, action="click_at_pointer", request_id="req-p3",
+    )
+    assert response.outcome == "execution_failed"
+    assert response.reason == "disabled_by_config"
+
+
+def test_click_at_pointer_is_not_gated_by_the_grid_keys(handler):
+    """The gate is the [click] master switch, not grid_enabled_effective.
+
+    A bad grid key refuses the grid, but clicking at the pointer uses no
+    grid geometry, so the click still goes out (RULING 22:16, plan A).
+    """
+    handler._pointer_position_seam = MagicMock(return_value=(5, 6))
+    seam = MagicMock(return_value=(True, None))
+    handler._mouse_click_seam = seam
+    _invalidate_grid_config(handler)
+
+    handler.click_at_pointer(request_id="req-p4")
+
+    seam.assert_called_once_with(5, 6, "left", 1)
+    response = _one_response(
+        handler, action="click_at_pointer", request_id="req-p4",
+    )
+    assert response.outcome == "ok"
+
+
+def test_click_at_pointer_reports_the_seam_refusal(handler):
+    handler._pointer_position_seam = MagicMock(return_value=(5, 6))
+    handler._mouse_click_seam = MagicMock(
+        return_value=(False, "sendinput_short")
+    )
+
+    handler.click_at_pointer(trace_id="t", request_id="req-p5")
+
+    response = _one_response(
+        handler, action="click_at_pointer", request_id="req-p5",
+    )
+    assert response.status == "error"
+    assert response.outcome == "execution_failed"
+    assert response.reason == "sendinput_short"
+
+
+def test_click_at_pointer_fails_closed_when_the_pointer_is_unreadable(
+    handler,
+):
+    handler._pointer_position_seam = MagicMock(return_value=None)
+    seam = MagicMock(return_value=(True, None))
+    handler._mouse_click_seam = seam
+
+    handler.click_at_pointer(request_id="req-p6")
+
+    seam.assert_not_called()
+    response = _one_response(
+        handler, action="click_at_pointer", request_id="req-p6",
+    )
+    assert response.outcome == "execution_failed"
+    assert response.reason == "pointer_unavailable"
+
+
+def test_click_at_pointer_maps_an_unexpected_error_to_one_response(handler):
+    handler._pointer_position_seam = MagicMock(
+        side_effect=RuntimeError("boom"),
+    )
+    handler._mouse_click_seam = MagicMock(return_value=(True, None))
+
+    handler.click_at_pointer(request_id="req-p7")
+
+    response = _one_response(
+        handler, action="click_at_pointer", request_id="req-p7",
+    )
+    assert response.outcome == "execution_failed"
+    assert response.reason == "unexpected_error"
+
+
+def test_click_at_pointer_owns_its_response_and_is_wired():
+    from input_proc import _HANDLES_OWN_RESPONSE
+    from ui import ui_action_handler as mod
+
+    assert "click_at_pointer" in _HANDLES_OWN_RESPONSE
+    assert callable(getattr(mod.UIActionHandler, "click_at_pointer"))
+    assert callable(mod._win32_pointer_position)
+
+
+def test_the_pointer_seam_reads_getcursorpos_and_fails_soft():
+    from ui import ui_action_handler as mod
+
+    with patch(f"{_MOD}.win32gui.GetCursorPos", return_value=(-3, 7)):
+        assert mod._win32_pointer_position() == (-3, 7)
+    with patch(
+        f"{_MOD}.win32gui.GetCursorPos", side_effect=OSError("denied"),
+    ):
+        assert mod._win32_pointer_position() is None
+
+
+def test_the_pointer_seam_is_wired_by_default(handler):
+    from ui import ui_action_handler as mod
+
+    assert handler._pointer_position_seam is mod._win32_pointer_position
+
+
+# ---------------------------------------------------------------------------
 # move_pointer
 # ---------------------------------------------------------------------------
 

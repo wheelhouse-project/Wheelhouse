@@ -89,9 +89,12 @@ def test_every_shipped_provider_uses_winrt_only():
         ]
         # Explicit keywords prevent a positional backend or **options from
         # concealing selection. Check every call, including diagnostics.
+        # outage_callback carries the microphone loss and recovery notices
+        # (wh-mic-loss-notice); like overflow_callback, it selects nothing.
         if not calls or any(
             call.args or any(
-                keyword.arg not in {"config", "overflow_callback"}
+                keyword.arg not in {
+                    "config", "overflow_callback", "outage_callback"}
                 for keyword in call.keywords
             )
             for call in calls

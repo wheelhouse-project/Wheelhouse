@@ -130,7 +130,7 @@ def test_toc_anchor_links_have_matching_targets():
 def test_link_routing_classification():
     assert link_is_external(REGEX_CHECKER_URL)
     assert link_is_external("http://example.com/page")
-    assert not link_is_external("#wake-word")
+    assert not link_is_external("#safety-word")
     assert not link_is_external("")
 
 
@@ -192,3 +192,40 @@ def test_rendered_document_carries_every_toc_anchor():
     assert fragments, "no internal TOC links found"
     missing = fragments - names
     assert not missing, f"anchors lost in Qt rendering: {sorted(missing)}"
+
+
+# ---------------------------------------------------------------------------
+# Numbers in commands (wh-number-capture-enforce, acceptance 1)
+# ---------------------------------------------------------------------------
+
+NUMBERS_PARAGRAPH_1 = (
+    r'Capture every number with (\d+). It accepts digits and number words, '
+    r'so it matches both "5" and "five". The speech engine can return either '
+    r'form for the same spoken number. Write (\d+)? when the number is '
+    r'optional, as in ^back ?space\s*(\d+)?$.'
+)
+NUMBERS_PARAGRAPH_2 = (
+    r"Other forms accept less. \d and [0-9] accept digits only. A list of "
+    "number words, such as (one|two|three), accepts only the words it lists. "
+    "Advanced mode does not save a command that matches a number in one of "
+    "those forms. The mouse grid commands are the one exception. They list "
+    "1 to 9 on purpose, because the grid has nine cells."
+)
+
+
+def test_numbers_section_is_in_the_toc_after_advanced_mode():
+    page = build_help_html()
+    assert '<a href="#numbers">Numbers in commands</a>' in page
+    assert '<h3><a name="numbers">Numbers in commands</a></h3>' in page
+    assert (
+        page.index('name="advanced-mode"')
+        < page.index('name="numbers"')
+        < page.index('name="function-reference"')
+    )
+
+
+def test_numbers_section_renders_the_exact_paragraphs():
+    dlg = PatternHelpDialog(parent=None)
+    text = dlg._browser.document().toPlainText()
+    assert NUMBERS_PARAGRAPH_1 in text
+    assert NUMBERS_PARAGRAPH_2 in text

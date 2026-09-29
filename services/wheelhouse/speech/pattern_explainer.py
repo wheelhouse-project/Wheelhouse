@@ -3,8 +3,8 @@
 ``explain_pattern`` turns one pattern dict -- the same per-pattern shape the
 Pattern Manager window receives from ``pm_get_patterns`` (``raw_pattern``,
 ``requires_hotword``, ``raw_actions`` as raw TOML action dicts, plus optional
-``phrases`` list, optional ``type`` of ``command``/``replacement``, optional
-``position`` of ``trailing``) -- into a multi-line English description
+``phrases`` list, optional ``type`` of ``command``/``replacement``) -- into a
+multi-line English description
 (wh-pattern-editor-explainer; spec:
 docs/plans/2026-07-09-pattern-manager-editor-design-v1.md section 10).
 
@@ -16,8 +16,7 @@ Output grammar (pinned by tests/test_pattern_explainer.py):
    against the whole utterance, speech/pattern_matcher.py) read
    ``Say 'save'.``; replacements (unanchored: matched with search anywhere
    in dictated text) read ``When you say 'period' anywhere while
-   dictating...``; trailing-position commands read ``Say 'submit' as the
-   last word of what you say...``. A phrase list renders directly as
+   dictating...``. A phrase list renders directly as
    ``Say 'editor' (or 'code editor', 'vs code').``.
 3. One sentence per action step from the function catalog
    (speech/action_catalog.py labels with the step's actual parameter
@@ -557,20 +556,18 @@ def _describe_step(action):
 
 
 def pattern_kind(pattern):
-    """Classify an entry as ``trailing`` / ``command`` / ``replacement``.
+    """Classify an entry as ``command`` / ``replacement``.
 
     The single classification seam shared by this explainer and the
     manager window's Type badge (wh-pattern-editor-r4.2), so the two can
-    never disagree. Trailing position wins (the catalog loader
-    special-cases it before the anchor check); then an explicit type from
-    the editor; then the pipeline's own rule: ^-anchored -> command
-    (fullmatch), unanchored -> replacement (search, matches
-    mid-dictation). speech/pattern_catalog.py.
+    never disagree. An explicit type from the editor wins; then the
+    pipeline's own rule: ^-anchored -> command (fullmatch), unanchored ->
+    replacement (search, matches mid-dictation).
+    speech/pattern_catalog.py. A leftover ``position`` key is ignored,
+    as the catalog loader ignores it (wh-remove-trailing-submit).
     """
     if not isinstance(pattern, dict):
         return "command"
-    if pattern.get("position") == "trailing":
-        return "trailing"
     if pattern.get("type") in ("command", "replacement"):
         return pattern["type"]
     raw = pattern.get("raw_pattern")
@@ -660,15 +657,10 @@ def explain_pattern(pattern, hotword):
         if wake:
             lines.append(f"You must say '{wake}' first.")
         else:
-            lines.append("You must say the wake word first.")
+            lines.append("You must say the safety word first.")
 
     folded = False
-    if kind == "trailing":
-        lines.append(
-            f"Say {display}{clauses} as the last word of what you say; "
-            "the words you said before it are typed as dictation."
-        )
-    elif kind == "command":
+    if kind == "command":
         lines.append(f"Say {display}{clauses}.")
     else:
         stem = f"When you say {display}{clauses}"

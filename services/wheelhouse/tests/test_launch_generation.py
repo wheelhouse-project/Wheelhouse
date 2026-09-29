@@ -1349,6 +1349,62 @@ class TestAReplacedLaunchsFailureLeavesTheDisplayAlone:
 
         notifier._send_notification.assert_called_once()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["mic_lost", "mic_recovered"])
+    async def test_a_replaced_launchs_microphone_notice_does_not_toast(
+        self, kind
+    ):
+        """wh-mic-loss-notice ruling D5: the microphone kinds are exempt
+        from the startup suppression, and a launch the user has already
+        replaced still may not show them -- its microphone is not the one
+        the replacement will use."""
+        current = {"generation": 1}
+        launcher = self._launcher(current)
+        state_manager, notifier = self._state_manager()
+        manager = self._manager(state_manager, launcher)
+
+        await manager.handle_connection(
+            self._client(
+                self._frames(
+                    current,
+                    2,
+                    kind=kind,
+                    message="Microphone lost. Speech recognition is waiting "
+                    "for it to come back.",
+                )
+            )
+        )
+
+        notifier._send_notification.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["mic_lost", "mic_recovered"])
+    async def test_the_current_launchs_microphone_notice_still_toasts(
+        self, kind
+    ):
+        """The opposite case: nothing replaced this launch, and
+        `is_starting` is true, so only the exemption lets it through."""
+        current = {"generation": 1}
+        launcher = self._launcher(current)
+        state_manager, notifier = self._state_manager()
+        manager = self._manager(state_manager, launcher)
+
+        await manager.handle_connection(
+            self._client(
+                self._frames(
+                    current,
+                    1,
+                    kind=kind,
+                    message="Microphone lost. Speech recognition is waiting "
+                    "for it to come back.",
+                )
+            )
+        )
+
+        notifier._send_notification.assert_called_once()
+        launcher.signal_provider_startup_failed.assert_not_called()
+        launcher.signal_provider_ready.assert_not_called()
+
 
 class TestOnlyAReadyFrameCompletesStartup:
     """An error is not a ready signal, whatever words it contains.
@@ -3679,3 +3735,260 @@ class TestTheNoticeNamesTheLaunchItBelongsTo:
             launcher._current_launch_generation,
         )
         assert launcher._current_launch_generation == 1
+
+
+_ACCESS_VIOLATION = 3221225477
+
+
+def _append_exit_line(launcher, provider_name, code):
+    """One exit line in the provider's stderr file, written the way
+    shared_stt/launcher.py writes it after its child exits
+    (wh-provider-native-crash-trace)."""
+    path = launcher.app_data_dir / f"{provider_name}.stderr.log"
+    with open(path, "ab") as stream:
+        stream.write(
+            f"[launcher] {provider_name} process exited with code {code} "
+            f"(0x{code & 0xFFFFFFFF:08X}) after 1.0s\n".encode("utf-8"))
+
+
+def _stderr_messages(caplog, provider_name):
+    prefix = f"[{provider_name} stderr] "
+    return [record.getMessage() for record in caplog.records
+            if record.getMessage().startswith(prefix)]
+
+
+# Codes that show no crash notice: a Python error, a termination, and
+# Ctrl+C, which has error severity but is not a crash (Boss e8 ruling
+# 09:46 2026-09-25).
+_ORDINARY_CODES = [
+    pytest.param(1, id="python-error"),
+    pytest.param(15, id="terminated"),
+    pytest.param(0xC000013A, id="ctrl-c"),
+]
+
+
+_NATIVE_STOPPED_TEXT = (
+    "The Google speech engine stopped because of an error in its "
+    "program code (exit code 0xC0000005) and did not start again. "
+    "The file wheelhouse.log has the details."
+)
+
+
+class TestAProviderDeathCopiesItsStderrAndNamesANativeCrash:
+    """A native crash leaves its trace in wheelhouse.log and in the notice.
+
+    The provider's supervisor writes the child's stderr and one exit line
+    per child exit to <app data>/<provider>.stderr.log. Every place that
+    notices a provider death copies the lines added since the launch into
+    wheelhouse.log, and so does each ready report (ruling R2). A
+    dead-child or late-death notice for a native crash says so instead
+    of the generic text (A6, R4, R5); other codes keep today's text
+    (wh-provider-native-crash-trace).
+    """
+
+    def _launcher(self, tmp_path):
+        launcher = _launcher(tmp_path)
+        launcher._launch_generations = {"google": 1}
+        launcher._current_launch_generation = 1
+        launcher._late_death_poll_interval = 0.01
+        launcher._late_death_watch_limit = 5.0
+        launcher._provider_stopped = MagicMock()
+        launcher._hide_working = MagicMock()
+        launcher._notify = MagicMock()
+        # start_provider marks the launch; these tests start no child.
+        launcher._stderr_tail.mark_launch("google")
+        return launcher
+
+    def test_a_native_crash_of_a_dead_child_names_the_code(self, tmp_path):
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", _ACCESS_VIOLATION)
+
+        launcher._monitor_startup(
+            "google", "Google", timeout=0.01, generation=1,
+            process=_dead_subprocess(),
+        )
+
+        launcher._notify.assert_called_once_with(
+            "Google", _NATIVE_STOPPED_TEXT, 1)
+
+    @pytest.mark.parametrize("code", _ORDINARY_CODES)
+    def test_a_dead_child_with_an_ordinary_code_keeps_todays_text(
+            self, tmp_path, code):
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", code)
+
+        launcher._monitor_startup(
+            "google", "Google", timeout=0.01, generation=1,
+            process=_dead_subprocess(),
+        )
+
+        launcher._notify.assert_called_once_with(
+            "Google", "Failed to start - try restarting Wheelhouse", 1)
+
+    def test_the_dead_child_copies_its_stderr_into_the_log(
+            self, tmp_path, caplog):
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", 1)
+
+        with caplog.at_level(logging.WARNING):
+            launcher._monitor_startup(
+                "google", "Google", timeout=0.01, generation=1,
+                process=_dead_subprocess(),
+            )
+
+        assert _stderr_messages(caplog, "google") == [
+            "[google stderr] [launcher] google process exited with code 1 "
+            "(0x00000001) after 1.0s"]
+
+    def test_a_native_crash_after_the_monitor_gave_up_names_the_code(
+            self, tmp_path):
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", _ACCESS_VIOLATION)
+
+        launcher._watch_for_late_death(
+            "google", "Google", _slot(launcher, 1), _dead_subprocess(), 1)
+
+        launcher._notify.assert_called_once_with(
+            "Google", _NATIVE_STOPPED_TEXT, 1)
+
+    @pytest.mark.parametrize("code", _ORDINARY_CODES)
+    def test_a_late_death_with_an_ordinary_code_keeps_todays_text(
+            self, tmp_path, code):
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", code)
+
+        launcher._watch_for_late_death(
+            "google", "Google", _slot(launcher, 1), _dead_subprocess(), 1)
+
+        launcher._notify.assert_called_once_with(
+            "Google", "Failed to start - try restarting Wheelhouse", 1)
+
+    def test_the_late_death_copies_its_stderr_into_the_log(
+            self, tmp_path, caplog):
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", 1)
+
+        with caplog.at_level(logging.WARNING):
+            launcher._watch_for_late_death(
+                "google", "Google", _slot(launcher, 1), _dead_subprocess(), 1)
+
+        assert _stderr_messages(caplog, "google") == [
+            "[google stderr] [launcher] google process exited with code 1 "
+            "(0x00000001) after 1.0s"]
+
+    def test_a_declared_failure_copies_its_stderr_into_the_log(
+            self, tmp_path, caplog):
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        launcher._subprocesses = {"google": _live_subprocess()}
+        _append_exit_line(launcher, "google", 3)
+        launcher.signal_provider_startup_failed(1)
+
+        with caplog.at_level(logging.WARNING):
+            launcher._monitor_startup(
+                "google", "Google", timeout=0.01, generation=1)
+
+        launcher._provider_stopped.assert_called_once_with(
+            "google", may_wait=True, generation=1)
+        assert _stderr_messages(caplog, "google") == [
+            "[google stderr] [launcher] google process exited with code 3 "
+            "(0x00000003) after 1.0s"]
+
+    def test_an_undeclared_failure_copies_its_stderr_into_the_log(
+            self, tmp_path, caplog):
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        launcher._subprocesses = {"google": _live_subprocess()}
+        launcher._undeclared_startup_failures.add(1)
+        _append_exit_line(launcher, "google", 3)
+
+        with caplog.at_level(logging.WARNING):
+            launcher._monitor_startup(
+                "google", "Google", timeout=0.01, generation=1)
+
+        launcher._provider_stopped.assert_called_once_with(
+            "google", may_wait=True, generation=1)
+        assert _stderr_messages(caplog, "google") == [
+            "[google stderr] [launcher] google process exited with code 3 "
+            "(0x00000003) after 1.0s"]
+
+    def test_a_failure_after_the_monitor_gave_up_copies_its_stderr(
+            self, tmp_path, caplog):
+        """The failure signal reports an orphaned launch itself, so it
+        also copies the lines; the next launch's mark would skip them
+        (wh-provider-native-crash-trace.1.1)."""
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        launcher._subprocesses = {"google": _live_subprocess()}
+        launcher._monitor_startup(
+            "google", "Google", timeout=0.01, generation=1)
+        launcher._provider_stopped.assert_not_called()
+        _append_exit_line(launcher, "google", 3)
+
+        with caplog.at_level(logging.WARNING):
+            launcher.signal_provider_startup_failed(1)
+            _join_orphan_reports(launcher)
+
+        launcher._provider_stopped.assert_called_once_with(
+            "google", may_wait=True, generation=1)
+        assert _stderr_messages(caplog, "google") == [
+            "[google stderr] [launcher] google process exited with code 3 "
+            "(0x00000003) after 1.0s"]
+
+    def test_an_undeclared_failure_after_the_monitor_gave_up_copies_its_stderr(
+            self, tmp_path, caplog):
+        """The same handoff for a failure no launch could be given
+        (wh-provider-native-crash-trace.1.1)."""
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        launcher._subprocesses = {"google": _live_subprocess()}
+        launcher._monitor_startup(
+            "google", "Google", timeout=0.01, generation=1)
+        launcher._provider_stopped.assert_not_called()
+        _append_exit_line(launcher, "google", 3)
+
+        with caplog.at_level(logging.WARNING):
+            launcher.record_undeclared_startup_failure(1)
+            _join_orphan_reports(launcher)
+
+        launcher._provider_stopped.assert_called_once_with(
+            "google", may_wait=True, generation=1)
+        assert _stderr_messages(caplog, "google") == [
+            "[google stderr] [launcher] google process exited with code 3 "
+            "(0x00000003) after 1.0s"]
+
+    def test_a_ready_report_copies_the_new_stderr_lines(
+            self, tmp_path, caplog):
+        """A crash the supervisor restarted on its own reaches the log at
+        the next ready (ruling R2)."""
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", _ACCESS_VIOLATION)
+
+        with caplog.at_level(logging.WARNING):
+            launcher.signal_provider_ready(1)
+
+        assert _stderr_messages(caplog, "google") == [
+            "[google stderr] [launcher] google process exited with code "
+            "3221225477 (0xC0000005) after 1.0s"]
+
+    def test_a_ready_for_an_unknown_launch_copies_nothing(
+            self, tmp_path, caplog):
+        import logging
+
+        launcher = self._launcher(tmp_path)
+        _append_exit_line(launcher, "google", _ACCESS_VIOLATION)
+
+        with caplog.at_level(logging.WARNING):
+            launcher.signal_provider_ready(7)
+
+        assert _stderr_messages(caplog, "google") == []

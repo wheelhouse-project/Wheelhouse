@@ -66,8 +66,9 @@ def _first_native_risk_import(tree):
 
     Standard library imports cannot: the interpreter already holds them, or
     they are built in. Everything else can, including this project's own
-    modules -- shared_audio pulls in pysilero_vad, and that is the import
-    that faults on MavenCore.
+    modules -- shared_audio's Silero VAD loads onnxruntime, whose import
+    fails on MavenCore. (Until wh-vad-releases-gil it loaded pysilero_vad,
+    whose model load faulted there.)
     """
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

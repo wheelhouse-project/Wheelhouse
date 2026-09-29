@@ -59,13 +59,18 @@ CAPTURE_BACKEND_NAME = "winrt"
 
 def get_audio_provider(
     config: Optional[AudioConfig] = None,
-    overflow_callback=None
+    overflow_callback=None,
+    outage_callback=None
 ) -> AudioProvider:
     """Create the WinRT audio capture, or refuse to create anything.
 
     Args:
         config: Audio configuration. Defaults to 16kHz mono 30ms.
         overflow_callback: Called when the audio queue overflows.
+        outage_callback: Called as outage_callback(event, device) when the
+            microphone is lost ("lost", None) and when samples arrive again
+            ("recovered", device name or None). The provider uses it to put
+            a notice on the screen (wh-mic-loss-notice).
 
     Returns:
         A WinRTAudioCapture ready for use. It carries OVERFLOW_SOURCE, the
@@ -96,4 +101,4 @@ def get_audio_provider(
 
     config = config or AudioConfig()
     logger.info("Using WinRT audio capture")
-    return WinRTAudioCapture(config, overflow_callback)
+    return WinRTAudioCapture(config, overflow_callback, outage_callback)

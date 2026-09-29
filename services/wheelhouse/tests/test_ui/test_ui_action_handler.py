@@ -1109,6 +1109,40 @@ class TestRawInsertTextFailureRaises:
             with pytest.raises(PasteFailedError):
                 handler.raw_insert_text("text")
 
+    def test_failure_message_does_not_carry_the_spoken_text(
+            self, handler, monkeypatch):
+        """wh-voice-access-parity.1.14.1.1: input_proc logs the
+        exception's text verbatim, so the message must pass the payload
+        through redact_transcript. "no space <words>" is the command a
+        person uses for password fragments."""
+        from ui.ui_action_handler import PasteFailedError
+        from utils.redact import ENV_VAR
+
+        monkeypatch.delenv(ENV_VAR, raising=False)
+        mock_strategy = MagicMock()
+        mock_strategy.insert.return_value = _fail(clipboard_dirty=False)
+        handler.router.get_strategy.return_value = mock_strategy
+
+        with patch(f"{_MOD}.capture_context") as mock_ctx:
+            mock_ctx.return_value = _make_context(focused_control=MagicMock())
+            with pytest.raises(PasteFailedError) as excinfo:
+                handler.raw_insert_text("hunter2secret")
+
+        assert "hunter2secret" not in str(excinfo.value)
+        assert "<redacted:" in str(excinfo.value)
+
+        # The Input reader loop logs, and answers the request with,
+        # _safe_error_text(e). The loop cannot be driven from a unit test,
+        # so the guard on it is on its source, as in test_soft_allow.py.
+        import inspect
+        import input_proc
+
+        err = input_proc._safe_error_text(excinfo.value)
+        assert "hunter2secret" not in err
+        src = inspect.getsource(input_proc.input_process_main)
+        assert "err = _safe_error_text(e)" in src
+        assert "'message': err" in src
+
     def test_success_does_not_raise(self, handler):
         mock_strategy = MagicMock()
         mock_strategy.insert.return_value = _ok(clipboard_dirty=True)
@@ -2538,6 +2572,68 @@ class TestHotkeyAction:
         mock_ctx.return_value = _make_context()
         handler.hotkey_action(["ctrl", "z"], repeat=3)
         assert mock_pk.call_count == 3
+
+    # wh-voice-access-parity.1.15.4: VS Code selected one word for "select
+    # forward 3 words" when the three chords arrived back to back. Probe 2
+    # (2026-09-26 11:42) selected all three words 5 of 5 times only with a
+    # pause of 100 ms or more between chords; 60 ms still failed.
+
+    @patch(f"{_MOD}.capture_context")
+    @patch(f"{_MOD}.verified_press_keys", return_value=(True, 6, 6))
+    def test_repeated_hotkey_pauses_at_least_100_ms_between_presses(
+        self, mock_pk, mock_ctx, handler
+    ):
+        mock_ctx.return_value = _make_context()
+        order = MagicMock()
+        order.attach_mock(mock_pk, "press")
+        with patch(f"{_MOD}.time.sleep") as mock_sleep:
+            order.attach_mock(mock_sleep, "sleep")
+            handler.hotkey_action(["shift", "ctrl", "right"], repeat=3)
+        names = [c[0] for c in order.mock_calls]
+        assert names == ["press", "sleep", "press", "sleep", "press"]
+        assert all(c.args[0] >= 0.1 for c in mock_sleep.call_args_list)
+
+    @patch(f"{_MOD}.capture_context")
+    @patch(f"{_MOD}.verified_press_keys", return_value=(True, 2, 2))
+    def test_single_hotkey_does_not_pause(self, mock_pk, mock_ctx, handler):
+        mock_ctx.return_value = _make_context()
+        with patch(f"{_MOD}.time.sleep") as mock_sleep:
+            handler.hotkey_action(["ctrl", "c"])
+        mock_pk.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @patch(f"{_MOD}.capture_context")
+    @patch(f"{_MOD}.verified_press_keys", return_value=(True, 2, 2))
+    def test_repeated_flutter_hotkey_pauses_between_presses(
+        self, mock_pk, mock_ctx, handler
+    ):
+        fc = MagicMock()
+        fc.Exists.return_value = True
+        mock_ctx.return_value = _make_context(
+            focused_control=fc, is_flutter=True
+        )
+        order = MagicMock()
+        order.attach_mock(fc.SendKeys, "send")
+        with patch.object(handler, '_convert_to_sendkeys_format', return_value='{Ctrl}z'), \
+                patch(f"{_MOD}.time.sleep") as mock_sleep:
+            order.attach_mock(mock_sleep, "sleep")
+            handler.hotkey_action(["ctrl", "z"], repeat=2)
+        names = [c[0] for c in order.mock_calls]
+        assert names == ["send", "sleep", "send"]
+        assert mock_sleep.call_args.args[0] >= 0.1
+
+    @patch(f"{_MOD}.capture_context")
+    @patch(f"{_MOD}.verified_press_keys")
+    def test_refused_hotkey_stops_without_a_further_pause(
+        self, mock_pk, mock_ctx, handler
+    ):
+        mock_ctx.return_value = _make_context()
+        mock_pk.side_effect = [(True, 2, 2), (False, 0, 2), (True, 2, 2)]
+        with patch(f"{_MOD}.time.sleep") as mock_sleep, \
+                patch(f"{_MOD}._send_modifier_keyups"):
+            handler.hotkey_action(["ctrl", "z"], repeat=3)
+        assert mock_pk.call_count == 2
+        assert mock_sleep.call_count == 1
 
     @patch(f"{_MOD}.capture_context")
     @patch(f"{_MOD}.verified_press_keys", return_value=(True, 2, 2))

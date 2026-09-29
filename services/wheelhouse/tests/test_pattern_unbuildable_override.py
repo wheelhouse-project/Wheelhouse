@@ -104,10 +104,19 @@ def _first_entry(block):
 CASES = [
     pytest.param({"expression": ""}, False, id="empty-expression"),
     pytest.param({"expression": "["}, False, id="invalid-regex"),
+    pytest.param({"expression": "^maximize$"}, True, id="ordinary-command"),
+    pytest.param({"expression": "teh"}, True, id="replacement-no-anchor"),
+    # A leftover position field is ignored (wh-remove-trailing-submit):
+    # the shapes the trailing loader used to reject now build.
+    pytest.param(
+        {"expression": "^submit$", "position": "trailing"},
+        True,
+        id="leftover-trailing-one-word",
+    ),
     pytest.param(
         {"expression": "^two words$", "position": "trailing"},
-        False,
-        id="trailing-more-than-one-word",
+        True,
+        id="leftover-trailing-more-than-one-word",
     ),
     pytest.param(
         {
@@ -115,15 +124,8 @@ CASES = [
             "position": "trailing",
             "requires_hotword": True,
         },
-        False,
-        id="trailing-requires-hotword",
-    ),
-    pytest.param({"expression": "^maximize$"}, True, id="ordinary-command"),
-    pytest.param({"expression": "teh"}, True, id="replacement-no-anchor"),
-    pytest.param(
-        {"expression": "^submit$", "position": "trailing"},
         True,
-        id="trailing-one-word",
+        id="leftover-trailing-requires-hotword",
     ),
 ]
 
@@ -131,7 +133,7 @@ CASES = [
 class TestThePredicateMatchesTheBuild:
     """The mirror. ``can_build_expression`` answers before the build runs.
 
-    It reproduces four of the build's rejection rules from the entry
+    It reproduces two of the build's rejection rules from the entry
     alone, so it can be wrong only by drifting from them. Each case is put
     to the real ``PatternCatalog`` as well, and the two answers must agree.
     """

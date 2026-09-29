@@ -13,28 +13,18 @@ WHAT IT DOES NOT LOOK AT. Actions. An override with a valid expression and
 the slot and suppress its built-in (wh-pattern-override-doc-id A5). The
 question here is only whether the EXPRESSION could produce a rule.
 
-THE FOUR REJECTIONS IT MIRRORS, each one a state
+THE TWO REJECTIONS IT MIRRORS, each one a state
 ``PatternCatalog._build_structures`` refuses:
   1. An empty ``pattern`` string, refused by the ``if pattern_str and
      actions_list`` guard that opens the build loop.
   2. An expression that ``re.compile`` rejects after ``transform_pattern``.
-  3. ``position = "trailing"`` with an expression that is not one literal
-     word, refused by ``PatternCatalog._build_trailing_entry``.
-  4. ``position = "trailing"`` together with ``requires_hotword``, refused
-     because a hotword must precede the command while a trailing command
-     must be the last word.
+A leftover ``position`` key changes neither answer: the build ignores it
+(wh-remove-trailing-submit), and so does this module.
 Mirroring is what makes this module able to answer before the build runs,
 and mirroring is also its risk: an edit to the build's rules that is not
 copied here would let a rejected entry take a slot again.
 ``tests/test_pattern_buildable.py`` holds each rejection to the build's
 own answer over the same entry, so the two cannot drift unnoticed.
-
-crewcut: one build-time rejection is deliberately NOT mirrored. A second
-``position = "trailing"`` entry carrying a word another entry already
-registered is skipped as a duplicate, so it builds nothing while this
-module still calls it buildable. A per-entry question cannot see the rest
-of the list. Removing the limit means giving the merge the whole merged
-list to answer against, which is a larger change than the defect needs.
 """
 
 from __future__ import annotations
@@ -44,10 +34,6 @@ from typing import Any, Optional
 
 from .pattern_identity import Identity, entry_identity
 from .pattern_transform import transform_pattern
-
-# The v1 trailing-command contract: one literal word, letters then
-# letters or digits. The same expression ``_build_trailing_entry`` uses.
-_TRAILING_WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
 
 def can_build_expression(entry: Any) -> bool:
@@ -66,19 +52,6 @@ def can_build_expression(entry: Any) -> bool:
     # produce a rule for it and this must not claim otherwise.
     if not isinstance(expression, str) or not expression:
         return False
-    if entry.get("position") == "trailing":
-        if entry.get("requires_hotword", False):
-            return False
-        candidate = expression.strip()
-        if not candidate:
-            return False
-        if candidate.startswith("^"):
-            candidate = candidate[1:]
-        if candidate.endswith("$"):
-            candidate = candidate[:-1]
-        # The word is escaped before compiling, so a word that passes
-        # this check always compiles.
-        return _TRAILING_WORD_RE.fullmatch(candidate) is not None
     try:
         transformed, _metadata = transform_pattern(expression)
         re.compile(transformed, re.IGNORECASE)

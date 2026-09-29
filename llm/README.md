@@ -1,11 +1,15 @@
 # Wheelhouse help for your LLM
 
 The fastest path is the official
-[Wheelhouse Assistant on Google Gemini](https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A)
+[Wheelhouse Assistant](https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview)
 — one click, nothing to set up, and it always answers from the latest
-documentation. Gemini asks you to sign in first. A Google account, an
-Apple account, or an email address works, and the free tier is enough (no
-credit card required).
+documentation. The Wheelhouse Assistant runs on Google's Gemini Notebook,
+so you must sign in with a Google Account. The account is free, and Google
+does not ask for a credit card. You can use an email address you already
+have; a Gmail address is not necessary. To create an account, click
+"Create account" on the Google sign-in page. If you are signed in with a
+work or school account and the Assistant does not open, sign in with a
+personal account instead.
 
 Prefer your own setup? Wheelhouse's complete user guide is written so an
 AI chat service can answer questions from it. Load it into the LLM you
@@ -19,11 +23,11 @@ in plain language.
 |------|------------|---------------------|
 | [`wheelhouse_help.md`](../services/wheelhouse/knowledge/wheelhouse_help.md) | The Wheelhouse daily-use guide | Upload it to your AI service as a knowledge file |
 | [`wheelhouse_install.md`](../services/wheelhouse/knowledge/wheelhouse_install.md) | Installation, updates, removal, and engine setup | Upload it alongside the guide and reference |
-| [`wheelhouse_reference.md`](../services/wheelhouse/knowledge/wheelhouse_reference.md) | The full voice-command and configuration reference | Upload it alongside the guide so the assistant can answer detailed command and setting questions |
+| [`wheelhouse_reference.md`](../services/wheelhouse/knowledge/wheelhouse_reference.md) | The full action, notice, and configuration reference | Upload it alongside the guide so the assistant can answer detailed setting questions |
 
-The guide covers what Wheelhouse is, getting started, and how each feature
-works; the reference is the exhaustive list of every voice command and
-configuration setting. Upload all three so your assistant can answer all kinds
+The guide covers what Wheelhouse is, getting started, how each feature
+works, and every voice command; the reference is the exhaustive list of every
+configuration setting, pattern action, and notice. Upload all three so your assistant can answer all kinds
 of question. The assistant behavior rules are embedded at the top of the
 guide (its "Instructions for AI Assistant" section), so there is nothing to
 paste. If a service refuses a `.md` upload, rename the file to `.txt` — the
@@ -60,7 +64,6 @@ them. Every rule in the file works the same on any assistant that can read
 attached files.
 
 The official assistant reads one Google Doc holding all three documents
-joined together, and the Wheelhouse release rewrites that Doc. That is why
-the official assistant always describes the current release. An assistant
-built from uploaded copies describes the release you uploaded, which is
+joined together. The project rewrites that Google Doc when it publishes a
+release. An assistant built from uploaded copies describes the release you uploaded, which is
 what the release line in every answer makes visible.

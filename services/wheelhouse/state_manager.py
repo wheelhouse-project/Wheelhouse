@@ -613,6 +613,7 @@ class StateManager:
                 'stt_provider': self._get_current_stt_provider(),
                 'stt_providers_available': self._get_available_stt_providers(),
                 'stt_provider_display_names': self._get_provider_display_names(),
+                'stt_providers_not_installed': self._get_not_installed_stt_providers(),
                 'interim_results_enabled': self.interim_results_enabled,
                 'debug_mode': self.debug_mode,
                 'speech_interaction_mode': self._speech_interaction_mode,
@@ -1558,6 +1559,29 @@ class StateManager:
             return [p["name"] for p in self._remote_stt_launcher.get_providers()]
 
         return []
+
+    def _get_not_installed_stt_providers(self) -> dict[str, str]:
+        """Tray-menu entries for engines that are set up but cannot run yet.
+
+        Maps provider name to menu label, today only
+        {"parakeet_tdt": "Parakeet (model not installed)"} when the
+        installer turned Parakeet off because its model is missing
+        (wh-parakeet-model-download-offer). Kept apart from
+        stt_providers_available, which lists engines that can start, so
+        the GUI never shows such an entry as the running engine. Never
+        raises: a failed query leaves the menu without the entry.
+        """
+        launcher = self._remote_stt_launcher
+        if launcher is None:
+            return {}
+        try:
+            return {
+                p["name"]: p["display_name"]
+                for p in launcher.get_not_installed_providers()
+            }
+        except Exception as e:
+            logger.warning(f"Could not list the engines without their model: {e}")
+            return {}
 
     def _get_provider_display_names(self) -> dict[str, str]:
         """Get display name mapping for available providers.

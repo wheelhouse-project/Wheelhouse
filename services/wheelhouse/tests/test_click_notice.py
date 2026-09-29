@@ -1125,3 +1125,28 @@ def test_wording_execution_failed_invoke_then_coordinate_no_effect():
         compose_click_notice_wording(event)
         == "Wheelhouse couldn't click 'Submit' -- the control did not respond."
     )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "toggle_com_error",
+        "select_com_error",
+        "toggle_then_sendinput_failed",
+        "select_then_sendinput_failed",
+    ],
+)
+def test_wording_execution_failed_toggle_and_select_reasons(reason: str):
+    """wh-mcp-repo-mining.3: a Toggle() or Select() press that raised, or the
+    gated coordinate click after a no-side-effect raise that did not land.
+    Each is the Toggle / Select analogue of invoke_com_error /
+    invoke_then_sendinput_failed, so each shares that sentence; the tags stay
+    separate for telemetry and no new user-visible wording is introduced."""
+    event = _event(
+        outcome="execution_failed",
+        reason=reason,
+        matched_name="Remember me",
+    )
+    assert compose_click_notice_wording(event) == (
+        "Wheelhouse couldn't click 'Remember me' -- the control did not respond."
+    )

@@ -2222,3 +2222,150 @@ def test_selection_state_coerces_the_com_value_to_a_bool():
     element = FakeInvokableElement(cached=FakeRawPattern(pattern))
 
     assert uia_walker.selection_state_via_selection_item_pattern(element) is True
+
+
+# ---------------------------------------------------------------------------
+# Toggle and Select presses (wh-mcp-repo-mining.3). The click executor tries
+# these, before the MSAA default action, on a by-name click whose Invoke
+# pattern is structurally unavailable. Each reads its pattern LIVE (the walk
+# caches only Invoke and LegacyIAccessible), raises its own *Unavailable
+# exception BEFORE any call when the pattern does not resolve, and lets a
+# raise from the press call itself propagate.
+# ---------------------------------------------------------------------------
+
+class FakePressPattern:
+    """A typed Toggle / SelectionItem pattern: one press method, counted."""
+
+    def __init__(self, raises=None):
+        self.toggle_calls = 0
+        self.select_calls = 0
+        self._raises = raises
+
+    def Toggle(self):
+        self.toggle_calls += 1
+        if self._raises is not None:
+            raise self._raises
+
+    def Select(self):
+        self.select_calls += 1
+        if self._raises is not None:
+            raise self._raises
+
+
+class FakePatternByIdElement:
+    """An element answering only the pattern ids it was given, and recording
+    every id each getter was asked for (a real element answers NULL for a
+    pattern it does not support)."""
+
+    def __init__(self, patterns):
+        self._patterns = patterns
+        self.current_ids = []
+        self.cached_ids = []
+
+    def GetCurrentPattern(self, pattern_id):
+        self.current_ids.append(pattern_id)
+        return self._patterns.get(pattern_id)
+
+    def GetCachedPattern(self, pattern_id):
+        self.cached_ids.append(pattern_id)
+        return self._patterns.get(pattern_id)
+
+
+UIA_TOGGLE_PATTERN_ID = 10015
+UIA_SELECTION_ITEM_PATTERN_ID = 10010
+
+
+def test_toggle_press_toggles_through_the_live_toggle_pattern():
+    pattern = FakePressPattern()
+    element = FakePatternByIdElement(
+        {UIA_TOGGLE_PATTERN_ID: FakeRawPattern(pattern)}
+    )
+
+    uia_walker.toggle_via_toggle_pattern(element)
+
+    assert pattern.toggle_calls == 1
+    assert element.current_ids == [UIA_TOGGLE_PATTERN_ID]
+    assert element.cached_ids == []
+
+
+def test_toggle_press_raises_unavailable_without_a_toggle_pattern():
+    # A SelectionItem pattern is not a Toggle pattern: nothing is pressed.
+    other = FakePressPattern()
+    element = FakePatternByIdElement(
+        {UIA_SELECTION_ITEM_PATTERN_ID: FakeRawPattern(other)}
+    )
+
+    with pytest.raises(uia_walker.TogglePatternUnavailable):
+        uia_walker.toggle_via_toggle_pattern(element)
+    assert other.toggle_calls == 0
+    assert other.select_calls == 0
+
+
+def test_toggle_press_treats_a_null_pointer_as_unavailable():
+    element = FakePatternByIdElement({UIA_TOGGLE_PATTERN_ID: FakeNullPattern()})
+
+    with pytest.raises(uia_walker.TogglePatternUnavailable):
+        uia_walker.toggle_via_toggle_pattern(element)
+
+
+def test_toggle_press_lets_a_raising_toggle_propagate():
+    # The call was made; the executor, not this helper, decides what that
+    # allows. Swallowing it or mapping it to Unavailable would let the
+    # executor press a second time.
+    boom = RuntimeError("toggle failed")
+    pattern = FakePressPattern(raises=boom)
+    element = FakePatternByIdElement(
+        {UIA_TOGGLE_PATTERN_ID: FakeRawPattern(pattern)}
+    )
+
+    with pytest.raises(RuntimeError) as info:
+        uia_walker.toggle_via_toggle_pattern(element)
+    assert info.value is boom
+    assert pattern.toggle_calls == 1
+
+
+def test_select_press_selects_through_the_live_selection_item_pattern():
+    pattern = FakePressPattern()
+    element = FakePatternByIdElement(
+        {UIA_SELECTION_ITEM_PATTERN_ID: FakeRawPattern(pattern)}
+    )
+
+    uia_walker.select_via_selection_item_pattern(element)
+
+    assert pattern.select_calls == 1
+    assert element.current_ids == [UIA_SELECTION_ITEM_PATTERN_ID]
+    assert element.cached_ids == []
+
+
+def test_select_press_raises_unavailable_without_a_selection_item_pattern():
+    other = FakePressPattern()
+    element = FakePatternByIdElement(
+        {UIA_TOGGLE_PATTERN_ID: FakeRawPattern(other)}
+    )
+
+    with pytest.raises(uia_walker.SelectionItemPatternUnavailable):
+        uia_walker.select_via_selection_item_pattern(element)
+    assert other.toggle_calls == 0
+    assert other.select_calls == 0
+
+
+def test_select_press_treats_a_null_pointer_as_unavailable():
+    element = FakePatternByIdElement(
+        {UIA_SELECTION_ITEM_PATTERN_ID: FakeNullPattern()}
+    )
+
+    with pytest.raises(uia_walker.SelectionItemPatternUnavailable):
+        uia_walker.select_via_selection_item_pattern(element)
+
+
+def test_select_press_lets_a_raising_select_propagate():
+    boom = RuntimeError("select failed")
+    pattern = FakePressPattern(raises=boom)
+    element = FakePatternByIdElement(
+        {UIA_SELECTION_ITEM_PATTERN_ID: FakeRawPattern(pattern)}
+    )
+
+    with pytest.raises(RuntimeError) as info:
+        uia_walker.select_via_selection_item_pattern(element)
+    assert info.value is boom
+    assert pattern.select_calls == 1

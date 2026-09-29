@@ -555,7 +555,9 @@ _ARM_RELEASE = (
 # single-word sibling above it asks the same question of ``[word]``, so the
 # argument name is what makes this line unique.
 _NAME_CANNOT_MATCH = (
-    '        return not self.matcher.cannot_match(words, "replacement", False)\n'
+    "        return not self.matcher.cannot_match(\n"
+    '            words, "replacement", False, hint_engine=self.hint_engine\n'
+    "        )\n"
 )
 # The end_of_utterance arm of _should_hold_replacement_prefix.
 _WHOLE_UTTERANCE_GATE = (

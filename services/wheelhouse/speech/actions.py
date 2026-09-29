@@ -64,6 +64,16 @@ logger = logging.getLogger(__name__)
 _RUN_CAPTURE_READ_CHUNK_BYTES = 4 * 1024
 _RUN_CAPTURE_STDERR_LOG_BYTES = 4 * 1024
 
+# The largest repeat count hotkey() sends (wh-voice-access-parity.1.15.4).
+# UIActionHandler.hotkey_action pauses HOTKEY_REPEAT_PAUSE_S (0.1 s) between
+# repeats, so 30 repeats hold the Input process's command loop 2.9 s longer.
+# That stays under the 5.0 s wait for the Input process's answer (app.py
+# response_timeout_s), the 6.0 s stall report (input_proc.py
+# _DISPATCH_STALL_REPORT_S), and the 5.0 s delivery limit for commands queued
+# behind it (app.py _COMMAND_DELIVERY_TTL_S). The cap was 50 before the pause;
+# 49 pauses alone would take 4.9 s. Boss e8 ruling 2026-09-26 11:49.
+HOTKEY_REPEAT_CAP = 30
+
 
 class ActionFailed(Exception):
     """An action could not run, so the whole matched rule must be abandoned.
@@ -320,8 +330,8 @@ def words_to_int(text: Optional[str]) -> Optional[int]:
     parser's documented options, not from a table here.
 
     This function does NOT cap the value. Each caller applies its own
-    limit after the conversion -- press and hotkey clamp a repeat at 50,
-    scroll clamps at MAX_SCROLL_CLICKS -- and those limits are unchanged.
+    limit after the conversion -- press clamps a repeat at 50, hotkey at
+    HOTKEY_REPEAT_CAP, scroll at MAX_SCROLL_CLICKS.
 
     A digit string longer than ``sys.get_int_max_str_digits()`` (4300 by
     default in Python 3.12) cannot be converted either, and is reported as
@@ -453,6 +463,23 @@ SPOKEN_KEY_MAP = {
 _MODIFIER_KEYS = {'ctrl', 'alt', 'shift', 'win', 'lwin'}
 
 
+def _clamped_repeat(repeat_str, cap: int = 50) -> int:
+    """Read a spoken repeat count and clamp it to 1-``cap``.
+
+    The one reading shared by press() and press_keys()
+    (wh-voice-access-parity.2.12): words_to_int accepts digits and number
+    words, and None, zero, a negative, or an unreadable count means one
+    press. The cap stops a misheard count from flooding the input. press()
+    keeps 50; press_keys() passes HOTKEY_REPEAT_CAP because its payload is
+    a hotkey_action, which pauses between repeats (Boss e8 ruling
+    2026-09-27 19:57).
+    """
+    repeat_count = words_to_int(repeat_str)
+    if repeat_count is None or repeat_count < 1: repeat_count = 1
+    if repeat_count > cap: repeat_count = cap
+    return repeat_count
+
+
 def _normalize_key(word: str) -> Optional[Union[str, tuple]]:
     """Normalize a spoken key word to VK_CODE_MAP key name.
 
@@ -474,6 +501,47 @@ def _normalize_key(word: str) -> Optional[Union[str, tuple]]:
         return word_lower
 
     return None
+
+
+def _function_key(number_word: str) -> Optional[str]:
+    """Return the function key named by "f" and ``number_word``, or None.
+
+    The speech engine often writes F5 as "f 5" or "f five", and press_keys
+    reads the pair as one key (wh-press-f-number-function-key, David
+    2026-09-27 22:34). The number is read with words_to_int, so digits,
+    number words and the homophone "for" all work. None when the number is
+    unreadable or names no key in VK_CODE_MAP (f1 through f12 only).
+    """
+    from services.wheelhouse.utils.win_input_sender import VK_CODE_MAP
+
+    number = words_to_int(number_word)
+    if number is None:
+        return None
+    key = f"f{number}"
+    return key if key in VK_CODE_MAP else None
+
+
+def _split_function_key_count(repeat_str) -> Optional[tuple]:
+    """Split a spoken count whose first word names a function key.
+
+    "press f five three times" reaches press_keys as the keys "f" and the
+    count "five three", which the number reader combines digit by digit
+    into 53. When the keys end with "f", the first count word alone names
+    a function key (f1 to f12), and the remaining words read as a count
+    of at least 1, the caller moves that first word to the keys: F5,
+    pressed three times (wh-press-f-two-numbers-count, David 2026-09-28
+    07:11). Returns (first word, remaining words), or None to keep the
+    count as it is. "twenty one" stays 21 because twenty names no
+    function key; "one zero" stays 10 because zero is no count.
+    """
+    words = str(repeat_str).lower().replace("-", " ").split()
+    if len(words) < 2 or _function_key(words[0]) is None:
+        return None
+    rest = " ".join(words[1:])
+    count = words_to_int(rest)
+    if count is None or count < 1:
+        return None
+    return words[0], rest
 
 
 class ActionFunctions:
@@ -499,6 +567,7 @@ class ActionFunctions:
         self._functions["type_text"] = self.type_text
         self._functions["insert_text"] = self.insert_text
         self._functions["insert_raw"] = self.insert_raw
+        self._functions["insert_raw_no_spaces"] = self.insert_raw_no_spaces
         self._functions["select_phrase"] = self.select_phrase
         self._functions["insert_newlines"] = self.insert_newlines
         self._functions["transform_selection"] = self.transform_selection
@@ -639,6 +708,20 @@ class ActionFunctions:
             Dictionary payload for raw text insertion via clipboard paste.
         """
         return {"action": "raw_insert_text", "params": {"text": text}}
+
+    def insert_raw_no_spaces(self, text: str):
+        """Insert text like insert_raw, with every space removed.
+
+        The Voice Access "no space <words>" command
+        (wh-voice-access-parity.1.14): "no space hello world" types
+        "helloworld". Spaces are removed with the same rule as the
+        compress selection transform (ui/selection_transformer.py), so
+        "no space <words>" and "no space that" give the same result.
+
+        Returns:
+            Dictionary payload for raw text insertion via clipboard paste.
+        """
+        return self.insert_raw(text.replace(' ', ''))
 
     def select_phrase(self, phrase):
         """Select the first match of a spoken phrase in the focused control.
@@ -788,8 +871,8 @@ class ActionFunctions:
                 # If last arg is a valid number, treat it as repeat count
                 if repeat_count is not None and repeat_count > 0:
                     keys = keys[:-1]  # Remove repeat count from keys
-                    if repeat_count > 50:
-                        repeat_count = 50
+                    if repeat_count > HOTKEY_REPEAT_CAP:
+                        repeat_count = HOTKEY_REPEAT_CAP
                 else:
                     repeat_count = 1
         else:
@@ -952,13 +1035,11 @@ class ActionFunctions:
             Clamps repeat count between 1-50 to prevent accidental excessive input. Used by patterns like
             "delete 3" or "backspace five".
         """
-        repeat_count = words_to_int(repeat_str)
-        if repeat_count is None or repeat_count < 1: repeat_count = 1
-        if repeat_count > 50: repeat_count = 50
+        repeat_count = _clamped_repeat(repeat_str)
         logger.debug("Pressing key %r, repeat %d", key, repeat_count)
         return {"action": "press_key_action", "params": {"key": str(key), "repeat": repeat_count}}
 
-    def press_keys(self, key_sequence: str):
+    def press_keys(self, key_sequence: str, repeat_str=None):
         """Execute a spoken key combination.
 
         Parses spoken key names and executes as hotkey.
@@ -972,6 +1053,11 @@ class ActionFunctions:
 
         Args:
             key_sequence: Space-separated key names (e.g., "control alt delete")
+            repeat_str: Optional spoken count, the (\\d+) group of "press
+                tab 3 times" (wh-voice-access-parity.2.12). Read exactly as
+                press() reads its count and clamped to 1-HOTKEY_REPEAT_CAP,
+                the cap every hotkey_action repeat obeys; None, zero, or an
+                unreadable count presses once.
 
         Returns:
             Dictionary payload for hotkey action
@@ -1001,6 +1087,14 @@ class ActionFunctions:
                 expanded.append(w)
         words = expanded
 
+        # "f" and then two numbers: the first is the function key and the
+        # rest is the count (wh-press-f-two-numbers-count).
+        if repeat_str is not None and words and words[-1] == "f":
+            split = _split_function_key_count(repeat_str)
+            if split is not None:
+                words.append(split[0])
+                repeat_str = split[1]
+
         normalized_keys = []
         i = 0
 
@@ -1015,6 +1109,16 @@ class ActionFunctions:
                         normalized_keys.extend(value)
                     else:
                         normalized_keys.append(value)
+                    i += 2
+                    continue
+
+            # "f" and a number name one function key: "f 5" is F5, not F
+            # and 5 together. "f 0" and "f 13" name no key, so they fall
+            # through to the single-word reading below.
+            if words[i] == "f" and i + 1 < len(words):
+                function_key = _function_key(words[i + 1])
+                if function_key is not None:
+                    normalized_keys.append(function_key)
                     i += 2
                     continue
 
@@ -1059,13 +1163,18 @@ class ActionFunctions:
         # trailing digit: "press 1" produced an empty key list, "press
         # control 2" pressed ctrl twice and never pressed 2, and the
         # ("shift", "9") aliases for "(" pressed shift nine times. Every
-        # token here is already validated as a key name, so the repeat is
-        # always 1 (wh-arrow-key-names-missing.1.2). hotkey() keeps the
-        # heuristic for pattern callers that pass a bare count group, such
-        # as the "undo 3" pattern's hk ctrl z g1.
+        # token here is already validated as a key name, so no token is
+        # ever taken as a count (wh-arrow-key-names-missing.1.2). The
+        # count arrives only as its own argument, from the pattern's
+        # "<n> times" group (wh-voice-access-parity.2.12). hotkey() keeps
+        # the heuristic for pattern callers that pass a bare count group,
+        # such as the "undo 3" pattern's hk ctrl z g1.
         return {
             "action": "hotkey_action",
-            "params": {"keys": [str(k) for k in sorted_keys], "repeat": 1},
+            "params": {
+                "keys": [str(k) for k in sorted_keys],
+                "repeat": _clamped_repeat(repeat_str, HOTKEY_REPEAT_CAP),
+            },
         }
 
     def activate_window(self, target):
@@ -1693,10 +1802,14 @@ class ActionFunctions:
         )
 
     async def grid_click_command(self, utterance: str):
-        """Handle a bare 'click' / 'right click' / 'double click'.
+        """Handle a bare 'click' / 'tap' / 'right click' / 'double click' /
+        'triple click'.
 
-        Acts at the grid's current cell center when the grid is open;
-        dictates the utterance when it is closed.
+        Acts at the grid's current cell center when the grid is open. With
+        the grid closed it clicks at the current pointer position
+        (wh-voice-access-parity.2.5, David approved 2026-08-24); it
+        dictates the utterance only when voice clicking is disabled by
+        config. "literal click" stays the way to type the word.
         """
         from .click_parser import ClickGesture
 
@@ -1705,15 +1818,19 @@ class ActionFunctions:
             gesture = ClickGesture.RIGHT_CLICK
         elif lowered.startswith("double"):
             gesture = ClickGesture.DOUBLE_CLICK
+        elif lowered.startswith("triple"):
+            gesture = ClickGesture.TRIPLE_CLICK
         else:
             gesture = ClickGesture.INVOKE
         return await self._delegate_grid_command(
             "click", gesture=gesture, utterance=utterance,
+            pointer_click=True,
         )
 
     async def _delegate_grid_command(
         self, command: str, *, number: int = 0, gesture=None,
         utterance: Optional[str] = None, badge_words: Optional[str] = None,
+        pointer_click: bool = False,
     ):
         """Shared grid-command delegation (wh-grid-speech-routing).
 
@@ -1730,6 +1847,12 @@ class ActionFunctions:
         not text. The grid still gets the number first, so the two
         overlays keep the precedence they already had. The words type
         exactly as before when badges are not showing.
+
+        ``pointer_click`` is set by the bare click words only
+        (wh-voice-access-parity.2.5). With it, the not-consumed fallback
+        first asks Logic to click at the pointer
+        (``handle_pointer_click``); the words type only when Logic
+        declines, which it does when voice clicking is disabled by config.
         """
         import uuid
 
@@ -1757,6 +1880,12 @@ class ActionFunctions:
                 badge_words, trace_id,
             ):
                 return None
+            if pointer_click and (
+                await self._click_at_pointer_instead_of_dictating(
+                    lc, gesture, utterance, trace_id,
+                )
+            ):
+                return None
             logger.info(
                 "grid %s: not consumed (grid closed); dictating %r "
                 "(trace_id=%s)", command, redact_transcript(utterance),
@@ -1764,6 +1893,20 @@ class ActionFunctions:
             )
             await self._dictate_grid_fallback(utterance)
         return None
+
+    async def _click_at_pointer_instead_of_dictating(
+        self, lc, gesture, spoken: str, trace_id: str,
+    ) -> bool:
+        """Ask Logic to click at the pointer; True when it did.
+
+        wh-voice-access-parity.2.5. A Logic object without
+        ``handle_pointer_click`` (partial wiring, an older stub) returns
+        False, so the words type, which is the behaviour before this bead.
+        """
+        click = getattr(lc, "handle_pointer_click", None)
+        if click is None:
+            return False
+        return bool(await click(gesture, trace_id, spoken=spoken))
 
     async def _click_badge_instead_of_dictating(
         self, spoken: str, trace_id: str,

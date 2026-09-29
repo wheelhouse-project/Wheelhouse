@@ -92,7 +92,7 @@ class TestTheFactoryReturnsWinRTAndNothingElse:
                 config = AudioConfig(rate=16000, channels=1)
                 provider = get_audio_provider(config=config)
 
-                MockWinRT.assert_called_once_with(config, None)
+                MockWinRT.assert_called_once_with(config, None, None)
                 assert provider is mock_instance
 
     def test_passes_the_overflow_callback_through(self):
@@ -103,7 +103,21 @@ class TestTheFactoryReturnsWinRTAndNothingElse:
 
                 get_audio_provider(config=config, overflow_callback=callback)
 
-                MockWinRT.assert_called_once_with(config, callback)
+                MockWinRT.assert_called_once_with(config, callback, None)
+
+    def test_passes_the_outage_callback_through(self):
+        """wh-mic-loss-notice: the provider's notice callback reaches the
+        capture, which is the only place a loss is seen."""
+        with patch('shared_audio.capture.factory.WINRT_AUDIO_AVAILABLE', True):
+            with patch('shared_audio.capture.factory.WinRTAudioCapture') as MockWinRT:
+                overflow = Mock()
+                outage = Mock()
+                config = AudioConfig()
+
+                get_audio_provider(config=config, overflow_callback=overflow,
+                                   outage_callback=outage)
+
+                MockWinRT.assert_called_once_with(config, overflow, outage)
 
     def test_uses_a_default_config_when_none_is_given(self):
         with patch('shared_audio.capture.factory.WINRT_AUDIO_AVAILABLE', True):
@@ -170,7 +184,8 @@ class TestTheSelectionApiIsGone:
 
     def test_there_is_no_backend_parameter(self):
         parameters = inspect.signature(get_audio_provider).parameters
-        assert list(parameters) == ["config", "overflow_callback"]
+        assert list(parameters) == [
+            "config", "overflow_callback", "outage_callback"]
 
     def test_a_backend_argument_is_rejected(self):
         with patch('shared_audio.capture.factory.WINRT_AUDIO_AVAILABLE', True):

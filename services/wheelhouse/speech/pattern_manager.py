@@ -13,6 +13,11 @@ import tomllib
 from collections import Counter
 from typing import Any, Optional
 
+try:  # Python 3.11+ moved the regex parser; sre_parse is a deprecated shim.
+    import re._parser as _regex_parser
+except ImportError:  # pragma: no cover - older interpreters
+    import sre_parse as _regex_parser
+
 from .pattern_block_text import (
     PATTERN_HEADER_RE,
     is_pattern_header,
@@ -24,6 +29,7 @@ from .pattern_identity import (
     ORIGIN_KEY,
     ORIGIN_OWN,
     Identity,
+    entry_identity,
     entry_text_candidates,
     is_valid_doc_id,
     legacy_candidates,
@@ -31,6 +37,7 @@ from .pattern_identity import (
 )
 from .phrase_expression import generate_expression, normalize_phrases
 from .pattern_expression_budget import MAX_EXPRESSION_LENGTH, EXPRESSION_LENGTH_ERROR
+from .pattern_matcher import PatternMatcher, _normalize_first_word_in_text
 from .pattern_transform import transform_pattern
 from .safe_regex import RegexTimeout, match_bounded
 
@@ -139,8 +146,9 @@ class PatternManager:
         """
         return slot_identity(pat_data)
 
+    @classmethod
     def _claimed_builtin(
-        self,
+        cls,
         pat_data: dict[str, Any],
         system_keys: set[Identity],
         system_candidates: dict[str, list[Identity]],
@@ -163,7 +171,7 @@ class PatternManager:
         the badge cannot disagree about what a row claims
         (wh-pattern-override-doc-id.3.6).
         """
-        user_key = self._override_key(pat_data)
+        user_key = cls._override_key(pat_data)
         if user_key is not None and user_key in system_keys:
             return user_key, False
         # The merge's legacy resolution, asked here so the badge cannot
@@ -434,6 +442,405 @@ class PatternManager:
         return doc_id
 
     @staticmethod
+    def _saved_identity(
+        pattern: str, doc_id: str | None, own_rule: bool,
+    ) -> dict[str, Any]:
+        """The identity fields of the block a save writes.
+
+        The three keys the merge places a block by: ``pattern``, ``doc_id``
+        (present only when the save writes one) and ``origin`` (present
+        only when the save writes ``origin = "user"``). The same shape
+        ``_build_block_lines`` writes, so ``_stands_in_front_for_save`` can
+        ask about the block before it exists.
+        """
+        block: dict[str, Any] = {"pattern": pattern}
+        if doc_id is not None:
+            block[DOC_ID_KEY] = doc_id
+        if own_rule:
+            block[ORIGIN_KEY] = ORIGIN_OWN
+        return block
+
+    @classmethod
+    def _stands_in_front_for_save(
+        cls,
+        block: dict[str, Any],
+        system_entries: list[dict[str, Any]],
+    ) -> bool:
+        """Whether the merge will give this saved block no built-in's slot.
+
+        The merge (``PatternCatalog._merge_entries``) puts every user entry
+        that holds no built-in's slot in front of every shipped entry
+        (wh-user-rule-precedence; David, QUESTIONS-2026-09-28.md item 12,
+        option three). This answers that question for one block with the
+        merge's own identity rules, through ``_claimed_builtin``, the rule
+        the listing badge already shares with the merge:
+
+        - a valid ``doc_id`` that names a shipped entry takes that slot;
+        - the person's own rule (``origin = "user"`` and no ``doc_id``,
+          ``is_own_rule``) takes a slot only when its text is the identity
+          of a shipped entry that carries no ``doc_id``, which no shipped
+          entry does today, so in practice never;
+        - a block with neither key takes a slot only when exactly one
+          shipped entry carries its text (the pre-doc_id migration);
+        - a ``doc_id`` naming no shipped entry takes no slot.
+
+        *block* holds the identity fields the save writes
+        (``_saved_identity``, or the preview's simulated block). Both save
+        paths and the Try-it preview call this one decision.
+
+        crewcut: only the shipped entries are consulted. One case of the
+        merge needs the rest of the user file: a LATER block claiming the
+        same built-in displaces this one to the front. The answer here is
+        then "slot", and the save keeps the stored ``whole_utterance_only``
+        instead of copying it; the placement itself is the merge's and is
+        unaffected. Remove the limit by passing the user file's blocks in
+        and asking whether a later block claims the same built-in.
+
+        The shipped identities are computed only for the entries that
+        share this block's own identity, which is what membership needs:
+        ``slot_identity`` equals ``entry_identity`` whenever it is not
+        None, so the subset holds this block's key exactly when the full
+        set does, without compiling every shipped expression per save.
+        """
+        user_key = cls._override_key(block)
+        system_keys = {
+            key for key in (
+                cls._override_key(entry) for entry in system_entries
+                if entry_identity(entry) == user_key
+            )
+            if key is not None
+        }
+        claimed, _unresolved = cls._claimed_builtin(
+            block, system_keys, entry_text_candidates(system_entries),
+        )
+        return claimed is None
+
+    @classmethod
+    def _whole_utterance_for_save(
+        cls,
+        in_front: bool,
+        pattern: str,
+        system_entries: list[dict[str, Any]],
+        carried: object,
+    ) -> bool:
+        """The ``whole_utterance_only`` value this save writes.
+
+        *carried* is today's value: the create argument, or the value the
+        block on disk holds for an update. A save that keeps a built-in's
+        slot writes it unchanged. A save that will stand in front of the
+        built-ins (*in_front*, the ``_stands_in_front_for_save`` answer:
+        Add, Duplicate, an edit whose words moved off its built-in, an
+        edit of an own rule) copies the flag from the built-in rules whose
+        words it takes (wh-user-rule-precedence, acceptance item 4, boss
+        rulings A and R2): True when any taken built-in has it exactly
+        True, False when built-ins are taken and none has it, and the
+        carried value when the words take no built-in.
+        ``requires_hotword`` is never copied; the editor's checkbox
+        decides it.
+
+        The flag is honoured only on a ^-anchored command, so the answer is
+        False for any other expression, as it was before.
+
+        Both save paths and the Try-it preview call this one decision, so
+        the preview builds the draft with the flag the save writes.
+
+        crewcut: the copy happens only at save time. A rule saved before
+        this change keeps its stored whole_utterance_only until it is
+        saved again, so an older added rule on a whole-utterance built-in's
+        words can fire inside a longer sentence, now ahead of that
+        built-in. Remove the limit with a load-time copy in the merge, at
+        about 90 ms per such rule per load (the cost of a
+        ``_taken_builtin_flags`` pass that finds no built-in).
+        """
+        if not pattern.startswith("^"):
+            return False
+        value = carried is True
+        if in_front:
+            taken = cls._taken_builtin_flags(
+                cls._sample_phrases(pattern), system_entries,
+            )
+            if taken:
+                value = any(taken)
+        return value
+
+    @classmethod
+    def _sample_phrases(cls, pattern: str) -> list[str]:
+        """Spoken phrases *pattern* answers, for the built-in lookup.
+
+        A phrase-shaped expression gives its literal phrases. Otherwise the
+        wordings the Pattern Manager displays for an alternation are used,
+        or, with no alternation, its strip-based display ('^desktop$'
+        gives 'desktop'), followed by the phrases enumerated from the
+        expression itself (``_enumerated_phrases``). The displays alone
+        miss wordings: '^show(?: desktop)?$' displays only 'show', but it
+        also answers 'show desktop', which the whole-utterance
+        show-desktop built-in answers (wh-user-rule-precedence.2.1).
+        Each candidate is kept only when the expression really answers
+        it: the display strips syntax it cannot speak, such as a capture
+        group, and a stripped wording is not something the rule takes.
+        An expression that gives none yields no phrases, so no built-in
+        is found.
+        """
+        phrases = cls._phrases_from_expression(pattern)
+        if phrases is not None:
+            return phrases
+        wordings = cls._alternation_displays(pattern)
+        if not wordings:
+            stripped = cls._strip_display(pattern)
+            wordings = [stripped] if stripped else []
+        wordings = list(dict.fromkeys(
+            [*wordings, *cls._enumerated_phrases(pattern)],
+        ))
+        if not wordings:
+            return []
+        # The same transformed, IGNORECASE, anchor-driven match the backtrack
+        # probe runs, in the safe_regex worker: this is the person's own
+        # expression, and the Try-it path has not probed it yet.
+        try:
+            probed, _meta = transform_pattern(pattern)
+            mode = "fullmatch" if probed.startswith("^") else "search"
+            return [
+                wording for wording in wordings
+                if match_bounded(
+                    probed, wording, flags=re.IGNORECASE, mode=mode,
+                ) is not None
+            ]
+        except (re.error, RegexTimeout):
+            return []
+
+    # crewcut: the enumeration keeps only the first 64 phrases, so an
+    # expression with more wordings than that is checked only on those.
+    # A built-in that answers only a later wording is not found, and the
+    # save keeps the carried flag. Remove the limit by raising the cap, at
+    # one bounded match per extra phrase on the Logic loop.
+    _MAX_ENUMERATED_PHRASES = 64
+
+    # A spoken phrase is never this long. A longer phrase is dropped; when
+    # every phrase is longer, or a repeat's minimum count is above it, the
+    # enumeration gives nothing, so a count such as {100000} cannot hold up
+    # the save.
+    _MAX_ENUMERATED_LENGTH = 256
+
+    # The one member a character class or category contributes.
+    _CATEGORY_MEMBERS = {
+        _regex_parser.CATEGORY_DIGIT: "2",
+        _regex_parser.CATEGORY_SPACE: " ",
+        _regex_parser.CATEGORY_WORD: "a",
+    }
+
+    class _NotEnumerable(Exception):
+        """The expression holds a construct the enumeration does not cover."""
+
+    @classmethod
+    def _enumerated_phrases(cls, raw_pattern: str) -> list[str]:
+        """Phrases *raw_pattern* answers, read from its parsed form.
+
+        The expression is parsed with CPython's own regex parser and
+        walked: a literal gives its character; a group gives its
+        contents; an alternation gives every alternative; a finite repeat
+        gives every count from its minimum to its maximum, so an optional
+        group gives the phrase without it and with it; an unbounded repeat
+        gives its minimum count and the minimum plus one; an anchor gives nothing; any character ('.') gives 'a'.
+        A character class or a category gives one member: the first
+        literal or range start in the class, '2' for a digit, ' ' for a
+        space, 'a' for a word character. The pieces are joined in order,
+        runs of whitespace are collapsed, and the ends are stripped.
+
+        Anything else -- a back reference, a lookaround, a negated class,
+        a category with no member above, a parse error -- makes the whole
+        enumeration give no phrases, never an exception: the caller then
+        uses the display wordings alone. At most
+        ``_MAX_ENUMERATED_PHRASES`` phrases are given, the first ones in
+        order. The caller keeps a phrase only when the expression answers
+        it, so these are candidates, not a promise.
+
+        crewcut: a class or category gives one member, so a built-in that
+        answers only another member ('^[ab] key$' with a built-in on
+        'b key') is not found. Remove the limit by giving every member of
+        a small class, within the phrase cap.
+        """
+        try:
+            pieces = cls._enumerate_sequence(_regex_parser.parse(raw_pattern))
+        except Exception:
+            return []
+        phrases: list[str] = []
+        for piece in pieces:
+            phrase = ' '.join(piece.split())
+            if phrase and phrase not in phrases:
+                phrases.append(phrase)
+        return phrases
+
+    @classmethod
+    def _enumerate_sequence(cls, items) -> list[str]:
+        """The phrases of a parsed sequence: the product of its items."""
+        texts = [""]
+        for opcode, argument in items:
+            texts = cls._enumerate_product(
+                texts, cls._enumerate_item(opcode, argument),
+            )
+        return texts
+
+    @classmethod
+    def _enumerate_product(cls, heads: list[str], tails: list[str]) -> list[str]:
+        """Every head followed by every tail, in order, up to the cap.
+
+        A joined text longer than the length guard is dropped, and the
+        shorter ones are kept: joining more text never makes a phrase
+        shorter, so no phrase is lost that could still fit
+        (wh-user-rule-precedence.2.3). When no joined text fits, this
+        raises _NotEnumerable.
+        """
+        joined: list[str] = []
+        dropped = False
+        for head in heads:
+            for tail in tails:
+                text = head + tail
+                if len(text) > cls._MAX_ENUMERATED_LENGTH:
+                    dropped = True
+                    continue
+                joined.append(text)
+                if len(joined) >= cls._MAX_ENUMERATED_PHRASES:
+                    return joined
+        if dropped and not joined:
+            raise cls._NotEnumerable("no phrase within the length guard")
+        return joined
+
+    @classmethod
+    def _enumerate_union(cls, choices: list[list[str]]) -> list[str]:
+        """Every phrase of every choice, in order, without repeats."""
+        union: list[str] = []
+        for choice in choices:
+            for text in choice:
+                if text not in union:
+                    union.append(text)
+                    if len(union) >= cls._MAX_ENUMERATED_PHRASES:
+                        return union
+        return union
+
+    @classmethod
+    def _enumerate_item(cls, opcode, argument) -> list[str]:
+        """The phrases of one parsed item; raises _NotEnumerable."""
+        parser = _regex_parser
+        if opcode is parser.LITERAL:
+            return [chr(argument)]
+        if opcode is parser.SUBPATTERN:
+            return cls._enumerate_sequence(argument[-1])
+        if opcode is parser.BRANCH:
+            return cls._enumerate_union(
+                [cls._enumerate_sequence(branch) for branch in argument[1]],
+            )
+        if opcode is parser.MAX_REPEAT or opcode is parser.MIN_REPEAT:
+            low, high, body = argument
+            if low > cls._MAX_ENUMERATED_LENGTH:
+                raise cls._NotEnumerable(opcode)
+            unit = cls._enumerate_sequence(body)
+            # A finite range gives every count up to its maximum; an
+            # unbounded one gives its minimum and the minimum plus one.
+            last = low + 1 if high == parser.MAXREPEAT else high
+            choices = []
+            found = 0
+            for count in range(low, last + 1):
+                texts = [""]
+                try:
+                    for _ in range(count):
+                        texts = cls._enumerate_product(texts, unit)
+                except cls._NotEnumerable:
+                    # A count with no phrase short enough to speak ends
+                    # the range; the shorter counts are still phrases
+                    # the rule answers.
+                    if count == low:
+                        raise
+                    break
+                choices.append(texts)
+                found += len(texts)
+                if found >= cls._MAX_ENUMERATED_PHRASES:
+                    break
+            return cls._enumerate_union(choices)
+        if opcode is parser.IN:
+            member_opcode, member = argument[0]
+            if member_opcode is parser.LITERAL:
+                return [chr(member)]
+            if member_opcode is parser.RANGE:
+                return [chr(member[0])]
+            if member_opcode is parser.CATEGORY:
+                return cls._category_member(member)
+            raise cls._NotEnumerable(member_opcode)
+        if opcode is parser.CATEGORY:
+            return cls._category_member(argument)
+        if opcode is parser.AT:
+            return [""]
+        if opcode is parser.ANY:
+            return ["a"]
+        raise cls._NotEnumerable(opcode)
+
+    @classmethod
+    def _category_member(cls, category) -> list[str]:
+        """The one member of a category, or _NotEnumerable."""
+        if category not in cls._CATEGORY_MEMBERS:
+            raise cls._NotEnumerable(category)
+        return [cls._CATEGORY_MEMBERS[category]]
+
+    @staticmethod
+    def _taken_builtin_flags(
+        phrases: list[str], system_entries: list[dict[str, Any]],
+    ) -> list[bool]:
+        """Per phrase, whether the built-in that answers it is whole-utterance.
+
+        The built-in that answers a phrase is the first shipped entry, in
+        file order, whose expression matches it the way the catalog
+        compiles it (``transform_pattern``, IGNORECASE) and the runtime
+        matches it: for a ^-anchored expression, the matcher's first-word
+        punctuation pass and then its fullmatch with STT-punctuation retry
+        (``PatternMatcher._match_command_with_punct_retry``); search
+        otherwise. An entry that does not compile is skipped, as the
+        catalog skips it. A phrase no entry answers adds nothing.
+
+        The shipped expressions are trusted and matched in process, as the
+        runtime matches them. Each is compiled at most once per call.
+
+        crewcut: a phrase no built-in answers transforms and compiles every
+        shipped entry, measured at about 90 ms on the 332-entry shipped
+        file with a cleared re cache. It runs only for a save or a Try-it
+        draft that will stand in front of the built-ins (Add, Duplicate, a
+        moved edit, an edit of an own rule), on the Logic loop, where
+        Try-it already costs
+        about 266 ms (see the crewcut in pattern_tester._simulate_save).
+        Remove it by caching one compiled list of the shipped entries per
+        shipped-file load and passing it in instead of compiling here.
+        """
+        compiled: dict[int, re.Pattern[str] | None] = {}
+
+        def entry_regex(index: int) -> re.Pattern[str] | None:
+            if index not in compiled:
+                expression = system_entries[index].get("pattern")
+                regex = None
+                if isinstance(expression, str):
+                    try:
+                        transformed, _meta = transform_pattern(expression)
+                        regex = re.compile(transformed, re.IGNORECASE)
+                    except re.error:
+                        regex = None
+                compiled[index] = regex
+            return compiled[index]
+
+        taken: list[bool] = []
+        for phrase in phrases:
+            for index, entry in enumerate(system_entries):
+                regex = entry_regex(index)
+                if regex is None:
+                    continue
+                if entry["pattern"].startswith("^"):
+                    found = PatternMatcher._match_command_with_punct_retry(
+                        regex, _normalize_first_word_in_text(phrase),
+                    )[0]
+                else:
+                    found = regex.search(phrase)
+                if found is not None:
+                    taken.append(entry.get("whole_utterance_only") is True)
+                    break
+        return taken
+
+    @staticmethod
     def _format_phrase_display(phrases: list[str]) -> str:
         """One display line for a phrase list: 'a' or 'a (or b, c)'."""
         if len(phrases) == 1:
@@ -549,9 +956,13 @@ class PatternManager:
             # it names the spoken phrases even when the expression is
             # hand-edited into an odd shape (wh-pattern-editor-r8.2).
             entry["trigger_display"] = self._format_phrase_display(phrases)
-        # Carry type/position so the explainer classifies trailing patterns
-        # and explicit-type patterns correctly (it falls back to the
-        # ^-anchor heuristic when absent). Garbage values are omitted.
+        # Carry type so the explainer classifies explicit-type patterns
+        # correctly (it falls back to the ^-anchor heuristic when absent).
+        # Carry position so the editor dialog passes a hand-edited key
+        # through a save unchanged (create_pattern_dialog); the explainer
+        # ignores it, and the loader warns and loads a "trailing" row as
+        # whole-utterance-only (wh-remove-trailing-submit).
+        # Garbage values are omitted.
         for key in ("type", "position"):
             value = pat_data.get(key)
             if isinstance(value, str) and value:
@@ -1232,10 +1643,12 @@ class PatternManager:
         ``phrases`` array is written when present so the editor dialog can
         round-trip the list; raw advanced saves write ``type`` instead
         (wh-pattern-editor-advanced). ``position`` is a hand-edited
-        runtime key the editor has no field for (trailing commands,
-        wh-2vz); update_pattern passes the original block's value through
-        so an edit does not silently turn a trailing command into a
-        regular one (wh-pattern-editor-r3.1). ``whole_utterance_only``
+        key the editor has no field for; update_pattern passes the
+        original block's value through unchanged so an edit never
+        rewrites a key it does not show (wh-pattern-editor-r3.1). Since
+        the trailing position was removed (wh-remove-trailing-submit),
+        the loader warns about the key and loads a "trailing" row as
+        whole-utterance-only. ``whole_utterance_only``
         is the punctuation-alias safety flag, carried the same way so a
         Customize/edit does not turn an alias into an eager command
         (wh-int8-punctuation-mishears.1.1). ``doc_id`` is the built-in's
@@ -1410,16 +1823,30 @@ class PatternManager:
             # replacement it is meaningless and the catalog would disable
             # it with a startup warning on every launch
             # (wh-int8-punctuation-mishears.1.5).
+            system_entries = self._load_pattern_dicts(self.patterns_file)
+            # A block the merge will place in front of the built-ins (Add,
+            # Duplicate, a Customize whose trigger moved off its built-in)
+            # takes the whole-utterance flag of the built-ins whose words
+            # it uses (wh-user-rule-precedence). The identity is the one
+            # the block below is written with: the saved doc_id, and the
+            # origin line the own_rule argument writes (always, here).
+            in_front = self._stands_in_front_for_save(
+                self._saved_identity(
+                    regex,
+                    self._doc_id_for_save(doc_id, regex, system_entries),
+                    True,
+                ),
+                system_entries,
+            )
             block_lines = self._build_block_lines(
                 regex, action_steps, requires_hotword, stored_phrases,
                 explicit_type,
                 position=position if isinstance(position, str) else None,
-                whole_utterance_only=(
-                    whole_utterance_only is True and regex.startswith("^")
+                whole_utterance_only=self._whole_utterance_for_save(
+                    in_front, regex, system_entries,
+                    whole_utterance_only,
                 ),
-                doc_id=self._doc_id_for_save(
-                    doc_id, regex, self._load_pattern_dicts(self.patterns_file),
-                ),
+                doc_id=self._doc_id_for_save(doc_id, regex, system_entries),
                 # Every block this method writes is one the person just
                 # created, whichever button they pressed. Duplicate is the
                 # case that needs it: without the key the merge reads a
@@ -1726,6 +2153,31 @@ class PatternManager:
             # than the one the editor writes is dropped rather than
             # rewritten, the same treatment position and doc_id get.
             original_origin = toml_patterns[target_index].get(ORIGIN_KEY)
+            # A block the merge will place in front of the built-ins (an
+            # edit whose trigger moved off its built-in, any edit of an own
+            # rule) takes the whole-utterance flag of the built-ins whose
+            # words it uses; a block keeping a built-in's slot keeps the
+            # stored flag (wh-user-rule-precedence). The identity is the
+            # one the block below is written with: the saved doc_id, and
+            # the origin line the own_rule argument writes.
+            # crewcut: this reads the shipped file a second time per save
+            # and decides the saved doc_id twice (the doc_id argument below
+            # does both again). The doc_id call is kept inline because
+            # tests/mutation_gate_pattern_doc_id_identity.py matches its
+            # exact text; pass system_entries and the saved id to it once
+            # that gate's pattern is updated.
+            system_entries = self._load_pattern_dicts(self.patterns_file)
+            in_front = self._stands_in_front_for_save(
+                self._saved_identity(
+                    regex,
+                    self._doc_id_for_save(
+                        original_doc_id, regex, system_entries,
+                        toml_patterns[target_index]["pattern"],
+                    ),
+                    original_origin == ORIGIN_OWN,
+                ),
+                system_entries,
+            )
             block_lines = self._build_block_lines(
                 regex, action_steps, data.get("requires_hotword", False),
                 stored_phrases, explicit_type,
@@ -1733,9 +2185,9 @@ class PatternManager:
                     original_position
                     if isinstance(original_position, str) else None
                 ),
-                whole_utterance_only=(
-                    original_whole_utterance is True
-                    and regex.startswith("^")
+                whole_utterance_only=self._whole_utterance_for_save(
+                    in_front, regex, system_entries,
+                    original_whole_utterance,
                 ),
                 doc_id=self._doc_id_for_save(
                     original_doc_id, regex,
@@ -1788,7 +2240,7 @@ class PatternManager:
             return {"success": False, "error": self._NO_USER_FILE_ERROR}
         try:
             if not isinstance(hotword, str) or not hotword.strip():
-                return {"success": False, "error": "Hotword cannot be empty"}
+                return {"success": False, "error": "Safety word cannot be empty"}
             value = hotword.strip()
             if len(value.split()) > 1:
                 # The router matches the wake word against a single STT token by
@@ -1797,7 +2249,7 @@ class PatternManager:
                 # (wh-user-patterns-split-bulletproof.3.1).
                 return {
                     "success": False,
-                    "error": "Wake word must be a single word (no spaces)",
+                    "error": "Safety word must be a single word (no spaces)",
                 }
 
             file_exists = os.path.exists(self.user_patterns_file)

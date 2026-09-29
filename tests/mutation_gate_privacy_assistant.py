@@ -14,6 +14,11 @@ The two guards added with the fix live in
   test_no_shipped_file_presents_the_assistant_as_the_retired_gpt
   test_privacy_notice_names_google_as_the_assistant_processor
 
+The move from the Gem to the Gemini Notebook (wh-assistant-gemini-notebook)
+added a third guard in the same file, with one mutation here:
+
+  test_no_shipped_public_file_describes_the_gem
+
 Each mutation below breaks exactly one thing those guards protect. A
 mutation counts as caught only when the named test fails AND the expected
 assertion text appears in the output. A red for any other reason proves
@@ -47,9 +52,16 @@ TESTS = _REPO_ROOT / "tests" / "test_llm_help_package.py"
 # The guards are pure stdlib, but pytest itself comes from this service's
 # environment; the file has no service imports.
 SERVICE = _REPO_ROOT / "services" / "wheelhouse"
+# The service's own interpreter when it exists. A worktree has no .venv of
+# its own, so the gate then uses the interpreter that runs it: start it with
+# the main checkout's services/wheelhouse/.venv python. Letting uv pick the
+# interpreter would build a new .venv inside the worktree instead.
+_VENV_PYTHON = SERVICE / ".venv" / "Scripts" / "python.exe"
+PYTHON = str(_VENV_PYTHON if _VENV_PYTHON.exists() else pathlib.Path(sys.executable))
 
 SCAN_TEST = "test_no_shipped_file_presents_the_assistant_as_the_retired_gpt"
 PROC_TEST = "test_privacy_notice_names_google_as_the_assistant_processor"
+GEM_SCAN_TEST = "test_no_shipped_public_file_describes_the_gem"
 
 MUTATIONS = [
     {
@@ -80,10 +92,10 @@ MUTATIONS = [
         "expect": "wheelhouse help gpt",
     },
     {
-        "name": "the-gem-address-goes-missing",
+        "name": "the-assistant-address-goes-missing",
         "old": (
-            "at <https://gemini.google.com/gem/"
-            "1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A>"
+            "at <https://notebook.google.com/notebook/"
+            "da51a404-67ec-4804-9ebe-83605df3e9cf/preview>"
         ),
         "new": "in the Gemini app",
         "test": PROC_TEST,
@@ -92,20 +104,22 @@ MUTATIONS = [
     {
         "name": "the-processor-goes-unnamed",
         "old": (
-            "are processed by Google as part of providing the Gemini service"
+            "are processed by Google as part of providing the Gemini Notebook"
+            " service"
         ),
-        "new": "are processed as part of providing the Gemini service",
+        "new": "are processed as part of providing the Gemini Notebook service",
         "test": PROC_TEST,
         "expect": "does not say who processes a conversation",
     },
     {
         "name": "the-assistants-home-returns-to-chatgpt",
         "target": "changelog",
+        # The release 1.2.0 changelog commit (a2cd6398) rewrote this
+        # entry; the pattern follows the current wording.
         "old": (
-            "the Wheelhouse Assistant runs inside Google Gemini and that"
-            " Gemini"
+            "The Wheelhouse Assistant now runs inside Google Gemini instead of"
         ),
-        "new": "the Wheelhouse Assistant runs inside ChatGPT and that ChatGPT",
+        "new": "The Wheelhouse Assistant now runs inside ChatGPT instead of",
         "test": SCAN_TEST,
         "expect": "inside chatgpt",
     },
@@ -118,12 +132,12 @@ MUTATIONS = [
         # caught only because the scan collapses whitespace first.
         "target": "changelog",
         "old": (
-            "asks you to sign in first; a free account works, and a Google"
-            " account, an\n  Apple account, or an email address will do."
+            "now says that Gemini asks you to\n  sign in, and that a Google"
+            " account, an Apple account, or an email\n  address will do."
         ),
         "new": (
-            "asks you to sign in first. You need a ChatGPT\n  account;"
-            " a free account works."
+            "now says that you need a ChatGPT\n  account; a free account"
+            " works."
         ),
         "test": SCAN_TEST,
         "expect": "chatgpt account",
@@ -142,6 +156,17 @@ MUTATIONS = [
         "test": PROC_TEST,
         "expect": "still says OpenAI processes the",
     },
+    {
+        "name": "the-gem-sign-in-returns",
+        # The Gem's sign-in page took an Apple account; the notebook's does
+        # not.
+        "old": "You use it in your web browser.",
+        "new": (
+            "You use it in your web browser. An Apple account also works."
+        ),
+        "test": GEM_SCAN_TEST,
+        "expect": "apple account",
+    },
 ]
 
 
@@ -156,7 +181,7 @@ def run_tests(selection: str) -> tuple[int, str]:
     env["COLUMNS"] = "1000"
     proc = subprocess.run(
         [
-            "uv", "run", "--project", ".", "python", "-m", "pytest",
+            PYTHON, "-m", "pytest",
             str(TESTS), "-k", selection, "-q", "-rf", "-p", "no:randomly",
         ],
         cwd=str(SERVICE),
@@ -175,7 +200,9 @@ def main() -> int:
     changelog_original = CHANGELOG.read_bytes()
     # A suite that is already red reports every mutation as caught for a
     # reason unrelated to the mutation.
-    baseline_rc, baseline_out = run_tests(f"{SCAN_TEST} or {PROC_TEST}")
+    baseline_rc, baseline_out = run_tests(
+        f"{SCAN_TEST} or {PROC_TEST} or {GEM_SCAN_TEST}"
+    )
     if baseline_rc != 0:
         print("BASELINE IS RED -- refusing to start")
         print(baseline_out[-2000:])

@@ -488,6 +488,81 @@ def test_paint_focus_change_restart():
     assert r.effects[-2].build_reason is BuildReason.SUPERSEDE
 
 
+# wh-overlay-failed-focus-read-keeps-numbers.1.1: a restart out of
+# paint_in_flight must clear the paint it abandons. That paint may already be
+# queued to the GUI; without a clear it stays on screen for the GUI lease when
+# the new walk then fails. The clear carries the OLD generation (the one the
+# GUI painted) and goes before the build, which turns the walk cue on.
+
+
+@pytest.mark.parametrize(
+    "restart_kind",
+    [OverlayEventKind.SHOW_NUMBERS, OverlayEventKind.FOCUS_CHANGE],
+    ids=["show-numbers", "focus-change"],
+)
+def test_paint_restart_clears_abandoned_paint_before_build(restart_kind):
+    m = ClickOverlayStateMachine()
+    to_paint_in_flight(m, "snapA")
+    sess, old_gen = m.overlay_session_id, m.paint_generation
+    r = m.apply(OverlayEvent(restart_kind))
+    assert m.state is OverlayState.WALK_IN_FLIGHT
+    assert m.paint_generation == old_gen + 1
+    assert effect_kinds(r) == [
+        EffectKind.CANCEL_TIMER,
+        EffectKind.DISPATCH_CLEAR,
+        EffectKind.UNPIN_SNAPSHOT,
+        EffectKind.DISPATCH_BUILD,
+        EffectKind.ARM_TIMER,
+    ]
+    clear, build = r.effects[1], r.effects[3]
+    assert (clear.overlay_session_id, clear.paint_generation) == (sess, old_gen)
+    assert (build.overlay_session_id, build.paint_generation) == (
+        sess, old_gen + 1,
+    )
+
+
+@pytest.mark.parametrize("ending", ["build_failed", "timeout"])
+def test_failed_read_after_focus_change_in_paint_leaves_no_paint(ending):
+    # SHOW_NUMBERS -> build ok (paint at gen 0 dispatched) -> FOCUS_CHANGE ->
+    # the new read fails. The gen-0 paint must have been cleared.
+    m = ClickOverlayStateMachine()
+    m.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+    r_ok = m.apply(gen_event(m, OverlayEventKind.BUILD_RESPONSE, snapshot_id="snapA"))
+    paint = [e for e in r_ok.effects if e.kind is EffectKind.DISPATCH_PAINT][0]
+    painted_pair = (paint.overlay_session_id, paint.paint_generation)
+    r_focus = m.apply(OverlayEvent(OverlayEventKind.FOCUS_CHANGE))
+    kinds = effect_kinds(r_focus)
+    assert EffectKind.DISPATCH_CLEAR in kinds
+    clear_i = kinds.index(EffectKind.DISPATCH_CLEAR)
+    assert clear_i < kinds.index(EffectKind.DISPATCH_BUILD)
+    clear = r_focus.effects[clear_i]
+    assert (clear.overlay_session_id, clear.paint_generation) == painted_pair
+    if ending == "build_failed":
+        r_end = m.apply(gen_event(m, OverlayEventKind.BUILD_RESPONSE, build_ok=False))
+    else:
+        r_end = m.apply(gen_event(m, OverlayEventKind.TIMEOUT))
+    assert r_end.outcome is OverlayOutcome.ACCEPTED
+    assert m.state is OverlayState.CLOSED
+    assert m.pinned_snapshot_id is None
+
+
+@pytest.mark.parametrize(
+    "restart_kind",
+    [OverlayEventKind.SHOW_NUMBERS, OverlayEventKind.FOCUS_CHANGE],
+    ids=["show-numbers", "focus-change"],
+)
+def test_walk_restart_without_pin_emits_no_clear(restart_kind):
+    # Nothing was painted yet, so a walk_in_flight restart has nothing to clear.
+    m = ClickOverlayStateMachine()
+    m.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+    r = m.apply(OverlayEvent(restart_kind))
+    assert effect_kinds(r) == [
+        EffectKind.CANCEL_TIMER,
+        EffectKind.DISPATCH_BUILD,
+        EffectKind.ARM_TIMER,
+    ]
+
+
 def test_paint_hide_to_closed():
     m = ClickOverlayStateMachine()
     to_paint_in_flight(m)
@@ -996,6 +1071,93 @@ def test_refresh_timeout_with_auto_hide_to_paused():
     assert r.outcome is OverlayOutcome.ACCEPTED
     assert m.state is OverlayState.PAUSED
     assert m.auto_hide_in_flight is False
+
+
+# wh-overlay-failed-focus-read-keeps-numbers: a refresh whose visible numbers
+# belong to a window that is no longer in front (Logic sets
+# ``visible_window_left``) must not fall back to those numbers when it fails.
+
+
+def _assert_closed_and_cleared(m, r, unpinned: set[str]) -> None:
+    assert r.outcome is OverlayOutcome.ACCEPTED
+    assert m.state is OverlayState.CLOSED
+    assert m.pinned_snapshot_id is None
+    assert m.prior_pinned_snapshot_id is None
+    assert m._prior_pin_deferred is False
+    kinds = effect_kinds(r)
+    assert EffectKind.CANCEL_TIMER in kinds
+    assert EffectKind.DISPATCH_CLEAR in kinds
+    # The same notice a failed first "show numbers" read shows: the generic
+    # standalone failure notice, which FIRE_NOTICE carries as notice=None.
+    notices = [e for e in r.effects if e.kind is EffectKind.FIRE_NOTICE]
+    assert len(notices) == 1
+    assert notices[0].notice is None
+    assert {
+        e.snapshot_id for e in r.effects
+        if e.kind is EffectKind.UNPIN_SNAPSHOT
+    } == unpinned
+
+
+def test_refresh_build_failed_after_window_left_clears_and_closes():
+    m = ClickOverlayStateMachine()
+    to_refresh(m)
+    r = m.apply(gen_event(
+        m, OverlayEventKind.BUILD_RESPONSE, build_ok=False,
+        visible_window_left=True,
+    ))
+    _assert_closed_and_cleared(m, r, {"snapA"})
+
+
+def test_refresh_timeout_after_window_left_clears_and_closes():
+    m = ClickOverlayStateMachine()
+    to_refresh(m)
+    r = m.apply(gen_event(m, OverlayEventKind.TIMEOUT, visible_window_left=True))
+    _assert_closed_and_cleared(m, r, {"snapA"})
+
+
+def test_refresh_timeout_after_build_ok_and_window_left_unpins_both():
+    # The build for the new window succeeded (snapB pinned, snapA deferred) but
+    # its paint never acknowledged. Neither list may stay pinned.
+    m = ClickOverlayStateMachine()
+    to_refresh(m)
+    m.apply(gen_event(m, OverlayEventKind.BUILD_RESPONSE, snapshot_id="snapB"))
+    assert m._prior_pin_deferred is True
+    r = m.apply(gen_event(m, OverlayEventKind.TIMEOUT, visible_window_left=True))
+    _assert_closed_and_cleared(m, r, {"snapA", "snapB"})
+
+
+def test_refresh_failure_after_window_left_in_auto_open_session_skips_stale_notice():
+    # An auto-open session keeps its suppressed ambiguous-click notice until
+    # the session closes. A later window-left failure must show the standalone
+    # notice, not that old ambiguous-click notice.
+    m = ClickOverlayStateMachine()
+    m.apply(OverlayEvent(OverlayEventKind.AUTO_OPEN, notice=make_notice()))
+    m.apply(gen_event(m, OverlayEventKind.BUILD_RESPONSE, snapshot_id="snapA"))
+    m.apply(gen_event(
+        m, OverlayEventKind.PAINT_ACK, paint_state=PaintAckState.PAINTED,
+    ))
+    assert m.state is OverlayState.PAINTED
+    assert m.pending_ambiguous_notice is not None
+    m.apply(OverlayEvent(OverlayEventKind.FOCUS_CHANGE))
+    assert m.state is OverlayState.REFRESH_IN_FLIGHT
+    r = m.apply(gen_event(m, OverlayEventKind.TIMEOUT, visible_window_left=True))
+    _assert_closed_and_cleared(m, r, {"snapA"})
+
+
+def test_refresh_failure_after_window_left_while_auto_hidden_stays_paused():
+    # The microphone pause already cleared the screen, and the resume identity
+    # check re-walks a window that is no longer in front, so the auto-hide leg
+    # keeps its fall-back to paused.
+    m = ClickOverlayStateMachine()
+    to_refresh(m)
+    m.apply(OverlayEvent(OverlayEventKind.MIC_PAUSE))
+    r = m.apply(gen_event(
+        m, OverlayEventKind.BUILD_RESPONSE, build_ok=False,
+        visible_window_left=True,
+    ))
+    assert r.outcome is OverlayOutcome.ACCEPTED
+    assert m.state is OverlayState.PAUSED
+    assert m.pinned_snapshot_id == "snapA"
 
 
 def test_refresh_show_numbers_supersede():

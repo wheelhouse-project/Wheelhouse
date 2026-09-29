@@ -29,6 +29,39 @@ files:
      outcome.
   7. The ``source`` argument travelling from the command into the log.
 
+wh-assistant-explainer-once-more (stage S4) added three behaviours and
+moved behaviour 2:
+
+  2. (moved) The GUI now sends the box state in its one command, and
+     main._record_help_explainer_choice in the Logic process decides and
+     writes. The setting is saved only when its value changes, because every
+     ConfigService.save drops the user's comments. The three GUI mutations of
+     this behaviour were re-targeted to the same decisions in Logic.
+  8. The marker file help_explainer_notebook_shown.toml: with the setting
+     false and no marker, the window is shown once more; only the Assistant
+     button writes the marker, never the showing, never a command without
+     the box state; an existing marker is not rewritten.
+  9. The start_ticked flag, from Logic through the GUI queue arm and
+     GuiManager._open_help_explainer to HelpExplainerWindow.prepare_to_show.
+ 10. The command table's strict boolean check on do_not_show_again.
+
+The review findings wh-assistant-explainer-once-more.1.1 and .1.2 added two
+more and re-targeted the patterns their code moved:
+
+ 11. _record_help_explainer_choice saves the setting before it writes the
+     marker; a save that returns False or raises (or has no state manager)
+     writes no marker; a failed save or marker write returns a notice, and
+     start_help_online shows it; a kept choice shows none.
+ 12. GuiManager._open_help_explainer resets the check box only when the
+     window is not visible, so a second Help keeps an unsent choice.
+
+Codex round 2 on .1.1 re-targeted behaviour 11's patterns to the staged
+save and added mutations for it: the comparison reads the value on disk
+(get_persisted, not get); the save is staged (save(values=...)), so a
+failed replace leaves the live value alone and a second press still saves;
+the save runs under StateManager's _gui_settings_lock, created the same
+lazy way; and a state update follows the save.
+
 Each mutation names the tests that must fail and the start of the assertion
 text each must fail with, as pytest prints it in the short test summary. A
 catch requires every named catcher to fail AT ITS OWN ASSERTION: a failure
@@ -138,6 +171,10 @@ RETIRED_WHITESPACE = "test_surrounding_whitespace_does_not_defeat_the_check"
 RETIRED_LOGGED = "test_the_substitution_is_logged_without_an_address"
 CUSTOM_UNCHANGED = "test_a_custom_address_opens_unchanged"
 OTHER_GPT_UNCHANGED = "test_another_chatgpt_address_opens_unchanged"
+OLD_GEM_OPENS_NOTEBOOK = "test_the_old_gem_address_opens_the_notebook"
+OLD_GEM_WHITESPACE = "test_surrounding_whitespace_does_not_defeat_the_gem_check"
+OLD_GEM_LOGGED = "test_the_gem_substitution_is_logged_without_an_address"
+OTHER_GEM_UNCHANGED = "test_another_gem_address_opens_unchanged"
 
 _NON_BOOL = "test_a_non_boolean_explained_field_takes_the_full_decision"
 # Only these four ids fail under the bool() form. The other four cases
@@ -153,9 +190,94 @@ NON_BOOL_CATCHERS = [
 
 SECOND_RAISES = "test_a_second_request_raises_the_open_window"
 BOX_CLEARED = "test_the_check_box_is_cleared_before_each_showing"
-ASSISTANT_OPENS = "test_assistant_asks_logic_to_open_the_page"
-CHECKED_SAVES = "test_the_checked_box_also_saves_the_setting"
-CLEAR_SAVES_NOTHING = "test_a_clear_box_saves_nothing"
+# wh-assistant-explainer-once-more: the GUI sends one command carrying the
+# box state, and Logic writes the setting. The three GUI save tests of
+# wh-assistant-button-explainer (assistant_asks_logic_to_open_the_page,
+# the_checked_box_also_saves_the_setting, a_clear_box_saves_nothing) were
+# replaced by this one parametrized test.
+_SENDS_ONE = "test_assistant_sends_one_command_with_the_box_state"
+SENDS_CLEAR = f"{_SENDS_ONE}[clear]"
+SENDS_TICKED = f"{_SENDS_ONE}[ticked]"
+FLAG_TICKS = "test_the_flag_ticks_the_box"
+NO_FLAG_CLEAR = "test_no_flag_leaves_the_box_clear"
+_ONLY_TRUE_TICKS = "test_only_the_boolean_true_ticks_the_box"
+ONLY_TRUE_TICKS = [f"{_ONLY_TRUE_TICKS}[{i}]" for i in ("true", "1", "yes")]
+
+# --- wh-assistant-explainer-once-more, Logic side ---
+PRE_TICKED = "test_false_and_no_marker_shows_the_window_pre_ticked"
+MARKER_OPENS = "test_false_and_the_marker_opens_the_browser"
+_TRUE_NO_TICK = "test_true_shows_the_window_without_the_tick"
+TRUE_NO_TICK_NO_MARKER = f"{_TRUE_NO_TICK}[no-marker]"
+TRUE_NO_TICK_MARKER = f"{_TRUE_NO_TICK}[marker]"
+SHOW_WRITES_NOTHING = "test_showing_the_window_writes_nothing"
+TICKED_FALSE_NO_SAVE = "test_ticked_with_the_setting_false_saves_no_config"
+TICKED_TRUE_SAVES = "test_ticked_with_the_setting_true_saves_false"
+UNTICKED_FALSE_SAVES = "test_unticked_with_the_setting_false_saves_true"
+UNTICKED_TRUE_NO_SAVE = "test_unticked_with_the_setting_true_saves_no_config"
+RECORDED_UNCONFIGURED = "test_the_choice_is_recorded_when_help_is_not_configured"
+_NO_BOX_STATE = "test_a_command_without_the_box_state_writes_nothing"
+NO_BOX_STATE = [f"{_NO_BOX_STATE}[{i}]" for i in ("setting-false", "setting-true")]
+MARKER_NOT_REWRITTEN = "test_an_existing_marker_is_not_rewritten"
+BOX_STATE_REACHES = "test_the_box_state_reaches_start_help_online"
+_REAL_BOOL = "test_only_a_real_boolean_is_passed_on"
+# [None] is left out: None passes through unchanged under both forms.
+REAL_BOOL_CATCHERS = [
+    f"{_REAL_BOOL}[{i}]" for i in ("false", "true", "1", "0", "value5")
+]
+MARKER_FOLDER = "test_the_marker_lives_in_the_data_folder"
+MISSING_SETTING_CHOICE = "test_a_missing_setting_counts_as_true_for_the_choice"
+
+# --- wh-assistant-explainer-once-more.1.1: a failed write keeps the choice
+# open and tells the user ---
+SAVED_BEFORE_MARKER = "test_the_setting_is_saved_before_the_marker"
+_FAILED_SAVE = "test_a_failed_save_writes_no_marker_and_says_so"
+FAILED_SAVE = [
+    f"{_FAILED_SAVE}[{case}-{outcome}]"
+    for case in ("re-enable", "turn-off")
+    for outcome in ("returns-false", "raises")
+]
+FAILED_SAVE_RAISES = [name for name in FAILED_SAVE if name.endswith("-raises]")]
+WINDOW_COMES_BACK = "test_the_window_comes_back_after_a_failed_save"
+MARKER_FAILS_REPORTED = "test_a_marker_that_cannot_be_written_is_reported"
+MARKER_RAISES_REPORTED = "test_a_marker_writer_that_raises_is_reported"
+NO_STATE_MANAGER = "test_no_state_manager_writes_no_marker"
+_KEPT_NO_NOTICE = "test_a_kept_choice_shows_no_notice"
+KEPT_NO_NOTICE = [
+    f"{_KEPT_NO_NOTICE}[{i}]"
+    for i in ("no-save-ticked", "save-false", "save-true", "no-save-clear")
+]
+
+# --- wh-assistant-explainer-once-more.1.1, round 2: the real ConfigService,
+# a failed atomic replace, and a second press in the same process ---
+_RETRY = "test_a_second_press_after_a_failed_save_keeps_the_choice"
+RETRY = [f"{_RETRY}[{i}]" for i in ("re-enable", "turn-off")]
+_WRITABLE = "test_a_press_after_the_file_is_writable_again_keeps_the_choice"
+WRITABLE = [f"{_WRITABLE}[{i}]" for i in ("re-enable", "turn-off")]
+_LIVE_ONLY = "test_a_live_value_that_never_reached_the_file_is_saved"
+LIVE_ONLY_RE_ENABLE = f"{_LIVE_ONLY}[re-enable]"
+LIVE_ONLY_TURN_OFF = f"{_LIVE_ONLY}[turn-off]"
+SAVE_WAITS = "test_the_save_waits_for_a_gui_settings_write"
+LOCK_CREATED = "test_the_lock_is_created_when_the_manager_has_none"
+MATCHING_NOT_REWRITTEN = "test_a_matching_file_is_not_rewritten"
+# wh-assistant-explainer-once-more.1.3: a second, opposite choice made
+# while the first save is pending.
+_PENDING = "test_a_later_opposite_choice_waits_for_a_pending_save"
+PENDING = [f"{_PENDING}[{i}]" for i in ("tick-then-clear", "clear-then-tick")]
+PENDING_LOST = "AssertionError: assert [{'values'"
+
+# --- wh-assistant-explainer-once-more.1.2: a second Help keeps the choice
+# in a visible window ---
+CLEARED_STAYS = "test_a_cleared_once_more_box_stays_cleared"
+TICKED_STAYS = "test_a_ticked_clear_start_box_stays_ticked"
+_HIDDEN_RESET = "test_a_hidden_window_is_reset_when_shown_again"
+HIDDEN_RESET = [f"{_HIDDEN_RESET}[{i}]" for i in ("clear-start", "once-more")]
+VISIBLE_RAISED = "test_a_visible_window_is_still_raised_and_activated"
+
+# --- wh-assistant-explainer-once-more, window side ---
+CAN_START_TICKED = "test_the_box_can_start_ticked"
+PRE_TICKED_REPORTS = "test_a_pre_ticked_box_reports_true_and_can_be_cleared"
+CLEARS_AGAIN = "test_the_box_clears_again_for_a_second_showing"
+PRE_TICK_NO_TRAVEL = "test_a_pre_ticked_box_does_not_travel_to_the_next_showing"
 
 CANCEL_SILENT = "test_cancel_reports_nothing_and_closes"
 CANCEL_SILENT_TICKED = "test_cancel_reports_nothing_even_when_the_box_is_checked"
@@ -181,9 +303,30 @@ NO_AWAIT = "AssertionError: expected await not found"
 NOT_CALLED = "AssertionError: Expected 'open' to not have been called"
 CALLED_ZERO = "AssertionError: Expected 'open' to be called once. Called 0 times."
 QUEUED_LIST = "AssertionError: assert [{'action': '"
-COMMAND_IN_LIST = (
-    "AssertionError: assert {'action': 'open_help_online', "
-    "'explained': True, 'source': 'window'} in ["
+# The Logic tests' settings stand-in is the AsyncMock config.save (the
+# staged save since round 2 of wh-assistant-explainer-once-more.1.1).
+# assert_awaited_once_with on a mock never awaited reports the await count,
+# not a mismatch, so it has its own marker.
+SAVE_NOT_EXPECTED = (
+    "AssertionError: Expected 'save' to not have been called. "
+    "Called 1 times."
+)
+SAVE_NEVER_AWAITED = (
+    "AssertionError: Expected save to have been awaited once. "
+    "Awaited 0 times."
+)
+
+# wh-assistant-explainer-once-more.1.1 and .1.2, measured 2026-09-28.
+NOTICE_MISSING = "AssertionError: assert [] == [{'action': '"
+MARKER_PRESENT = "AssertionError: assert not True"
+NOT_OPENED = "AssertionError: Expected 'open' to not have been called. Called 1 times."
+PREPARED_TWICE = (
+    "AssertionError: Expected 'prepare_to_show' to be called once. "
+    "Called 2 times."
+)
+PREPARED_NEVER = (
+    "AssertionError: Expected 'prepare_to_show' to have been called once. "
+    "Called 0 times."
 )
 
 # The command table's explained/source arguments, as one unique substring.
@@ -214,15 +357,149 @@ BLANK_BRANCH = (
     "            return\n"
 )
 WINDOW_BRANCH = (
-    '        if not explained and config.get("ai.help.explain_before_open", True):\n'
-    "            logger.info(\n"
-    '                "Help: source=%s explained=%s, asking for the explanation window.",\n'
-    "                source,\n"
-    "                explained,\n"
-    "            )\n"
-    "            self._request_help_explainer()\n"
-    "            return\n"
+    "        if not explained:\n"
+    '            explain = bool(config.get("ai.help.explain_before_open", True))\n'
+    "            once_more = False\n"
+    "            if not explain:\n"
+    "                # Setting false: the window is shown once more while the\n"
+    "                # marker is missing, with the box ticked to match the\n"
+    "                # user's earlier choice. load_hint_shown never raises, and\n"
+    "                # treats an unreadable marker as present.\n"
+    "                from services.wheelhouse.click_first_use_hint import (\n"
+    "                    load_hint_shown,\n"
+    "                )\n"
+    "                once_more = not await asyncio.to_thread(\n"
+    "                    load_hint_shown, default_help_explainer_marker_path()\n"
+    "                )\n"
+    "            if explain or once_more:\n"
+    "                logger.info(\n"
+    '                    "Help: source=%s explained=%s, asking for the explanation "\n'
+    '                    "window.",\n'
+    "                    source,\n"
+    "                    explained,\n"
+    "                )\n"
+    "                self._request_help_explainer(start_ticked=once_more)\n"
+    "                return\n"
 )
+
+# The Assistant button's record step, whose place before the blank-address
+# check the second move mutation tests (wh-assistant-explainer-once-more).
+RECORD_BLOCK = (
+    "        if explained and do_not_show_again is not None:\n"
+    "            # Before the blank-address check: the window is modeless, so the\n"
+    "            # address can be blanked while it is open, and the choice made\n"
+    "            # in the window is still the user's to keep.\n"
+    "            notice = await _record_help_explainer_choice(\n"
+    '                config, getattr(self, "state_manager", None), do_not_show_again\n'
+    "            )\n"
+    "            if notice:\n"
+    "                self._send_gui_notification(notice)\n"
+)
+
+WINDOW_REQUEST = "                self._request_help_explainer(start_ticked=once_more)\n"
+
+# The save call inside _record_help_explainer_choice. Re-indented by
+# wh-assistant-explainer-once-more.1.1, which put it inside the save step,
+# and replaced in round 2 by the staged save under the GUI settings lock.
+SAVE_CALL = "                        saved = bool(await config.save(values={key: wanted}))\n"
+# Round 2: the lock StateManager._save_gui_settings holds, created the same
+# lazy way, and the state update after the save.
+LOCK_CREATE = (
+    '            if not hasattr(state_manager, "_gui_settings_lock"):\n'
+    "                state_manager._gui_settings_lock = asyncio.Lock()\n"
+)
+LOCK_HELD = "            async with state_manager._gui_settings_lock:\n"
+STATE_UPDATE = "                    state_manager.send_state_update()\n"
+# wh-assistant-explainer-once-more.1.3: the value on disk is read in two
+# places. With a state manager it is read under the lock, so a choice made
+# while an earlier save is pending waits for that save; without one there
+# is no save to wait for.
+LOCKED_READ = "                if bool(config.get_persisted(key, True)) == wanted:\n"
+NO_MANAGER_READ = "        saved = bool(config.get_persisted(key, True)) == wanted\n"
+SAVED_FALSE = "    saved = False\n"
+NOT_SAVED_RETURN = (
+    "        # the window again and the user can choose again.\n"
+    "        return _HELP_CHOICE_NOT_SAVED_NOTICE\n"
+)
+
+# wh-assistant-explainer-once-more.1.1: the two steps of
+# _record_help_explainer_choice, in their required order. The move mutation
+# puts the marker step first, which is the order the finding reported.
+# Rebuilt for .1.3, which moved the comparison under the lock.
+SAVE_STEP = (
+    '    key = "ai.help.explain_before_open"\n'
+    "    wanted = not do_not_show_again\n"
+    + SAVED_FALSE
+    + "    if state_manager is None:\n"
+    + NO_MANAGER_READ
+    + "        if not saved:\n"
+    "            logger.warning(\n"
+    '                "Help: no state manager, the window setting was not saved."\n'
+    "            )\n"
+    "    else:\n"
+    "        try:\n"
+    "            # The staged save StateManager._save_gui_settings makes for a\n"
+    "            # GUI settings write, under the same lock, without its request\n"
+    "            # ID: no GUI request waits for an acknowledgement here, so the\n"
+    "            # notice returned below takes its place. The comparison is made\n"
+    "            # under the lock too: the window hides at once, so a second\n"
+    "            # choice can arrive while an earlier save is pending, and until\n"
+    "            # that save ends the value on disk is the old one\n"
+    "            # (wh-assistant-explainer-once-more.1.3).\n"
+    + LOCK_CREATE
+    + LOCK_HELD
+    + LOCKED_READ
+    + "                    saved = True\n"
+    "                else:\n"
+    "                    try:\n"
+    + SAVE_CALL
+    + "                        if not saved:\n"
+    "                            logger.warning(\n"
+    '                                "Help: the window setting was not saved to disk."\n'
+    "                            )\n"
+    "                    except Exception as exc:\n"
+    "                        logger.warning(\n"
+    '                            "Help: the window setting could not be saved: %s", exc\n'
+    "                        )\n"
+    + STATE_UPDATE
+    + "        except Exception as exc:\n"
+    '            logger.warning("Help: the window setting save did not finish: %s", exc)\n'
+    "    if not saved:\n"
+    "        # No marker: the choice is not complete, so the next Help shows\n"
+    + NOT_SAVED_RETURN
+)
+MARKER_NOT_WRITTEN = (
+    "            if not await asyncio.to_thread(mark_hint_shown, marker):\n"
+    '                logger.warning("Help: the explanation window marker was not written.")\n'
+    "                return _HELP_CHOICE_NOT_SAVED_NOTICE\n"
+)
+MARKER_RAISED = (
+    "    except Exception as exc:\n"
+    '        logger.warning("Help: the explanation window marker failed: %s", exc)\n'
+    "        return _HELP_CHOICE_NOT_SAVED_NOTICE\n"
+)
+MARKER_STEP = (
+    "    try:\n"
+    "        marker = default_help_explainer_marker_path()\n"
+    "        if not await asyncio.to_thread(load_hint_shown, marker):\n"
+    + MARKER_NOT_WRITTEN
+    + MARKER_RAISED
+)
+# The caller in start_help_online that shows the returned notice.
+NOTICE_SENT = (
+    "            if notice:\n"
+    "                self._send_gui_notification(notice)\n"
+)
+# The GUI guard of wh-assistant-explainer-once-more.1.2.
+VISIBLE_GUARD = "        if not self._help_explainer.isVisible():\n"
+
+# The table's do_not_show_again argument: only a real boolean is a choice.
+TABLE_BOX_ARG = (
+    'do_not_show_again=command.get("do_not_show_again") '
+    'if isinstance(command.get("do_not_show_again"), bool) else None'
+)
+
+GUI_BOX_FIELD = '            "do_not_show_again": bool(do_not_show_again),\n        })\n'
 
 BROWSER_LOG = (
     "        logger.info(\n"
@@ -246,10 +523,12 @@ MUTATIONS = [
     {
         # Without the explained half the window answers its own Assistant
         # button and the browser never opens.
+        # Re-targeted for wh-assistant-explainer-once-more: the explained
+        # check and the config read are separate lines now.
         "name": "the-explained-half-is-dropped",
         "file": MAIN,
-        "old": '        if not explained and config.get("ai.help.explain_before_open", True):',
-        "new": '        if config.get("ai.help.explain_before_open", True):',
+        "old": "        if not explained:\n",
+        "new": "        if True:\n",
         "catchers": {SKIPS_WINDOW: CALLED_ZERO},
     },
     {
@@ -257,17 +536,19 @@ MUTATIONS = [
         # appears however ai.help.explain_before_open is set.
         "name": "the-config-read-is-dropped",
         "file": MAIN,
-        "old": '        if not explained and config.get("ai.help.explain_before_open", True):',
-        "new": "        if not explained:",
+        "old": 'explain = bool(config.get("ai.help.explain_before_open", True))',
+        "new": "explain = True",
         "catchers": {OPENS_ADDRESS: CALLED_ZERO},
     },
     {
         # W3: an absent key must read as true, so a user who has never
-        # touched the setting still gets the explanation.
+        # touched the setting still gets the explanation. The autouse
+        # marker fixture writes the marker, so the once-more rule cannot
+        # show the window in place of the default.
         "name": "the-default-becomes-false",
         "file": MAIN,
-        "old": '        if not explained and config.get("ai.help.explain_before_open", True):',
-        "new": '        if not explained and config.get("ai.help.explain_before_open", False):',
+        "old": '            explain = bool(config.get("ai.help.explain_before_open", True))',
+        "new": '            explain = bool(config.get("ai.help.explain_before_open", False))',
         "catchers": {MISSING_SETTING: NOT_CALLED},
     },
     {
@@ -344,10 +625,12 @@ MUTATIONS = [
     {
         # The Logic side of the cross-process contract: the GUI process
         # matches this exact action name and nothing else.
+        # Re-targeted: the message is built before the put since
+        # wh-assistant-explainer-once-more.
         "name": "the-explainer-request-uses-another-action-name",
         "file": MAIN,
-        "old": 'queue.put_nowait({"action": "open_help_explainer"})',
-        "new": 'queue.put_nowait({"action": "open_help_explainer_disabled"})',
+        "old": 'message = {"action": "open_help_explainer"}',
+        "new": 'message = {"action": "open_help_explainer_disabled"}',
         "catchers": {
             ASKS_FOR_WINDOW: QUEUED_LIST,
             MISSING_SETTING: QUEUED_LIST,
@@ -359,10 +642,15 @@ MUTATIONS = [
     {
         # The window branch claims the browser opened. One line still, but
         # it names the wrong outcome.
+        # Re-targeted: the format string is split over two lines since
+        # wh-assistant-explainer-once-more.
         "name": "the-window-branch-logs-the-browser-text",
         "file": MAIN,
-        "old": '                "Help: source=%s explained=%s, asking for the explanation window.",',
-        "new": '                "Help: source=%s explained=%s, opening the browser.",',
+        "old": (
+            '                    "Help: source=%s explained=%s, asking for the explanation "\n'
+            '                    "window.",\n'
+        ),
+        "new": '                    "Help: source=%s explained=%s, opening the browser.",\n',
         "catchers": {
             LOG_WINDOW: "AssertionError: assert 'explanation window' in",
         },
@@ -409,57 +697,659 @@ MUTATIONS = [
     {
         # The same instance comes back, so a box ticked in an earlier
         # reading would travel with a later Assistant press.
+        # Re-targeted: the call carries start_ticked since
+        # wh-assistant-explainer-once-more, and sits under the visible-window
+        # guard since .1.2, where a hidden window shown again must still be
+        # reset (HIDDEN_RESET).
         "name": "the-check-box-is-not-cleared-before-showing",
         "file": GUI,
-        "old": "        self._help_explainer.prepare_to_show()\n",
-        "new": "        pass\n",
+        "old": "            self._help_explainer.prepare_to_show(start_ticked=start_ticked)\n",
+        "new": "            pass\n",
         "catchers": {
             BOX_CLEARED: "AssertionError: Expected 'prepare_to_show' to have been called once",
+            HIDDEN_RESET[0]: "assert True is False",
+            HIDDEN_RESET[1]: "assert False is True",
         },
     },
-    # ---------------------------------------------------------------
-    # Behaviour 2: save only when Assistant was chosen AND the box is
-    # ticked.
-    # ---------------------------------------------------------------
     {
-        # The tick is ignored and the setting is written every time, so one
-        # Assistant press turns the explanation off for good.
-        "name": "the-tick-is-ignored-and-the-setting-always-saves",
+        # wh-assistant-explainer-once-more: the flag stops at the GUI
+        # manager, so the once-more showing starts with the box clear.
+        "name": "the-gui-drops-the-tick-before-the-window",
         "file": GUI,
-        "old": "        if do_not_show_again:",
-        "new": "        if True:",
+        "old": "            self._help_explainer.prepare_to_show(start_ticked=start_ticked)\n",
+        "new": "            self._help_explainer.prepare_to_show(start_ticked=False)\n",
+        "catchers": {FLAG_TICKS: "AssertionError: expected call not found"},
+    },
+    {
+        # The queue arm drops the flag from the Logic message.
+        "name": "the-gui-queue-arm-drops-the-tick",
+        "file": GUI,
+        "old": 'start_ticked=message.get("start_ticked") is True',
+        "new": "start_ticked=False",
+        "catchers": {FLAG_TICKS: "AssertionError: expected call not found"},
+    },
+    {
+        # The queue arm inverts the flag.
+        "name": "the-gui-queue-arm-inverts-the-tick",
+        "file": GUI,
+        "old": 'start_ticked=message.get("start_ticked") is True',
+        "new": 'start_ticked=message.get("start_ticked") is not True',
         "catchers": {
-            CLEAR_SAVES_NOTHING: QUEUED_LIST,
-            ASSISTANT_OPENS: QUEUED_LIST,
+            FLAG_TICKS: "AssertionError: expected call not found",
+            NO_FLAG_CLEAR: "AssertionError: expected call not found",
         },
     },
     {
-        # The tick never writes anything, so the check box does nothing.
-        "name": "the-tick-never-saves-the-setting",
+        # The strict check becomes truthiness: the flag crosses a process
+        # boundary, so bool("yes") would tick the box.
+        "name": "the-gui-tick-check-becomes-bool",
         "file": GUI,
-        "old": "        if do_not_show_again:",
-        "new": "        if False:",
-        "catchers": {CHECKED_SAVES: "assert 0 == 1"},
+        "old": 'start_ticked=message.get("start_ticked") is True',
+        "new": 'start_ticked=bool(message.get("start_ticked"))',
+        "catchers": {
+            name: "AssertionError: expected call not found"
+            for name in ONLY_TRUE_TICKS
+        },
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 2: save only when Assistant was chosen, and only when the
+    # value changes. Since wh-assistant-explainer-once-more the GUI sends
+    # the box state and Logic's _record_help_explainer_choice decides and
+    # writes, so the three GUI mutations of this behaviour are re-targeted
+    # to the same decisions in Logic. Every ConfigService.save drops the
+    # user's comments, which is why "no save when nothing changes" is
+    # itself guarded.
+    # ---------------------------------------------------------------
+    {
+        # Re-targeted: the equality early return is gone, so the setting is
+        # written on every Assistant press, even when it already holds the
+        # wanted value. Re-targeted again by .1.1: the condition now
+        # guards the save step instead of returning early. Re-targeted
+        # again by .1.3: the comparison is now made under the lock.
+        "name": "the-tick-is-ignored-and-the-setting-always-saves",
+        "file": MAIN,
+        "old": LOCKED_READ,
+        "new": "                if False:\n",
+        "catchers": {
+            TICKED_FALSE_NO_SAVE: SAVE_NOT_EXPECTED,
+            UNTICKED_TRUE_NO_SAVE: SAVE_NOT_EXPECTED,
+            MATCHING_NOT_REWRITTEN: "AssertionError: assert b",
+        },
     },
     {
-        # The write goes the wrong way: ticking the box turns the
-        # explanation ON rather than off.
+        # Re-targeted: the save call is replaced by a claimed success, so
+        # the check box never changes the setting.
+        "name": "the-tick-never-saves-the-setting",
+        "file": MAIN,
+        "old": SAVE_CALL,
+        "new": "                        saved = True\n",
+        "catchers": {
+            TICKED_TRUE_SAVES: SAVE_NEVER_AWAITED,
+            UNTICKED_FALSE_SAVES: SAVE_NEVER_AWAITED,
+            RECORDED_UNCONFIGURED: SAVE_NEVER_AWAITED,
+        },
+    },
+    {
+        # Re-targeted: the saved value is always true, so ticking the box
+        # turns the explanation ON rather than off.
         "name": "the-saved-value-becomes-true",
-        "file": GUI,
-        "old": "                'value': False,",
-        "new": "                'value': True,",
-        "catchers": {CHECKED_SAVES: "assert True is False"},
+        "file": MAIN,
+        "old": "values={key: wanted}",
+        "new": "values={key: True}",
+        "catchers": {
+            TICKED_TRUE_SAVES: "AssertionError: expected await not found",
+            RECORDED_UNCONFIGURED: "AssertionError: expected await not found",
+        },
+    },
+    {
+        # The wanted value is inverted: the box means the opposite.
+        "name": "the-wanted-value-is-inverted",
+        "file": MAIN,
+        "old": "    wanted = not do_not_show_again\n",
+        "new": "    wanted = do_not_show_again\n",
+        "catchers": {
+            TICKED_FALSE_NO_SAVE: SAVE_NOT_EXPECTED,
+            TICKED_TRUE_SAVES: SAVE_NEVER_AWAITED,
+            UNTICKED_FALSE_SAVES: SAVE_NEVER_AWAITED,
+            UNTICKED_TRUE_NO_SAVE: SAVE_NOT_EXPECTED,
+        },
+    },
+    {
+        # The tick is ignored and every press means "do not show again": an
+        # unticked box with the setting false leaves it false, so the
+        # window never returns although the user cleared the box.
+        "name": "an-unticked-box-leaves-the-setting-false",
+        "file": MAIN,
+        "old": "    wanted = not do_not_show_again\n",
+        "new": "    wanted = False\n",
+        "catchers": {
+            UNTICKED_FALSE_SAVES: SAVE_NEVER_AWAITED,
+        },
+    },
+    {
+        # The no-save rule broken for the ticked case only: a ticked box
+        # with the setting already false rewrites the settings file, and
+        # the user's comments are lost for nothing.
+        "name": "ticked-with-the-setting-false-saves-anyway",
+        "file": MAIN,
+        "old": LOCKED_READ,
+        "new": LOCKED_READ.replace(":\n", " and not do_not_show_again:\n"),
+        "catchers": {
+            TICKED_FALSE_NO_SAVE: SAVE_NOT_EXPECTED,
+        },
+    },
+    {
+        # The no-save rule broken for the unticked case only.
+        "name": "unticked-with-the-setting-true-saves-anyway",
+        "file": MAIN,
+        "old": LOCKED_READ,
+        "new": LOCKED_READ.replace(":\n", " and do_not_show_again:\n"),
+        "catchers": {
+            UNTICKED_TRUE_NO_SAVE: SAVE_NOT_EXPECTED,
+        },
+    },
+    {
+        # The choice reads a missing setting as false, although the window
+        # itself reads it as true (W3). An unticked press by a user who
+        # never touched the setting then rewrites the settings file.
+        "name": "the-choice-reads-a-missing-setting-as-false",
+        "file": MAIN,
+        "old": LOCKED_READ,
+        "new": LOCKED_READ.replace("(key, True)", "(key, False)"),
+        "catchers": {
+            MISSING_SETTING_CHOICE: SAVE_NOT_EXPECTED,
+        },
     },
     {
         # The Assistant button's command claims it came from the menu.
+        # Catchers re-named: the GUI save tests became one parametrized
+        # test in wh-assistant-explainer-once-more.
         "name": "the-window-does-not-name-itself-as-the-source",
         "file": GUI,
         "old": '            "source": "window",',
         "new": '            "source": "menu",',
+        "catchers": {SENDS_CLEAR: QUEUED_LIST, SENDS_TICKED: QUEUED_LIST},
+    },
+    {
+        # The box state is left out of the command, so Logic can never
+        # record the choice.
+        "name": "the-gui-drops-the-box-state",
+        "file": GUI,
+        "old": GUI_BOX_FIELD,
+        "new": "        })\n",
+        "catchers": {SENDS_CLEAR: QUEUED_LIST, SENDS_TICKED: QUEUED_LIST},
+    },
+    {
+        # The box state is sent as always ticked.
+        "name": "the-gui-always-sends-ticked",
+        "file": GUI,
+        "old": GUI_BOX_FIELD,
+        "new": '            "do_not_show_again": True,\n        })\n',
+        "catchers": {SENDS_CLEAR: QUEUED_LIST},
+    },
+    {
+        # The old design comes back: the GUI writes the setting itself, a
+        # second command beside the one Logic now acts on.
+        "name": "the-gui-writes-the-setting-itself",
+        "file": GUI,
+        "old": GUI_BOX_FIELD,
+        "new": (
+            GUI_BOX_FIELD
+            + "        if do_not_show_again:\n"
+            + "            self.send_command({\n"
+            + "                'action': 'set_config_value',\n"
+            + "                'key': 'ai.help.explain_before_open',\n"
+            + "                'value': False,\n"
+            + "            })\n"
+        ),
+        "catchers": {SENDS_TICKED: QUEUED_LIST},
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 8 (wh-assistant-explainer-once-more): the marker file and
+    # the once-more showing.
+    # ---------------------------------------------------------------
+    {
+        # The marker check is dropped for a false setting: the window is
+        # never shown once more.
+        "name": "the-once-more-check-is-dropped",
+        "file": MAIN,
+        "old": "            if not explain:\n",
+        "new": "            if False:\n",
+        "catchers": {PRE_TICKED: NOT_CALLED},
+    },
+    {
+        # The marker check is inverted: the window is shown to a user who
+        # has already chosen since the move, and not to one who has not.
+        "name": "the-once-more-check-is-inverted",
+        "file": MAIN,
+        "old": "once_more = not await asyncio.to_thread(",
+        "new": "once_more = await asyncio.to_thread(",
+        "catchers": {PRE_TICKED: NOT_CALLED, MARKER_OPENS: CALLED_ZERO},
+    },
+    {
+        # The window is always shown for a false setting, marker or not.
+        "name": "the-window-is-always-shown",
+        "file": MAIN,
+        "old": "            if explain or once_more:\n",
+        "new": "            if True:\n",
+        "catchers": {MARKER_OPENS: CALLED_ZERO},
+    },
+    {
+        # The marker path names the click hint's file, which many users
+        # already hold, so the once-more showing never happens for them.
+        "name": "the-marker-reuses-the-click-hint-file",
+        "file": MAIN,
+        "old": '/ "help_explainer_notebook_shown.toml"',
+        "new": '/ "click_first_use_hint_shown.toml"',
+        "catchers": {MARKER_FOLDER: "AssertionError: assert WindowsPath("},
+    },
+    {
+        # The marker is never written, so the window comes back at every
+        # Help for a user whose setting is false.
+        "name": "the-marker-is-never-written",
+        "file": MAIN,
+        "old": MARKER_NOT_WRITTEN,
+        "new": "            pass\n",
         "catchers": {
-            ASSISTANT_OPENS: QUEUED_LIST,
-            CHECKED_SAVES: COMMAND_IN_LIST,
+            TICKED_FALSE_NO_SAVE: "AssertionError: assert False is True",
+            TICKED_TRUE_SAVES: "AssertionError: assert False is True",
+            UNTICKED_FALSE_SAVES: "AssertionError: assert False is True",
+            UNTICKED_TRUE_NO_SAVE: "AssertionError: assert False is True",
+            RECORDED_UNCONFIGURED: "AssertionError: assert False is True",
         },
+    },
+    {
+        # An existing marker is written again on every press.
+        "name": "an-existing-marker-is-rewritten",
+        "file": MAIN,
+        "old": "        if not await asyncio.to_thread(load_hint_shown, marker):\n",
+        "new": "        if True:\n",
+        "catchers": {MARKER_NOT_REWRITTEN: "assert b'shown = tru"},
+    },
+    {
+        # The record step is skipped altogether: neither marker nor setting.
+        "name": "the-choice-is-never-recorded",
+        "file": MAIN,
+        "old": "        if explained and do_not_show_again is not None:\n",
+        "new": "        if False:\n",
+        "catchers": {
+            TICKED_FALSE_NO_SAVE: "AssertionError: assert False is True",
+            TICKED_TRUE_SAVES: "AssertionError: assert False is True",
+            UNTICKED_FALSE_SAVES: "AssertionError: assert False is True",
+            UNTICKED_TRUE_NO_SAVE: "AssertionError: assert False is True",
+            RECORDED_UNCONFIGURED: "AssertionError: assert False is True",
+        },
+    },
+    {
+        # A command without the box state records a choice anyway: None
+        # reads as an unticked box. This is the mutation for the guard
+        # test_a_command_without_the_box_state_writes_nothing, which
+        # passed before the implementation.
+        "name": "a-command-without-the-box-state-records-a-choice",
+        "file": MAIN,
+        "old": "        if explained and do_not_show_again is not None:\n",
+        "new": "        if explained:\n",
+        "catchers": {name: "AssertionError: assert not True" for name in NO_BOX_STATE},
+    },
+    {
+        # A MOVE: the record step goes after the blank-address check, so a
+        # choice made while the address was blanked is lost.
+        "name": "the-choice-is-recorded-after-the-blank-check",
+        "file": MAIN,
+        "old": RECORD_BLOCK + "\n" + BLANK_BRANCH,
+        "new": BLANK_BRANCH + "\n" + RECORD_BLOCK,
+        "catchers": {RECORDED_UNCONFIGURED: "AssertionError: assert False is True"},
+    },
+    {
+        # Showing the window uses up the once-more showing: the marker is
+        # written when the window is requested, so Cancel ends it too. The
+        # mutation for the guard test_showing_the_window_writes_nothing,
+        # which passed before the implementation. __import__ binds no
+        # name, so the function's own import is untouched.
+        "name": "showing-the-window-writes-the-marker",
+        "file": MAIN,
+        "old": WINDOW_REQUEST,
+        "new": (
+            '                __import__("services.wheelhouse.click_first_use_hint",'
+            ' fromlist=["mark_hint_shown"]).mark_hint_shown('
+            "default_help_explainer_marker_path())\n" + WINDOW_REQUEST
+        ),
+        "catchers": {SHOW_WRITES_NOTHING: "AssertionError: assert not True"},
+    },
+    {
+        # Showing the window saves the setting. Aimed at the second
+        # assertion of the same guard: the marker stays unwritten, so the
+        # test reaches the settings check.
+        "name": "showing-the-window-saves-the-setting",
+        "file": MAIN,
+        "old": WINDOW_REQUEST,
+        "new": (
+            "                await config.save(\n"
+            '                    values={"ai.help.explain_before_open": True}\n'
+            "                )\n" + WINDOW_REQUEST
+        ),
+        "catchers": {
+            SHOW_WRITES_NOTHING: SAVE_NOT_EXPECTED,
+        },
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 11 (wh-assistant-explainer-once-more.1.1): the setting is
+    # saved before the marker is written, a failed save writes no marker,
+    # and every failed write shows the user a notice.
+    # ---------------------------------------------------------------
+    {
+        # A MOVE: the marker step goes before the save step, the order the
+        # finding reported. A failed save then leaves the marker written.
+        "name": "the-marker-is-written-before-the-save",
+        "file": MAIN,
+        "old": SAVE_STEP + "\n" + MARKER_STEP,
+        "new": MARKER_STEP + "\n" + SAVE_STEP,
+        "catchers": {
+            SAVED_BEFORE_MARKER: "assert [True] == [False]",
+            **{name: MARKER_PRESENT for name in FAILED_SAVE},
+            WINDOW_COMES_BACK: NOT_OPENED,
+        },
+    },
+    {
+        # A failed save goes on to write the marker (and shows no notice).
+        "name": "a-failed-save-still-writes-the-marker",
+        "file": MAIN,
+        "old": "    if not saved:\n        # No marker",
+        "new": "    if False:\n        # No marker",
+        "catchers": {
+            **{name: MARKER_PRESENT for name in FAILED_SAVE},
+            WINDOW_COMES_BACK: NOT_OPENED,
+            NO_STATE_MANAGER: MARKER_PRESENT,
+        },
+    },
+    {
+        # A missing state manager counts as a saved setting. Re-targeted by
+        # .1.3: that path now compares the value on disk itself.
+        "name": "no-state-manager-counts-as-saved",
+        "file": MAIN,
+        "old": NO_MANAGER_READ,
+        "new": "        saved = True\n",
+        "catchers": {NO_STATE_MANAGER: MARKER_PRESENT},
+    },
+    {
+        # A save that raises counts as saved. Split from the mutation above
+        # by .1.3: the start value no longer reaches the no-manager path.
+        "name": "a-raised-save-counts-as-saved",
+        "file": MAIN,
+        "old": SAVED_FALSE,
+        "new": "    saved = True\n",
+        "catchers": {name: MARKER_PRESENT for name in FAILED_SAVE_RAISES},
+    },
+    {
+        # A failed save writes no marker but tells the user nothing.
+        "name": "a-failed-save-shows-no-notice",
+        "file": MAIN,
+        "old": NOT_SAVED_RETURN,
+        "new": NOT_SAVED_RETURN.replace(
+            "return _HELP_CHOICE_NOT_SAVED_NOTICE", "return None"
+        ),
+        "catchers": {
+            **{name: NOTICE_MISSING for name in FAILED_SAVE},
+            NO_STATE_MANAGER: "AssertionError: assert None == 'Wheelhouse could not",
+        },
+    },
+    {
+        # A marker the writer reports as not written tells the user nothing.
+        "name": "a-marker-write-failure-shows-no-notice",
+        "file": MAIN,
+        "old": MARKER_NOT_WRITTEN,
+        "new": MARKER_NOT_WRITTEN.replace(
+            "return _HELP_CHOICE_NOT_SAVED_NOTICE", "return None"
+        ),
+        "catchers": {MARKER_FAILS_REPORTED: NOTICE_MISSING},
+    },
+    {
+        # A marker writer that raises tells the user nothing.
+        "name": "a-marker-writer-exception-shows-no-notice",
+        "file": MAIN,
+        "old": MARKER_RAISED,
+        "new": MARKER_RAISED.replace(
+            "return _HELP_CHOICE_NOT_SAVED_NOTICE", "return None"
+        ),
+        "catchers": {MARKER_RAISES_REPORTED: NOTICE_MISSING},
+    },
+    {
+        # The caller drops the returned notice, so no failure reaches the
+        # user.
+        "name": "start-help-online-drops-the-notice",
+        "file": MAIN,
+        "old": NOTICE_SENT,
+        "new": "            pass\n",
+        "catchers": {
+            **{name: NOTICE_MISSING for name in FAILED_SAVE},
+            MARKER_FAILS_REPORTED: NOTICE_MISSING,
+            MARKER_RAISES_REPORTED: NOTICE_MISSING,
+        },
+    },
+    {
+        # A kept choice also shows the failure notice.
+        "name": "a-kept-choice-shows-the-notice",
+        "file": MAIN,
+        "old": (
+            "        return _HELP_CHOICE_NOT_SAVED_NOTICE\n"
+            "    return None\n"
+        ),
+        "new": (
+            "        return _HELP_CHOICE_NOT_SAVED_NOTICE\n"
+            "    return _HELP_CHOICE_NOT_SAVED_NOTICE\n"
+        ),
+        "catchers": {name: QUEUED_LIST for name in KEPT_NO_NOTICE},
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 11, round 2 (Codex on wh-assistant-explainer-once-more.1.1):
+    # the comparison reads the value on disk, the save is staged so a
+    # failure leaves the live value alone, it runs under the GUI settings
+    # lock, and a state update follows it. Catchers use the real
+    # ConfigService with a failed atomic replace of the settings file.
+    # ---------------------------------------------------------------
+    {
+        # The comparison reads the live value: a live value that matches
+        # the choice but never reached the file skips the save.
+        "name": "the-choice-reads-the-live-value",
+        "file": MAIN,
+        "old": LOCKED_READ,
+        "new": LOCKED_READ.replace("config.get_persisted(", "config.get("),
+        "catchers": {
+            LIVE_ONLY_RE_ENABLE: "AssertionError: assert False is not False",
+            LIVE_ONLY_TURN_OFF: "AssertionError: assert True is not True",
+        },
+    },
+    {
+        # The save changes the live value first and saves the whole live
+        # settings, the round-1 call: a failed replace leaves the live value
+        # matching the choice, and the second press saves nothing.
+        "name": "the-save-changes-the-live-value-first",
+        "file": MAIN,
+        "old": SAVE_CALL,
+        "new": (
+            "                        config.set(key, wanted)\n"
+            "                        saved = bool(await config.save())\n"
+        ),
+        "catchers": {name: "AssertionError: 1" for name in RETRY},
+    },
+    {
+        # The save does not take the GUI settings lock, so it can run in
+        # the middle of a GUI settings write and its acknowledgement.
+        "name": "the-save-takes-no-lock",
+        "file": MAIN,
+        "old": LOCK_HELD,
+        "new": "            if True:\n",
+        "catchers": {
+            SAVE_WAITS: "AssertionError: the save ran while",
+            **{name: PENDING_LOST for name in PENDING},
+        },
+    },
+    {
+        # A new lock on every save replaces the one a GUI write holds.
+        "name": "the-lock-is-replaced-on-every-save",
+        "file": MAIN,
+        "old": LOCK_CREATE,
+        "new": LOCK_CREATE.replace(
+            'if not hasattr(state_manager, "_gui_settings_lock"):', "if True:"
+        ),
+        "catchers": {SAVE_WAITS: "AssertionError: the save ran while"},
+    },
+    {
+        # The lock is never created: the first save after startup fails on
+        # the missing attribute, and the choice is never kept.
+        "name": "the-lock-is-never-created",
+        "file": MAIN,
+        "old": LOCK_CREATE,
+        "new": LOCK_CREATE.replace(
+            'if not hasattr(state_manager, "_gui_settings_lock"):', "if False:"
+        ),
+        "catchers": {LOCK_CREATED: "AssertionError: assert False"},
+    },
+    {
+        # A MOVE, the af86a7c8 shape (wh-assistant-explainer-once-more.1.3):
+        # the value on disk is compared before the lock is taken. A second,
+        # opposite choice made while the first save is pending matches the
+        # old value, saves nothing, and the first save then replaces it.
+        "name": "the-comparison-is-made-before-the-lock",
+        "file": MAIN,
+        "old": LOCK_CREATE + LOCK_HELD + LOCKED_READ,
+        "new": (
+            "            matches = bool(config.get_persisted(key, True)) == wanted\n"
+            + LOCK_CREATE
+            + LOCK_HELD
+            + "                if matches:\n"
+        ),
+        "catchers": {name: PENDING_LOST for name in PENDING},
+    },
+    {
+        # No state update after the save, so the GUI keeps the old view.
+        "name": "no-state-update-after-the-save",
+        "file": MAIN,
+        "old": STATE_UPDATE,
+        "new": "                    pass\n",
+        "catchers": {name: "assert False" for name in WRITABLE},
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 12 (wh-assistant-explainer-once-more.1.2): a second Help
+    # request raises a visible window without resetting its check box.
+    # ---------------------------------------------------------------
+    {
+        # The guard is dropped: every request resets the box, the defect
+        # the finding reported.
+        "name": "a-visible-window-is-reset",
+        "file": GUI,
+        "old": VISIBLE_GUARD,
+        "new": "        if True:\n",
+        "catchers": {
+            CLEARED_STAYS: "assert True is False",
+            TICKED_STAYS: "assert False is True",
+            VISIBLE_RAISED: PREPARED_TWICE,
+        },
+    },
+    {
+        # The guard is inverted: only a visible window is reset, so a new
+        # or hidden window keeps whatever its box held.
+        "name": "the-visible-guard-is-inverted",
+        "file": GUI,
+        "old": VISIBLE_GUARD,
+        "new": "        if self._help_explainer.isVisible():\n",
+        "catchers": {
+            HIDDEN_RESET[0]: "assert True is False",
+            HIDDEN_RESET[1]: "assert False is True",
+            # Fails at its first check: the new window is never set up.
+            CLEARED_STAYS: "assert False is True",
+            BOX_CLEARED: PREPARED_NEVER,
+        },
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 9 (wh-assistant-explainer-once-more): the start_ticked
+    # flag, from Logic through the GUI to the window.
+    # ---------------------------------------------------------------
+    {
+        # Logic drops the flag: the once-more window starts clear, and one
+        # Assistant press turns the window back on.
+        "name": "logic-drops-the-tick",
+        "file": MAIN,
+        "old": WINDOW_REQUEST,
+        "new": "                self._request_help_explainer(start_ticked=False)\n",
+        "catchers": {PRE_TICKED: QUEUED_LIST},
+    },
+    {
+        # Logic inverts the flag.
+        "name": "logic-inverts-the-tick",
+        "file": MAIN,
+        "old": WINDOW_REQUEST,
+        "new": "                self._request_help_explainer(start_ticked=not once_more)\n",
+        "catchers": {
+            PRE_TICKED: QUEUED_LIST,
+            TRUE_NO_TICK_NO_MARKER: QUEUED_LIST,
+            TRUE_NO_TICK_MARKER: QUEUED_LIST,
+            ASKS_FOR_WINDOW: QUEUED_LIST,
+        },
+    },
+    {
+        # The request always carries the flag, so every showing starts
+        # ticked.
+        "name": "the-request-always-carries-the-tick",
+        "file": MAIN,
+        "old": "        if start_ticked:\n",
+        "new": "        if True:\n",
+        "catchers": {
+            TRUE_NO_TICK_NO_MARKER: QUEUED_LIST,
+            ASKS_FOR_WINDOW: QUEUED_LIST,
+        },
+    },
+    {
+        # The window ignores the flag and always starts clear.
+        "name": "the-window-ignores-the-tick",
+        "file": WINDOW,
+        "old": "        self._do_not_show_again.setChecked(bool(start_ticked))",
+        "new": "        self._do_not_show_again.setChecked(False)",
+        "catchers": {
+            CAN_START_TICKED: "assert False is True",
+            PRE_TICKED_REPORTS: "assert [False, False] == [True, False]",
+        },
+    },
+    {
+        # The window inverts the flag.
+        "name": "the-window-inverts-the-tick",
+        "file": WINDOW,
+        "old": "        self._do_not_show_again.setChecked(bool(start_ticked))",
+        "new": "        self._do_not_show_again.setChecked(not start_ticked)",
+        "catchers": {
+            CAN_START_TICKED: "assert False is True",
+            CLEARS_AGAIN: "assert True is False",
+            PRE_TICK_NO_TRAVEL: "assert True is False",
+        },
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 10 (wh-assistant-explainer-once-more): the command
+    # table's strict boolean check on do_not_show_again.
+    # ---------------------------------------------------------------
+    {
+        # A non-boolean passes through, so the string "false" would read
+        # as a ticked box in _record_help_explainer_choice.
+        "name": "the-box-state-check-is-dropped",
+        "file": MAIN,
+        "old": TABLE_BOX_ARG,
+        "new": 'do_not_show_again=command.get("do_not_show_again")',
+        # Measured: the string cases carry the AssertionError prefix and
+        # the others do not.
+        "catchers": {
+            REAL_BOOL_CATCHERS[0]: "AssertionError: assert '",
+            REAL_BOOL_CATCHERS[1]: "AssertionError: assert '",
+            REAL_BOOL_CATCHERS[2]: "assert 1 is None",
+            REAL_BOOL_CATCHERS[3]: "assert 0 is None",
+            REAL_BOOL_CATCHERS[4]: "assert [] is None",
+        },
+    },
+    {
+        # The box state never reaches start_help_online.
+        "name": "the-box-state-is-not-passed-on",
+        "file": MAIN,
+        "old": TABLE_BOX_ARG,
+        "new": "do_not_show_again=None",
+        "catchers": {BOX_STATE_REACHES: NO_CALL},
     },
     {
         # Cancel reaches the Assistant handler, so backing out of the
@@ -553,6 +1443,45 @@ MUTATIONS = [
         "new": '        if gem_url.strip().startswith("https://chatgpt.com/"):',
         "catchers": {
             OTHER_GPT_UNCHANGED: "AssertionError: expected call not found",
+        },
+    },
+    # ---------------------------------------------------------------
+    # Behaviour 6, second address: an installation made with 1.2.0 still
+    # names the Gemini Gem that Google ends on 2026-11-17, and the Gemini
+    # Notebook opens instead (wh-assistant-gemini-notebook).
+    # ---------------------------------------------------------------
+    {
+        # The substitution never fires, so every 1.2.0 installation keeps
+        # opening the Gem after Google stops running it.
+        "name": "the-old-gem-address-is-opened-as-written",
+        "file": MAIN,
+        "old": "        elif gem_url.strip() == _OLD_GEM_HELP_URL:",
+        "new": "        elif False:",
+        "catchers": {
+            OLD_GEM_OPENS_NOTEBOOK: "AssertionError: expected call not found",
+            OLD_GEM_WHITESPACE: "AssertionError: expected call not found",
+            OLD_GEM_LOGGED: "assert 0 == 1",
+        },
+    },
+    {
+        # strip() is dropped from the Gem comparison.
+        "name": "the-gem-comparison-stops-stripping",
+        "file": MAIN,
+        "old": "        elif gem_url.strip() == _OLD_GEM_HELP_URL:",
+        "new": "        elif gem_url == _OLD_GEM_HELP_URL:",
+        "catchers": {
+            OLD_GEM_WHITESPACE: "AssertionError: expected call not found",
+        },
+    },
+    {
+        # The exact comparison becomes a prefix test, so a Gem the user
+        # chose on purpose is replaced too.
+        "name": "the-gem-comparison-stops-being-exact",
+        "file": MAIN,
+        "old": "        elif gem_url.strip() == _OLD_GEM_HELP_URL:",
+        "new": '        elif gem_url.strip().startswith("https://gemini.google.com/gem/"):',
+        "catchers": {
+            OTHER_GEM_UNCHANGED: "AssertionError: expected call not found",
         },
     },
 ]

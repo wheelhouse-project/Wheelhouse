@@ -219,8 +219,11 @@ class TestADuplicateNoLongerTakesTheBuiltIn:
             tmp_path, SHIPPED,
             _block("^(?:escape|dismiss)$", origin="user", actions=MINE),
         )
+        # The duplicate now answers first and the built-in stays in the
+        # list behind it: QUESTIONS-2026-09-28.md item 12, option three
+        # (wh-user-rule-precedence), a cost David accepted.
         assert _actions_of(catalog.get_matching_patterns("escape")) == [
-            ESC, MINE,
+            MINE, ESC,
         ]
 
     def test_the_listing_does_not_call_it_an_override(self, tmp_path):
@@ -245,12 +248,17 @@ class TestADuplicateNoLongerTakesTheBuiltIn:
 
 
 class TestTheWholeDuplicateSequence:
-    def test_saving_a_duplicate_leaves_the_builtin_running(self, tmp_path):
+    def test_saving_a_duplicate_keeps_the_builtin_in_the_list(self, tmp_path):
         """The reviewer's own sequence, through the real save and load.
 
         Duplicate of the shipped escape row, action changed and nothing
         else, saved by ``create_pattern``, then read by a real
         ``PatternCatalog`` over the same two files.
+
+        Renamed from test_saving_a_duplicate_leaves_the_builtin_running:
+        the duplicate now answers first (QUESTIONS-2026-09-28.md item 12,
+        option three), so the built-in no longer answers "escape". It is
+        still in the list, and deleting the duplicate brings it back.
         """
         manager = _manager(tmp_path)
         result = manager.create_pattern(
@@ -260,8 +268,10 @@ class TestTheWholeDuplicateSequence:
         catalog = PatternCatalog(
             manager.patterns_file, manager.user_patterns_file,
         )
+        # The duplicate leads: QUESTIONS-2026-09-28.md item 12, option
+        # three (wh-user-rule-precedence).
         assert _actions_of(catalog.get_matching_patterns("escape")) == [
-            ESC, MINE,
+            MINE, ESC,
         ]
 
 

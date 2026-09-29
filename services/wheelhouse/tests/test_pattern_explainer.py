@@ -126,15 +126,16 @@ def _pattern_dict(raw_pattern, actions, requires_hotword=False, **extra):
 class TestPatternKind:
     """pattern_kind is the single classification seam shared by the
     explainer and the manager window's Type badge
-    (wh-pattern-editor-r4.2): trailing position wins, then an explicit
-    type key, then the ^-anchor rule the runtime loader uses."""
+    (wh-pattern-editor-r4.2): an explicit type key wins, then the
+    ^-anchor rule the runtime loader uses. A leftover position key is
+    ignored (wh-remove-trailing-submit)."""
 
-    def test_precedence_position_then_type_then_anchor(self):
+    def test_precedence_type_then_anchor_and_position_is_ignored(self):
         from speech.pattern_explainer import pattern_kind
 
         assert pattern_kind(
-            _pattern_dict("submit", [], position="trailing")
-        ) == "trailing"
+            _pattern_dict("^submit$", [], position="trailing")
+        ) == "command"
         assert pattern_kind(
             _pattern_dict(r"\bdeploy\b", [], type="replacement")
         ) == "replacement"
@@ -200,7 +201,7 @@ class TestWakeWordCommand:
             requires_hotword=True,
         )
         assert explain_pattern(pattern, "").startswith(
-            "You must say the wake word first.\n"
+            "You must say the safety word first.\n"
         )
 
 
@@ -418,17 +419,16 @@ class TestCapturePatterns:
         )
 
 
-class TestTrailingPosition:
-    def test_trailing_command_reads_as_last_word(self):
-        # Shipped 'submit' pattern with position = "trailing".
+class TestLeftoverPositionIsIgnored:
+    def test_a_leftover_trailing_position_reads_as_an_ordinary_command(self):
+        # A user row left over from before wh-remove-trailing-submit.
         pattern = _pattern_dict(
-            "submit",
+            "^submit$",
             [{"function": "press_keys", "params": ["enter"]}],
             position="trailing",
         )
         assert explain_pattern(pattern, HOTWORD) == (
-            "Say 'submit' as the last word of what you say; the words you "
-            "said before it are typed as dictation.\n"
+            "Say 'submit'.\n"
             "Press a spoken key sequence ('enter')."
         )
 
@@ -632,9 +632,27 @@ def _va_range_fallbacks() -> set:
         ("left", ["characters?", "words?"]),
         ("right", ["characters?", "words?"]),
     ]
+    # wh-voice-access-parity.1.14 widened the character forms with "move
+    # forward|backward", and added the "[n] times" arrow-key repeats and
+    # "move slider" forms. All carry the same optional numeric capture.
+    # wh-direction-left-right-words adds "go write" and "move write".
+    # wh-go-synonym-for-move adds "go backward", "go forward", and
+    # "go slider".
+    widened = {"left": "(?:go left|go backward|move left|move backward)",
+               "right": "(?:go right|go write|go forward|move right|move write|move forward)"}
+    # wh-direction-left-right-words also accepts "write" wherever "right"
+    # is a direction.
+    spoken = {"up": "up", "down": "down", "left": "left",
+              "right": "(?:right|write)"}
     for direction, nav_units in nav_pairs:
+        word = spoken[direction]
         for unit in nav_units:
-            out.add(rf"^(?:go|move) {direction}(?: (\d+))? {unit}$")
+            if unit == "characters?":
+                out.add(rf"^{widened[direction]}(?: (\d+))? {unit}$")
+            else:
+                out.add(rf"^(?:go|move) {word}(?: (\d+))? {unit}$")
+        out.add(rf"^(?:go|move) {word}(?: (\d+) times?)?$")
+        out.add(rf"^(?:go|move) slider {word}(?: (\d+) times?)?$")
     for verb in ["bold", "italicize", "underline", "capitalize",
                  "lower ?case", "upper ?case"]:
         for unit in units:
@@ -648,8 +666,31 @@ def _va_range_fallbacks() -> set:
             for unit in units:
                 out.add(rf"^{verb} {direction}\s+(\d+)?\s*{unit}$")
     for unit in units:
-        out.add(rf"^select next\s+(\d+)?\s*{unit}$")
-        out.add(rf"^select (?:previous|last)\s+(\d+)?\s*{unit}$")
+        # wh-voice-access-parity.1.14 adds "forward" and "backward" to the
+        # character and line forms; wh-voice-access-parity.1.15 adds them to
+        # the word forms; wh-direction-left-right-words adds "right",
+        # "write", and "left".
+        if unit in ("characters?", "lines?", "words?"):
+            out.add(rf"^select (?:next|forward|right|write)\s+(\d+)?\s*{unit}$")
+            out.add(rf"^select (?:previous|last|backward|left)\s+(\d+)?\s*{unit}$")
+        else:
+            out.add(rf"^select next\s+(\d+)?\s*{unit}$")
+            out.add(rf"^select (?:previous|last)\s+(\d+)?\s*{unit}$")
+    # wh-voice-access-parity.1.15: the bold row gained "bold face" and an
+    # optional "text"/"that" tail. The translator does not phrase an
+    # alternation followed by an optional alternation, in either spelling:
+    # the shipped flat "(?: text| that)?" (boss ruling 06:15 2026-09-26) and
+    # the earlier nested "(?: (?:text|that))?" both fall back, as did nested
+    # per-word optionals and a flat nine-way list. So the Pattern Manager
+    # explains this row with the raw expression. Its trigger display still
+    # reads "bold (or boldface, bold face)".
+    out.add(r"^(?:bold|boldface|bold face)(?: text| that)?$")
+    # wh-voice-access-parity.2.12: the press row gained an optional
+    # "<n> times" tail after a lazy key group. The translator does not
+    # phrase an optional group holding a count, the same shape that sends
+    # the "go/move <direction> <n> times" rows above to the fallback, so
+    # the Pattern Manager explains this row with the raw expression.
+    out.add(r"^press\s*(.+?)(?:\s+(\d+)\s+times?)?$")
     return out
 
 

@@ -205,6 +205,8 @@ class TestElementQueryGestureField:
         assert ClickGesture.INVOKE.value == "invoke"
         assert ClickGesture.RIGHT_CLICK.value == "right_click"
         assert ClickGesture.DOUBLE_CLICK.value == "double_click"
+        # wh-voice-access-parity.2.5: the triple click member.
+        assert ClickGesture.TRIPLE_CLICK.value == "triple_click"
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +238,21 @@ class TestNonDefaultGestureSkipsInvoke:
         assert result.clicked_via == "coordinate"
         assert control.invoke_calls == 0
         assert clicks.calls == [(120, 115, "left", 2)]
+
+    def test_triple_click_sends_three_left_clicks(self):
+        # wh-voice-access-parity.2.5: TRIPLE_CLICK maps to ("left", 3) in
+        # _GESTURE_MOUSE_PARAMS and takes the same guarded coordinate path
+        # as the other physical gestures, never Invoke.
+        control = FakeControl()
+        clicks = RecordingClick()
+        ex = make_executor(gesture_click=clicks)
+        result = ex.click(
+            make_match(control), snap(), query(ClickGesture.TRIPLE_CLICK)
+        )
+        assert result.outcome == "ok"
+        assert result.clicked_via == "coordinate"
+        assert control.invoke_calls == 0
+        assert clicks.calls == [(120, 115, "left", 3)]
 
     def test_default_gesture_still_invokes(self):
         control = FakeControl()

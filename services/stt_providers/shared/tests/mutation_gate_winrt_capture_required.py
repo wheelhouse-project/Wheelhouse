@@ -761,13 +761,20 @@ AUDIO_DEVICE_MUTATIONS = [
         "service": SHARED,
         "test_file": WINRT_CAPTURE_TESTS,
         "file": WINRT_CAPTURE,
+        # Pattern refreshed for wh-mic-loss-capture-recovery, which put
+        # the ERROR line under `if log_failure:` (the rebuild after a lost
+        # microphone passes False). Without the `if` line the old pattern
+        # matched four characters into the deeper indent. Only the raised
+        # words change in the mutant, as before.
         "old": (
-            "                logger.error(AUDIO_DEVICE_MISSING_LOG_LINE)\n"
+            "                if log_failure:\n"
+            "                    logger.error(AUDIO_DEVICE_MISSING_LOG_LINE)\n"
             "                raise RuntimeError(AUDIO_DEVICE_MISSING_MESSAGE)"
             "\n"
         ),
         "new": (
-            "                logger.error(AUDIO_DEVICE_MISSING_LOG_LINE)\n"
+            "                if log_failure:\n"
+            "                    logger.error(AUDIO_DEVICE_MISSING_LOG_LINE)\n"
             "                raise RuntimeError(\n"
             "                    \"The speech service cannot start: the"
             " audio package \"\n"

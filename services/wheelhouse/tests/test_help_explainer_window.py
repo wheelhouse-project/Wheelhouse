@@ -1,8 +1,8 @@
 """Tests for the HelpExplainerWindow (wh-assistant-button-explainer).
 
 The window appears when the user chooses Help, before the browser opens.
-It explains that the Wheelhouse Assistant runs inside Google Gemini, that
-a sign-in is required, and what signing in involves. An Assistant
+It explains that the Wheelhouse Assistant runs on Google's Gemini Notebook,
+that a Google Account is required, and how to get one. An Assistant
 button opens the assistant; a Cancel button opens nothing.
 
 The window carries no settings and no message to another process. It
@@ -18,7 +18,12 @@ The body wording is quoted from David's approval on the bead
 (comment of 2026-09-20 00:56), as edited on 2026-09-22 when the assistant
 moved from ChatGPT to a Google Gemini Gem (wh-gem-replaces-gpt-assistant):
 that change rewrote the assistant's name, the account sentence, and the
-sign-up sentence. Assertions are exact, not substrings:
+sign-up sentence. On 2026-09-27 the assistant moved from the Gem to a
+Gemini Notebook (wh-assistant-gemini-notebook): everything between the
+first sentence and the last paragraph became David's approved Google
+Account text, word for word (bead comment of 2026-09-27 20:48), split
+into paragraphs at sentence ends under the boss ruling of 21:54.
+Assertions are exact, not substrings:
 the words are the deliverable, so a silent edit must fail a test.
 """
 
@@ -35,11 +40,14 @@ from help_explainer_window import (
 
 APPROVED_PARAGRAPHS = (
     "The Wheelhouse Assistant answers questions about Wheelhouse."
-    " It runs inside Google Gemini, in your web browser.",
-    "Gemini asks you to sign in first. A free account works.",
-    'No account yet? On the Gemini page, select "Sign in". You can use a'
-    " Google account, an Apple account, or an email address."
-    " Signing in takes about two minutes.",
+    " The Wheelhouse Assistant runs on Google's Gemini Notebook, so you must"
+    " sign in with a Google Account.",
+    "The account is free, and Google does not ask for a credit card."
+    " You can use an email address you already have; a Gmail address is not"
+    " necessary.",
+    'To create an account, click "Create account" on the Google sign-in page.',
+    "If you are signed in with a work or school account and the Assistant"
+    " does not open, sign in with a personal account instead.",
     "Then type or dictate your question in plain words.",
 )
 
@@ -55,19 +63,29 @@ def window(qapp):
 
 
 class TestApprovedText:
-    """W1: the title, the four paragraphs, and the check box label."""
+    """W1: the title, the five paragraphs, and the check box label."""
 
     def test_title_is_the_approved_title(self, window):
         assert EXPLAINER_TITLE == "Ask the Wheelhouse Assistant"
         assert window.windowTitle() == "Ask the Wheelhouse Assistant"
 
-    def test_the_four_paragraphs_are_the_approved_words(self, window):
+    def test_the_five_paragraphs_are_the_approved_words(self, window):
         assert tuple(EXPLAINER_BODY_PARAGRAPHS) == APPROVED_PARAGRAPHS
 
-    def test_the_body_shows_all_four_paragraphs(self, window):
+    def test_the_body_shows_all_five_paragraphs(self, window):
         body = window._body_label.text()
         for paragraph in APPROVED_PARAGRAPHS:
             assert paragraph in body
+
+    def test_no_paragraph_names_the_old_gem_sign_in(self, window):
+        """The Gem's sign-in page took an Apple account; the notebook's does not.
+
+        wh-assistant-gemini-notebook: Gemini Notebook offers only a Google
+        Account, and there is no longer a "Gemini page" to select Sign in on.
+        """
+        for paragraph in EXPLAINER_BODY_PARAGRAPHS:
+            assert "Apple" not in paragraph
+            assert "Gemini page" not in paragraph
 
     def test_the_check_box_says_do_not_show_this_again(self, window):
         assert window._do_not_show_again.text() == "Do not show this again"
@@ -161,6 +179,28 @@ class TestModeless:
         # box left checked from an earlier showing must not travel with
         # a later Assistant press.
         window._do_not_show_again.setChecked(True)
+        window.reject()
+        window.prepare_to_show()
+        assert window._do_not_show_again.isChecked() is False
+
+    def test_the_box_can_start_ticked(self, window):
+        # wh-assistant-explainer-once-more: the once-more showing for a
+        # user who turned the window off starts with the box ticked.
+        window.prepare_to_show(start_ticked=True)
+        assert window._do_not_show_again.isChecked() is True
+
+    def test_a_pre_ticked_box_reports_true_and_can_be_cleared(self, window):
+        seen = []
+        window.assistant_chosen.connect(seen.append)
+        window.prepare_to_show(start_ticked=True)
+        window._assistant_button.click()
+        window.prepare_to_show(start_ticked=True)
+        window._do_not_show_again.setChecked(False)
+        window._assistant_button.click()
+        assert seen == [True, False]
+
+    def test_a_pre_ticked_box_does_not_travel_to_the_next_showing(self, window):
+        window.prepare_to_show(start_ticked=True)
         window.reject()
         window.prepare_to_show()
         assert window._do_not_show_again.isChecked() is False

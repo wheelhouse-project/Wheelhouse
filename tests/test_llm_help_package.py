@@ -3,11 +3,13 @@
 The kit ships the canonical help payload
 `services/wheelhouse/knowledge/wheelhouse_help.md`, whose embedded
 "## Instructions for AI Assistant" section carries the assistant behavior
-rules, plus the separate command and configuration reference
+rules, plus the separate action, notice, and configuration reference
 `services/wheelhouse/knowledge/wheelhouse_reference.md`. The two-file build
 (wh-helpdoc-migration.3.1) moved the exhaustive command and setting tables
 out of the size-limited help document into that reference, so the embedded
-rules ground the assistant in both documents. The 2026-07-17 source-of-truth
+rules ground the assistant in both documents; wh-patterns-doc-coverage-test
+(2026-09-28) moved the command tables back into the help document's Voice
+Commands section. The 2026-07-17 source-of-truth
 design (docs/plans/2026-07-17-help-doc-source-of-truth-design.md) retired the
 generated companion `llm/assistant-instructions.txt` and its extractor,
 superseding decisions 8 and 9 of the 2026-07-15 packaging design.
@@ -60,8 +62,13 @@ _HEADING = "## Instructions for AI Assistant"
 _SUPPORT_ADDRESS = "help@wheelhouse-project.org"
 _ADDRESS_CODE_SPAN = "`help@wheelhouse-project.org`"
 
-# The official assistant's public address, named in both shipped READMEs.
-_GEM_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+# The official assistant's public address, named in both shipped READMEs:
+# the chat view of the Gemini Notebook that replaced the Gemini Gem, because
+# Google ends Gems on 2026-11-17 (wh-assistant-gemini-notebook).
+_ASSISTANT_URL = (
+    "https://notebook.google.com/notebook/"
+    "da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
+)
 
 # The retired ChatGPT GPT's public address. Spelled as two adjacent string
 # pieces for the same reason as the _PLACEHOLDERS constant below: the release
@@ -194,17 +201,25 @@ def test_embedded_instruction_section_present_and_wellformed():
         "Wheelhouse documents"
     )
     assert (
-        "the separate Wheelhouse command and configuration reference" in norm
-    ), (
-        "the embedded instructions no longer point the assistant at the "
-        "separate command and configuration reference; the two-file upload "
-        "setup would refuse detailed command and setting questions"
-    )
-    assert (
-        "use the command and configuration reference when it is available"
+        "the separate Wheelhouse action, notice, and configuration reference"
         in norm
     ), (
-        "the rule routing command and configuration lookups to the reference "
+        "the embedded instructions no longer point the assistant at the "
+        "separate action, notice, and configuration reference; the two-file "
+        "upload setup would refuse detailed setting questions"
+    )
+    assert (
+        "For the exact wording of a voice command, use the tables in the Voice"
+        " Commands section of this help document, which list every command."
+        in norm
+    ), (
+        "the rule routing voice-command lookups to the Voice Commands section "
+        "is missing from the embedded instructions"
+    )
+    assert (
+        "use the configuration reference when it is available" in norm
+    ), (
+        "the rule routing configuration lookups to the reference "
         "is missing from the embedded instructions"
     )
     assert (
@@ -303,21 +318,24 @@ def test_gem_instructions_contract():
     # Routing. The GPT routed by Action name (getCommandReference,
     # getHelpDocument, getInstallGuide); the Gem routes by document heading,
     # because it looks the document up in its Knowledge section instead of
-    # fetching it. Same three destinations, same three subjects.
+    # fetching it. Same three destinations. Since wh-patterns-doc-coverage-test
+    # (2026-09-28) the voice commands are in the Help Document and the
+    # reference holds the configuration keys and defaults.
     assert (
-        '"Wheelhouse Voice Command and Configuration Reference" -- the exact'
-        " wording of every voice command, every configuration key, and every"
-        " default value." in norm
-    ), "the reference document is no longer described as the command/config source"
+        '"Wheelhouse Action, Notice, and Configuration Reference" -- the exact'
+        " wording of every configuration key and every default value, and every"
+        " pattern action and notice." in norm
+    ), "the reference document is no longer described as the config source"
     assert (
         '"Wheelhouse Installation Guide" -- installing, upgrading,'
         " uninstalling, and installer troubleshooting." in norm
     ), "installation questions no longer route to the separate installation guide"
     assert (
-        '"Wheelhouse Help Document" -- everything else: what Wheelhouse is,'
-        " getting started, hardware, speech engines, concepts, and"
-        " troubleshooting." in norm
-    ), "the route-every-other-question-to-the-guide directive is missing"
+        '"Wheelhouse Help Document" -- the exact wording of every voice command,'
+        " in the tables of its Voice Commands section, and everything else:"
+        " what Wheelhouse is, getting started, hardware, speech engines,"
+        " concepts, and troubleshooting." in norm
+    ), "the route-commands-and-every-other-question-to-the-guide directive is missing"
 
     # Ignore the structural markers visible in the raw markdown.
     assert (
@@ -513,17 +531,18 @@ def test_gem_instructions_contract():
         " say." in norm
     ), "the give-an-example rule for voice commands is missing"
     assert (
-        "If someone seems overwhelmed, point them at the guide's \"Day 1 Quick"
+        "If someone seems overwhelmed, point them at the guide's \"Quick"
         " Start\" section and say to ignore everything else for now." in norm
-    ), "the Day 1 Quick Start pointer is missing"
+    ), "the Quick Start pointer is missing"
 
     # The last rule in the file, and the one with the most direct user harm:
     # a plausible invented command or config key wastes the user's time and
     # cannot be told from a real one by reading the answer.
     assert (
         "NEVER INVENT A VOICE COMMAND, A CONFIGURATION KEY, OR A DEFAULT"
-        " VALUE. Every one of them must be copied from the reference document,"
-        " character for character." in norm
+        " VALUE. Copy every voice command from the Voice Commands section of"
+        " the Help Document, and every configuration key and default value"
+        " from the reference document, character for character." in norm
     ), "the do-not-invent-commands-keys-or-defaults rule is missing or weakened"
     assert (
         "If the exact wording is not there, say it is not there rather than"
@@ -638,7 +657,7 @@ def test_gem_instructions_do_not_lead_a_help_answer_with_an_email_draft():
     ), "a help answer may lead with email again"
     assert (
         'Lead with the help built into Wheelhouse: right-click the floating'
-        ' button or the tray icon and choose Help, or say "x-ray help".'
+        ' button or the tray icon and choose Help, or say "help".'
         in norm
     ), "the in-app help is no longer the first thing a help answer offers"
     # The rule needs a literal address to reproduce, and it must be pinned
@@ -785,8 +804,8 @@ def test_landing_page_has_all_provider_anchors():
     missing = [a for a in _REQUIRED_ANCHORS if a not in html]
     assert not missing, (
         f"help page is missing LLM help anchors: {missing}. The llm/ "
-        "README and the public README link to these anchors, so removing "
-        "one breaks published links."
+        "README links to these anchors, so removing one breaks published "
+        "links."
     )
 
 
@@ -819,8 +838,8 @@ def test_no_shipped_public_file_links_the_retired_gpt():
             offenders.append(str(path.relative_to(_PUBLIC_DIR)))
     assert not offenders, (
         f"these shipped files still link the retired ChatGPT GPT: {offenders}."
-        " The official assistant is the Gemini Gem at"
-        f" {_GEM_URL}; OpenAI stops running custom GPTs on 2026-12-11."
+        " The official assistant is the Gemini Notebook at"
+        f" {_ASSISTANT_URL}; OpenAI stops running custom GPTs on 2026-12-11."
     )
 
 
@@ -872,14 +891,14 @@ def test_no_shipped_file_presents_the_assistant_as_the_retired_gpt():
                 offenders.append(f"{path.relative_to(_PUBLIC_DIR)}: {phrase}")
     assert not offenders, (
         "these shipped files still describe the Wheelhouse Assistant as the"
-        f" retired ChatGPT GPT: {offenders}. The assistant is the Gemini Gem"
-        f" at {_GEM_URL}; it stores its knowledge as attached files and"
+        f" retired ChatGPT GPT: {offenders}. The assistant is the Gemini Notebook"
+        f" at {_ASSISTANT_URL}; it stores its knowledge as a source and"
         " fetches nothing at answer time."
     )
 
 
 def test_privacy_notice_names_google_as_the_assistant_processor():
-    """The privacy notice must name the Gem and Google, not OpenAI.
+    """The privacy notice must name the notebook and Google, not OpenAI.
 
     A privacy notice that names the wrong processor sends the reader to
     the wrong company's terms. Wheelhouse users dictate passwords,
@@ -890,14 +909,14 @@ def test_privacy_notice_names_google_as_the_assistant_processor():
     has nothing to do with the assistant.
     """
     content = _PRIVACY_NOTICE.read_text(encoding="utf-8")
-    assert _GEM_URL in content, (
+    assert _ASSISTANT_URL in content, (
         f"{_PRIVACY_NOTICE.name} does not give the assistant's address"
-        f" ({_GEM_URL}), so a reader cannot tell which assistant the"
+        f" ({_ASSISTANT_URL}), so a reader cannot tell which assistant the"
         " section describes"
     )
     assert "processed by Google" in content, (
         f"{_PRIVACY_NOTICE.name} does not say who processes a conversation"
-        " with the assistant. Google runs the Gem, and the reader needs that"
+        " with the assistant. Google runs the notebook, and the reader needs that"
         " name to find the right terms of service and privacy policy"
     )
     assert "processed by OpenAI" not in content, (
@@ -906,9 +925,13 @@ def test_privacy_notice_names_google_as_the_assistant_processor():
         " conversation any more, so that sentence points the reader at the"
         " wrong company's terms of use and privacy policy."
     )
+    assert "Gemini Notebook" in content, (
+        f"{_PRIVACY_NOTICE.name} does not name the Gemini Notebook, the"
+        " Google product the assistant runs on"
+    )
 
 
-def test_shipped_readmes_name_the_official_gem():
+def test_shipped_readmes_name_the_official_assistant():
     """Both READMEs must point at the official assistant by its real address.
 
     This is the one link a user is most likely to follow, and it is the
@@ -916,11 +939,115 @@ def test_shipped_readmes_name_the_official_gem():
     """
     for path in (_LLM_README, _PUBLIC_README):
         content = path.read_text(encoding="utf-8")
-        assert _GEM_URL in content, (
+        assert _ASSISTANT_URL in content, (
             f"{path.name} no longer gives the official Wheelhouse Assistant's"
-            f" address ({_GEM_URL}); the fastest path to help is missing from"
+            f" address ({_ASSISTANT_URL}); the fastest path to help is missing from"
             " the document that is supposed to lead with it"
         )
+
+
+# The Gem's identifier. Any address that holds it leads to the Gem.
+_OLD_GEM_ID = "1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+# David's approved Google Account text, word for word (bd comment on
+# wh-assistant-gemini-notebook, 2026-09-27 20:48). The Help window shows the
+# same sentences (help_explainer_window.EXPLAINER_BODY_PARAGRAPHS).
+_APPROVED_ACCOUNT_TEXT = (
+    "The Wheelhouse Assistant runs on Google's Gemini Notebook, so you must"
+    " sign in with a Google Account. The account is free, and Google does not"
+    " ask for a credit card. You can use an email address you already have;"
+    " a Gmail address is not necessary. To create an account, click \"Create"
+    " account\" on the Google sign-in page. If you are signed in with a work"
+    " or school account and the Assistant does not open, sign in with a"
+    " personal account instead."
+)
+# Phrases that describe the Gem's sign-in, which the notebook does not have:
+# the Gem took an Apple account; the notebook takes only a Google Account.
+_GEM_SIGN_IN_PHRASES = (
+    "apple account",
+    "runs inside google gemini",
+    "google gemini assistant",
+    "wheelhouse gem",
+)
+_KNOWLEDGE_DIR = _REPO_ROOT / "services" / "wheelhouse" / "knowledge"
+_KNOWLEDGE_DOCS = (
+    _HELP_DOC,
+    _KNOWLEDGE_DIR / "wheelhouse_reference.md",
+    _KNOWLEDGE_DIR / "wheelhouse_install.md",
+)
+
+
+def test_help_document_sends_readers_to_the_notebook():
+    """The help document gives the notebook address and the approved text.
+
+    The Assistant answers from these documents, and people load them into
+    other assistants too, so a stale address here outlives the Gem.
+    """
+    content = " ".join(_HELP_DOC.read_text(encoding="utf-8").split())
+    assert _ASSISTANT_URL in content, (
+        f"{_HELP_DOC.name} does not give the notebook address ({_ASSISTANT_URL})"
+    )
+    assert _APPROVED_ACCOUNT_TEXT in content, (
+        f"{_HELP_DOC.name} does not carry the approved Google Account text"
+        " word for word"
+    )
+
+
+def test_knowledge_documents_no_longer_describe_the_gem():
+    """No knowledge document names the Gem's address or its sign-in."""
+    offenders = []
+    for path in _KNOWLEDGE_DOCS:
+        content = " ".join(path.read_text(encoding="utf-8").split())
+        if _OLD_GEM_ID in content:
+            offenders.append(f"{path.name}: the Gem address")
+        lowered = content.lower()
+        for phrase in _GEM_SIGN_IN_PHRASES:
+            if phrase in lowered:
+                offenders.append(f"{path.name}: {phrase}")
+    assert not offenders, (
+        f"these knowledge documents still describe the Gemini Gem: {offenders}."
+        f" The Wheelhouse Assistant is the Gemini Notebook at {_ASSISTANT_URL}."
+    )
+
+
+def test_no_shipped_public_file_describes_the_gem():
+    """No public file except the changelog names the Gem or its sign-in.
+
+    The Gem stops working when Google ends Gems on 2026-11-17, and its
+    sign-in took an Apple account, which the notebook does not. The
+    changelog keeps both, because its released sections describe 1.2.0 as
+    it shipped. The scan covers the whole public overlay for the same reason
+    the retired-GPT scans do: a fixed list misses the next file.
+    """
+    offenders = []
+    for path in sorted(_PUBLIC_DIR.rglob("*")):
+        if not path.is_file() or path == _PUBLIC_DIR / "CHANGELOG.md":
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        content = " ".join(raw.split())
+        if _OLD_GEM_ID in content:
+            offenders.append(f"{path.relative_to(_PUBLIC_DIR)}: the Gem address")
+        if "apple account" in content.lower():
+            offenders.append(f"{path.relative_to(_PUBLIC_DIR)}: apple account")
+    assert not offenders, (
+        f"these shipped files still describe the Gemini Gem: {offenders}."
+        f" The Wheelhouse Assistant is the Gemini Notebook at {_ASSISTANT_URL}."
+    )
+
+
+def test_help_page_carries_the_approved_account_text():
+    """The website's help page states the Google Account text word for word.
+
+    The page's "Ask the assistant" card is where a visitor decides to open
+    the Assistant, so it carries the same sign-in text as the Help window.
+    """
+    content = " ".join(_HELP_PAGE.read_text(encoding="utf-8").split())
+    assert _APPROVED_ACCOUNT_TEXT in content, (
+        f"{_HELP_PAGE.name} does not carry the approved Google Account text"
+        " word for word"
+    )
 
 
 def test_llm_readme_canonical_links_resolve():
@@ -988,6 +1115,24 @@ _SITE_ANCHOR_URLS = tuple(
 )
 
 
+# README 146fe7bb links the help kit at published addresses instead of
+# repository paths: the help document as the website page render_site.py
+# builds from it, and the llm folder as its GitHub blob. Either form counts;
+# a published form counts only while the file it serves exists here.
+_PUBLIC_README_KIT_LINKS = (
+    (
+        "(./services/wheelhouse/knowledge/wheelhouse_help.md)",
+        "(https://wheelhouse-project.org/guide.html)",
+        _PUBLIC_DIR / "site" / "guide.html",
+    ),
+    (
+        "(./llm/README.md)",
+        "(https://github.com/wheelhouse-project/Wheelhouse/blob/main/llm/README.md)",
+        _LLM_README,
+    ),
+)
+
+
 def _hrefs(html: str) -> list[str]:
     return re.findall(r'href="([^"]+)"', html)
 
@@ -1004,19 +1149,15 @@ def test_landing_page_links_canonical_help_doc():
 
 
 def test_public_readme_help_kit_links_resolve():
-    """The public README publishes the same help-kit links as the llm README:
-    the help document, the llm folder, and the four help-page anchors.
-    Each anchor URL must target an id that exists on the help page."""
+    """The public README links the help document and the llm folder.
+
+    README 146fe7bb links none of the four help-page anchors, so this test
+    no longer requires them; test_landing_page_has_all_provider_anchors
+    still checks the ids on the help page."""
     content = _PUBLIC_README.read_text(encoding="utf-8")
-    for link in (
-        "(./services/wheelhouse/knowledge/wheelhouse_help.md)",
-        "(./llm/README.md)",
-    ):
-        assert link in content, f"public README dropped the {link} link"
-    html = _HELP_PAGE.read_text(encoding="utf-8")
-    for url in _SITE_ANCHOR_URLS:
-        assert url in content, f"public README dropped the {url} link"
-        fragment = url.rsplit("#", 1)[1]
-        assert f'id="{fragment}"' in html, (
-            f"help page lost the id the public README links: #{fragment}"
+    for link, published_link, published_file in _PUBLIC_README_KIT_LINKS:
+        published = published_link in content and published_file.is_file()
+        assert link in content or published, (
+            f"public README dropped the {link} link and its published form "
+            f"{published_link}"
         )

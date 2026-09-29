@@ -241,9 +241,11 @@ class TestTheMergeKeepsEveryUserEntry:
     doc_id key is what made them collide.
 
     The rule: the LAST claimant in user-file order holds the built-in's slot,
-    and every earlier claimant is appended after all system entries. Last
-    wins because it is the newer customisation and, in the sequence that
-    reaches this, it is the one carrying the built-in's own trigger.
+    and every earlier claimant goes in front of all system entries (it was
+    appended after them until David's answer to QUESTIONS-2026-09-28.md
+    item 12, option three). Last wins because it is the newer customisation
+    and, in the sequence that reaches this, it is the one carrying the
+    built-in's own trigger.
     """
 
     SECOND_BUILTIN = block(RESTORE)
@@ -298,9 +300,11 @@ class TestTheMergeKeepsEveryUserEntry:
             tmp_path, self.FIRST_CLAIM + self.SECOND_CLAIM
         )
         raw = [entry["raw_pattern"] for entry in catalog.all_patterns]
-        assert raw == [MAX_PATTERN, RESTORE_PATTERN, "^grow$"], (
+        # The displaced claimant now leads: QUESTIONS-2026-09-28.md item 12,
+        # option three (wh-user-rule-precedence). The slot is unchanged.
+        assert raw == ["^grow$", MAX_PATTERN, RESTORE_PATTERN], (
             "the last claimant takes the built-in's slot and the earlier one "
-            f"is appended after every built-in; the merged order is {raw}"
+            f"goes in front of every built-in; the merged order is {raw}"
         )
 
     def test_a_legacy_claim_does_not_evict_the_named_one(self, tmp_path):
@@ -467,10 +471,13 @@ class TestAThirdClaimantAfterALegacyDisplacement:
             self.NAMED_FIRST + self.LEGACY_MIDDLE + self.NAMED_LAST,
         )
         raw = [entry["raw_pattern"] for entry in catalog.all_patterns]
-        assert raw == ["^expand$", RESTORE_PATTERN, "^grow$", MAX_PATTERN], (
+        # The two displaced claimants now lead, in user-file order:
+        # QUESTIONS-2026-09-28.md item 12, option three
+        # (wh-user-rule-precedence). The newest claimant keeps the slot.
+        assert raw == ["^grow$", MAX_PATTERN, "^expand$", RESTORE_PATTERN], (
             "the newest claimant holds the built-in's slot and the two it "
-            "displaced follow every built-in, in the order they moved; the "
-            f"merged order is {raw}"
+            "displaced go in front of every built-in, in user-file order; "
+            f"the merged order is {raw}"
         )
 
     def test_a_repeated_legacy_expression_still_supersedes_its_own_copy(
@@ -534,7 +541,10 @@ class TestAThirdClaimantAfterALegacyDisplacement:
         ]
         merged = catalog._merge_entries(system, user)
         expressions = [entry["pattern"] for entry in merged]
-        assert expressions == ["^expand$", "^grow$", MAX_PATTERN], (
+        # The displaced rules now lead, in user-file order:
+        # QUESTIONS-2026-09-28.md item 12, option three
+        # (wh-user-rule-precedence).
+        assert expressions == ["^grow$", MAX_PATTERN, "^expand$"], (
             "the disabled rule is displaced, not dropped; the merged "
             f"expressions were {expressions}"
         )

@@ -188,15 +188,17 @@ class TestTwoCandidatesStayUnresolved:
         assert catalog.pattern_count == 3
 
     def test_the_override_is_kept_rather_than_dropped(self, tmp_path):
-        """Kept and still running, at the end of the order.
+        """Kept and still running, at the front of the order.
 
         Dropping it would destroy the user's rule outright, which is worse
-        than the wrong precedence it has now.
+        than running it beside both built-ins. It holds no built-in's slot,
+        so it leads (QUESTIONS-2026-09-28.md item 12, option three,
+        wh-user-rule-precedence); it was at the end before that.
         """
         catalog = _catalog(tmp_path, self.TWINS, LEGACY_OVERRIDE)
-        last = catalog.all_patterns[-1]
-        assert last["is_user"] is True
-        assert last["actions"][0]["params"] == ["ctrl", "alt", "m"]
+        first = catalog.all_patterns[0]
+        assert first["is_user"] is True
+        assert first["actions"][0]["params"] == ["ctrl", "alt", "m"]
 
     def test_the_ambiguity_is_reported_with_both_candidates(
         self, tmp_path, caplog,

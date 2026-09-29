@@ -94,6 +94,127 @@ WINRT_AUDIO_AVAILABLE = _is_winrt_available()
 # not mark a window (wh-stt-load-metrics.2.1.1).
 POLL_FAILURES_BEFORE_DEAD = 3
 
+# How long a running graph may go without delivering one audio sample before
+# the microphone counts as lost and the graph is rebuilt
+# (wh-mic-loss-capture-recovery). A quiet microphone still delivers samples:
+# on 2026-09-24 the frame counter moved in every load-diag window for the 19
+# minutes between the last utterance and the loss, with max_frame_gap_ms=62.
+# 3.0 s is above the worst capture gap ever measured under load, 2.4 s on
+# 2026-09-03 on the retired sounddevice path. Boss ruling 20:56 2026-09-24.
+CAPTURE_STALL_SECONDS = 3.0
+
+# The wait between two failed rebuild attempts while the microphone is gone.
+# Fixed, with no attempt limit: a microphone can stay unplugged for hours and
+# the provider must pick it up whenever it comes back. A failed attempt costs
+# one AudioGraph.create_async call. Boss ruling 20:56 2026-09-24.
+REBUILD_RETRY_SECONDS = 2.0
+
+# The shortest time between two "still unavailable" reminder lines during one
+# outage, so an absent microphone cannot fill the log. Boss ruling 20:56
+# 2026-09-24.
+STILL_UNAVAILABLE_LOG_SECONDS = 60.0
+
+# The stall clock. Bound once at import rather than read as time.monotonic
+# at each call, because tests that drive _poll_frames inline replace this
+# module's `time` with a stub that has only sleep(); a lookup through it
+# would raise inside the poll and be counted as a failed poll.
+_monotonic = time.monotonic
+
+# AudioGraphUnrecoverableError, written out for the same reason as
+# AUDIO_GRAPH_DEVICE_NOT_AVAILABLE below: this module must load without
+# winsdk (winsdk/windows/media/audio/__init__.pyi lists these four).
+_UNRECOVERABLE_ERROR_NAMES = {
+    0: 'NONE',
+    1: 'AUDIO_DEVICE_LOST',
+    2: 'AUDIO_SESSION_DISCONNECTED',
+    3: 'UNKNOWN_FAILURE',
+}
+
+
+class _GraphLoss:
+    """What one graph's UnrecoverableErrorOccurred handler tells the poll loop.
+
+    WinRT calls the handler on its own thread, so the handler only records
+    the reason and sets an event; the capture thread does the rebuild.
+    Microsoft documents the event for the graph's device, and whether it
+    fires when only the CAPTURE device goes is not proven. The sample stall
+    in _poll_frames is the signal the 2026-09-24 log proves; this one makes
+    the rebuild immediate when it does fire (wh-mic-loss-capture-recovery).
+    """
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.reason: Optional[str] = None
+        self.token = None
+
+    def handler(self, sender, args) -> None:
+        # Never raise into WinRT: an exception here would be reported on a
+        # thread nobody watches, and the event must still be set.
+        try:
+            code = int(args.error)
+            name = _UNRECOVERABLE_ERROR_NAMES.get(code, f'error {code}')
+        except Exception:
+            name = 'an unknown error'
+        self.reason = f'AudioGraph reported {name}'
+        self.event.set()
+
+
+class _Outage:
+    """One stretch of time in which the microphone delivers no samples.
+
+    It begins with the loss line and ends with the recovery line, and every
+    rebuild in between -- one that failed, or one that built a graph that
+    then delivered nothing -- is one more attempt in the same outage. Boss
+    ruling C1, 20:56 2026-09-24: recovered means samples arrived, not that a
+    graph was built, so a device that opens but never delivers cannot write
+    a loss and a recovery line every few seconds.
+    """
+
+    def __init__(self, reason: str):
+        self.started = _monotonic()
+        self.last_logged = self.started
+        self.attempts = 0
+        self.last_error = reason
+        self.device: Optional[str] = None
+        self.over = False
+        logger.warning(
+            f'Microphone lost ({reason}); rebuilding the audio capture')
+
+    def remind(self) -> None:
+        """Log that the microphone is still missing, at most once a period."""
+        now = _monotonic()
+        if now - self.last_logged < STILL_UNAVAILABLE_LOG_SECONDS:
+            return
+        self.last_logged = now
+        logger.warning(
+            f'Microphone still unavailable after {self.attempts} '
+            f'{"attempt" if self.attempts == 1 else "attempts"} '
+            f'({self.last_error}); retrying every '
+            f'{REBUILD_RETRY_SECONDS:g} s')
+
+    def recovered(self) -> None:
+        """Log the recovery once, when the first samples arrive."""
+        self.over = True
+        elapsed = _monotonic() - self.started
+        # Ruling C4: the rebuild opens Windows's CURRENT default microphone,
+        # which may not be the one that was lost, so the line names it.
+        # Device names only, never audio.
+        device = f' on {self.device!r}' if self.device else ''
+        logger.info(
+            f'Microphone recovered after {elapsed:.1f} s and '
+            f'{self.attempts} '
+            f'{"attempt" if self.attempts == 1 else "attempts"}; '
+            f'audio capture rebuilt{device}')
+
+
+def _device_name(mic_node) -> Optional[str]:
+    """The opened microphone's name, when the input node can say cheaply."""
+    try:
+        name = mic_node.device.name
+    except Exception:
+        return None
+    return str(name) if name else None
+
 # AudioGraphCreationStatus.DEVICE_NOT_AVAILABLE. The winsdk enum is
 # SUCCESS 0, DEVICE_NOT_AVAILABLE 1, FORMAT_NOT_SUPPORTED 2,
 # UNKNOWN_FAILURE 3 (winsdk/windows/media/audio/__init__.pyi). The number
@@ -167,6 +288,8 @@ class WinRTAudioCapture:
     Args:
         config: Audio configuration (rate, channels, chunk_ms).
         overflow_callback: Optional callback when queue overflows.
+        outage_callback: Optional callback for a lost and a recovered
+            microphone; see __init__.
 
     Example:
         ```python
@@ -195,16 +318,26 @@ class WinRTAudioCapture:
     def __init__(
         self,
         config: Optional[AudioConfig] = None,
-        overflow_callback: Optional[Callable] = None
+        overflow_callback: Optional[Callable] = None,
+        outage_callback: Optional[
+            Callable[[str, Optional[str]], None]] = None
     ):
         """Initialize WinRT audio capture.
 
         Args:
             config: Audio configuration. Defaults to 16kHz mono 30ms.
             overflow_callback: Called when audio queue overflows.
+            outage_callback: Called on the capture thread as
+                outage_callback("lost", None) once when an outage begins,
+                and outage_callback("recovered", device) once when the
+                first samples arrive after a rebuild; device is the opened
+                microphone's name, or None. The reminders call nothing. The
+                provider turns the two calls into on-screen notices
+                (wh-mic-loss-notice).
         """
         self.config = config or AudioConfig()
         self.overflow_callback = overflow_callback
+        self.outage_callback = outage_callback
 
         # WinRT objects (created on start)
         self._graph = None
@@ -253,6 +386,15 @@ class WinRTAudioCapture:
         # nothing further; the child's first use of this lock is
         # _publish_cycle, well after that point (wh-stt-load-metrics.2.1.13).
         self._lifecycle_lock = threading.Lock()
+        # Set by stop() so a capture thread waiting between two rebuild
+        # attempts wakes at once instead of finishing its wait (boss ruling
+        # C2, 20:56 2026-09-24). One per start() cycle, handed to that
+        # cycle's thread, so a stop()/start() pair cannot clear the event a
+        # stale thread is still waiting on.
+        self._stop_event = threading.Event()
+        # What _capture_until_stopped hands _poll_frames besides its two
+        # arguments; see _poll_frames. Local to each capture thread.
+        self._poll_context = threading.local()
 
         # Statistics
         self._frames_captured = 0
@@ -307,6 +449,8 @@ class WinRTAudioCapture:
 
             self._running = True
             cycle = self._cycle
+            self._stop_event = threading.Event()
+            stop_event = self._stop_event
 
             self._start_time = time.time()
 
@@ -320,7 +464,7 @@ class WinRTAudioCapture:
             # (wh-stt-load-metrics.2.1.13).
             self._capture_thread = threading.Thread(
                 target=self._capture_loop,
-                args=(cycle,),
+                args=(cycle, stop_event),
                 daemon=True,
                 name="WinRTAudioCapture"
             )
@@ -338,6 +482,7 @@ class WinRTAudioCapture:
                 return
 
             self._running = False
+            self._stop_event.set()
             # Also cleared by the capture thread's own finally, but the join
             # below is bounded and a thread that outlives it must not leave
             # a stopped provider answering ready.
@@ -390,8 +535,8 @@ class WinRTAudioCapture:
         printed drops=0 for a dead microphone
         (wh-stt-load-metrics.2).
 
-        Exactly two things take the answer back, and it is worth being
-        precise about them, because the earlier version of this text
+        Exactly three things take the answer back, and it is worth being
+        precise about them, because an earlier version of this text
         named a case the code did not actually cover
         (wh-stt-load-metrics.2.1.1):
 
@@ -399,12 +544,21 @@ class WinRTAudioCapture:
         2. POLL_FAILURES_BEFORE_DEAD consecutive frame polls raising.
            The poll loop catches each one and keeps running, so the
            thread stays alive and its own lifetime cannot report this.
+        3. A lost microphone (wh-mic-loss-capture-recovery): the graph's
+           UnrecoverableErrorOccurred event, or CAPTURE_STALL_SECONDS
+           with no samples. _mark_lost takes the answer back, and it
+           stays False while the thread rebuilds the graph, until a
+           rebuilt graph delivers samples. A rebuilt graph that opens
+           but delivers nothing never answers ready.
 
-        A poll that succeeds and returns no frame is not one of them:
-        here it is indistinguishable from a quiet microphone, and a
-        device that is alive by every measure this provider has while
-        delivering nothing stays the load reporter's frame counter to
-        find.
+        A single poll that succeeds and returns no frame is not one of
+        them: a quiet microphone still delivers samples, so only a run
+        of empty polls as long as CAPTURE_STALL_SECONDS counts as a
+        loss.
+
+        On the first start the answer is True as soon as the graph is
+        built, before any sample arrives, exactly as before the rebuild
+        existed; the provider's start-up handshake is unchanged.
 
         The wait is over setup only. A dead graph has already set the
         handshake, so this answers immediately rather than spending the
@@ -417,8 +571,9 @@ class WinRTAudioCapture:
             True only while the AudioGraph is running. False when setup
             raised (setup_error holds the message), when the wait
             expired with setup still unfinished (setup_error is None),
-            and when the capture thread has since ended (setup_error is
-            None as well -- nothing about the setup failed).
+            when the capture thread has since ended (setup_error is
+            None as well -- nothing about the setup failed), and during
+            a microphone outage until a rebuilt graph delivers samples.
         """
         if not self._setup_done.wait(timeout):
             return False
@@ -518,11 +673,15 @@ class WinRTAudioCapture:
             logger.warning(f"Failed to enumerate audio devices: {e}")
             return []
 
-    def _capture_loop(self, cycle: int) -> None:
+    def _capture_loop(self, cycle: int,
+                      stop_event: Optional[threading.Event] = None) -> None:
         """Background thread for audio capture.
 
         Creates WinRT graph and polls for frames, converting to bytes
-        and queuing for consumption by read().
+        and queuing for consumption by read(). When the microphone is lost
+        the same thread closes the graph and builds a new one, in the same
+        start() cycle, until samples arrive again or the cycle ends
+        (wh-mic-loss-capture-recovery).
 
         The graph, the microphone node and the frame output stay local to
         this thread until _publish_cycle installs them, and this thread is
@@ -536,8 +695,17 @@ class WinRTAudioCapture:
                 makes to the provider's shared state goes through
                 _publish_cycle or _retire_cycle, both of which refuse a
                 cycle that is no longer current.
+            stop_event: Set by this cycle's stop(). Only the wait between
+                two rebuild attempts reads it. None, for a caller that runs
+                the loop directly, means an event nothing sets, so that wait
+                then lasts its full length.
         """
-        graph = mic_node = frame_output = None
+        if stop_event is None:
+            stop_event = threading.Event()
+        # Every graph this thread currently owns, whatever it is. The rebuild
+        # replaces the contents, and the finally below closes what is there
+        # when the thread leaves, however it leaves.
+        owned = [None, None, None]
         mmcss = None
         try:
             # Audio capture must stay scheduled when the machine is saturated
@@ -595,12 +763,9 @@ class WinRTAudioCapture:
                         f"thread priority")
                 elevated = elevate_current_thread('time_critical')
                 logger.info(f"Capture thread priority elevated: {elevated}")
-            graph, mic_node, frame_output = self._setup_graph()
-            if self._publish_cycle(cycle, graph, mic_node, frame_output):
-                # Its own node, not the attribute: a thread that publishes
-                # after this one would otherwise redirect this loop onto a
-                # graph nobody is reading.
-                self._poll_frames(cycle, frame_output)
+            owned[:] = self._setup_graph()
+            if self._publish_cycle(cycle, *owned):
+                self._capture_until_stopped(cycle, stop_event, owned)
         except Exception as e:
             logger.error(f"WinRT capture error: {e}")
             # Only a pre-handshake failure is a SETUP failure. _poll_frames
@@ -626,7 +791,7 @@ class WinRTAudioCapture:
             # published, and outside the lock because closing a WinRT graph
             # is a blocking call. Every other thread is closing a different
             # object, so no two of these can collide.
-            self._cleanup_graph(graph, mic_node, frame_output)
+            self._cleanup_graph(*owned)
 
     def _publish_cycle(self, cycle: int, graph, mic_node,
                        frame_output) -> bool:
@@ -703,12 +868,169 @@ class WinRTAudioCapture:
             self._frame_output = None
             return True
 
-    def _setup_graph(self):
+    def _capture_until_stopped(self, cycle: int, stop_event: threading.Event,
+                               owned: list) -> None:
+        """Poll the published graph, and rebuild it whenever it is lost.
+
+        Returns when the cycle ends. Nothing else ends it: a microphone that
+        never comes back is retried for as long as the provider runs, every
+        REBUILD_RETRY_SECONDS, because the provider cannot know how long a
+        user will leave a device unplugged (boss ruling 20:56 2026-09-24).
+
+        Args:
+            cycle: The start() cycle the calling thread belongs to.
+            stop_event: Set by this cycle's stop().
+            owned: The calling thread's [graph, mic_node, frame_output],
+                already published. Replaced in place on each rebuild, so the
+                thread's finally always closes the graph it holds last.
+        """
+        outage: Optional[_Outage] = None
+        while True:
+            loss = self._watch_for_loss(owned[0])
+            self._poll_context.loss = loss
+            self._poll_context.recovering = outage
+            # Its own node, not the attribute: a thread that publishes
+            # after this one would otherwise redirect this loop onto a
+            # graph nobody is reading.
+            reason = self._poll_frames(cycle, owned[2])
+            # Only a string names a loss. Anything else -- None from a
+            # stopped cycle, or a test's stand-in for _poll_frames -- ends
+            # the thread the way the poll loop ending always has.
+            if not isinstance(reason, str):
+                return
+            if outage is not None and outage.over:
+                outage = None
+
+            self._mark_lost(cycle)
+            self._forget_loss_handler(owned[0], loss)
+            self._cleanup_graph(*owned)
+            owned[:] = [None, None, None]
+
+            if outage is None:
+                outage = _Outage(reason)
+                self._report_outage('lost', None)
+            else:
+                # A graph that built but never delivered: one more failed
+                # attempt in the same outage (ruling C1).
+                outage.last_error = reason
+                outage.remind()
+
+            rebuilt = self._rebuild(cycle, stop_event, outage)
+            if rebuilt is None:
+                return
+            owned[:] = rebuilt
+
+    def _report_outage(self, event: str, device: Optional[str]) -> None:
+        """Tell the provider an outage began or ended (wh-mic-loss-notice).
+
+        Ruling K1: the callback runs inside this try, so a notice fault is
+        one WARNING line and never stops the recovery, and both call sites
+        hold no lock -- the loss call comes after _mark_lost released
+        _lifecycle_lock, and the recovery call runs after the frame's buffer
+        is closed and before the chunk loop takes _lifecycle_lock. The
+        callback is expected to return at once: the providers' callback only
+        schedules a send onto the forwarder's own loop.
+        """
+        callback = self.outage_callback
+        if callback is None:
+            return
+        try:
+            callback(event, device)
+        except Exception as e:
+            # Worded so it can never be read as a second loss or recovery
+            # line: the log reader and the tests count those by their
+            # opening words.
+            logger.warning(
+                f'The {event} notice for the microphone outage failed: '
+                f'{type(e).__name__}: {e}')
+
+    def _watch_for_loss(self, graph) -> _GraphLoss:
+        """Subscribe to one graph's UnrecoverableErrorOccurred event."""
+        loss = _GraphLoss()
+        try:
+            loss.token = graph.add_unrecoverable_error_occurred(loss.handler)
+        except Exception as e:
+            # The sample stall still detects a lost microphone, so a graph
+            # that refuses the subscription is still watched.
+            logger.debug(f'UnrecoverableErrorOccurred subscription failed: {e}')
+        return loss
+
+    @staticmethod
+    def _forget_loss_handler(graph, loss: _GraphLoss) -> None:
+        if loss.token is None:
+            return
+        try:
+            graph.remove_unrecoverable_error_occurred(loss.token)
+        except Exception as e:
+            logger.debug(f'UnrecoverableErrorOccurred removal failed: {e}')
+
+    def _mark_lost(self, cycle: int) -> None:
+        """Take readiness back and drop the published graph after a loss.
+
+        The graph itself is closed by the capture thread, which holds its own
+        references. _setup_ok and _setup_error are left alone: they answer
+        how the FIRST setup went, and a caller has already read them.
+        """
+        with self._lifecycle_lock:
+            # _running as well as the cycle, for the reason given at the
+            # POLL_FAILURES_BEFORE_DEAD write in _poll_frames.
+            if not self._running or self._cycle != cycle:
+                return
+            self._capture_alive = False
+            self._graph = None
+            self._mic_node = None
+            self._frame_output = None
+
+    def _rebuild(self, cycle: int, stop_event: threading.Event,
+                 outage: _Outage) -> Optional[tuple]:
+        """Build a new graph, retrying until one builds or the cycle ends.
+
+        The first attempt runs at once. After a failed attempt the thread
+        waits REBUILD_RETRY_SECONDS on stop_event, never on time.sleep, so a
+        stop() in the wait returns at once (ruling C2).
+
+        Returns:
+            The new (graph, mic_node, frame_output), installed on the
+            provider but NOT yet marked alive: the recovery counts only when
+            samples arrive (ruling C1). None when the cycle ended first.
+        """
+        while self._running and self._cycle == cycle:
+            outage.attempts += 1
+            try:
+                triple = self._setup_graph(log_failure=False)
+            except Exception as e:
+                outage.last_error = str(e)
+                logger.debug(f'Microphone rebuild attempt {outage.attempts} '
+                             f'failed: {e}')
+                outage.remind()
+                if stop_event.wait(REBUILD_RETRY_SECONDS):
+                    return None
+                continue
+
+            outage.device = _device_name(triple[1])
+            with self._lifecycle_lock:
+                if self._running and self._cycle == cycle:
+                    self._graph, self._mic_node, self._frame_output = triple
+                    return tuple(triple)
+            # The cycle ended while the graph was being built. Nobody else
+            # can reach it, so this thread closes it.
+            self._cleanup_graph(*triple)
+            return None
+        return None
+
+    def _setup_graph(self, log_failure: bool = True):
         """Create and configure WinRT AudioGraph.
 
         Returns what it built rather than installing it on the provider, so
         the thread that created a graph is the only thread that can hand it
         over and the only thread that closes it (wh-stt-load-metrics.2.1.3).
+
+        Args:
+            log_failure: Whether a missing output device writes its ERROR
+                line. The rebuild after a lost microphone passes False: it
+                retries every REBUILD_RETRY_SECONDS, and its own reminder
+                line carries the failure at most once a minute
+                (wh-mic-loss-capture-recovery).
 
         Returns:
             A (graph, mic_node, frame_output) tuple. The graph is already
@@ -791,7 +1113,8 @@ class WinRTAudioCapture:
                 # the user sentences use all of them. See
                 # AUDIO_DEVICE_MISSING_MESSAGE above for the
                 # measurement.
-                logger.error(AUDIO_DEVICE_MISSING_LOG_LINE)
+                if log_failure:
+                    logger.error(AUDIO_DEVICE_MISSING_LOG_LINE)
                 raise RuntimeError(AUDIO_DEVICE_MISSING_MESSAGE)
             raise RuntimeError(f"AudioGraph creation failed: status={result.status}")
 
@@ -832,7 +1155,7 @@ class WinRTAudioCapture:
         logger.debug("WinRT AudioGraph started")
         return graph, mic_node, frame_output
 
-    def _poll_frames(self, cycle: int, frame_output) -> None:
+    def _poll_frames(self, cycle: int, frame_output) -> Optional[str]:
         """Poll for audio frames and queue them.
 
         KEY INSIGHT: AudioGraph ALWAYS outputs float32 audio internally, regardless of
@@ -849,8 +1172,20 @@ class WinRTAudioCapture:
         failing (wh-stt-load-metrics.2.1.1).
 
         This covers a poll that RAISES. A poll that succeeds and yields no
-        frame is indistinguishable from a quiet microphone here, and stays
-        the frame counter's job.
+        samples is NOT a quiet microphone: a quiet microphone still delivers
+        samples, and on 2026-09-24 the lost Scarlett Solo showed exactly this
+        pattern until Wheelhouse was restarted. So the loop also returns when
+        no sample has arrived for CAPTURE_STALL_SECONDS, whether the polls
+        in that time raised or answered empty, and when the graph's own
+        UnrecoverableErrorOccurred event has fired. The caller then rebuilds
+        the graph (wh-mic-loss-capture-recovery). The stall test compares
+        the time each poll STARTED with the time of the last samples, so a
+        loss needs a poll that started CAPTURE_STALL_SECONDS after the last
+        samples and then found none or raised. A thread that was not
+        scheduled for longer than the threshold -- one that waited for the
+        GIL after its sleep, for example -- polls once more first, collects
+        its backlog, and is not counted as a stall
+        (wh-mic-false-loss-stall-check).
 
         Args:
             cycle: The start() cycle this loop belongs to. The loop itself
@@ -865,6 +1200,20 @@ class WinRTAudioCapture:
                 Read from the argument rather than from the provider, so a
                 later thread publishing its own node cannot redirect this
                 loop onto a graph nobody is reading.
+
+        Two more inputs come from _capture_until_stopped through
+        self._poll_context, which is local to the calling thread: `loss`,
+        the graph's UnrecoverableErrorOccurred record, and `recovering`, the
+        outage a rebuilt graph is meant to end. While `recovering` is set,
+        the loop marks the capture alive only once samples arrive, and the
+        first samples write the recovery line (ruling C1). They are not
+        parameters because many tests stand in for this method with a
+        two-argument function, and a thread-local store cannot be read by
+        a stale thread of an earlier cycle.
+
+        Returns:
+            Why the microphone counts as lost, or None when the loop ended
+            because the cycle was stopped or replaced.
         """
         from winsdk.windows.media import AudioBufferAccessMode
 
@@ -875,6 +1224,16 @@ class WinRTAudioCapture:
 
         buffer_accumulator = bytearray()
         consecutive_failures = 0
+        # The stall clock starts with the loop, so a graph that is built and
+        # never delivers is given the same CAPTURE_STALL_SECONDS as one that
+        # stops delivering later.
+        last_samples_at = _monotonic()
+        delivered = False
+        # Set at the first samples of a recovery; read once the frame's
+        # buffer is closed (wh-mic-loss-notice).
+        announce_recovery = False
+        loss = getattr(self._poll_context, 'loss', None)
+        recovering = getattr(self._poll_context, 'recovering', None)
 
         # Deliberately read without the lock: this decides only whether to
         # make another WinRT call, never a write, and holding the lock across
@@ -883,6 +1242,14 @@ class WinRTAudioCapture:
         # stale read here can buy is one extra poll whose writes are refused
         # (wh-stt-load-metrics.2.1.5).
         while self._running and self._cycle == cycle:
+            if loss is not None and loss.event.is_set():
+                return loss.reason
+            # When this poll started, for the stall test below. GetFrame
+            # returns everything captured since the previous call, so only a
+            # poll that STARTED past the threshold and found nothing proves a
+            # stall; the time after the sleep does not (wh-mic-false-loss-
+            # stall-check).
+            poll_started = _monotonic()
             try:
                 frame = frame_output.get_frame()
                 if frame:
@@ -912,8 +1279,21 @@ class WinRTAudioCapture:
                             np.clip(float_samples, -32768, 32767, out=float_samples)
                             int16_data = float_samples.astype('<i2').tobytes()
                             buffer_accumulator.extend(int16_data)
+                            last_samples_at = _monotonic()
+                            if not delivered:
+                                delivered = True
+                                if recovering is not None:
+                                    recovering.recovered()
+                                    announce_recovery = True
                     finally:
                         audio_buffer.close()
+
+                    # After the buffer is released and before the chunk
+                    # loop takes _lifecycle_lock, so the provider's callback
+                    # runs under no lock at all (ruling K1).
+                    if announce_recovery and recovering is not None:
+                        announce_recovery = False
+                        self._report_outage('recovered', recovering.device)
 
                     # Yield chunks of target size (in int16 bytes)
                     while len(buffer_accumulator) >= target_bytes:
@@ -962,9 +1342,12 @@ class WinRTAudioCapture:
                 # Only after a whole iteration has come through without
                 # raising, so a failure anywhere above still counts.
                 consecutive_failures = 0
-                with self._lifecycle_lock:
-                    if self._running and self._cycle == cycle:
-                        self._capture_alive = True
+                # A rebuilt graph is alive once it has delivered samples, not
+                # once it has built (ruling C1).
+                if recovering is None or delivered:
+                    with self._lifecycle_lock:
+                        if self._running and self._cycle == cycle:
+                            self._capture_alive = True
 
             except Exception as e:
                 if self._running:
@@ -980,6 +1363,17 @@ class WinRTAudioCapture:
                             if self._running and self._cycle == cycle:
                                 self._capture_alive = False
                     time.sleep(0.1)
+
+            # After the poll on both paths, so polls that raise and polls
+            # that answer empty both run the clock out. The poll's start
+            # time, not the time now: on 2026-09-25 the capture thread waited
+            # seconds for the GIL after its sleep, and a test of the time now
+            # declared 39 false losses before the next poll could collect the
+            # audio. A poll that delivered samples set last_samples_at after
+            # poll_started, so it never counts.
+            if poll_started - last_samples_at >= CAPTURE_STALL_SECONDS:
+                return f'no audio samples for {CAPTURE_STALL_SECONDS:.1f} s'
+        return None
 
     def _cleanup_graph(self, graph=_PROVIDER_RESOURCES, mic_node=None,
                        frame_output=None) -> None:

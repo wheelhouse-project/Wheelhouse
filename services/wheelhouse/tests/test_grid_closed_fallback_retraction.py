@@ -241,3 +241,53 @@ async def test_a_real_command_after_a_fallback_still_blocks_retraction():
 
     assert proc.text_parser.last_executed_pattern_type == "command"
     assert proc._command_executed_in_utterance is True
+
+
+class _PointerClickLc(_ClosedGridLc):
+    """Grid closed; the pointer click is dispatched (wh-voice-access-parity.2.5)."""
+
+    def __init__(self, clicks: bool):
+        super().__init__()
+        self.clicks = clicks
+        self.pointer_clicks = []
+
+    async def handle_pointer_click(self, gesture, trace_id, *, spoken=""):
+        self.pointer_clicks.append((gesture, spoken))
+        return self.clicks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance", ["click", "right click", "double click", "triple click"],
+)
+async def test_a_closed_grid_click_word_is_a_command_not_dictation(utterance):
+    # wh-voice-access-parity.2.5: with the grid closed and voice clicking
+    # on, the bare click words click at the pointer. The click is an
+    # irreversible side effect, so the parse is a COMMAND: nothing types,
+    # and a later STT revision must not retract past it.
+    proc, app = _make_processor()
+    lc = _PointerClickLc(clicks=True)
+    proc.text_parser.speech_handler.logic_controller = lc
+
+    await proc._execute_command(utterance)
+
+    assert [spoken for _g, spoken in lc.pointer_clicks] == [utterance]
+    assert app.inserts() == []
+    assert proc.text_parser.last_executed_pattern_type == "command"
+    assert proc._command_executed_in_utterance is True
+
+
+@pytest.mark.asyncio
+async def test_a_click_word_with_clicking_disabled_stays_a_retractable_fallback():
+    # [click] enabled = false: Logic declines the pointer click and the
+    # word types as before, still marked a dictation fallback.
+    proc, app = _make_processor()
+    lc = _PointerClickLc(clicks=False)
+    proc.text_parser.speech_handler.logic_controller = lc
+
+    await proc._execute_command("click")
+
+    assert len(lc.pointer_clicks) == 1
+    assert app.inserts() == ["click"]
+    assert proc.text_parser.last_executed_pattern_type == "dictation_fallback"
+    assert proc._command_executed_in_utterance is False

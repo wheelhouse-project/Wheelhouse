@@ -241,3 +241,47 @@ class TestDismissedSignal:
         toast._no_button.click()
         toast.close()
         assert emits == []
+
+
+class TestButtonLabelsAndLifetimeParameters:
+    """wh-parakeet-model-download-offer: the Parakeet offer reuses this
+    toast with its own button labels and no auto-close. The defaults stay
+    "Yes" / "No" and 12 seconds, so the grant prompt, which passes
+    neither, is unchanged (boss ruling a)."""
+
+    def test_default_lifetime_is_twelve_seconds(self, toast):
+        toast.show_prompt(title="t", body="b")
+        assert toast._lifetime_timer.isActive()
+        assert toast._lifetime_timer.interval() == 12000
+
+    def test_default_labels_are_yes_and_no(self, toast):
+        toast.show_prompt(title="t", body="b")
+        assert toast._yes_button.text() == "Yes"
+        assert toast._no_button.text() == "No"
+
+    def test_custom_labels_are_shown(self, toast):
+        toast.show_prompt(
+            title="t", body="b", yes_label="Download now", no_label="Not now",
+        )
+        assert toast._yes_button.text() == "Download now"
+        assert toast._no_button.text() == "Not now"
+
+    def test_labels_return_to_the_defaults_on_a_show_without_them(self, toast):
+        toast.show_prompt(
+            title="t", body="b", yes_label="Copy command", no_label="Not now",
+        )
+        toast.show_prompt(title="t", body="b")
+        assert toast._yes_button.text() == "Yes"
+        assert toast._no_button.text() == "No"
+
+    def test_no_lifetime_means_no_auto_close(self, toast, qtbot):
+        toast.show_prompt(title="t", body="b", lifetime_ms=None)
+        assert not toast._lifetime_timer.isActive()
+        qtbot.wait(700)
+        assert toast.isVisible()
+
+    def test_no_lifetime_stops_an_earlier_timer(self, toast, qtbot):
+        toast.show_prompt(title="t", body="b", lifetime_ms=500)
+        toast.show_prompt(title="t2", body="b2", lifetime_ms=None)
+        qtbot.wait(800)
+        assert toast.isVisible()

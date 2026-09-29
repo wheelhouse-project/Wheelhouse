@@ -294,13 +294,15 @@ def test_badge_click_carries_the_requested_gesture(payload, expected):
 
 def test_unrecognised_gesture_degrades_to_invoke():
     # A malformed / future gesture value must never guess a physical click;
-    # it degrades to today's Invoke behaviour.
+    # it degrades to today's Invoke behaviour. ("triple_click" was the
+    # example here until wh-voice-access-parity.2.5 made it a real
+    # gesture; "quadruple_click" is still unknown.)
     match = _match("uia-3")
     executor = _FakeExecutor(_FakeClickResult("ok", None, "Cancel"))
     stub = _Stub(finder=_FakeFinder(_snapshot([match])), executor=executor)
 
     _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
-          trace_id="t", gesture="triple_click")
+          trace_id="t", gesture="quadruple_click")
 
     assert executor.calls[0][2].gesture is ClickGesture.INVOKE
 

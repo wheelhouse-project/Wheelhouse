@@ -254,10 +254,15 @@ _DEFAULT_BADGE_CORNER = _BADGE_CORNER_TOP_RIGHT
 # axes) instead of tucking it fully inside, so only about a quarter of the
 # badge covers the control (wh-overlay-small-control-cover). Packed toolbar
 # icon buttons are the motivating case: their trailing strips are occupied by
-# the next button, and a fully-inside badge covered most of the icon. The rule
-# deliberately requires BOTH dimensions small: on a wide-but-short control (a
-# list row, a column header) a half-above badge would sit visually between two
-# stacked rows and read as ambiguous, so those keep the inside corner.
+# the next button, and a fully-inside badge covered most of the icon. A packed
+# run of three or more such icons now usually gets a badge row below it
+# instead (the interior-run row, wh-overlay-toolbar-badges-cover-icons); this
+# corner point still serves shorter runs and runs whose row is blocked. The
+# rule deliberately requires BOTH dimensions small: on a wide-but-short control
+# (a list row, a column header) a half-above badge would sit visually between
+# two stacked rows and read as ambiguous, so those keep the inside corner. The
+# interior-run row uses the same test to decide which controls join a run and
+# which controls block the row.
 _BADGE_SMALL_CONTROL_FACTOR = 2.0
 # A numbered control whose width is at least this many times its height is a
 # "wide row" (wh-vscode-menu-badge-misplaced): its numeral goes in the LEADING
@@ -298,6 +303,32 @@ _EDGE_CLUSTER_BAND_FACTOR = 3.0
 # groups).
 _EDGE_CLUSTER_JOIN_GAP_FACTOR = 1.0
 
+# Interior-run row (wh-overlay-toolbar-badges-cover-icons): a horizontal run
+# of small controls AWAY from every monitor edge -- a browser's address-bar
+# row of navigation and extension icons -- gets ONE badge row just below the
+# row band, in icon order (``_interior_run_placements_phys``). A run needs at
+# least this many members; the collision nudge already handles a pair.
+_INTERIOR_RUN_MIN_COUNT = 3
+# Two small controls share a row when their vertical centres differ by at
+# most this many badge heights.
+_INTERIOR_ROW_CENTRE_TOLERANCE_FACTOR = 0.5
+# A run continues while the next control starts less than this many of the
+# previous control's badge widths past its right edge: the previous
+# control's trailing strip cannot hold its badge.
+_INTERIOR_RUN_JOIN_GAP_FACTOR = 1.0
+# A blocked row may move sideways by up to this many of the run's widest
+# badge widths, in steps of _INTERIOR_RUN_SHIFT_STEP_LOGICAL_PX (logical px,
+# scaled by dpr), trying right before left at each distance.
+_INTERIOR_RUN_SHIFT_BADGE_WIDTHS = 3
+_INTERIOR_RUN_SHIFT_STEP_LOGICAL_PX = 1.0
+# When no shift is clear, the row may cover the TOP STRIP of a control lying
+# wholly below the run's band and move that control's badge (RULING of
+# David, 2026-09-25 09:23, option 1A), but never more than this fraction of
+# the control's height: a row covering most of a control would hide it (a
+# second icon run directly below the first, the next row of a list, a short
+# text link just under the toolbar).
+_INTERIOR_ROW_MAX_COVER_FRACTION = 0.5
+
 # Whether to place the numeral in the empty space just BEYOND the control's
 # trailing edge (the corner's horizontal side) instead of inside its corner,
 # when that strip is clear of other walked controls and stays on the monitor
@@ -308,9 +339,12 @@ _EDGE_CLUSTER_JOIN_GAP_FACTOR = 1.0
 # short folder name) or on a trailing value (a file's size). Placing the badge
 # just past the control clears both. When the strip is occupied (a grid tile or
 # a packed toolbar button has a neighbour immediately to its right) or the badge
-# would run off-screen, it falls back to the corner, so those layouts are
-# unchanged. False restores pure corner placement. The value is the validated
-# [click] setting overlay_badge_trailing_space.
+# would run off-screen, it falls back to the corner. (A packed run of three or
+# more small toolbar icons usually never reaches this choice: the interior-run
+# row replaces those badges, wh-overlay-toolbar-badges-cover-icons.) False
+# restores corner placement for every badge that no edge cluster and no
+# interior-run row places; those two passes do not read this setting. The
+# value is the validated [click] setting overlay_badge_trailing_space.
 _DEFAULT_BADGE_TRAILING_SPACE = True
 
 # The bubble badge's own color scheme (wh-overlay-bubble-badges): "light" is a
@@ -2310,12 +2344,17 @@ class OverlayPaintWindowManager:
         The outside placement is used ONLY when it is safe: the badge must stay
         fully on the monitor AND must not overlap any OTHER walked control's box.
         A grid tile or a packed toolbar button has a neighbour immediately to its
-        right, so the overlap test fails and the badge falls back to the inside
-        corner (``_numeral_badge_footprint_phys``) unchanged -- no regression for
-        those layouts. A control flush against the monitor edge also falls back
-        (and is then shifted inward by the corner clamp). When
-        ``self._badge_trailing_space`` is False, or the monitor bounds are not
-        supplied, the corner placement is used directly.
+        right, so the overlap test fails and the badge falls back to the corner
+        (``_numeral_badge_footprint_phys``) and the ladder below. On a small
+        toolbar icon that corner badge covers most of the icon, so for a packed
+        run of three or more small icons the result of this method is usually
+        replaced: after the per-badge walk, the interior-run row
+        (``_interior_run_placements_phys``) takes those badges, and only a run
+        whose row is blocked keeps this method's placement
+        (wh-overlay-toolbar-badges-cover-icons). A control flush against the
+        monitor edge also falls back (and is then shifted inward by the corner
+        clamp). When ``self._badge_trailing_space`` is False, or the monitor
+        bounds are not supplied, the corner placement is used directly.
 
         ``ctrl_rects_phys`` is the physical ``(l, t, r, b)`` box of EVERY badge
         on the monitor (the caller passes the full list, unsliced). The badge's
@@ -2689,7 +2728,17 @@ class OverlayPaintWindowManager:
           each badge's own width for a row, plus the collision gap) than
           fit single-file in the run's own extent. An unpacked run --
           spaced taskbar app buttons -- keeps the shipped placement,
-          which already handles it without tangling.
+          which already handles it without tangling;
+        * for the LEFT and RIGHT edges only: it is not a member of a
+          horizontal run of small controls (``_small_control_runs``, the
+          interior-run definition, computed over every numbered control).
+          The live trigger (Brave, 2026-09-25): Back touches the left
+          monitor edge, so the left pass grouped a pinned tab with Back
+          and Forward into a column beside the toolbar, and badge 4
+          covered Reload. The address-bar run's badges belong in the
+          interior-run row below the icons. KNOWN LIMIT: a vertical
+          taskbar tray with three or more small icons side by side in one
+          row loses its edge column (see the crewcut comment in the code).
 
         Geometry: the badges' shared inner edge sits
         ``_BADGE_COLLISION_GAP_PX`` beyond the cluster's inner side (a
@@ -2703,6 +2752,17 @@ class OverlayPaintWindowManager:
         excluded. A column or row that cannot fit on the monitor
         abandons the cluster (no dict entries; the normal per-badge
         path applies).
+
+        A top or bottom ROW is abandoned the same way when any of its
+        badges would cover a toolbar icon: a member of a horizontal run of
+        small controls (``_small_control_runs``) that reaches into that
+        edge's band (wh-overlay-toolbar-badges-cover-icons, OPTION A). The
+        live trigger (Brave with pinned tabs, 2026-09-25): the pinned-tab
+        row just below the tabs lay on the address-bar icons (badge 99 on
+        Back). A run lying wholly past the band is page content, and the
+        row may cover it. KNOWN LIMIT: the badges of an abandoned
+        pinned-tab row take the per-badge placement and may cover their
+        own tabs (see the crewcut comment in the code).
 
         Deterministic pure float math over the same inputs, like the rest of
         the placement pass, so the bbox and render calls always agree.
@@ -2728,6 +2788,28 @@ class OverlayPaintWindowManager:
                 (rect.y + rect.height) * dpr,
             ))
 
+        # Members of a horizontal run of small controls never join a left
+        # or right column (wh-overlay-toolbar-badges-cover-icons, part 2).
+        # crewcut: a vertical taskbar tray with three or more small icons
+        # side by side inside one badge-height band (vertical centres
+        # within _INTERIOR_ROW_CENTRE_TOLERANCE_FACTOR badge heights) loses
+        # its edge column: those icons form a horizontal run, so their
+        # badges go to the interior-run row or the per-badge path. Leaving
+        # a run's members in the column when the whole run lies inside the
+        # edge band (a tray row stays inside it; a toolbar run continues
+        # into the monitor interior) would remove the limit.
+        badge_sizes = {
+            b[0]: self._numeral_badge_size(
+                badges[b[0]][1], dpr, metrics=metrics
+            )
+            for b in boxes
+        }
+        in_row_run = {
+            b[0]
+            for run in self._small_control_runs(boxes, badge_sizes, badge_h)
+            for b in run
+        }
+
         out: "dict[int, tuple[int, int, tuple[float, float, float, float]]]" = {}
         claimed: "set[int]" = set()
         # Vertical edges first: a corner cluster lying inside both a
@@ -2739,6 +2821,7 @@ class OverlayPaintWindowManager:
                 members = [
                     b for b in boxes
                     if b[0] not in claimed
+                    and b[0] not in in_row_run
                     and b[1] >= mon_w_phys - band
                     and (b[4] - b[2]) < max_member_cross
                 ]
@@ -2746,6 +2829,7 @@ class OverlayPaintWindowManager:
                 members = [
                     b for b in boxes
                     if b[0] not in claimed
+                    and b[0] not in in_row_run
                     and b[3] <= band
                     and (b[4] - b[2]) < max_member_cross
                 ]
@@ -2781,6 +2865,29 @@ class OverlayPaintWindowManager:
                 members.sort(key=lambda b: (b[1], -b[2]))
             else:  # top
                 members.sort(key=lambda b: (b[1], b[2]))
+            # The icons a top or bottom row must not cover: members of a
+            # horizontal run of small controls that reach into this edge's
+            # band -- the toolbar right beside a tab strip. A run lying
+            # wholly past the band is page content; a row may cover its
+            # top strip, as the interior-run row may (RULING 1A).
+            # crewcut: when the row is dropped, its badges take the
+            # per-badge placement, and a pinned tab's badge may then cover
+            # part of its own tab and of the next tab (measured on Brave:
+            # about a quarter of each; the tab strip is out of scope). Placing
+            # the dropped row's badges in the free space beside the run
+            # (the tab strip's own row, or a row past the toolbar run's
+            # own row) would remove the limit.
+            toolbar_icons: "list[tuple[float, float, float, float]]" = []
+            if side == "bottom":
+                toolbar_icons = [
+                    b[1:] for b in boxes
+                    if b[0] in in_row_run and b[4] > mon_h_phys - band
+                ]
+            elif side == "top":
+                toolbar_icons = [
+                    b[1:] for b in boxes
+                    if b[0] in in_row_run and b[2] < band
+                ]
             run: "list[tuple[int, float, float, float, float]]" = []
             run_end = 0.0
 
@@ -2901,15 +3008,26 @@ class OverlayPaintWindowManager:
                     # overlap).
                     for k in range(n):
                         pos[k] = max(0.0, pos[k])
-                for b, (bw, _bh), p in zip(run_members, sizes, pos):
+                rects = []
+                for (bw, _bh), p in zip(sizes, pos):
                     if side == "right":
-                        rect = (inner - bw, p, inner, p + badge_h)
+                        rects.append((inner - bw, p, inner, p + badge_h))
                     elif side == "left":
-                        rect = (inner, p, inner + bw, p + badge_h)
+                        rects.append((inner, p, inner + bw, p + badge_h))
                     elif side == "bottom":
-                        rect = (p, inner - badge_h, p + bw, inner)
+                        rects.append((p, inner - badge_h, p + bw, inner))
                     else:  # top
-                        rect = (p, inner, p + bw, inner + badge_h)
+                        rects.append((p, inner, p + bw, inner + badge_h))
+                # A top or bottom row that would cover an icon of a toolbar
+                # run is dropped: its badges take the per-badge placement
+                # (wh-overlay-toolbar-badges-cover-icons, OPTION A).
+                if any(
+                    self._rects_overlap_phys(rect, icon)
+                    for rect in rects
+                    for icon in toolbar_icons
+                ):
+                    return
+                for b, (bw, _bh), rect in zip(run_members, sizes, rects):
                     out[b[0]] = (bw, badge_h, rect)
                     claimed.add(b[0])
 
@@ -2922,6 +3040,447 @@ class OverlayPaintWindowManager:
                 run_end = main_hi if not run else max(run_end, main_hi)
                 run.append(b)
             _flush(run)
+        return out
+
+    def _interior_run_placements_phys(
+        self,
+        badges: "list[tuple[OverlayPaintRect, int]]",
+        dpr: float,
+        mon_w_phys: float,
+        mon_h_phys: float,
+        metrics: QFontMetricsF,
+        edge_placements: "dict[int, tuple[int, int, tuple[float, float, float, float]]]",
+        walk_placements: "dict[int, tuple[float, float, float, float]]",
+        *,
+        corner: str,
+    ) -> "dict[int, tuple[int, int, tuple[float, float, float, float]]]":
+        """Row placements for packed runs of small controls away from the
+        monitor edges, keyed by badge index
+        (wh-overlay-toolbar-badges-cover-icons).
+
+        The live trigger: a browser's address-bar row (Brave, 2026-09-24).
+        Its navigation and extension icons are about 28 logical px square,
+        so a badge is nearly as large as the icon; every trailing strip
+        holds the next icon, and the per-badge path put each badge on its
+        icon's corner or inside it, covering most of the icon. The
+        edge-cluster pass never claims the row, because the row is not at
+        a monitor edge.
+
+        This pass runs LAST, after ``_edge_cluster_placements_phys`` and
+        after the per-badge walk, and it only REPLACES placements: every
+        badge it does not return keeps the walk's footprint unchanged.
+        ``walk_placements`` is that walk's footprint for every badge the
+        edge-cluster pass did not claim. The pass considers only the small
+        controls the edge-cluster pass did not claim (small:
+        under ``_BADGE_SMALL_CONTROL_FACTOR`` of the control's own badge
+        width and of the badge height, the rule the corner anchor uses):
+
+        * A ROW is a set of such controls whose vertical centres lie within
+          ``_INTERIOR_ROW_CENTRE_TOLERANCE_FACTOR`` badge heights of the
+          row's first control (rows are formed top to bottom).
+        * Within a row, ordered by left edge, a RUN continues while the
+          next control starts less than ``_INTERIOR_RUN_JOIN_GAP_FACTOR``
+          of the previous control's badge width past that control's right
+          edge. A control that overlaps a run member by area ends the run
+          and starts the next one: overlapping boxes are not a row of
+          separate icons.
+        * A run of at least ``_INTERIOR_RUN_MIN_COUNT`` controls gets ONE
+          badge row BELOW its row band. The row's top is the lowest bottom
+          of the run and of every other numbered control that shares the
+          band and the row's span, plus ``_BADGE_COLLISION_GAP_PX``.
+        * Each badge aims its centre at its icon's centre. A forward chain
+          keeps ``_BADGE_COLLISION_GAP_PX`` between badges; the length the
+          chain adds is split equally to both ends, and the row is moved
+          back onto the monitor if it overhangs an edge.
+        * The row is BLOCKED when any badge would leave the monitor, or
+          would overlap a badge already placed (edge-cluster badges, earlier
+          rows, and the walk footprint of every badge outside the run and
+          outside every earlier row), or would overlap a SMALL numbered
+          control. A small
+          blocker also keeps its trailing strip (its own badge width plus
+          the collision gap, on the corner's horizontal side) free, so its
+          own badge can still take the strip and is not pushed onto its
+          icon. Wide controls (a tab, an address field, a page link row)
+          never block: the row may cover part of their box.
+        * A blocked row tries sideways shifts of 1, 2, 3, ...
+          ``_INTERIOR_RUN_SHIFT_STEP_LOGICAL_PX`` (right first, then left)
+          up to ``_INTERIOR_RUN_SHIFT_BADGE_WIDTHS`` of the run's widest
+          badge.
+        * When no shift is clear, the row may still cover the top strip of
+          page controls that lie WHOLLY below the run's band (control top
+          at or below the band's bottom; RULING of David, 2026-09-25 09:23,
+          option 1A) when the row covers at most
+          ``_INTERIOR_ROW_MAX_COVER_FRACTION`` of the control's height: the
+          row takes the first shift, in the same order, that is clear of
+          every obstacle except such a control's own blocker box and its
+          walked badge. The walked badges of those
+          controls that the row overlaps are DISPLACED and placed again,
+          in index order, by the per-badge placement
+          (``_numeral_badge_placement_phys``), with the row and every
+          other badge (walked, edge-cluster, earlier rows, and the badges
+          already placed again) as obstacles. If a displaced badge still
+          overlaps one of those badges, lands detached from its own
+          control (``_bubble_drawing_state``), or overlaps the box of any
+          other numbered control, the row is dropped for this run
+          and the displaced badges keep their walk footprints. A control
+          that overlaps the band vertically, or whose box the row would
+          cover beyond the fraction, never yields.
+        * A run whose row is dropped gets no dict entries and its badges
+          keep the per-badge path unchanged.
+
+        The returned dict holds the run badges of every accepted row AND
+        the new footprint of every displaced badge.
+
+        Badge order matches icon order and the row's y is constant, so the
+        leader lines of detached badges cannot cross each other.
+
+        The rows never seed the per-badge walk
+        (wh-overlay-toolbar-badges-cover-icons.1.1). The first build placed
+        the rows first and seeded them into the walk's ``placed`` list; on a
+        packed multi-row icon grid that rerouted the collision nudges of
+        badges in no run until one landed on the collision floor and
+        stacked two badges. Now every badge outside an accepted row is
+        placed exactly as it is without this pass, except a displaced
+        badge, and a row is accepted only where it overlaps none of those
+        badges and every displaced badge lands clear of every other badge,
+        so the pass can add no badge overlap that the per-badge placement
+        lacks. A rejected run needs no second walk: its badges already hold
+        their walk footprints.
+        Deterministic pure float math over the same inputs, so the
+        bounding-box and paint calls agree.
+        """
+        # crewcut: a run's row also avoids the walk footprints of the
+        # members of LATER runs (lower rows, runs further right), although
+        # those footprints disappear if the later run then takes its own
+        # row. The row can therefore fall back or shift when it did not
+        # need to. Deciding all runs together (accept, re-check, repeat
+        # until stable) would remove the limit.
+        # crewcut: rows only. A VERTICAL interior run of small icons (the
+        # VS Code activity bar) is not detected here and keeps the
+        # per-badge placement. A column pass that groups by centre x and
+        # places the column beside the run would remove the limit.
+        # crewcut: the row is tried BELOW the run only (RULING #3 on
+        # wh-overlay-toolbar-badges-cover-icons). The RULING of David
+        # (2026-09-25 09:23, option 1A) lets the row cover the top strip of
+        # page controls that lie wholly below the toolbar band (header
+        # buttons and links) and moves their badges out of the row. Limits
+        # remain: the row is dropped, and the run's badges still cover the
+        # icons, when a displaced badge cannot move without overlapping
+        # another badge, without landing detached from its own control
+        # (farther than _BUBBLE_ATTACH_GAP_LOGICAL_PX), or without covering
+        # another numbered control's box, when a control
+        # that overlaps the band blocks every
+        # shift, or when the row would cover more than
+        # _INTERIOR_ROW_MAX_COVER_FRACTION of a blocking control (a short
+        # text link or an icon-only bookmarks bar just under the toolbar);
+        # and nothing is ever tried above the run. Trying the next shift
+        # after a failed move, and a second attempt above the run that
+        # moves no other control's badge onto an icon (the design stage
+        # measured that regression for "above"), would remove them.
+        gap = _BADGE_COLLISION_GAP_PX * dpr
+        # Badge height is constant per (font, dpr); only the width varies
+        # with the digit count. Probe with any number for the height.
+        _probe_w, badge_h = self._numeral_badge_size(1, dpr, metrics=metrics)
+        is_right = corner in (_BADGE_CORNER_TOP_RIGHT, _BADGE_CORNER_BOTTOM_RIGHT)
+
+        # (index, left, top, right, bottom) per numeral badge, physical px,
+        # and each badge's own size.
+        sizes: "dict[int, tuple[int, int]]" = {}
+        boxes: "list[tuple[int, float, float, float, float]]" = []
+        for i, (rect, number) in enumerate(badges):
+            if number == WORKING_BADGE_NUMBER:
+                continue
+            sizes[i] = self._numeral_badge_size(number, dpr, metrics=metrics)
+            boxes.append((
+                i,
+                rect.x * dpr,
+                rect.y * dpr,
+                (rect.x + rect.width) * dpr,
+                (rect.y + rect.height) * dpr,
+            ))
+
+        def _is_small(b: "tuple[int, float, float, float, float]") -> bool:
+            return self._is_small_control_box(b, sizes, badge_h)
+
+        # Each control's top and bottom, physical px: a control whose top
+        # is at or below a run's band bottom lies wholly below the band,
+        # and the row may cover its top strip and move its badge
+        # (RULING 1A).
+        spans = {b[0]: (b[2], b[4]) for b in boxes}
+        # Every control box, as the per-badge walk receives it, for placing
+        # a displaced badge again with the same machinery.
+        ctrl_rects_phys = [
+            (r.x * dpr, r.y * dpr,
+             (r.x + r.width) * dpr, (r.y + r.height) * dpr)
+            for r, _n in badges
+        ]
+
+        # Every small numbered control blocks the row, widened on its
+        # trailing side by its own badge width plus the gap, tagged with
+        # the control's index. A run's own members never reach the row (it
+        # starts below their bottoms), so the list serves every run
+        # unchanged.
+        blockers: "list[tuple[int, tuple[float, float, float, float]]]" = []
+        for b in boxes:
+            if not _is_small(b):
+                continue
+            strip = sizes[b[0]][0] + gap
+            if is_right:
+                blockers.append((b[0], (b[1], b[2], b[3] + strip, b[4])))
+            else:
+                blockers.append((b[0], (b[1] - strip, b[2], b[3], b[4])))
+
+        placed = [p[2] for p in edge_placements.values()]
+        # Walk footprints of the badges that keep them: every badge outside
+        # the accepted rows. An accepted run's members leave this map, and
+        # a displaced badge's entry becomes its new footprint.
+        walked = dict(walk_placements)
+        out: "dict[int, tuple[int, int, tuple[float, float, float, float]]]" = {}
+
+        def _move_displaced(
+            displaced: "list[int]",
+            row: "list[tuple[float, float, float, float]]",
+            run_ids: "set[int]",
+        ) -> "Optional[dict[int, tuple[float, float, float, float]]]":
+            """New footprints for the ``displaced`` badges, placed in index
+            order by the per-badge placement with the row and every other
+            badge as obstacles; ``None`` when one still overlaps a badge,
+            lands DETACHED from its own control
+            (``_bubble_drawing_state``), or overlaps the box of any other
+            numbered control."""
+            others = row + placed + [
+                fp for i, fp in walked.items()
+                if i not in run_ids and i not in displaced
+            ]
+            moved: "dict[int, tuple[float, float, float, float]]" = {}
+            for j in displaced:
+                bw, bh = sizes[j]
+                fp = self._numeral_badge_placement_phys(
+                    badges[j][0], bw, bh, dpr, mon_w_phys, mon_h_phys,
+                    ctrl_rects_phys, corner=corner, placed_badges=others,
+                )
+                if any(self._rects_overlap_phys(fp, o) for o in others):
+                    return None
+                # A badge far from its control reads as another control's
+                # number (wh-overlay-toolbar-badges-cover-icons.2.1).
+                if (
+                    _bubble_drawing_state(fp, ctrl_rects_phys[j], dpr)
+                    == _BUBBLE_STATE_DETACHED
+                ):
+                    return None
+                # The per-badge placement accepts an attached place on
+                # another control when no clean one is left; a displaced
+                # badge must not take one, because the badge would then
+                # cover another control to make room for the row
+                # (wh-overlay-toolbar-badges-cover-icons.2.2).
+                if any(
+                    self._rects_overlap_phys(fp, c)
+                    for k, c in enumerate(ctrl_rects_phys) if k != j
+                ):
+                    return None
+                moved[j] = fp
+                others.append(fp)
+            return moved
+
+        def _place_row(
+            run: "list[tuple[int, float, float, float, float]]",
+        ) -> "Optional[tuple[list[tuple[float, float, float, float]], dict[int, tuple[float, float, float, float]]]]":
+            """The run's badge row and the new footprints of the badges it
+            displaces, or ``None`` when every position is blocked."""
+            slots = [float(sizes[b[0]][0]) for b in run]
+            ideals = [
+                (b[1] + b[3]) / 2.0 - s / 2.0 for b, s in zip(run, slots)
+            ]
+            pos: "list[float]" = []
+            for k, ideal in enumerate(ideals):
+                if k and ideal < pos[-1] + slots[k - 1] + gap:
+                    ideal = pos[-1] + slots[k - 1] + gap
+                pos.append(ideal)
+            # The chain only ever pushes forward; split what it added
+            # equally to both ends of the row.
+            excess = (pos[-1] - ideals[-1]) / 2.0
+            pos = [p - excess for p in pos]
+            if pos[0] < 0.0:
+                pos = [p - pos[0] for p in pos]
+            elif pos[-1] + slots[-1] > mon_w_phys:
+                overhang = pos[-1] + slots[-1] - mon_w_phys
+                pos = [p - overhang for p in pos]
+            span_lo, span_hi = pos[0], pos[-1] + slots[-1]
+            run_ids = {b[0] for b in run}
+            band_top = min(b[2] for b in run)
+            band_bottom = max(b[4] for b in run)
+            row_top = max(
+                [band_bottom] + [
+                    o[4] for o in boxes
+                    if o[0] not in run_ids
+                    and o[2] < band_bottom and o[4] > band_top
+                    and o[1] < span_hi and o[3] > span_lo
+                ]
+            ) + gap
+            row_bottom = row_top + badge_h
+            if row_top < 0.0 or row_bottom > mon_h_phys:
+                return None
+            # The row's y never changes, so only obstacles that overlap its
+            # height can block any shift. Each obstacle carries the index
+            # of the control it belongs to when it may YIELD to the row:
+            # the blocker box or the walked badge of a control lying
+            # wholly below the band whose top strip, at most
+            # _INTERIOR_ROW_MAX_COVER_FRACTION of its height, is all the
+            # row can cover (RULING 1A). Every other obstacle carries None
+            # and always blocks.
+            def _yields(i: int) -> bool:
+                top, bottom = spans[i]
+                return top >= band_bottom and (
+                    row_bottom - top
+                    <= _INTERIOR_ROW_MAX_COVER_FRACTION * (bottom - top)
+                )
+
+            obstacles = [
+                (owner, o) for owner, o in [
+                    (i if _yields(i) else None, o) for i, o in blockers
+                ] + [(None, o) for o in placed] + [
+                    (i if _yields(i) else None, fp)
+                    for i, fp in walked.items() if i not in run_ids
+                ]
+                if o[1] < row_bottom and o[3] > row_top
+            ]
+            firm = [o for owner, o in obstacles if owner is None]
+            steps = int(
+                _INTERIOR_RUN_SHIFT_BADGE_WIDTHS * max(slots) / dpr
+                / _INTERIOR_RUN_SHIFT_STEP_LOGICAL_PX
+            )
+            shifts = [0.0]
+            for d in range(1, steps + 1):
+                shifts.extend((float(d), float(-d)))
+            cands: "list[list[tuple[float, float, float, float]]]" = []
+            for shift in shifts:
+                dx = shift * _INTERIOR_RUN_SHIFT_STEP_LOGICAL_PX * dpr
+                cand = [
+                    (p + dx, row_top, p + dx + s, row_bottom)
+                    for p, s in zip(pos, slots)
+                ]
+                if cand[0][0] < 0.0 or cand[-1][2] > mon_w_phys:
+                    continue
+                cands.append(cand)
+                if any(
+                    self._rects_overlap_phys(c, o)
+                    for c in cand for _owner, o in obstacles
+                ):
+                    continue
+                return cand, {}
+            # No shift is clear: take the first one that only page
+            # controls wholly below the band block, and move the badges
+            # the row covers (RULING 1A). One attempt: a failed move drops
+            # the row.
+            for cand in cands:
+                if any(
+                    self._rects_overlap_phys(c, o)
+                    for c in cand for o in firm
+                ):
+                    continue
+                displaced = sorted(
+                    i for i, fp in walked.items()
+                    if i not in run_ids and _yields(i)
+                    and any(self._rects_overlap_phys(c, fp) for c in cand)
+                )
+                moved = _move_displaced(displaced, cand, run_ids)
+                if moved is None:
+                    return None
+                return cand, moved
+            return None
+
+        # Runs of the small controls the edge-cluster pass did not claim.
+        for run in self._small_control_runs(
+            [b for b in boxes if b[0] not in edge_placements], sizes, badge_h,
+        ):
+            result = _place_row(run)
+            if result is None:
+                continue
+            row_rects, moved = result
+            for b, rect in zip(run, row_rects):
+                out[b[0]] = (sizes[b[0]][0], badge_h, rect)
+                walked.pop(b[0], None)
+            placed.extend(row_rects)
+            for i, fp in moved.items():
+                out[i] = (sizes[i][0], badge_h, fp)
+                walked[i] = fp
+        return out
+
+    @staticmethod
+    def _is_small_control_box(
+        b: "tuple[int, float, float, float, float]",
+        sizes: "dict[int, tuple[int, int]]",
+        badge_h: float,
+    ) -> bool:
+        """Whether a ``(index, left, top, right, bottom)`` control box is
+        small: under ``_BADGE_SMALL_CONTROL_FACTOR`` of its own badge width
+        (``sizes[index][0]``) and of the badge height, the rule the corner
+        anchor uses."""
+        return (
+            (b[3] - b[1])
+            < _BADGE_SMALL_CONTROL_FACTOR * sizes[b[0]][0]
+            and (b[4] - b[2]) < _BADGE_SMALL_CONTROL_FACTOR * badge_h
+        )
+
+    def _small_control_runs(
+        self,
+        boxes: "list[tuple[int, float, float, float, float]]",
+        sizes: "dict[int, tuple[int, int]]",
+        badge_h: float,
+    ) -> "list[list[tuple[int, float, float, float, float]]]":
+        """Horizontal runs of at least ``_INTERIOR_RUN_MIN_COUNT`` small
+        controls among ``boxes`` (``(index, left, top, right, bottom)``,
+        physical px; ``sizes`` maps each index to its badge size), rows top
+        to bottom and runs left to right, each run in left-to-right order.
+
+        The run definition of the interior-run row, shared with the
+        left/right edge-cluster pass, which must not claim a run's member
+        (wh-overlay-toolbar-badges-cover-icons, part 2):
+
+        * only small controls (``_is_small_control_box``) take part;
+        * a ROW is a set of them whose vertical centres lie within
+          ``_INTERIOR_ROW_CENTRE_TOLERANCE_FACTOR`` badge heights of the
+          row's first control (rows are formed top to bottom);
+        * within a row, ordered by left edge, a RUN continues while the
+          next control starts less than ``_INTERIOR_RUN_JOIN_GAP_FACTOR``
+          of the previous control's badge width past that control's right
+          edge; a control that overlaps a run member by area ends the run
+          and starts the next one (overlapping boxes -- pinned tabs -- are
+          not a row of separate icons).
+        """
+        members = [
+            b for b in boxes if self._is_small_control_box(b, sizes, badge_h)
+        ]
+        members.sort(key=lambda b: ((b[2] + b[4]) / 2.0, b[1]))
+        tolerance = _INTERIOR_ROW_CENTRE_TOLERANCE_FACTOR * badge_h
+        rows: "list[list[tuple[int, float, float, float, float]]]" = []
+        for b in members:
+            if rows and abs(
+                (b[2] + b[4]) / 2.0 - (rows[-1][0][2] + rows[-1][0][4]) / 2.0
+            ) <= tolerance:
+                rows[-1].append(b)
+            else:
+                rows.append([b])
+        out: "list[list[tuple[int, float, float, float, float]]]" = []
+        for row in rows:
+            row.sort(key=lambda b: (b[1], b[2]))
+            runs: "list[list[tuple[int, float, float, float, float]]]" = []
+            for b in row:
+                if runs and not (
+                    b[1] - runs[-1][-1][3]
+                    >= _INTERIOR_RUN_JOIN_GAP_FACTOR * sizes[runs[-1][-1][0]][0]
+                    or any(
+                        self._rects_overlap_phys(b[1:], m[1:])
+                        for m in runs[-1]
+                    )
+                ):
+                    runs[-1].append(b)
+                else:
+                    runs.append([b])
+            for run in runs:
+                if len(run) < _INTERIOR_RUN_MIN_COUNT:
+                    continue
+                out.append(run)
         return out
 
     def _numeral_badge_placements_phys(
@@ -2956,11 +3515,17 @@ class OverlayPaintWindowManager:
         placed (wh-overlay-badge-collision): ``placed`` accumulates every
         numeral footprint in list order and feeds the next placement's
         collision checks. Edge-cluster badges
-        (``_edge_cluster_placements_phys``) are placed FIRST -- their column
-        footprints seed ``placed`` before the sequential walk, so every
-        non-cluster badge avoids the column. The pass is deterministic (pure
-        float math over the same inputs), so the bbox call and the render
-        call always produce identical placements.
+        (``_edge_cluster_placements_phys``) are placed FIRST -- their
+        footprints seed ``placed`` before the sequential walk, so every other
+        badge avoids the columns. The interior-run rows
+        (``_interior_run_placements_phys``,
+        wh-overlay-toolbar-badges-cover-icons) come LAST: they replace the
+        walk's placement of their run's badges only where the row overlaps
+        no badge the walk placed, and they never seed the walk, so every
+        other badge keeps exactly its placement without the rows
+        (wh-overlay-toolbar-badges-cover-icons.1.1). The pass is
+        deterministic (pure float math over the same inputs), so the bbox
+        call and the render call always produce identical placements.
         """
         # Every badge's physical control box, so the trailing-space placement
         # can tell whether the strip just past a control is occupied by another
@@ -2979,7 +3544,10 @@ class OverlayPaintWindowManager:
         numeral_metrics: Optional[QFontMetricsF] = metrics
         has_numeral = any(n != WORKING_BADGE_NUMBER for _r, n in badges)
         cluster: "dict[int, tuple[int, int, tuple[float, float, float, float]]]" = {}
-        if has_numeral and mon_w_phys is not None and mon_h_phys is not None:
+        rows_possible = (
+            has_numeral and mon_w_phys is not None and mon_h_phys is not None
+        )
+        if rows_possible:
             if numeral_metrics is None:
                 numeral_metrics = QFontMetricsF(self._numeral_font(dpr))
             cluster = self._edge_cluster_placements_phys(
@@ -3007,6 +3575,17 @@ class OverlayPaintWindowManager:
             )
             placed.append(footprint)
             out.append((bw, bh, footprint))
+        if rows_possible:
+            walked = {
+                i: p[2] for i, p in enumerate(out)
+                if p is not None and i not in cluster
+            }
+            interior = self._interior_run_placements_phys(
+                badges, dpr, mon_w_phys, mon_h_phys, numeral_metrics,
+                cluster, walked, corner=corner,
+            )
+            for i, placement in interior.items():
+                out[i] = placement
         return out
 
     def _render_monitor_surface(

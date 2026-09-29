@@ -192,6 +192,10 @@ _HANDLES_OWN_RESPONSE = frozenset({
     "click_point",
     "move_pointer",
     "perform_drag",
+    # wh-voice-access-parity.2.5: the bare click words with no grid open.
+    # The handler reads the pointer position and clicks there through the
+    # same click primitive, emitting its own MouseActionResponse.
+    "click_at_pointer",
 })
 
 
@@ -1359,7 +1363,8 @@ class _DispatchWatch:
         # so the wait is a queue put and never disk I/O.
         self._report_lock = threading.Lock()
         # [action, request_id, trace_id, started_monotonic, reported_at,
-        # awaited_window_s] or None when no dispatch is in flight.
+        # awaited_window_s, loop_thread_id] or None when no dispatch is in
+        # flight.
         self._current = None
 
     def begin(
@@ -1375,10 +1380,14 @@ class _DispatchWatch:
         caller written before the stamp existed -- still registers a
         dispatch that the fixed limit answers for.
         """
+        # wh-overlay-walk-vscode-stall: begin() runs on the command-loop
+        # thread, so its identity here is the thread whose stack the first
+        # stall report logs.
+        loop_thread_id = threading.get_ident()
         with self._lock:
             self._current = [
                 action, request_id, trace_id, started_monotonic, None,
-                awaited_window_s,
+                awaited_window_s, loop_thread_id,
             ]
 
     def end(self):
@@ -1394,7 +1403,7 @@ class _DispatchWatch:
                 return
             (
                 action, request_id, trace_id, started, _reported_at,
-                _awaited_window_s,
+                _awaited_window_s, _loop_thread_id,
             ) = current
             logger.error(
                 "Input command loop recovered: %s finally returned after "
@@ -1423,7 +1432,7 @@ class _DispatchWatch:
                     return
                 (
                     action, request_id, trace_id, started, reported_at,
-                    awaited_window_s,
+                    awaited_window_s, loop_thread_id,
                 ) = current
                 # wh-watchdog-stall-window: a stamped command answers to its
                 # own awaited window instead of the fixed limit. Read here,
@@ -1448,6 +1457,65 @@ class _DispatchWatch:
                 "silent. trace_id=%s request_id=%s",
                 action, held_s, report_s, trace_id or "-", request_id or "-",
             )
+            if reported_at is None:
+                _log_command_loop_stack(
+                    loop_thread_id, action, trace_id, request_id,
+                )
+
+
+# The most frames one stack report lists, innermost kept. The blocking call is
+# at the innermost end; the bound keeps one report to a bounded log line.
+_STACK_REPORT_MAX_FRAMES = 60
+
+
+def _log_command_loop_stack(thread_id, action, trace_id, request_id):
+    """Log the command-loop thread's Python stack, frames only.
+
+    wh-overlay-walk-vscode-stall. A VS Code screen read held the loop for
+    244 s and the stall report could not say which call held it. The stack
+    names the function and line the loop is inside at the first report.
+
+    Each frame is its file, line and function name, read from the code
+    object. Local variables are never read: they can hold the user's spoken
+    words. Source text is not read either, so the watchdog does no file I/O.
+
+    Logged at WARNING, not ERROR, so the stack does not travel into a Windows
+    notification; the ERROR stall line before it already does. Never raises:
+    a failed capture costs only the stack, never the stall report or the
+    watchdog thread.
+    """
+    try:
+        frame = sys._current_frames().get(thread_id)
+        frames = []
+        while frame is not None:
+            code = frame.f_code
+            frames.append(
+                f'  File "{code.co_filename}", line {frame.f_lineno}, '
+                f"in {code.co_name}"
+            )
+            frame = frame.f_back
+        if not frames:
+            logger.warning(
+                "stack of the command loop for %s is unavailable: its thread "
+                "was not found. trace_id=%s request_id=%s",
+                action, trace_id or "-", request_id or "-",
+            )
+            return
+        omitted = max(0, len(frames) - _STACK_REPORT_MAX_FRAMES)
+        shown = frames[:_STACK_REPORT_MAX_FRAMES]
+        shown.reverse()
+        logger.warning(
+            "stack of the command loop held by %s, innermost call last "
+            "(%d outer frames omitted). trace_id=%s request_id=%s\n%s",
+            action, omitted, trace_id or "-", request_id or "-",
+            "\n".join(shown),
+        )
+    except Exception:
+        logger.warning(
+            "stack of the command loop for %s could not be captured; the "
+            "stall report above stands. trace_id=%s request_id=%s",
+            action, trace_id or "-", request_id or "-", exc_info=True,
+        )
 
 
 def _run_dispatch_watchdog(watch, shutdown_event):
@@ -1660,6 +1728,7 @@ def input_process_main(shm_name: str, command_ready_event: multiprocessing.Event
     from services.wheelhouse.config_service import ConfigService
     from utils.logging_setup import setup_logging
     from utils.process_priority import elevate_process_priority
+    from utils.clipboard_manager import select_windows_clipboard
 
     from utils.trace_context import set_trace
     from ui.ui_actions import UIActionHandler
@@ -1687,6 +1756,10 @@ def input_process_main(shm_name: str, command_ready_event: multiprocessing.Event
         # setup_logging so a refusal's warning reaches the process log
         # instead of bare stderr (wh-process-priority-durable.1.4).
         elevate_process_priority()
+
+        # Before the command loop, so the first paste starts no child
+        # process for pyperclip's OS detection (wh-input-first-paste-stall).
+        select_windows_clipboard()
 
         # Enable faulthandler to capture native crashes (access violations, segfaults)
         # that bypass Python's exception handling.  Writes traceback to a file so

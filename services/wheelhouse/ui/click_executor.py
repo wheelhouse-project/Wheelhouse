@@ -153,6 +153,20 @@ success path emits no reason (``ok``); the ``dda_ok``,
 tags are telemetry markers on the log, not ClickResult.reason values (``ok``
 carries ``reason=None``).
 
+Toggle and Select press reason tags (wh-mcp-repo-mining.3), used only for a
+by-name click inside the InvokePatternUnavailable branch, where
+``TogglePattern.Toggle`` and then ``SelectionItemPattern.Select`` (neither
+for a TreeItem) are tried BEFORE the DoDefaultAction fallback above:
+``toggle_com_error`` / ``select_com_error`` (the press call raised, so it may
+have acted: fail closed, with no later press path, no default action, and no
+coordinate click) and ``toggle_then_sendinput_failed`` /
+``select_then_sendinput_failed`` (the call raised a proven no-side-effect
+HRESULT, the gated coordinate click fired, and it did not land). A success
+reports ``clicked_via="invoke"`` like the default action; the log-only
+telemetry markers are ``toggle_ok``, ``select_ok``,
+``toggle_no_side_effect_then_coord``, and
+``select_no_side_effect_then_coord``.
+
 The ``invoke_pattern_unavailable`` tag was retired in wh-l4h.1.17: the
 ``InvokePatternUnavailable`` branch now enters the DoDefaultAction fallback
 above instead of failing under that tag, so no path emits it. It is omitted
@@ -180,7 +194,8 @@ closed with no DDA attempt. The tag
 badge-first coordinate click whose seam raised or reported not-landed with
 events out; the log-only telemetry marker for entering the path is
 ``badge_coord_first``. By-name clicks (``badge_pick`` False) keep the
-DDA-first order unchanged.
+press-first order: Toggle, then Select, then DoDefaultAction
+(wh-mcp-repo-mining.3), each before any coordinate click.
 
 Shell-owned badge coordinate-first (wh-tray-invoke-noop): a badge pick whose
 winner is shell-owned (``ElementMatch.source_window_is_shell`` -- taskbar and
@@ -217,9 +232,13 @@ from ui.uia_walker import (
     DoDefaultActionUnavailable,
     InvokePatternUnavailable,
     NoDefaultAction,
+    SelectionItemPatternUnavailable,
+    TogglePatternUnavailable,
     do_default_action_via_legacy_pattern,
     invoke_via_invoke_pattern,
+    select_via_selection_item_pattern,
     selection_state_via_selection_item_pattern,
+    toggle_via_toggle_pattern,
 )
 
 logger = logging.getLogger(__name__)
@@ -278,7 +297,9 @@ class ClickResult:
             the target). ``None`` only if the winner had no name.
         clicked_via: which execution path performed the click on ``ok``
             (``"invoke"`` or ``"coordinate"``); ``None`` on failure. Telemetry
-            only.
+            only. A press through the MSAA default action, TogglePattern, or
+            SelectionItemPattern also reports ``"invoke"`` (a pattern press,
+            not a coordinate click); the log tag names which one.
     """
 
     outcome: Literal["ok", "execution_failed"]
@@ -290,6 +311,24 @@ class ClickResult:
 # v5 design default, mirrored as a constructor default so this module reads no
 # config; the real value arrives from ClickConfig (a separate slice).
 _DEFAULT_ENABLE_COORDINATE_CLICK_ON_COM_ERROR = False
+
+# Control types that never take the SelectionItem.Select press
+# (wh-mcp-repo-mining.3, Boss ruling R1 2026-09-27). A TreeItem keeps its
+# earlier path (the MSAA default action, then the guarded coordinate click):
+# Select was verified live to move the File Explorer navigation-pane
+# highlight WITHOUT navigating (wh-explorer-navpane-click), where a mouse
+# click navigates. Remove UIA_TREEITEM from this set to let tree items take
+# Select.
+_SELECT_PRESS_EXCLUDED_CONTROL_TYPES = frozenset({UIA_TREEITEM})
+
+# Control types that never take the TogglePattern.Toggle press
+# (wh-mcp-repo-mining.3, BOSS RULING 01:46 2026-09-27). Every tree item keeps
+# the same earlier path as above, so a tree item that exposes Toggle (a
+# checkbox tree) is not toggled either: the File Explorer navigation-pane
+# evidence (wh-explorer-navpane-click) showed that a pattern press on a tree
+# item can do something other than what a mouse click does. Remove
+# UIA_TREEITEM from this set to let tree items take Toggle.
+_TOGGLE_PRESS_EXCLUDED_CONTROL_TYPES = frozenset({UIA_TREEITEM})
 
 # Phase 1.5 pre-click bounds-tolerance default (design r1c.6), mirrored as a
 # constructor default so this module reads no config. The real value is threaded
@@ -325,6 +364,9 @@ _DEFAULT_VERIFICATION_BUDGET_MS = 2000
 _GESTURE_MOUSE_PARAMS: dict[ClickGesture, tuple[str, int]] = {
     ClickGesture.RIGHT_CLICK: ("right", 1),
     ClickGesture.DOUBLE_CLICK: ("left", 2),
+    # wh-voice-access-parity.2.5: three left clicks in one batch, which
+    # Windows reads as a triple click (a line or paragraph selection).
+    ClickGesture.TRIPLE_CLICK: ("left", 3),
 }
 
 
@@ -492,6 +534,19 @@ class ClickExecutor:
             (wh-click-dda-wiring), exactly as ``invoke_fn`` defaults to the real
             ``invoke_via_invoke_pattern``. Tests inject a fake to drive the
             DoDefaultAction branches headlessly.
+        toggle_fn: ``(control_ref) -> None`` -- the UIA
+            ``TogglePattern.Toggle`` press seam (wh-mcp-repo-mining.3), tried
+            for a by-name click ONLY when ``invoke_fn`` raised
+            ``InvokePatternUnavailable``, before ``select_fn`` and
+            ``do_default_action_fn``, and never for a TreeItem. Raises ``TogglePatternUnavailable``
+            before any call when the pattern does not resolve. Defaults to
+            the real press ``toggle_via_toggle_pattern``.
+        select_fn: ``(control_ref) -> None`` -- the UIA
+            ``SelectionItemPattern.Select`` press seam (wh-mcp-repo-mining.3),
+            tried after ``toggle_fn`` reported no Toggle pattern, and never
+            for a TreeItem. Raises ``SelectionItemPatternUnavailable`` before
+            any call when the pattern does not resolve. Defaults to the real
+            press ``select_via_selection_item_pattern``.
         enable_coordinate_click_on_com_error: v5 knob (default False). When
             False, a non-allowlisted Invoke COM error NEVER coordinate-clicks.
         overlay_bounds_tolerance_physical_px: Phase 1.5 knob (design r1c.6,
@@ -547,6 +602,8 @@ class ClickExecutor:
         selection_state_fn: Callable[
             [Any], Optional[bool]
         ] = selection_state_via_selection_item_pattern,
+        toggle_fn: Callable[[Any], None] = toggle_via_toggle_pattern,
+        select_fn: Callable[[Any], None] = select_via_selection_item_pattern,
         enable_coordinate_click_on_com_error: bool = (
             _DEFAULT_ENABLE_COORDINATE_CLICK_ON_COM_ERROR
         ),
@@ -617,6 +674,14 @@ class ClickExecutor:
         # type never touches this seam, so the Phase 1 path costs no extra COM
         # round-trip. Injected in tests to script the selection state.
         self._selection_state_fn = selection_state_fn
+        # The Toggle and SelectionItem.Select press seams
+        # (wh-mcp-repo-mining.3). Consulted ONLY for a by-name click inside
+        # the InvokePatternUnavailable branch, BEFORE the MSAA default action
+        # (see _attempt_pattern_press). Each raises its own *Unavailable
+        # exception before any call when the pattern does not resolve.
+        # Injected in tests so a fake control_ref can drive every branch.
+        self._toggle_fn = toggle_fn
+        self._select_fn = select_fn
         self._enable_coordinate_click_on_com_error = (
             enable_coordinate_click_on_com_error
         )
@@ -792,9 +857,16 @@ class ClickExecutor:
                 # structurally unavailable, _handle_invoke_error must go
                 # straight to DoDefaultAction -- the badge coordinate-first
                 # reorder would only repeat the attempt that was just
-                # refused with no input.
+                # refused with no input. skip_pattern_presses=True keeps
+                # the Toggle / Select presses off this path too: it is
+                # still a badge pick (Boss ruling R2 on
+                # wh-mcp-repo-mining.3).
                 return self._invoke_path(
-                    winner, snapshot_foreground, query, badge_pick=False
+                    winner,
+                    snapshot_foreground,
+                    query,
+                    badge_pick=False,
+                    skip_pattern_presses=True,
                 )
 
             return self._coordinate_fallback(
@@ -836,8 +908,12 @@ class ClickExecutor:
         query: ElementQuery,
         *,
         badge_pick: bool = False,
+        skip_pattern_presses: bool = False,
     ) -> ClickResult:
         """The InvokePattern execution path (pre-click verification done).
+
+        ``skip_pattern_presses`` is passed through to ``_handle_invoke_error``;
+        see there.
 
         A TreeItem additionally gets its press OUTCOME checked
         (wh-pattern-manager-tree-click). Measured 2026-09-22 on the Pattern
@@ -895,7 +971,12 @@ class ClickExecutor:
             self._invoke_fn(winner.control_ref)
         except Exception as exc:  # noqa: BLE001 -- COM raises broad exceptions
             return self._handle_invoke_error(
-                exc, winner, snap, query, badge_pick=badge_pick
+                exc,
+                winner,
+                snap,
+                query,
+                badge_pick=badge_pick,
+                skip_pattern_presses=skip_pattern_presses,
             )
         if selected_before is False:
             retried = self._invoke_outcome_retry(winner, snap, query)
@@ -1463,8 +1544,16 @@ class ClickExecutor:
         query: ElementQuery,
         *,
         badge_pick: bool = False,
+        skip_pattern_presses: bool = False,
     ) -> ClickResult:
         """Map an Invoke() exception to a ClickResult, fail-closed.
+
+        ``skip_pattern_presses`` marks a badge pick that reaches here with
+        ``badge_pick`` False: the shell-owned badge path in ``click`` whose
+        coordinate-first attempt sent no input. Such a pick must not take the
+        Toggle / Select presses either (Boss ruling R2 on
+        wh-mcp-repo-mining.3), so a structurally unavailable Invoke goes
+        straight to DoDefaultAction, as it did before that bead.
 
         Gate 0: the exception must be a real COM error (per the injected
         ``com_error_predicate``) before its ``.hresult`` is consulted against
@@ -1543,7 +1632,19 @@ class ClickExecutor:
                     fail_reason="badge_coord_first_sendinput_failed",
                     no_input_fallback=_dda_after_no_input,
                 )
-            return self._attempt_do_default_action(winner, snap, query)
+            if badge_pick or skip_pattern_presses:
+                # A badge pick keeps today's order and never takes the
+                # Toggle / Select presses (Boss ruling R2 on
+                # wh-mcp-repo-mining.3, 2026-09-27): a badge pick means
+                # "click the thing at that spot". This line is reached for a
+                # badge pick whose match failed the coordinate eligibility
+                # gate, and for the shell-owned badge pick whose
+                # coordinate-first attempt sent no input
+                # (skip_pattern_presses).
+                return self._attempt_do_default_action(winner, snap, query)
+            # A by-name click tries Toggle, then Select, and only then the
+            # DoDefaultAction fallback described above (wh-mcp-repo-mining.3).
+            return self._attempt_pattern_press(winner, snap, query)
 
         if not self._com_error_predicate(exc):
             # Not a real COM error: cannot be proven side-effect-free, so it can
@@ -1572,6 +1673,159 @@ class ClickExecutor:
         # match that fails the stronger eligibility check) does NOT
         # coordinate-click.
         return self._fail(winner, "invoke_com_error")
+
+    def _attempt_pattern_press(
+        self,
+        winner: ElementMatch,
+        snap: SnapshotForeground,
+        query: ElementQuery,
+    ) -> ClickResult:
+        """Toggle, then Select, then the MSAA default action (wh-mcp-repo-mining.3).
+
+        Reached ONLY for a by-name click whose Invoke pattern is structurally
+        unavailable. A checkbox or toggle button that exposes no Invoke is
+        pressed through ``TogglePattern.Toggle``; a list item or radio button
+        through ``SelectionItemPattern.Select``. Both run BEFORE the MSAA
+        default action because a list item's default action is often "Double
+        Click", which OPENS the item where a single mouse click only selects
+        it (Boss ruling on the A3 placement, 2026-09-27).
+
+        The choice is made from live pattern availability, in this order:
+        Toggle if its pattern resolves and the control type allows it, else
+        Select under the same two conditions, else the default action exactly
+        as before. So an element offering both patterns is only toggled, and
+        a TreeItem takes neither press (``_TOGGLE_PRESS_EXCLUDED_CONTROL_TYPES``
+        and ``_SELECT_PRESS_EXCLUDED_CONTROL_TYPES``).
+
+        Honesty contract (A4, the Invoke path's rule):
+
+        * The seam returns -> ``ok``, reported as ``invoke`` (a press through
+          an accessibility pattern, not a coordinate click; the log tag names
+          the path: ``toggle_ok`` / ``select_ok``).
+        * ``TogglePatternUnavailable`` / ``SelectionItemPatternUnavailable``
+          -> the next path. Both are raised before any call, so nothing was
+          pressed.
+        * Anything raised by ``Toggle()`` / ``Select()`` itself -> the call
+          was made, and it may have acted. The next press path and the
+          default action are NEVER tried after it: a Toggle that fired and
+          then raised, followed by the default action "Check", would revert
+          the box. See ``_pattern_press_error`` for the one coordinate-click
+          exception.
+
+        crewcut: each seam reads its pattern live and presses in one call,
+        with no verification-budget check between the read and the press --
+        the same as the live Invoke fallback and the default-action read. To
+        add one, split each seam into a probe and a press and check
+        ``_verification_budget_expired`` between them.
+        """
+        if winner.control_type_id not in _TOGGLE_PRESS_EXCLUDED_CONTROL_TYPES:
+            try:
+                self._toggle_fn(winner.control_ref)
+            except TogglePatternUnavailable:
+                pass
+            except Exception as exc:  # noqa: BLE001 -- COM raises broad exceptions
+                return self._pattern_press_error(
+                    exc,
+                    winner,
+                    snap,
+                    query,
+                    pattern_name="Toggle",
+                    com_error_reason="toggle_com_error",
+                    coord_tag="toggle_no_side_effect_then_coord",
+                    sendinput_reason="toggle_then_sendinput_failed",
+                )
+            else:
+                logger.debug(
+                    "click_element Toggle succeeded (toggle_ok): matched=%r",
+                    winner.name,
+                )
+                return ClickResult(
+                    outcome="ok",
+                    reason=None,
+                    matched_name=winner.name,
+                    clicked_via="invoke",
+                )
+
+        if winner.control_type_id not in _SELECT_PRESS_EXCLUDED_CONTROL_TYPES:
+            try:
+                self._select_fn(winner.control_ref)
+            except SelectionItemPatternUnavailable:
+                pass
+            except Exception as exc:  # noqa: BLE001 -- COM raises broad exceptions
+                return self._pattern_press_error(
+                    exc,
+                    winner,
+                    snap,
+                    query,
+                    pattern_name="Select",
+                    com_error_reason="select_com_error",
+                    coord_tag="select_no_side_effect_then_coord",
+                    sendinput_reason="select_then_sendinput_failed",
+                )
+            else:
+                logger.debug(
+                    "click_element Select succeeded (select_ok): matched=%r",
+                    winner.name,
+                )
+                return ClickResult(
+                    outcome="ok",
+                    reason=None,
+                    matched_name=winner.name,
+                    clicked_via="invoke",
+                )
+
+        return self._attempt_do_default_action(winner, snap, query)
+
+    def _pattern_press_error(
+        self,
+        exc: BaseException,
+        winner: ElementMatch,
+        snap: SnapshotForeground,
+        query: ElementQuery,
+        *,
+        pattern_name: str,
+        com_error_reason: str,
+        coord_tag: str,
+        sendinput_reason: str,
+    ) -> ClickResult:
+        """Map a raise from ``Toggle()`` / ``Select()`` to a ClickResult.
+
+        The call was made, so the press may have acted. The only way forward
+        is the one the Invoke and default-action paths allow: a real COM error
+        (gate 0, ``com_error_predicate``) whose HRESULT is on the
+        no-side-effect allowlist, on a match that passes ``_coord_eligible``,
+        gets ONE gated coordinate click. Everything else fails closed under
+        ``com_error_reason``. The ``enable_coordinate_click_on_com_error``
+        knob is deliberately NOT consulted, exactly as on the default-action
+        path: a non-allowlisted error may already have toggled or selected.
+        """
+        logger.warning(
+            "click_element %s() failed: matched=%r exc_type=%s hresult=%r "
+            "is_com_error=%s repr=%.200s",
+            pattern_name,
+            winner.name,
+            type(exc).__name__,
+            getattr(exc, "hresult", None),
+            self._com_error_predicate(exc),
+            repr(exc),
+        )
+        if self._com_error_predicate(exc):
+            hresult = _hresult_of(exc)
+            if is_no_side_effect_hresult(hresult) and self._coord_eligible(  # type: ignore[arg-type]
+                winner, query
+            ):
+                logger.info(
+                    "click_element %s side-effect-free failure, falling "
+                    "through to coordinate click (%s): matched=%r hresult=%r",
+                    pattern_name,
+                    coord_tag,
+                    winner.name,
+                    hresult,
+                )
+                return self._coordinate_fallback(
+                    winner, snap, fail_reason=sendinput_reason
+                )
+        return self._fail(winner, com_error_reason)
 
     def _attempt_do_default_action(
         self,

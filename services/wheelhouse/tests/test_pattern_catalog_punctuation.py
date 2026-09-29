@@ -102,7 +102,7 @@ class TestNormalizeLookupWord:
 
 class TestCatalogLookupNormalization:
     """The lookup helpers (could_be_pattern_start, get_matching_patterns,
-    get_pattern_type, get_trailing_command) must all normalize the
+    get_pattern_type) must all normalize the
     incoming word so STT-attached punctuation doesn't drop the match."""
 
     def _backspace_catalog(self, tmp_path: Path) -> PatternCatalog:
@@ -121,17 +121,6 @@ actions = [
 pattern = '''\\*cough\\*'''
 actions = [
     { function = "noop", params = [] }
-]
-"""
-        return PatternCatalog(_write_patterns(tmp_path, body))
-
-    def _submit_catalog(self, tmp_path: Path) -> PatternCatalog:
-        body = """
-[[pattern]]
-pattern = '''submit'''
-position = "trailing"
-actions = [
-    { function = "press_keys", params = ["enter"] }
 ]
 """
         return PatternCatalog(_write_patterns(tmp_path, body))
@@ -161,11 +150,3 @@ actions = [
     def test_get_pattern_type_with_trailing_comma(self, tmp_path):
         catalog = self._backspace_catalog(tmp_path)
         assert catalog.get_pattern_type("backspace,") == PatternType.COMMAND
-
-    def test_get_trailing_command_with_trailing_period(self, tmp_path):
-        catalog = self._submit_catalog(tmp_path)
-        entry = catalog.get_trailing_command("submit.")
-        assert entry is not None
-        assert entry["actions"] == [
-            {"function": "press_keys", "params": ["enter"]}
-        ]

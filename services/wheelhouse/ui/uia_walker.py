@@ -749,6 +749,26 @@ class DefaultActionIsExpandCollapse(RuntimeError):
         self.default_action = default_action
 
 
+class TogglePatternUnavailable(RuntimeError):
+    """Raised when a control exposes no resolvable UIA Toggle pattern.
+
+    Raised by ``toggle_via_toggle_pattern`` (wh-mcp-repo-mining.3) BEFORE any
+    call on the control, so it proves nothing was pressed. ``ClickExecutor``
+    reads it as structural absence and tries its next press path; it is the
+    Toggle analogue of ``InvokePatternUnavailable``.
+    """
+
+
+class SelectionItemPatternUnavailable(RuntimeError):
+    """Raised when a control exposes no resolvable UIA SelectionItem pattern.
+
+    Raised by ``select_via_selection_item_pattern`` (wh-mcp-repo-mining.3)
+    BEFORE any call on the control, so it proves nothing was pressed.
+    ``ClickExecutor`` reads it as structural absence and tries its next press
+    path; it is the Select analogue of ``InvokePatternUnavailable``.
+    """
+
+
 def _typed_pattern(
     element: Any, getter_name: str, pattern_id: int, iface_fn: Any
 ) -> Any:
@@ -906,6 +926,62 @@ def selection_state_via_selection_item_pattern(element: Any) -> Optional[bool]:
         return None
 
     return bool(pattern.CurrentIsSelected)
+
+
+def _toggle_pattern_class() -> Any:
+    """Return the IUIAutomationTogglePattern interface class, or None.
+
+    Needed to ``QueryInterface`` a raw pattern pointer into the typed Toggle
+    pattern. None when the generated comtypes module cannot be resolved; the
+    caller then raises ``TogglePatternUnavailable`` (nothing pressed).
+    """
+    try:
+        return _uia_module().IUIAutomationTogglePattern
+    except Exception:  # noqa: BLE001 -- gen module absent / unresolvable
+        return None
+
+
+def toggle_via_toggle_pattern(element: Any) -> None:
+    """Press a control through its UIA Toggle pattern (wh-mcp-repo-mining.3).
+
+    The press path for a checkbox or toggle button that exposes no Invoke
+    pattern. The pattern is read LIVE (``GetCurrentPattern``): the walk's
+    CacheRequest caches only Invoke and LegacyIAccessible, and adding Toggle
+    to it is separate work (wh-mcp-repo-mining.8).
+
+    Raises ``TogglePatternUnavailable`` when the pattern does not resolve --
+    before any call, so nothing has been pressed. A raise from ``Toggle()``
+    itself propagates unchanged: the call was made, and the executor decides
+    what that error allows.
+    """
+    pattern_id = _uia_const("UIA_TogglePatternId", 10015)
+    pattern = _typed_pattern(
+        element, "GetCurrentPattern", pattern_id, _toggle_pattern_class
+    )
+    if pattern is None:
+        raise TogglePatternUnavailable("control exposes no UIA Toggle pattern")
+    pattern.Toggle()
+
+
+def select_via_selection_item_pattern(element: Any) -> None:
+    """Press a control through ``SelectionItemPattern.Select`` (wh-mcp-repo-mining.3).
+
+    The press path for a list item or radio button that exposes no Invoke
+    pattern. Read LIVE for the same reason as ``toggle_via_toggle_pattern``.
+
+    Raises ``SelectionItemPatternUnavailable`` when the pattern does not
+    resolve -- before any call, so nothing has been pressed. A raise from
+    ``Select()`` itself propagates unchanged.
+    """
+    pattern_id = _uia_const("UIA_SelectionItemPatternId", 10010)
+    pattern = _typed_pattern(
+        element, "GetCurrentPattern", pattern_id, _selection_item_pattern_class
+    )
+    if pattern is None:
+        raise SelectionItemPatternUnavailable(
+            "control exposes no UIA SelectionItem pattern"
+        )
+    pattern.Select()
 
 
 def _legacy_pattern_class() -> Any:

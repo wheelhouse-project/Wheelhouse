@@ -4182,3 +4182,75 @@ class TestTheReadingTheReporterTook:
         reporter.record_iteration()
 
         assert reporter.last_queue_depth == 12
+
+
+class TestAWindowOverALostMicrophoneIsMarkedUnavailable:
+    """A window inside a rebuild outage says the microphone is missing.
+
+    wh-mic-loss-capture-recovery. WinRTAudioCapture now rebuilds its graph
+    after the microphone disappears. From the loss until a rebuilt graph
+    delivers samples, wait_ready(timeout=0.0) answers False, and the
+    reporter's readiness reader must turn that answer into
+    capture=unavailable. Boss e8 ruled on 2026-09-24 21:15 that a test
+    must drive the reporter with a capture in that outage state. The
+    capture thread here is the real one. Only _setup_graph is replaced,
+    by a graph whose frame output answers without samples, which is what
+    the lost Scarlett Solo looked like.
+    """
+
+    def test_a_window_during_a_rebuild_outage_is_marked_unavailable(self):
+        from shared_audio.capture import winrt_capture
+        from shared_audio.capture.base import AudioConfig
+
+        def dead_graph(**_kwargs):
+            frame_output = Mock()
+            frame_output.get_frame = Mock(return_value=None)
+            return Mock(), Mock(), frame_output
+
+        cls = winrt_capture.WinRTAudioCapture
+        capture = cls(AudioConfig())
+        with patch.object(winrt_capture, 'WINRT_AUDIO_AVAILABLE', True), \
+             patch.object(winrt_capture, 'CAPTURE_STALL_SECONDS', 0.1), \
+             patch.object(winrt_capture, 'REBUILD_RETRY_SECONDS', 0.05), \
+             patch.object(winrt_capture, 'elevate_current_thread',
+                          return_value=True), \
+             patch.object(cls, '_setup_graph', side_effect=dead_graph), \
+             patch.object(cls, '_cleanup_graph') as cleanup:
+            capture.start()
+            try:
+                assert capture._setup_done.wait(5.0) is True
+                deadline = time.monotonic() + 5.0
+                while cleanup.call_count == 0 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert cleanup.call_count >= 1, (
+                    'the stalled graph was never torn down, so no outage '
+                    'began')
+                # The reporter keeps _ready_reporter's stats, which carry no
+                # frame counter, so readiness alone decides the mark. With
+                # capture.get_stats the frame counter would mark the window
+                # too (no frame arrives), and the test would pass with the
+                # readiness write in _mark_lost removed (measured).
+                clock = _Clock()
+                reporter = _ready_reporter(
+                    clock, lambda: capture.wait_ready(timeout=0.0))
+                line = _summary(_window(clock, reporter))
+            finally:
+                capture.stop()
+
+        assert 'capture=unavailable' in line, (
+            'a window inside a microphone outage reported itself as '
+            'measured capture')
+
+    def test_the_unavailable_docstring_names_the_outage_as_a_fourth_way(self):
+        """The docstring listed three ways readiness says no. This branch
+        adds a fourth, and a maintainer weighing a change to the readiness
+        path needs it named, as the three-way test beside the others
+        requires for the first three."""
+        from shared_audio.diagnostics import CaptureLoadReporter
+        collapsed = ' '.join(
+            CaptureLoadReporter._capture_unavailable.__doc__.split())
+        assert 'a fourth way: a lost microphone' in collapsed, (
+            'the docstring does not say a lost microphone takes the '
+            'readiness answer back')
+        assert 'until a rebuilt graph delivers samples' in collapsed, (
+            'the docstring does not say how long the outage answer lasts')

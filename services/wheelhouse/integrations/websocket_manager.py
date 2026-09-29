@@ -83,7 +83,14 @@ _CAL_MODE_OFF_SEND_TIMEOUT_S = 2.0
 # currency check and the suppression read this ONE tuple. Writing the
 # two lists separately is exactly how the check came to cover only
 # "startup_failed" (wh-launch-generation.2.12).
-_STARTUP_SUPPRESSION_EXEMPT_KINDS = ("startup_failed", "error")
+#
+# "mic_lost" and "mic_recovered" are the provider's notices for a lost
+# and a recovered microphone (shared_stt/mic_notice.py). A microphone
+# lost during a launch is a real reason speech fails, and exempting both
+# keeps the pair together; the currency check still drops them from a
+# replaced launch (wh-mic-loss-notice ruling D5).
+_STARTUP_SUPPRESSION_EXEMPT_KINDS = (
+    "startup_failed", "error", "mic_lost", "mic_recovered")
 
 
 def _redact_content_fields(payload: dict) -> dict:

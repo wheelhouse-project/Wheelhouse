@@ -100,6 +100,7 @@ from shared_audio.silero_vad import SileroVAD
 from shared_audio.agc import SmartAGC, AGCConfig
 from shared_audio.thread_priority import elevate_current_thread
 from shared_stt.ws_forwarder import WSForwarder, WebSocketLogHandler
+from shared_stt.mic_notice import MicOutageNotifier
 from shared_stt.startup_refusal import (
     REFUSAL_EXIT_CODE,
     send_startup_failed_notice,
@@ -1510,8 +1511,15 @@ def main(argv=None):
     
     # Overflow detection: log warnings but do NOT restart the mic.
     # Restarting the mic causes a 2s+ blackout that often makes things worse.
+    # The capture sees a lost microphone; main() owns the forwarder that
+    # can tell the user (wh-mic-loss-notice). The forwarder is built well
+    # below this line, and stays None when forwarding is off, so the
+    # notifier reads it at each call and does nothing while there is none.
+    outage_notifier = MicOutageNotifier("Google STT", lambda: forwarder)
     try:
-        mic = get_audio_provider(config=audio_config, overflow_callback=on_overflow_detected)
+        mic = get_audio_provider(config=audio_config,
+                                 overflow_callback=on_overflow_detected,
+                                 outage_callback=outage_notifier)
     except RuntimeError as exc:
         # The factory refuses when winsdk is missing and there is no second
         # capture path to fall back to (wh-capture-winrt-required). Starting

@@ -24,7 +24,12 @@ import pytest
 # guard for a later change to GuiManager.__init__. Because that qapp is
 # real, _patched_gui_manager patches gui.QGuiApplication as well
 # (wh-ci-gui-heap-crash).
-pytestmark = pytest.mark.usefixtures("qapp", "mock_editor_window")
+# parakeet_model_present: the Parakeet switches below exercise the
+# ordinary switch, which now first checks the Parakeet model on disk
+# (wh-parakeet-model-download-offer).
+pytestmark = pytest.mark.usefixtures(
+    "qapp", "mock_editor_window", "parakeet_model_present",
+)
 
 # Add parent directories to path for imports
 project_root = Path(__file__).parent.parent.parent.parent

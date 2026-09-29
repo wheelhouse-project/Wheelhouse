@@ -66,8 +66,11 @@ def test_moved_customization_restores_origin_and_previews_save(bench, mode, dest
     assert result["success"], result
     assert catalog.reload()
     assert outputs(catalog, "first") == ["FIRST"]
-    assert outputs(catalog, destination) == (["SECOND", "CUSTOM"] if destination == "second" else ["CUSTOM"])
-    assert preview["winner"] == ("existing" if destination == "second" else "draft")
+    # The moved rule holds no built-in's slot, so it runs ahead of the
+    # built-in whose words it took: QUESTIONS-2026-09-28.md item 12,
+    # option three (wh-user-rule-precedence).
+    assert outputs(catalog, destination) == (["CUSTOM", "SECOND"] if destination == "second" else ["CUSTOM"])
+    assert preview["winner"] == "draft"
     stored = tomllib.loads(user.read_text(encoding="utf-8"))["pattern"][0]
     assert "doc_id" not in stored
     assert stored["origin"] == "user"

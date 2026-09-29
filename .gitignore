@@ -83,6 +83,8 @@ services/wheelhouse/data/user_patterns.toml.tmp
 # detected. Both are written per machine and were showing up as untracked
 # entries in git status.
 services/wheelhouse/data/click_first_use_hint_shown.toml
+# Records that the user answered the Assistant explanation window once more.
+services/wheelhouse/data/help_explainer_notebook_shown.toml
 services/wheelhouse/data/llama-server.pid
 
 # Large Model Files
@@ -92,6 +94,11 @@ models/
 # publish staging into the public repo (the 1.0.0 drop,
 # wh-export-publish-gitignore-guard)
 !services/stt_providers/shared/data/wake_words/*.onnx
+# ...and the shipped Silero VAD model, for the same reason
+# (wh-vad-releases-gil). Its directory is not named models/, because a !
+# exception cannot re-include a file under a directory the models/ rule
+# above already ignores.
+!services/stt_providers/shared/shared_audio/vad_model/*.onnx
 tokens.txt
 
 # Claude Code (local settings are user-specific)

@@ -54,6 +54,10 @@ class GrantPromptToast(QDialog):
         treats this as "dismissed without choosing" and keeps the
         per-tuple dedup map open so the next threshold event on the
         same tuple re-fires the toast.
+
+    The two button labels default to "Yes" and "No"; ``show_prompt``
+    takes others (the Parakeet download offer uses "Download now" or
+    "Copy command", and "Not now"). The signal names stay the same.
     """
 
     DEFAULT_LIFETIME_MS = 12000
@@ -191,7 +195,9 @@ class GrantPromptToast(QDialog):
         title: str,
         body: str,
         *,
-        lifetime_ms: int = DEFAULT_LIFETIME_MS,
+        lifetime_ms: Optional[int] = DEFAULT_LIFETIME_MS,
+        yes_label: str = "Yes",
+        no_label: str = "No",
     ) -> None:
         """Render the prompt and show the toast.
 
@@ -201,11 +207,20 @@ class GrantPromptToast(QDialog):
             lifetime_ms: auto-dismiss timeout. The default is longer
                 than the rejection toast (12 seconds) because the user
                 must read a question and pick Yes or No, not just
-                acknowledge an advisory message.
+                acknowledge an advisory message. None means no
+                auto-dismiss: the toast stays until the user answers or
+                closes it (the Parakeet download offer,
+                wh-parakeet-model-download-offer).
+            yes_label: text of the button that emits ``yes_clicked``.
+            no_label: text of the button that emits ``no_clicked``.
+                Both labels are set at every show, so a show that passes
+                neither goes back to "Yes" / "No".
         """
 
         self._title_label.setText(title)
         self._body_label.setText(body)
+        self._yes_button.setText(yes_label)
+        self._no_button.setText(no_label)
 
         self._action_taken = False
         self._yes_button.setEnabled(True)
@@ -217,7 +232,12 @@ class GrantPromptToast(QDialog):
         if not self.isVisible():
             self.show()
         self.raise_()
-        self._lifetime_timer.start(max(500, int(lifetime_ms)))
+        if lifetime_ms is None:
+            # A timer left running by an earlier show would otherwise
+            # close this one.
+            self._lifetime_timer.stop()
+        else:
+            self._lifetime_timer.start(max(500, int(lifetime_ms)))
 
     def closeEvent(self, event):  # type: ignore[override]
         # Emit ``dismissed`` only when the close was not preceded by a

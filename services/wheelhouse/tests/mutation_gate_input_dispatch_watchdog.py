@@ -50,12 +50,25 @@ job. A numeric string is the only input the shape check alone rejects. Any
 later fix that adds a layer over an existing guard needs the same look at
 the older mutations through it.
 
+wh-overlay-walk-vscode-stall added six mutations for the stack report that
+follows the first stall line: the call dropped, the call on every repeat, the
+wrong thread recorded, a frame's locals leaked into the line, the containment
+removed, and the frame cap keeping the outer end. Two of them carry an
+"expect_text": the catching test has earlier assertions that a wreck could
+trip, so the runner also requires the named assertion's text in the failure
+reason before it counts the catch.
+
 Run it from services/wheelhouse:
 
     uv run python tests/mutation_gate_input_dispatch_watchdog.py
+    uv run python tests/mutation_gate_input_dispatch_watchdog.py --check
+
+--check runs no tests. It confirms every pattern matches exactly once and
+every mutant compiles, and exits non-zero otherwise.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -326,7 +339,115 @@ _LAUNCHER_LOGIC_ARGS = (
     "commands_to_logic_queue, state_to_gui_queue, gui_shm_name)\n"
 )
 
+# wh-overlay-walk-vscode-stall. The stack report after the first stall line.
+# The call pattern carries its argument lines so it cannot match anything but
+# the call site in poll(); the containment pattern carries the message line
+# because "except Exception:\n        logger.warning(\n" appears more than once.
+_STACK_CALL = (
+    "                _log_command_loop_stack(\n"
+    "                    loop_thread_id, action, trace_id, request_id,\n"
+    "                )\n"
+)
+_STACK_FIRST_REPORT_GATE = (
+    "            if reported_at is None:\n"
+    "                _log_command_loop_stack(\n"
+)
+_STACK_THREAD_ID = "        loop_thread_id = threading.get_ident()\n"
+_STACK_FRAME_LINE = (
+    "            frames.append(\n"
+    "                f'  File \"{code.co_filename}\", line {frame.f_lineno}, '\n"
+    "                f\"in {code.co_name}\"\n"
+    "            )\n"
+)
+_STACK_CONTAINMENT = (
+    "    except Exception:\n"
+    "        logger.warning(\n"
+    "            \"stack of the command loop for %s could not be captured; the \"\n"
+)
+_STACK_CAP_SLICE = "        shown = frames[:_STACK_REPORT_MAX_FRAMES]\n"
+
 MUTATIONS = [
+    # --- wh-overlay-walk-vscode-stall ---------------------------------------
+    {
+        "name": "stack-report-never-logged",
+        "old": _STACK_CALL,
+        # "pass" rather than a deleted call: the if body would otherwise be
+        # empty and the mutant would not compile.
+        "new": "                pass\n",
+        "expect": [
+            "test_the_first_stall_report_names_the_blocked_function_once",
+        ],
+        "expect_text": "0 stack reports for one dispatch",
+    },
+    {
+        "name": "stack-report-on-every-repeat",
+        "old": _STACK_FIRST_REPORT_GATE,
+        "new": (
+            "            if True:\n"
+            "                _log_command_loop_stack(\n"
+        ),
+        # The test waits for two stall reports before it counts, so a repeat
+        # that carries a stack is observed rather than raced.
+        "expect": [
+            "test_the_first_stall_report_names_the_blocked_function_once",
+        ],
+        "expect_text": "stack reports for one dispatch",
+    },
+    {
+        "name": "stack-of-the-wrong-thread",
+        "old": _STACK_THREAD_ID,
+        # The main thread is the pytest thread, which is alive and waiting in
+        # the test body, so the capture succeeds and names the wrong calls.
+        "new": "        loop_thread_id = threading.main_thread().ident\n",
+        "expect": [
+            "test_the_first_stall_report_names_the_blocked_function_once",
+        ],
+        "expect_text": "does not name the function that held the loop",
+    },
+    {
+        "name": "stack-frame-line-carries-the-locals",
+        "old": _STACK_FRAME_LINE,
+        "new": (
+            "            frames.append(\n"
+            "                f'  File \"{code.co_filename}\", line {frame.f_lineno}, '\n"
+            "                f\"in {code.co_name} {frame.f_locals!r}\"\n"
+            "            )\n"
+        ),
+        # The count, name and request assertions all pass under this mutant;
+        # only the private-value assertion can see it, and expect_text is
+        # what proves that assertion fired rather than an earlier one.
+        "expect": [
+            "test_the_first_stall_report_names_the_blocked_function_once",
+        ],
+        "expect_text": "a log line carries a local variable's value",
+    },
+    {
+        "name": "stack-capture-uncontained",
+        "old": _STACK_CONTAINMENT,
+        "new": (
+            "    except Exception:\n"
+            "        raise\n"
+            "        logger.warning(\n"
+            "            \"stack of the command loop for %s could not be captured; the \"\n"
+        ),
+        # The RuntimeError the test's stand-in raises escapes poll(). In the
+        # shipped process _run_dispatch_watchdog's wrapper would swallow it.
+        "expect": [
+            "test_a_failed_stack_capture_still_reports_the_stall",
+        ],
+        "expect_text": "RuntimeError: frames unavailable",
+    },
+    {
+        "name": "stack-cap-keeps-the-outer-frames",
+        "old": _STACK_CAP_SLICE,
+        "new": "        shown = frames[-_STACK_REPORT_MAX_FRAMES:]\n",
+        # The shipped cap of 60 is above every stack the other tests make, so
+        # only the test that lowers the cap can see which end is kept.
+        "expect": [
+            "test_a_capped_stack_keeps_the_innermost_frames",
+        ],
+        "expect_text": "the capped stack dropped the innermost frames",
+    },
     {
         "name": "launcher-swaps-the-logic-and-input-entrypoints",
         "target": LAUNCHER_TARGET,
@@ -1011,12 +1132,24 @@ MUTATIONS = [
 ]
 
 
+def _clear_bytecode():
+    # Python decides whether cached bytecode is current from the source
+    # file's (mtime, size). stack-cap-keeps-the-outer-frames keeps the file
+    # the same length, so a cache left from another run could be taken as
+    # current. PYTHONDONTWRITEBYTECODE stops new writes; this removes the
+    # caches an ordinary pytest run already left. Every target sits in
+    # SERVICE_DIR itself, so its cache directory is the only one that can
+    # hold a stale compiled target.
+    shutil.rmtree(SERVICE_DIR / "__pycache__", ignore_errors=True)
+
+
 def _run_pytest(test_file=TEST_FILE):
     env = dict(os.environ)
-    # Python decides whether cached bytecode is current from the source
-    # file's (mtime, size). Both mutations here keep the file a different
-    # length, but the cache is disabled anyway rather than relied on.
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # A captured run has no terminal, so pytest cuts each short-summary
+    # reason at 80 columns; expect_text is read from that reason.
+    env["COLUMNS"] = "1000"
+    _clear_bytecode()
     return subprocess.run(
         [sys.executable, "-m", "pytest", test_file, "-q", "-rf", "-p",
          "no:cacheprovider"],
@@ -1025,19 +1158,52 @@ def _run_pytest(test_file=TEST_FILE):
     )
 
 
-def _failed_names(output):
-    names = set()
+def _failed_reasons(output):
+    """Map each failed test name to its short-summary reason text."""
+    reasons = {}
     for line in output.splitlines():
         if line.startswith("FAILED "):
             rest = line.split(" ", 1)[1]
             if "::" in rest:
+                node, _, reason = rest.partition(" - ")
                 # rsplit for the same reason the collector uses it: a
                 # class-based test reports as path::Class::method.
-                names.add(rest.split(" ")[0].rsplit("::", 1)[1].split("[")[0])
-    return names
+                name = node.split(" ")[0].rsplit("::", 1)[1].split("[")[0]
+                reasons[name] = reasons.get(name, "") + reason
+    return reasons
+
+
+def _check():
+    """Patterns match exactly once and every mutant compiles; no tests run."""
+    stale, uncompilable = [], []
+    for mutation in MUTATIONS:
+        target = mutation.get("target", TARGET)
+        raw = target.read_bytes()
+        if b"\r\n" in raw:
+            print(f"ERROR: {target.name} uses CRLF; patterns here are LF")
+            return 1
+        source = raw.decode("utf-8")
+        count = source.count(mutation["old"])
+        if count != 1:
+            stale.append(f"{mutation['name']}: pattern matched {count} times")
+            continue
+        try:
+            compile(source.replace(mutation["old"], mutation["new"], 1),
+                    str(target), "exec")
+        except SyntaxError as exc:
+            uncompilable.append(f"{mutation['name']}: {exc}")
+    print(
+        f"checked {len(MUTATIONS)} patterns, {len(stale)} stale, "
+        f"{len(uncompilable)} that do not compile"
+    )
+    for line in stale + uncompilable:
+        print(f"  ERROR {line}")
+    return 0 if not stale and not uncompilable else 1
 
 
 def main():
+    if "--check" in sys.argv[1:]:
+        return _check()
     targets = {mutation.get("target", TARGET) for mutation in MUTATIONS}
     originals = {}
     for target in targets:
@@ -1134,14 +1300,44 @@ def main():
                 print(f"ERROR {name}: suite-timeout abort")
                 continue
 
-            failed = _failed_names(combined)
-            missing = [n for n in mutation["expect"] if n not in failed]
+            # Exit code first: 0 means no test failed, and a green run prints
+            # no short summary to read. 1 is "tests failed"; anything else
+            # (collection error, internal error, usage) is no verdict.
+            if result.returncode == 0:
+                survivors.append(f"{name}: no test failed")
+                print(f"SURVIVED {name}: no test failed")
+                continue
+            if result.returncode != 1:
+                errors.append(f"{name}: pytest exited {result.returncode}")
+                print(f"ERROR {name}: pytest exited {result.returncode}")
+                print(combined[-2000:])
+                continue
+
+            reasons = _failed_reasons(combined)
+            missing = [n for n in mutation["expect"] if n not in reasons]
             if missing:
                 survivors.append(f"{name}: expected failures missing: {missing}")
                 print(f"SURVIVED {name}: {missing} did not fail")
-            else:
-                caught.append(name)
-                print(f"caught   {name}: {sorted(failed)}")
+                continue
+            # A catcher with earlier assertions can fail on one a wreck trips.
+            # expect_text names the assertion that must be the one that fired.
+            text = mutation.get("expect_text")
+            wrong = [
+                n for n in mutation["expect"]
+                if text is not None and text not in reasons[n]
+            ]
+            if wrong:
+                errors.append(
+                    f"{name}: {wrong} failed without {text!r}: "
+                    f"{[reasons[n][:300] for n in wrong]}"
+                )
+                print(f"ERROR {name}: failed for another reason: "
+                      f"{[reasons[n][:300] for n in wrong]}")
+                continue
+            caught.append(name)
+            print(f"caught   {name}: {sorted(reasons)}")
+            if text is not None:
+                print(f"         reason: {reasons[mutation['expect'][0]][:300]}")
     finally:
         for target, raw in originals.items():
             target.write_bytes(raw)

@@ -244,6 +244,32 @@ _FORCED_REAPPLY_DELAY_MS = 1500
 # notice is unaffected.
 SUPPRESS_UNCERTAIN_REJECTION_NOTICE = True
 
+# The Parakeet model offer (wh-parakeet-model-download-offer). The Logic
+# process sends a parakeet_model_offer action when the user picks Parakeet
+# and its speech model is not complete. Kind "launch": the Setup program's
+# installer can be run (Download now). Kind "fallback": it cannot, and the
+# notice gives the one-line install command instead (Copy command). The
+# texts are the ones the boss ruled (19:04 and 19:07, 2026-09-25) and
+# David can override.
+PARAKEET_OFFER_TITLE = "Parakeet speech model not installed"
+PARAKEET_OFFER_LAUNCH_BODY = (
+    "Parakeet needs its speech model, which is not on this computer. The "
+    "download is about 2.5 GB. Download now closes Wheelhouse and runs the "
+    "Wheelhouse installer again. The installer repeats its whole setup for "
+    "several minutes, then downloads the model and starts Wheelhouse with "
+    "Parakeet."
+)
+PARAKEET_OFFER_FALLBACK_BODY = (
+    "Parakeet needs its speech model, which is not on this computer. The "
+    "download is about 2.5 GB. To install it, close Wheelhouse, open "
+    "PowerShell, and run the Wheelhouse install command. When the installer "
+    "asks which speech engine to use, choose Parakeet. The installer repeats "
+    "its whole setup for several minutes."
+)
+PARAKEET_OFFER_LAUNCH_BUTTON = "Download now"
+PARAKEET_OFFER_FALLBACK_BUTTON = "Copy command"
+PARAKEET_OFFER_DECLINE_BUTTON = "Not now"
+
 
 def _screen_bounds(exclude=None):
     """Return every connected screen as ``(x, y, width, height)``.
@@ -1214,6 +1240,24 @@ _WORKING_BADGE_SESSION = 1
 # bounding a frozen-producer stuck badge.
 _WORKING_BADGE_TIMEOUT_MS = 60000
 
+# wh-pattern-font-size: the Pattern Manager's font size, saved through the
+# acknowledged settings route (set_config_value) like the floating button's
+# keys. Absent or invalid means the dialog's own default size.
+PATTERN_MANAGER_FONT_SIZE_KEY = 'PATTERN_MANAGER_FONT_SIZE'
+
+
+def _valid_pattern_manager_font_size(value):
+    """A stored Pattern Manager font size, clamped to the dialog's bounds.
+
+    Returns None (the dialog's default size) for anything that is not an
+    int, including a bool, which Python counts as an int.
+    """
+    from pattern_manager_dialog import _FONT_SIZE_MAX, _FONT_SIZE_MIN
+
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return max(_FONT_SIZE_MIN, min(_FONT_SIZE_MAX, value))
+
 
 class GuiManager(QObject):
     def __init__(
@@ -1241,6 +1285,10 @@ class GuiManager(QObject):
         self.stt_provider = None  # Current STT provider name
         self.stt_providers_available = []  # List of available providers
         self.stt_provider_display_names = {}  # Provider name -> display name mapping
+        # Provider name -> menu label for engines that are set up but cannot
+        # run yet, listed after the engines and never checked
+        # (wh-parakeet-model-download-offer).
+        self.stt_providers_not_installed = {}
         self.ai_provider = None  # Current AI provider name
         self.ai_providers_available = []  # List of available AI providers
         self.ai_provider_display_names = {}  # AI provider name -> display name mapping
@@ -1257,6 +1305,12 @@ class GuiManager(QObject):
         self._settings_confirmed = {}
         self.settings_status_text = ''
         self._settings_notice = None
+        # The GUI process read the config file at its own start; the saved
+        # Pattern Manager font size in it is the confirmed baseline that a
+        # failed save of a newer size returns the dialog to.
+        self._settings_confirmed[PATTERN_MANAGER_FONT_SIZE_KEY] = (
+            _valid_pattern_manager_font_size(
+                (config or {}).get(PATTERN_MANAGER_FONT_SIZE_KEY)))
 
         self.button = FloatingButton()
         self.working_dialog = WorkingDialog()
@@ -1280,6 +1334,13 @@ class GuiManager(QObject):
         # use so Qt does not pay the construction cost when no
         # threshold event has fired yet.
         self._grant_prompt_toast = None
+        # wh-parakeet-model-download-offer: the Parakeet model offer has
+        # its own toast instance, built on first use, so it never shares
+        # state or signal handlers with the grant prompt. The kind and the
+        # command of the offer on screen decide what its first button does.
+        self._parakeet_offer_toast = None
+        self._parakeet_offer_kind = None
+        self._parakeet_offer_command = ""
         # Per-tuple per-session dedup. A tuple is added when the user
         # clicks Yes or No on the prompt for that tuple; subsequent
         # threshold events for the same tuple are suppressed. A
@@ -1865,6 +1926,10 @@ class GuiManager(QObject):
                     self.stt_provider = message.get('stt_provider')
                     self.stt_providers_available = message.get('stt_providers_available', [])
                     self.stt_provider_display_names = message.get('stt_provider_display_names', {})
+                    not_installed = message.get('stt_providers_not_installed', {})
+                    self.stt_providers_not_installed = (
+                        dict(not_installed) if isinstance(not_installed, dict) else {}
+                    )
                     self.ai_provider = message.get('ai_provider')
                     self.ai_providers_available = message.get('ai_providers_available', [])
                     self.ai_provider_display_names = message.get('ai_provider_display_names', {})
@@ -2035,6 +2100,10 @@ class GuiManager(QObject):
                     # threshold. Per-tuple per-session deduped on the
                     # GUI side; dismiss-without-click resets dedup.
                     self._show_grant_prompt_toast(message)
+                elif action == "parakeet_model_offer":
+                    # wh-parakeet-model-download-offer: Parakeet was
+                    # picked and its speech model is not complete.
+                    self._show_parakeet_model_offer(message)
                 elif action == "soft_allow_write_failed":
                     # wh-9dkse: disk-write-fails follow-up toast.
                     # LogicController.add_soft_allow emits this when the
@@ -2056,8 +2125,12 @@ class GuiManager(QObject):
                 elif action == "open_help_explainer":
                     # The Logic process decided the user needs the
                     # explanation before the browser opens. It holds the
-                    # settings; this process holds the windows.
-                    self._open_help_explainer()
+                    # settings; this process holds the windows. Only the
+                    # boolean true ticks the box: the flag crosses a process
+                    # boundary (wh-assistant-explainer-once-more).
+                    self._open_help_explainer(
+                        start_ticked=message.get("start_ticked") is True
+                    )
                 elif action == "open_calibration":
                     # wh-7ou.7.3.1: voice-command path ("learn my voice").
                     # Logic asks the GUI to open the voice-teaching window.
@@ -2696,6 +2769,79 @@ class GuiManager(QObject):
         })
 
     # ------------------------------------------------------------------
+    # Parakeet model offer (wh-parakeet-model-download-offer)
+    # ------------------------------------------------------------------
+
+    def _show_parakeet_model_offer(self, message: dict) -> None:
+        """Show the Parakeet model offer that the Logic process sent.
+
+        Logic sends ``parakeet_model_offer`` when Parakeet is picked and
+        its speech model is not complete. Kind "launch" offers Download
+        now, which asks Logic to start the installer. Kind "fallback"
+        offers Copy command, which puts the one-line install command on
+        the clipboard. Not now, the X button and closing do nothing.
+
+        One toast is built and reused, so a second offer while one is
+        shown replaces its text and never adds a second toast. The toast
+        does not close by itself. Never raises.
+        """
+        kind = message.get("kind")
+        if kind == "launch":
+            body = PARAKEET_OFFER_LAUNCH_BODY
+            yes_label = PARAKEET_OFFER_LAUNCH_BUTTON
+        elif kind == "fallback":
+            body = PARAKEET_OFFER_FALLBACK_BODY
+            yes_label = PARAKEET_OFFER_FALLBACK_BUTTON
+        else:
+            logger.warning(
+                "parakeet_model_offer dropped, unknown kind: %r", kind,
+            )
+            return
+        try:
+            command = message.get("command")
+            if not isinstance(command, str) or not command:
+                from stt.parakeet_model import ONE_LINE_INSTALL_COMMAND
+                command = ONE_LINE_INSTALL_COMMAND
+
+            from grant_prompt_toast import GrantPromptToast
+
+            if self._parakeet_offer_toast is None:
+                self._parakeet_offer_toast = GrantPromptToast()
+                self._parakeet_offer_toast.yes_clicked.connect(
+                    self._on_parakeet_offer_accepted
+                )
+            self._parakeet_offer_kind = kind
+            self._parakeet_offer_command = command
+            self._parakeet_offer_toast.show_prompt(
+                title=PARAKEET_OFFER_TITLE,
+                body=body,
+                yes_label=yes_label,
+                no_label=PARAKEET_OFFER_DECLINE_BUTTON,
+                lifetime_ms=None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not show the Parakeet model offer: %s", exc)
+
+    def _on_parakeet_offer_accepted(self) -> None:
+        """The first button of the Parakeet model offer was pressed.
+
+        Download now sends ``parakeet_download_now`` to Logic. Copy
+        command writes the install command to the clipboard from this
+        process and changes nothing else. Never raises.
+        """
+        if self._parakeet_offer_kind == "launch":
+            self.send_command({"action": "parakeet_download_now"})
+            return
+        if self._parakeet_offer_kind == "fallback":
+            try:
+                import pyperclip
+
+                pyperclip.copy(self._parakeet_offer_command)
+                logger.info("Copied the Wheelhouse install command to the clipboard")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not copy the install command: %s", exc)
+
+    # ------------------------------------------------------------------
     # Three-strikes grant prompt (wh-bqv9c)
     # ------------------------------------------------------------------
 
@@ -3166,27 +3312,30 @@ class GuiManager(QObject):
     def settings_pending(self):
         return bool(self._settings_requests)
 
-    def _settings_show_status(self, text, *, failure=False):
+    def _settings_show_status(self, text):
+        """Show a settings failure notice for 15 s, in the box and in Windows.
+
+        Only a failure calls this (wh-settings-save-notice-failure-only). The
+        notice ends by its lifetime or a newer failure; a success never closes
+        it, because a success of one request proves nothing about another
+        request's failure (wh-settings-save-notice-failure-only.2.1).
+        """
         self.settings_status_text = text
-        rendered = False
         try:
             if self._settings_notice is None:
                 from soft_allow_write_failed_toast import SoftAllowWriteFailedToast
                 self._settings_notice = SoftAllowWriteFailedToast()
             self._settings_notice.setAccessibleName(text)
             self._settings_notice.show_message(
-                title='WheelHouse settings', body=text,
-                lifetime_ms=15000 if failure else 2147483647,
+                title='WheelHouse settings', body=text, lifetime_ms=15000,
             )
-            rendered = True
         except Exception:
             logger.exception('Could not render settings notice')
-        if failure or not rendered:
-            # send_notice does not catch its own delivery failures.
-            try:
-                send_notice('WheelHouse settings', text, timeout=15)
-            except Exception:
-                logger.exception('Could not deliver the settings notice')
+        # send_notice does not catch its own delivery failures.
+        try:
+            send_notice('WheelHouse settings', text, timeout=15)
+        except Exception:
+            logger.exception('Could not deliver the settings notice')
 
     def _send_settings_command(self, command):
         values = (dict(command.get('values') or {})
@@ -3207,7 +3356,9 @@ class GuiManager(QObject):
             self._apply_geometry((self._settings_confirmed.get('FLOATING_BUTTON_SIZE', 50),
                                   self._settings_confirmed.get('FLOATING_BUTTON_POS', [100, 100])),
                                  save_correction=False)
-            self._settings_show_status("Couldn't send settings. Restored the confirmed values.", failure=True)
+            if PATTERN_MANAGER_FONT_SIZE_KEY in values:
+                self._restore_pattern_manager_font_size()
+            self._settings_show_status("Couldn't send settings. Restored the confirmed values.")
             return
         self._settings_requests[request_id] = {
             'values': values, 'deadline': time.monotonic() + 5.0, 'attempts': 0,
@@ -3220,7 +3371,8 @@ class GuiManager(QObject):
                                  if self._settings_latest.get(key) == old_id}
             if not pending['values']:
                 del self._settings_requests[old_id]
-        self._settings_show_status('Saving settings. Waiting for confirmation.')
+        # No notice while the save waits or when it succeeds; only a failure
+        # shows one (wh-settings-save-notice-failure-only).
 
     def _settings_filter_state(self, message):
         message = dict(message)
@@ -3279,19 +3431,45 @@ class GuiManager(QObject):
             self.button_visible = self._settings_confirmed['FLOATING_BUTTON_VISIBLE']
         if 'SHOW_SPEECH_PULSE' in keys:
             self.show_speech_pulse = self._settings_confirmed['SHOW_SPEECH_PULSE']
+        # Like the geometry above, the font size follows every reply that
+        # carries it: a failed save, a reconcile reply after a lost result,
+        # and a confirmed save. A stale reply never gets here, because keys
+        # holds only the keys whose newest request is this one.
+        if PATTERN_MANAGER_FONT_SIZE_KEY in keys:
+            self._restore_pattern_manager_font_size()
         self.update_ui_state()
         if failed:
-            self._settings_show_status("Couldn't save settings. Restored the confirmed values.", failure=True)
-        elif not self.settings_pending:
-            self.settings_status_text = ''
-            if self._settings_notice is not None:
-                self._settings_notice.close()
+            self._settings_show_status("Couldn't save settings. Restored the confirmed values.")
+
+    def _restore_pattern_manager_font_size(self):
+        """Put the Pattern Manager at the confirmed font size.
+
+        Runs when the dialog is first built, and when a reply settles the
+        newest font-size write, so the failure notice's "Restored the
+        confirmed values" is true for this key too, and a reconcile reply
+        after a lost result shows the stored size. The apply sends no write
+        of its own.
+        """
+        dialog = getattr(self, '_pm_dialog', None)
+        if dialog is None:
+            return
+        dialog.apply_font_point_size(_valid_pattern_manager_font_size(
+            self._settings_confirmed.get(PATTERN_MANAGER_FONT_SIZE_KEY)))
+
+    def _send_pattern_manager_font_size(self, size: int) -> None:
+        """Save a font size the user chose in the Pattern Manager."""
+        # crewcut: one write per zoom key press. Supersession in
+        # _send_settings_command keeps only the newest value per key, so a
+        # burst of presses costs extra small writes, not a wrong result;
+        # debounce here if the writes ever show up as a cost.
+        self.send_command({'action': 'set_config_value',
+                           'key': PATTERN_MANAGER_FONT_SIZE_KEY, 'value': size})
 
     def _settings_fail_request(self, request_id):
         """Retire a request that never came back, and say so."""
         self._settings_requests.pop(request_id, None)
         self._settings_show_status(
-            "Couldn't confirm the settings. They may not have been saved.", failure=True)
+            "Couldn't confirm the settings. They may not have been saved.")
 
     def _check_settings_timeout(self):
         now = time.monotonic()
@@ -3305,7 +3483,7 @@ class GuiManager(QObject):
                 continue
             pending['attempts'] += 1
             pending['deadline'] = now + 5.0
-            self._settings_show_status('Settings outcome unknown. Checking the current settings.')
+            # The check is silent; only a final failure shows a notice.
             try:
                 self.commands_to_logic_queue.put_nowait({
                     'action': 'get_config_values', 'request_id': request_id,
@@ -4186,11 +4364,38 @@ class GuiManager(QObject):
             self._pm_dialog.tree_changed.connect(
                 self._send_pattern_manager_tree_changed
             )
+            # wh-pattern-font-size: start at the saved size, and save each
+            # size the user picks with the zoom shortcuts.
+            self._restore_pattern_manager_font_size()
+            self._pm_dialog.font_size_changed.connect(
+                self._send_pattern_manager_font_size
+            )
         # Request fresh data from Logic process
         self.commands_to_logic_queue.put_nowait({"action": "pm_get_patterns"})
+        # wh-voice-access-parity.1.15 F4: a minimized dialog stays in the
+        # taskbar through show/raise_/activateWindow, so clear only the
+        # minimized bit (a maximized dialog stays maximized; showNormal
+        # would not keep it).
+        state = self._pm_dialog.windowState()
+        if state & Qt.WindowState.WindowMinimized:
+            self._pm_dialog.setWindowState(
+                (state & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
         self._pm_dialog.show()
         self._pm_dialog.raise_()
         self._pm_dialog.activateWindow()
+        # The voice triggers arrive by the Logic-to-GUI queue, so this
+        # process holds no foreground right and Windows would only flash
+        # the taskbar button. _steal_foreground is the terminal editor's
+        # AttachThreadInput bypass; it catches its own Win32 failures, and
+        # this guard keeps an import or handle failure out of the caller.
+        try:
+            from terminal_editor_window import _steal_foreground
+
+            _steal_foreground(int(self._pm_dialog.winId()))
+        except Exception as exc:
+            logger.debug("Pattern Manager foreground request failed: %s", exc)
 
     def _send_pm_command(self, command: dict):
         """Forward Pattern Manager commands to Logic process."""
@@ -4214,12 +4419,15 @@ class GuiManager(QObject):
                 "dropping the overlay re-walk request",
             )
 
-    def _open_help_explainer(self):
+    def _open_help_explainer(self, start_ticked: bool = False):
         """Show the window that explains the Wheelhouse Assistant.
 
         One window only: a second Help while it is open raises the one
         already there. The window is modeless, so this method returns at
         once and the queue this call came from keeps being read.
+        ``start_ticked`` starts the check box ticked; the Logic process
+        sets it only for the once-more showing to a user who turned the
+        window off (wh-assistant-explainer-once-more).
         """
         from help_explainer_window import HelpExplainerWindow
         if getattr(self, '_help_explainer', None) is None:
@@ -4228,22 +4436,43 @@ class GuiManager(QObject):
                 self._on_help_explainer_choice
             )
         # The same window comes back, so a check box left ticked by an
-        # earlier reading must not travel with this one.
-        self._help_explainer.prepare_to_show()
+        # earlier reading must not travel with this one. A new window is
+        # not visible yet, so it is prepared here too. A window that is
+        # still visible holds a choice the user has not yet sent, so a
+        # second Help only raises it: resetting the box would change that
+        # choice unseen, and for the once-more showing the marker written
+        # on the next Assistant press would make the loss permanent
+        # (wh-assistant-explainer-once-more.1.2).
+        if not self._help_explainer.isVisible():
+            self._help_explainer.prepare_to_show(start_ticked=start_ticked)
         self._help_explainer.show()
         self._help_explainer.raise_()
         self._help_explainer.activateWindow()
+        # wh-assistant-window-behind: the spoken 'help' request arrives by
+        # the Logic-to-GUI queue, so this process holds no foreground right
+        # and Windows would only flash the taskbar button. _steal_foreground
+        # is the terminal editor's AttachThreadInput bypass; it catches its
+        # own Win32 failures, and this guard keeps an import or handle
+        # failure out of the caller.
+        try:
+            from terminal_editor_window import _steal_foreground
+
+            _steal_foreground(int(self._help_explainer.winId()))
+        except Exception as exc:
+            logger.debug("Assistant window foreground request failed: %s", exc)
 
     def _on_help_explainer_choice(self, do_not_show_again: bool):
         """Act on the window's Assistant button.
 
         The Logic process opens the browser, as it does for the menu entry;
         ``explained`` tells it the user has already read the explanation, so
-        it does not ask for the window again. The check box writes the
-        setting through the acknowledged settings path, in the Logic
-        process, which is the only process that writes the settings file.
-        Cancel and the Escape key never reach here, so backing out of the
-        window changes nothing.
+        it does not ask for the window again. The command carries the check
+        box state; the Logic process holds the settings, so it decides
+        whether the setting changes and writes it, together with the
+        marker file that ends the once-more showing
+        (wh-assistant-explainer-once-more). This process sends no settings
+        write of its own. Cancel and the Escape key never reach here, so
+        backing out of the window changes nothing.
         """
         self.send_command({
             "action": "open_help_online",
@@ -4252,13 +4481,8 @@ class GuiManager(QObject):
             # honest: this run began at the Assistant button, not at the
             # menu entry or the spoken command that produced the window.
             "source": "window",
+            "do_not_show_again": bool(do_not_show_again),
         })
-        if do_not_show_again:
-            self.send_command({
-                'action': 'set_config_value',
-                'key': 'ai.help.explain_before_open',
-                'value': False,
-            })
 
     def _open_calibration(self):
         """Open the voice-teaching (calibration) window (wh-7ou.7.3.1)."""
@@ -4273,6 +4497,18 @@ class GuiManager(QObject):
         self._cal_dialog.show()
         self._cal_dialog.raise_()
         self._cal_dialog.activateWindow()
+        # wh-calibration-window-front: 'learn my voice' arrives by the
+        # Logic-to-GUI queue, so this process holds no foreground right and
+        # Windows would only flash the taskbar button. _steal_foreground is
+        # the terminal editor's AttachThreadInput bypass; it catches its own
+        # Win32 failures, and this guard keeps an import or handle failure
+        # out of the caller.
+        try:
+            from terminal_editor_window import _steal_foreground
+
+            _steal_foreground(int(self._cal_dialog.winId()))
+        except Exception as exc:
+            logger.debug("Calibration window foreground request failed: %s", exc)
 
     def _send_cal_command(self, command: dict):
         """Forward voice-teaching commands to Logic process."""
@@ -4335,6 +4571,27 @@ class GuiManager(QObject):
                             display_name,
                             callback,
                             checked=checked_fn,
+                            enabled=is_ready
+                        )
+                    )
+                # An engine that is set up but cannot run yet, such as a
+                # Parakeet without its model. Picking it sends the ordinary
+                # switch, and the Logic process offers the installer. No
+                # checked callback, so it is never shown as the running
+                # engine (wh-parakeet-model-download-offer).
+                # crewcut: the entry sits inside this submenu, which is
+                # built only when at least one engine can run. With none,
+                # the entry is not offered. Remove the limit by building
+                # the submenu when either list is non-empty, in both
+                # branches. That also shows the voice-teaching entry with
+                # no engine (test_gui.py
+                # TestVoiceTeachingSitsInTheSttProviderSubmenu), so decide
+                # that entry's place in the same change.
+                for provider, label in self.stt_providers_not_installed.items():
+                    provider_items.append(
+                        pystray.MenuItem(
+                            label,
+                            partial(self._on_provider_menu_click, provider),
                             enabled=is_ready
                         )
                     )
@@ -4496,6 +4753,21 @@ class GuiManager(QObject):
                         " effect at once."
                     )
                     # Capture provider value in lambda closure
+                    action.triggered.connect(
+                        lambda checked, p=provider: self.switch_stt_provider(p)
+                    )
+                    stt_submenu.addAction(action)
+                # The same not-installed entries as the tray branch, not
+                # checkable, so never shown as the running engine
+                # (wh-parakeet-model-download-offer).
+                for provider, label in self.stt_providers_not_installed.items():
+                    action = QAction(label, stt_submenu)
+                    action.setCheckable(False)
+                    action.setEnabled(is_ready)
+                    action.setToolTip(
+                        "This speech engine needs its speech model. Choose it"
+                        " to see how to install the model."
+                    )
                     action.triggered.connect(
                         lambda checked, p=provider: self.switch_stt_provider(p)
                     )
@@ -4708,6 +4980,7 @@ def gui_process_target(shutdown_event: Event, commands_to_logic_queue: Queue, st
     from services.wheelhouse.config_service import ConfigService
     from utils.logging_setup import setup_logging
     from utils.process_priority import elevate_process_priority
+    from utils.clipboard_manager import select_windows_clipboard
 
     # Use consistent logging setup across all processes
     config_service = ConfigService()
@@ -4720,7 +4993,11 @@ def gui_process_target(shutdown_event: Event, commands_to_logic_queue: Queue, st
     # warning reaches the process log instead of bare stderr
     # (wh-process-priority-durable.1.4).
     elevate_process_priority()
-    
+
+    # So the first paste starts no child process for pyperclip's OS
+    # detection (wh-input-first-paste-stall).
+    select_windows_clipboard()
+
     logger.info("GUI process started.")
     try:
         app = QApplication(sys.argv)

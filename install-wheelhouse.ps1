@@ -103,7 +103,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.2.0"
+$AppVersion = "1.2.1"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -174,6 +174,38 @@ $PreviousModelDirName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 # Wheelhouse's own three other processes, plus the measured 2.37 GB, plus
 # 1.5 GB left free for the user's own work: 7.37 GB, just under this floor.
 # Raising the floor would refuse machines that install today, so it stays.
+# The floor above is the OFFLINE engine's need, so Test-Preflights applies it
+# only to parakeet_tdt and distil_medium_en (wh-installer-ram-floor-gap).
+#
+# The baseline floor below applies to EVERY engine, including google_stt. It
+# is what Windows and Wheelhouse itself need with the lightest engine, and
+# its terms were measured on Ikon on 2026-09-26 at 08:26:51, read only, with
+# the Google engine running (method A):
+#   W11    = 4 GiB. Microsoft's published Windows 11 minimum. It is a
+#            whole-machine minimum, so it already carries its own headroom.
+#   APP    = 460,316,672 bytes (0.43 GiB). The sum of PeakWorkingSet64 of the
+#            12 engine-independent Wheelhouse processes (launcher and its
+#            console, Logic, Input, GUI, the console-probe helper and its
+#            trampoline, uv, the provider launcher and three venv
+#            trampolines): find the python process whose MainWindowTitle is
+#            like '*\services\wheelhouse\.venv\Scripts\python*.exe', walk its
+#            child processes through Win32_Process.ParentProcessId, and read
+#            Get-Process -Id <ids> | Select-Object PeakWorkingSet64. The
+#            speech provider and llama-server are left out. Summing peaks
+#            that happen at different times overstates, on purpose.
+#   GOOGLE = 246,624,256 bytes. The live PeakWorkingSet64 of the Google
+#            provider process (pid 47200, the child of the pid in
+#            google_stt.pid) after about 4 minutes of dictation and 23 final
+#            results. This live figure replaces the earlier import-only
+#            128,434,176 bytes plus the 100 MB stream-buffer estimate.
+#   MARGIN = 0.5 GiB (boss ruling 2026-09-25): the W11 term is already a
+#            whole-machine minimum, so a larger margin counts headroom twice.
+# Total 5,538,779,136 bytes (5.16 GiB). 53 * 100MB (5,557,452,800 bytes)
+# covers it with the 0.5 GiB margin intact and 17.8 MiB above the margin.
+# 53 is the smallest step that covers it; the next step is 54.
+# The Google peak covers only about 4 minutes of dictation. A longer session
+# could raise it, which is what the margin is for (boss ruling 2026-09-26).
+$RamBaselineBytes = 53 * 100MB   # nominal 6 GB
 $RamFloorBytes = 75 * 100MB      # nominal 8 GB, measured physical is less
 $RamRecommendedBytes = 15 * 1GB  # nominal 16 GB
 $CpuWarnCores = 4
@@ -288,6 +320,8 @@ $PreservePaths = @(
     "services\wheelhouse\data\soft_allow_tuples.toml",
     "services\wheelhouse\data\soft_allow_declined_tuples.toml",
     "services\wheelhouse\data\soft_allow_pending_counters.toml",
+    "services\wheelhouse\data\help_explainer_notebook_shown.toml",
+    "services\wheelhouse\data\click_first_use_hint_shown.toml",
     "services\stt_providers\shared\hints.txt"
 )
 
@@ -547,15 +581,45 @@ function Test-Preflights {
             "Free up disk space, then run the installer again."
     }
 
-    # RAM floor: hard stop BEFORE downloading anything. Below this the
-    # default speech model loads too slowly to be usable. Routed through
-    # Stop-Install like every other hard stop, so this failure also gets
-    # the standard What-to-try line and the issues URL.
+    # RAM floors: hard stops BEFORE downloading anything. Routed through
+    # Stop-Install like every other hard stop, so each failure also gets
+    # the standard What-to-try line and the issues URL. The baseline floor
+    # stops every engine. The offline floor stops only an offline engine, so
+    # the engine is resolved here, before the download, when memory is below
+    # it: -SttProvider names it, or one question asks (wh-installer-ram-floor-gap).
     $ram = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+    $ramGb = [math]::Round($ram / 1GB, 1)
+    if ($ram -lt $RamBaselineBytes) {
+        Stop-Install "This computer has $ramGb GB of memory. Wheelhouse needs about 6 GB for any speech engine." `
+            "Adding memory to this computer is the only fix. No choice of speech engine lets Wheelhouse run with less."
+    }
     if ($ram -lt $RamFloorBytes) {
-        $ramGb = [math]::Round($ram / 1GB, 1)
-        Stop-Install "This computer has $ramGb GB of memory. The built-in offline speech engine needs about 8 GB to run well." `
-            "Use the Google Cloud speech engine instead -- it runs in the cloud and needs far less memory, but requires a Google Cloud account (see INSTALL.md in the Wheelhouse repository). Or add memory to this computer."
+        # No engine given means the one-liner path, where Select-SttProvider
+        # would ask later. Ask here instead, and on yes set the script's
+        # -SttProvider, so Select-SttProvider receives google_stt and does not
+        # ask again. The graphical installer always passes -SttProvider.
+        # An update of an install that already uses the Google engine keeps
+        # it without the question: the question would offer the engine the
+        # user already has, and its default answer would stop the update.
+        # Setting -SttProvider here gives Select-SttProvider the same engine
+        # its Enter default would keep, and does not offer the offline
+        # engines this memory cannot run (wh-installer-ram-floor-gap.1.2).
+        if (-not $SttProvider -and (Get-CurrentProvider) -eq "google_stt") {
+            $script:SttProvider = "google_stt"
+        }
+        if (-not $SttProvider) {
+            Write-Host ""
+            Write-Host "This computer has $ramGb GB of memory. The built-in offline speech engine needs about 8 GB to run well." -ForegroundColor Cyan
+            Write-Host "  The Google Cloud speech engine runs in the cloud and needs far less memory,"
+            Write-Host "  but needs a Google Cloud account and internet (see INSTALL.md in the Wheelhouse repository)."
+            $useGoogle = Resolve-YesNoChoice -Specified $false -Value $false `
+                -Prompt "Install with the Google Cloud speech engine instead? Type yes or no (default: no)"
+            if ($useGoogle) { $script:SttProvider = "google_stt" }
+        }
+        if ($script:SttProvider -ne "google_stt") {
+            Stop-Install "This computer has $ramGb GB of memory. The built-in offline speech engine needs about 8 GB to run well." `
+                "Adding memory to this computer is the only fix for the offline speech engine. Or install with the Google Cloud speech engine, which runs in the cloud and needs far less memory but requires a Google Cloud account (see INSTALL.md in the Wheelhouse repository): choose it in Setup, or run this installer again with -SttProvider google_stt."
+        }
     }
     if ($ram -lt $RamRecommendedBytes) {
         Write-InstallNotice "This computer has $([math]::Round($ram / 1GB, 1)) GB of memory. Wheelhouse will run, but 16 GB is recommended."

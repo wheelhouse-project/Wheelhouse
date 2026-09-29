@@ -225,13 +225,6 @@ class PatternCatalog:
         """
         self.first_words: Dict[str, List[Tuple[re.Pattern, str, Any]]] = {}
         self.all_patterns: List[Dict[str, Any]] = []  # For TextParser execution
-        # wh-2vz: trailing-position commands. Pattern entries that set
-        # ``position = "trailing"`` are NOT indexed in first_words or
-        # all_patterns. They live in this separate map keyed by the
-        # lowercased single literal word so SpeechProcessor can look them
-        # up when end_of_utterance=True. Each value is a dict with
-        # ``compiled_pattern`` (re.Pattern) and ``actions`` (list).
-        self.trailing_commands: Dict[str, Dict[str, Any]] = {}
         self.pattern_count = 0
         self.command_hotword = None  # Will be loaded from patterns.toml (required)
         # The entries as the two files spell them, kept so a caller can ask
@@ -339,7 +332,7 @@ class PatternCatalog:
         elif require_hotword:
             error_msg = (
                 f"FATAL: COMMAND_HOTWORD not found in {patterns_file}\n"
-                f"Please add: COMMAND_HOTWORD = \"x-ray\" (or your preferred hotword) "
+                f"Please add: COMMAND_HOTWORD = \"x-ray\" (or your preferred safety word) "
                 f"to the top of {patterns_file}"
             )
             logger.error(error_msg)
@@ -374,29 +367,47 @@ class PatternCatalog:
         A user entry whose identity matches a system entry replaces that
         system entry in place, preserving the built-in's position in the
         order (which matters for order-sensitive replacement patterns). A
-        user entry with an identity nothing shipped is appended after all
-        system entries.
+        user entry with an identity nothing shipped holds no built-in's
+        slot, and it goes in front of every system entry.
+
+        That front placement covers every user entry that ends the merge
+        in no system slot: a rule the person added or duplicated, an
+        edited rule whose words moved off its built-in (including rules
+        saved before this placement existed), a displaced earlier
+        claimant, an ambiguous pre-doc_id entry, and a ``doc_id`` whose
+        built-in no longer ships. Commands and replacements alike. They
+        keep user-file order among themselves -- their position in
+        *user_entries*, not the order the loop appended them in -- so a
+        displaced claimant sits at its own place in the file. The move
+        happens after every slot is settled, so it changes no slot
+        decision, and a user entry holding a built-in's slot stays there
+        (wh-user-rule-precedence; David's answer to
+        QUESTIONS-2026-09-28.md item 12, option three). Before that
+        change these entries were appended after every system entry, so
+        a person's rule on words a built-in also answered never ran.
 
         The identity is the built-in's ``doc_id`` when both carry one, and
         the normalized pattern text otherwise. Every shipped pattern now
         carries an id and a user file written before ids existed carries
         none, so those two never match on identity alone: such an entry
-        would be appended behind the built-in it was written to replace,
-        and lose. The only association that file holds is its expression,
+        would lose the built-in's slot, and the built-in it was written to
+        replace would go on answering every phrase the entry does not
+        also take. The only association that file holds is its expression,
         so an entry with no id that no built-in matches by identity is
         migrated onto the built-in carrying that same text -- but only when
         exactly one does (wh-pattern-override-doc-id A4). Two candidates
         means the file does not say which was meant; guessing would hand a
         user's replacement to a command they never touched, so the entry is
-        appended, kept, and reported. See ``speech.pattern_identity``.
+        kept in front with the other slot-less entries, and reported. See
+        ``speech.pattern_identity``.
 
         Two user entries can claim one built-in, and both are kept. The
         LAST claimant in user-file order holds the built-in's slot: it
         is the newer customisation, and in the sequence that produces
         two claims it is the one carrying the built-in's own trigger.
-        Every earlier claimant is appended after all system entries,
-        where it keeps running under its own trigger, and a warning
-        names both. The one exception is a claimant whose trigger equals
+        Every earlier claimant loses the slot and goes in front of all
+        system entries, where it keeps running under its own trigger, and
+        a warning names both. The one exception is a claimant whose trigger equals
         the trigger that replaced it: appending that would add a rule
         which can never match and put two rules on one phrase, and two
         copies of one expression collapsed before ids existed, so it is
@@ -417,7 +428,8 @@ class PatternCatalog:
         name in the file, and an ambiguous one has no single answer to
         record. The merge behaves identically whether or not the dict is
         passed -- it is a report, not a switch
-        (wh-pattern-override-doc-id.3.1).
+        (wh-pattern-override-doc-id.3.1). Its keys are positions in
+        *user_entries*, so the front move leaves it unchanged.
         """
         merged = list(system_entries)
         key_to_index: Dict[Identity, int] = {}
@@ -485,7 +497,9 @@ class PatternCatalog:
                 # newer customisation, and in the sequence that produces two
                 # claims it is the one carrying the built-in's own trigger.
                 # Whoever it displaces is appended and keeps running, which
-                # is where a user entry matching no built-in already goes.
+                # is where a user entry matching no built-in already goes;
+                # the move at the end then puts both in front of the
+                # shipped entries.
                 displaced = merged[index] if index in claimed else None
                 if displaced is not None and self._same_trigger(
                     displaced, user_entry
@@ -522,7 +536,7 @@ class PatternCatalog:
                     logger.warning(
                         "Two saved rules claim the built-in %r. %r takes "
                         "its place in the command order and %r now runs "
-                        "after every built-in instead. Both still run. "
+                        "before every built-in instead. Both still run. "
                         "Delete the one you no longer want in the Pattern "
                         "Manager.",
                         claimed_identity[1] if claimed_identity else "",
@@ -552,7 +566,22 @@ class PatternCatalog:
             if key is not None and key not in key_to_index:
                 key_to_index[key] = len(merged) - 1
 
-        return merged
+        # Every entry beyond the shipped rows holds no built-in's slot, and
+        # all of them go in front of every shipped entry, in user-file
+        # order (wh-user-rule-precedence; David, QUESTIONS-2026-09-28.md
+        # item 12, option three). Sorting by file position rather than
+        # keeping the append order puts a displaced claimant back at its
+        # own place in the file. The move happens after every slot is
+        # settled, so it changes no slot decision, and the slot rows keep
+        # the built-ins' own positions.
+        system_count = len(system_entries)
+        file_position = {
+            id(entry): position for position, entry in enumerate(user_entries)
+        }
+        leading = sorted(
+            merged[system_count:], key=lambda entry: file_position[id(entry)],
+        )
+        return leading + merged[:system_count]
 
     @staticmethod
     def _tag_source(
@@ -613,7 +642,6 @@ class PatternCatalog:
         List[Dict[str, Any]],
         int,
         str,
-        Dict[str, Dict[str, Any]],
         List[Dict[str, Any]],
         List[Dict[str, Any]],
     ]:
@@ -631,8 +659,7 @@ class PatternCatalog:
 
         Returns:
             Tuple of (first_words, all_patterns, pattern_count,
-            command_hotword, trailing_commands, system_entries,
-            user_entries). The last two are the RAW entries the two files
+            command_hotword, system_entries, user_entries). The last two are the RAW entries the two files
             spell, returned rather than stored so the caller can put them
             on self in the same atomic swap as everything else -- a failed
             reload must leave the old raw entries in place beside the old
@@ -682,7 +709,7 @@ class PatternCatalog:
         )
         command_hotword = self._effective_hotword(system_hotword, user_hotword)
 
-        first_words, all_patterns, pattern_count, trailing_commands = (
+        first_words, all_patterns, pattern_count = (
             self._build_structures(merged_entries, self._patterns_file)
         )
 
@@ -725,7 +752,7 @@ class PatternCatalog:
                 }
         return (
             first_words, all_patterns, pattern_count, command_hotword,
-            trailing_commands, system_entries, user_entries,
+            system_entries, user_entries,
         )
 
     # The copy of the user file this migration keeps, named so it can never
@@ -963,7 +990,6 @@ class PatternCatalog:
         Dict[str, List[Tuple[re.Pattern, str, Any]]],
         List[Dict[str, Any]],
         int,
-        Dict[str, Dict[str, Any]],
     ]:
         """Build the lookup structures from a merged list of raw entries.
 
@@ -972,21 +998,19 @@ class PatternCatalog:
             patterns_file: Label used only in log messages.
 
         Returns:
-            Tuple of (first_words, all_patterns, pattern_count,
-            trailing_commands). Command-vs-replacement type is auto-detected
-            per entry from the ``^`` anchor. A single bad entry (invalid
-            regex, or a rejected trailing entry) is skipped; the rest load.
+            Tuple of (first_words, all_patterns, pattern_count).
+            Command-vs-replacement type is auto-detected per entry from the
+            ``^`` anchor. A single bad entry (an invalid regex) is skipped;
+            the rest load.
         """
         first_words: Dict[str, List[Tuple[re.Pattern, str, Any]]] = {}
         all_patterns: List[Dict[str, Any]] = []
-        trailing_commands: Dict[str, Dict[str, Any]] = {}
         pattern_count = 0
 
         for rule in patterns:
             pattern_str = rule.get("pattern")
             actions_list = rule.get("actions")
             requires_hotword = rule.get("requires_hotword", False)
-            position = rule.get("position", "leading")
             # Attribute per-entry errors to the file the entry came from, so a
             # bad hand-edited user pattern is not blamed on the shipped system
             # file (wh-user-patterns-split.9.1). Falls back to the passed
@@ -1007,59 +1031,54 @@ class PatternCatalog:
                         pattern_str, source_file,
                     )
                     continue
-                # wh-2vz: trailing-position commands are stored in a
-                # separate map and never enter the leading-pattern
-                # routing structures. Validate the v1 single-word
-                # constraint and skip the entry on failure so a typo
-                # in patterns.toml cannot break the rest of the file.
-                if position == "trailing":
-                    if requires_hotword:
-                        # Trailing-position commands fire when the
-                        # word is the last word of an utterance. A
-                        # hotword "x-ray" would have to PRECEDE the
-                        # command, but the position contract puts the
-                        # command word LAST. The two combine
-                        # incoherently; reject at load time so a
-                        # future patterns.toml maintainer notices.
-                        logger.error(
-                            "Trailing-position pattern %r in %s sets "
-                            "requires_hotword=true. Trailing commands "
-                            "cannot require a hotword; skipping entry.",
-                            pattern_str, source_file,
-                        )
-                        continue
-                    trailing_entry = self._build_trailing_entry(
-                        pattern_str, actions_list,
-                    )
-                    if trailing_entry is None:
-                        # Validation already logged a specific message.
-                        continue
-                    key, entry = trailing_entry
-                    if key in trailing_commands:
-                        logger.warning(
-                            "Duplicate trailing-command word %r in %s; "
-                            "keeping the first entry",
-                            key, source_file,
-                        )
-                        continue
-                    trailing_commands[key] = entry
-                    pattern_count += 1
-                    continue
-
-                if position != "leading":
+                # wh-remove-trailing-submit: patterns.toml once had a
+                # ``position`` field, whose "trailing" value made a
+                # single-word command fire at the END of an utterance.
+                # That feature is gone -- every command starts its
+                # utterance. "leading" was the default, so it changes
+                # nothing and passes silently.
+                #
+                # A row that still says "trailing" loads as
+                # whole-utterance-only (BOSS RULING 02:27 2026-09-27, Q2).
+                # The pattern editor carries the key through a Customize
+                # save, so a user can hold a copy of the old shipped row:
+                # the UNANCHORED 'submit'. As an ordinary unanchored
+                # pattern it would press Enter wherever "submit" is said,
+                # in the middle of dictation. whole_utterance_only is
+                # honoured only on a ^-anchored command, so an unanchored
+                # row is anchored here; ``pattern_str`` itself is kept as
+                # the row's raw expression, the identity the Pattern
+                # Manager and the try-it preview key on.
+                #
+                # Any other value was never supported: it loads as the
+                # same row without the field, as it did before.
+                position = rule.get("position", "leading")
+                trailing_row = position == "trailing"
+                match_str = pattern_str
+                if trailing_row:
                     logger.warning(
-                        "Unknown position=%r for pattern %r in %s; "
-                        "treating as leading",
-                        position, pattern_str, source_file,
+                        "Pattern %r in %s sets position='trailing'; the "
+                        "position field is no longer supported. The "
+                        "pattern now matches only the whole utterance.",
+                        pattern_str, source_file,
+                    )
+                    if not pattern_str.startswith('^'):
+                        match_str = f"^(?:{pattern_str})$"
+                elif position != "leading":
+                    logger.warning(
+                        "Pattern %r in %s sets position=%r; the position "
+                        "field is no longer supported and is ignored. The "
+                        "pattern loads as an ordinary pattern.",
+                        pattern_str, source_file, position,
                     )
 
                 try:
                     # Auto-detect pattern type from ^ anchor
-                    is_command = pattern_str.startswith('^')
+                    is_command = match_str.startswith('^')
                     pattern_type = "command" if is_command else "replacement"
 
                     # Auto-detect special patterns and transform if needed
-                    transformed_pattern, auto_metadata = transform_pattern(pattern_str)
+                    transformed_pattern, auto_metadata = transform_pattern(match_str)
 
                     compiled = re.compile(transformed_pattern, re.IGNORECASE)
 
@@ -1078,7 +1097,12 @@ class PatternCatalog:
                     # hand-edit garbage and degrades to disabled so the two
                     # rebuilt representations below can never disagree.
                     raw_whole_utterance = rule.get("whole_utterance_only", False)
-                    if not isinstance(raw_whole_utterance, bool):
+                    if trailing_row:
+                        # See the position note above: the leftover
+                        # trailing row is whole-utterance-only whatever
+                        # else it says, and it is a command by now.
+                        raw_whole_utterance = True
+                    elif not isinstance(raw_whole_utterance, bool):
                         logger.warning(
                             "Non-boolean whole_utterance_only=%r for pattern "
                             "%r in %s; treating as disabled",
@@ -1229,87 +1253,7 @@ class PatternCatalog:
 
         logger.info(f"Loaded {pattern_count} patterns from {patterns_file}")
 
-        # wh-2vz: warn when a word is registered as both a leading
-        # first_word AND a trailing command. The leading entry's router
-        # behaviour will fire first on single-word utterances, silently
-        # pre-empting the trailing intercept. A clean run has no
-        # collisions; surface any so a maintainer notices.
-        collisions = sorted(set(trailing_commands.keys()) & set(first_words.keys()))
-        if collisions:
-            logger.warning(
-                "Words registered as BOTH leading and trailing in the "
-                "merged system+user patterns: %s. The leading match fires "
-                "first; the trailing entry is unreachable for single-word "
-                "utterances. Remove one of the duplicates.",
-                collisions,
-            )
-
-        return (
-            first_words, all_patterns, pattern_count, trailing_commands,
-        )
-
-    def _build_trailing_entry(
-        self, pattern_str: str, actions_list: List[Dict[str, Any]],
-    ) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """Validate and compile a ``position = "trailing"`` pattern entry.
-
-        v1 contract (wh-2vz): a trailing entry is a single literal word
-        that fires its action when it is the last word of an utterance.
-        Any pattern string that is not a single word is rejected with a
-        logged warning; the rest of patterns.toml continues to load.
-
-        Args:
-            pattern_str: The raw value of the ``pattern`` field.
-            actions_list: The raw value of the ``actions`` field.
-
-        Returns:
-            ``(lowercased_word, entry_dict)`` on success; ``None`` if the
-            entry failed validation. The entry_dict has ``compiled_pattern``
-            (re.Pattern matching the word case-insensitively), ``actions``
-            (the raw action list) and ``requires_hint_engine``.
-        """
-        if not isinstance(pattern_str, str) or not pattern_str.strip():
-            logger.warning(
-                "Trailing-position pattern has empty pattern string; "
-                "skipping",
-            )
-            return None
-
-        # v1 supports only single-word literals. Strip optional regex
-        # anchors so the user can write either ``submit`` or ``^submit$``
-        # without surprising behaviour, but reject anything more
-        # elaborate.
-        candidate = pattern_str.strip()
-        if candidate.startswith("^"):
-            candidate = candidate[1:]
-        if candidate.endswith("$"):
-            candidate = candidate[:-1]
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", candidate):
-            logger.warning(
-                "Trailing-position pattern %r is not a single literal "
-                "word; skipping (v1 supports only single-word trailing "
-                "commands)",
-                pattern_str,
-            )
-            return None
-
-        word = candidate.lower()
-        try:
-            compiled = re.compile(rf"^{re.escape(word)}$", re.IGNORECASE)
-        except re.error as e:
-            logger.error(
-                "Failed to compile trailing-position pattern %r: %s",
-                pattern_str, e,
-            )
-            return None
-
-        return word, {
-            "compiled_pattern": compiled,
-            "actions": actions_list,
-            # wh-boost-engine-qualification: the same derived flag the
-            # leading entries carry; SpeechProcessor reads it.
-            "requires_hint_engine": _actions_need_hint_engine(actions_list),
-        }
+        return first_words, all_patterns, pattern_count
 
     def _load_patterns(self):
         """
@@ -1332,7 +1276,7 @@ class PatternCatalog:
         try:
             (
                 first_words, all_patterns, pattern_count, command_hotword,
-                trailing_commands, system_entries, user_entries,
+                system_entries, user_entries,
             ) = self._build_all()
         except tomllib.TOMLDecodeError as e:
             error_msg = f"TOML syntax error in {self._patterns_file}: {e}"
@@ -1347,7 +1291,6 @@ class PatternCatalog:
         self.all_patterns = all_patterns
         self.pattern_count = pattern_count
         self.command_hotword = command_hotword
-        self.trailing_commands = trailing_commands
         self._raw_system_entries = system_entries
         self._raw_user_entries = user_entries
 
@@ -1366,7 +1309,7 @@ class PatternCatalog:
         try:
             (
                 first_words, all_patterns, pattern_count, command_hotword,
-                trailing_commands, system_entries, user_entries,
+                system_entries, user_entries,
             ) = self._build_all()
         except Exception:
             logger.error(
@@ -1380,14 +1323,12 @@ class PatternCatalog:
         self.all_patterns = all_patterns
         self.pattern_count = pattern_count
         self.command_hotword = command_hotword
-        self.trailing_commands = trailing_commands
         self._raw_system_entries = system_entries
         self._raw_user_entries = user_entries
 
         logger.info(
             f"PatternCatalog reloaded: {pattern_count} patterns, "
-            f"{len(first_words)} first-word entries, "
-            f"{len(trailing_commands)} trailing-command entries"
+            f"{len(first_words)} first-word entries"
         )
         return True
     
@@ -1851,7 +1792,7 @@ class PatternCatalog:
         """
         tagged = self._tag_source(user_entries, self._user_patterns_file)
         merged = self._merge_entries(self._raw_system_entries, tagged)
-        _first_words, all_patterns, _count, _trailing = (
+        _first_words, all_patterns, _count = (
             self._build_structures(merged, self._patterns_file)
         )
         return all_patterns
@@ -1859,16 +1800,3 @@ class PatternCatalog:
     def get_all_first_words(self) -> List[str]:
         """Return all indexed first words for debugging."""
         return sorted(self.first_words.keys())
-
-    def get_trailing_command(self, word: str) -> Optional[Dict[str, Any]]:
-        """Return the trailing-command entry for ``word``, or None (wh-2vz).
-
-        The lookup is case-insensitive. The returned entry has a
-        ``compiled_pattern`` (re.Pattern) and ``actions`` (list of step
-        dicts) that the SpeechProcessor passes to TextParser._execute_rule
-        when the trailing word arrives with end_of_utterance=True.
-        """
-        # wh-9f51.1: trailing words inherit the same STT/ITN punctuation
-        # tolerance as the leading-word lookup methods. "submit." (from
-        # "submit.") resolves to the same entry as "submit".
-        return self.trailing_commands.get(_normalize_lookup_word(word))

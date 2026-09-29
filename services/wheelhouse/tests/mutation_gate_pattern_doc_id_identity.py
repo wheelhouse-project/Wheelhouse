@@ -96,7 +96,9 @@ text and no shipped doc_id is edited by a run.
 The list above names the entries filed against the bead's own acceptance
 points. The entries added for a review finding -- .2.1, .2.2, .2.3, .3.1,
 .3.2, .3.3, .3.4 and .3.6 -- each carry their explanation as a comment on
-the entry itself.
+the entry itself. So do the five entries at the end for the leftover
+position = "trailing" rule of wh-remove-trailing-submit (BOSS RULING
+02:27 2026-09-27, Q2), which run tests/test_remove_trailing_submit.py.
 
 Every entry in ``MUTATIONS`` must be caught. Pattern-not-found, an
 ambiguous pattern, a mutation that does not compile, a per-mutation
@@ -988,14 +990,8 @@ MUTATIONS = [
         "expect": [
             "test_the_builtin_still_responds[empty-expression]",
             "test_the_builtin_still_responds[invalid-regex]",
-            "test_the_builtin_still_responds[trailing-more-than-one-word]",
-            "test_the_builtin_still_responds[trailing-requires-hotword]",
             "test_the_manager_does_not_call_it_an_override[empty-expression]",
             "test_the_manager_does_not_call_it_an_override[invalid-regex]",
-            "test_the_manager_does_not_call_it_an_override"
-            "[trailing-more-than-one-word]",
-            "test_the_manager_does_not_call_it_an_override"
-            "[trailing-requires-hotword]",
         ],
     },
     {
@@ -1034,41 +1030,6 @@ MUTATIONS = [
         ],
     },
     {
-        # The v1 trailing contract is one literal word; anything else is
-        # rejected by _build_trailing_entry.
-        "name": "a-trailing-expression-of-any-shape-counts-as-buildable",
-        "file": BUILDABLE,
-        "old": (
-            "        return _TRAILING_WORD_RE.fullmatch(candidate) is not None\n"
-        ),
-        "new": "        return True\n",
-        "expect": [
-            "test_the_predicate_agrees_with_the_catalog"
-            "[trailing-more-than-one-word]",
-            "test_the_builtin_still_responds[trailing-more-than-one-word]",
-            "test_the_manager_does_not_call_it_an_override"
-            "[trailing-more-than-one-word]",
-        ],
-    },
-    {
-        # A hotword must precede its command and a trailing command must
-        # be the last word, so the build refuses the pair.
-        "name": "a-trailing-entry-may-require-the-hotword",
-        "file": BUILDABLE,
-        "old": (
-            '        if entry.get("requires_hotword", False):\n'
-            "            return False\n"
-        ),
-        "new": "",
-        "expect": [
-            "test_the_predicate_agrees_with_the_catalog"
-            "[trailing-requires-hotword]",
-            "test_the_builtin_still_responds[trailing-requires-hotword]",
-            "test_the_manager_does_not_call_it_an_override"
-            "[trailing-requires-hotword]",
-        ],
-    },
-    {
         # .3.5. Back to re-deriving the placement from the built list,
         # which has lost the user file's order, the rows the build
         # dropped, and a legacy resolution's attached identity.
@@ -1079,11 +1040,18 @@ MUTATIONS = [
             "if catalog is not None else None\n"
         ),
         "new": "    draft_block = None\n",
+        # wh-user-rule-precedence: the two-claimant and legacy-resolved
+        # agreement tests no longer fail here. The re-derived placement
+        # appends the draft; the save now puts the edited rule, which holds
+        # no slot, in front of every built-in. In both fixtures the draft
+        # then wins either way, so the two answers agree by accident. The
+        # four tests below fail on their own preview or agreement
+        # assertion under this mutant (measured 2026-09-28).
         "expect": [
-            "test_the_preview_and_the_save_agree_when_two_rules_claim_one_builtin",
             "test_the_preview_and_the_save_agree_when_the_claimant_has_no_row",
-            "test_the_preview_and_the_save_agree_for_a_legacy_resolved_override",
             "test_the_stored_id_beats_the_id_the_draft_carries",
+            "test_a_builtin_sharing_the_expression_is_not_the_draft",
+            "test_a_claimant_moved_onto_a_builtins_expression_answers_first",
         ],
     },
     {
@@ -1121,9 +1089,15 @@ MUTATIONS = [
         # test_the_preview_leaves_the_catalog_alone does NOT belong here,
         # measured: that test only asks whether the catalog changed, and an
         # append changes nothing about the catalog.
+        # wh-user-rule-precedence: the two tests this entry named before no
+        # longer fail. The appended draft now stands in front of every
+        # built-in, which is also where the save puts the edited rule in
+        # both fixtures, so preview and save agree. The two tests below
+        # fail on their preview-winner and agreement assertions under this
+        # mutant (measured 2026-09-28).
         "expect": [
-            "test_the_preview_and_the_save_agree_when_two_rules_claim_one_builtin",
-            "test_the_stored_id_beats_the_id_the_draft_carries",
+            "test_a_builtin_sharing_the_expression_is_not_the_draft",
+            "test_an_edit_of_the_persons_own_rule_keeps_it_independent",
         ],
     },
     {
@@ -1175,13 +1149,13 @@ MUTATIONS = [
         "name": "build-from-user-entries-stores-its-result",
         "file": CATALOG,
         "old": (
-            "        _first_words, all_patterns, _count, _trailing = (\n"
+            "        _first_words, all_patterns, _count = (\n"
             "            self._build_structures(merged, self._patterns_file)\n"
             "        )\n"
             "        return all_patterns\n"
         ),
         "new": (
-            "        _first_words, all_patterns, _count, _trailing = (\n"
+            "        _first_words, all_patterns, _count = (\n"
             "            self._build_structures(merged, self._patterns_file)\n"
             "        )\n"
             "        self.all_patterns = all_patterns\n"
@@ -1398,7 +1372,7 @@ MUTATIONS = [
             "test_a_new_rule_copying_a_builtin_does_not_take_it_over",
             "test_a_switched_off_duplicate_switches_nothing_off",
             "test_both_rules_are_present",
-            "test_saving_a_duplicate_leaves_the_builtin_running",
+            "test_saving_a_duplicate_keeps_the_builtin_in_the_list",
             "test_the_builtin_still_runs_its_own_action",
             "test_the_listing_does_not_call_it_an_override",
         ],
@@ -1464,7 +1438,7 @@ MUTATIONS = [
             "test_a_duplicate_carries_the_key",
             "test_a_new_rule_carries_the_key",
             "test_a_new_rule_copying_a_builtin_does_not_take_it_over",
-            "test_saving_a_duplicate_leaves_the_builtin_running",
+            "test_saving_a_duplicate_keeps_the_builtin_in_the_list",
         ],
     },
     {
@@ -1507,7 +1481,7 @@ MUTATIONS = [
             "test_a_new_rule_carries_the_key",
             "test_a_new_rule_copying_a_builtin_does_not_take_it_over",
             "test_an_edit_keeps_the_key_the_block_already_had",
-            "test_saving_a_duplicate_leaves_the_builtin_running",
+            "test_saving_a_duplicate_keeps_the_builtin_in_the_list",
         ],
     },
     {
@@ -1538,7 +1512,10 @@ MUTATIONS = [
         # _edited_block stops removing the mark _draft_block put on the
         # draft, so an edit of a customization saved before ids existed
         # previews as an independent rule while the save keeps it
-        # attached to its built-in.
+        # attached to its built-in. Since wh-user-rule-precedence the
+        # independent rule stands in front and answers the phrase too, so
+        # the catcher compares the previewed list with the saved one: the
+        # previewed list keeps the built-in the save replaced.
         "name": "the-previewed-edit-keeps-the-drafts-own-mark",
         "file": TESTER,
         "old": (
@@ -1727,6 +1704,102 @@ MUTATIONS = [
         # input, so no other test's behaviour changes under this mutation.
         "expect": [
             "test_a_refused_correspondence_check_leaves_the_file_byte_identical",
+        ],
+    },
+    # wh-remove-trailing-submit, BOSS RULING 02:27 2026-09-27 (Q2). A row
+    # that still carries position = "trailing" -- a user's Customize copy
+    # of the old unanchored 'submit' row above all -- loads as
+    # whole-utterance-only. The rule lives in
+    # PatternCatalog._build_structures, so its mutations sit in this gate,
+    # which already targets pattern_catalog.py. The catchers are in
+    # tests/test_remove_trailing_submit.py, which none of the other
+    # entries run, so each entry names it as its own selection.
+    {
+        # (a) The anchor is dropped: the unanchored old row stays a
+        # replacement, whole_utterance_only is not honoured on it, and
+        # "submit" presses Enter wherever it is said.
+        "name": "a-trailing-row-is-not-anchored",
+        "file": CATALOG,
+        "old": '                        match_str = f"^(?:{pattern_str})$"\n',
+        "new": "                        match_str = pattern_str\n",
+        "selection": ["tests/test_remove_trailing_submit.py"],
+        "expect": [
+            "test_unanchored_row_becomes_a_whole_utterance_command",
+            "test_submit_the_form_types_text_and_presses_no_enter",
+            "test_hello_world_submit_types_text",
+        ],
+    },
+    {
+        # (b) The forced flag is dropped: the trailing row is anchored but
+        # keeps whatever whole_utterance_only it says (absent: False), so
+        # it fires wherever its words start an utterance.
+        "name": "a-trailing-row-is-not-forced-whole-utterance",
+        "file": CATALOG,
+        "old": "                        raw_whole_utterance = True\n",
+        "new": "                        pass\n",
+        "selection": ["tests/test_remove_trailing_submit.py"],
+        # The measured set: "hello world submit" stays green, because a
+        # ^-anchored command still has to start its utterance.
+        "expect": [
+            "test_anchored_row_loads_as_the_whole_utterance_only_row",
+            "test_unanchored_row_becomes_a_whole_utterance_command",
+            "test_user_row_loads_whole_utterance_only_and_warns_once",
+            "test_submit_the_form_types_text_and_presses_no_enter",
+        ],
+    },
+    {
+        # (c) The trailing check is removed: a trailing row is read as an
+        # unsupported value, warned as "ignored", and loads as an ordinary
+        # pattern -- the state before the ruling.
+        "name": "the-trailing-check-never-matches",
+        "file": CATALOG,
+        "old": '                trailing_row = position == "trailing"\n',
+        "new": "                trailing_row = False\n",
+        "selection": ["tests/test_remove_trailing_submit.py"],
+        "expect": [
+            "test_anchored_row_loads_as_the_whole_utterance_only_row",
+            "test_unanchored_row_becomes_a_whole_utterance_command",
+            "test_one_warning_names_the_field_and_says_whole_utterance",
+            "test_user_row_loads_whole_utterance_only_and_warns_once",
+            "test_submit_the_form_types_text_and_presses_no_enter",
+            "test_hello_world_submit_types_text",
+        ],
+    },
+    {
+        # (d) The row type is read from the written expression instead of
+        # the anchored one, so the unanchored old row is built as a
+        # replacement although its compiled expression is anchored.
+        "name": "the-row-type-ignores-the-anchor",
+        "file": CATALOG,
+        "old": "                    is_command = match_str.startswith('^')\n",
+        "new": "                    is_command = pattern_str.startswith('^')\n",
+        "selection": ["tests/test_remove_trailing_submit.py"],
+        "expect": [
+            "test_unanchored_row_becomes_a_whole_utterance_command",
+            "test_submit_the_form_types_text_and_presses_no_enter",
+            "test_hello_world_submit_types_text",
+        ],
+    },
+    {
+        # (e) The compiled expression is built from the written expression
+        # instead of the anchored one, so the row is typed a command but
+        # still matches "submit" inside a longer utterance.
+        "name": "the-compiled-row-ignores-the-anchor",
+        "file": CATALOG,
+        "old": (
+            "                    transformed_pattern, auto_metadata = "
+            "transform_pattern(match_str)\n"
+        ),
+        "new": (
+            "                    transformed_pattern, auto_metadata = "
+            "transform_pattern(pattern_str)\n"
+        ),
+        "selection": ["tests/test_remove_trailing_submit.py"],
+        # The measured set: "hello world submit" stays green, because the
+        # row is still typed a command and a command starts its utterance.
+        "expect": [
+            "test_unanchored_row_becomes_a_whole_utterance_command",
+            "test_submit_the_form_types_text_and_presses_no_enter",
         ],
     },
 ]

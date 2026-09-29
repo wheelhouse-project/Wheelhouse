@@ -22,3 +22,67 @@ derivative of the model above, so it is redistributed under the same
 Creative Commons Attribution 4.0 International License and under the
 attribution given above. docs/vendoring/SECURITY.md records where it came
 from and how it was checked.
+
+This product includes the Silero voice activity detection model
+services/stt_providers/shared/shared_audio/vad_model/silero_vad_v6.2.3.onnx,
+the file src/silero_vad/data/silero_vad.onnx of Silero VAD
+(https://github.com/snakers4/silero-vad) at tag v6.2.3, unmodified. It is
+licensed under the MIT License:
+
+    MIT License
+
+    Copyright (c) 2020-present Silero Team
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+This product includes the "computer" wake-word model
+services/stt_providers/shared/data/wake_words/computer_v2.onnx, an
+openWakeWord community model from the Home Assistant wakewords collection
+(https://github.com/fwartner/home-assistant-wakewords-collection, folder
+en/computer). A wake word other than "computer" is downloaded from the same
+collection the first time it is used; those models are not redistributed
+here. The collection is licensed under the MIT License:
+
+    MIT License
+
+    Copyright (c) 2023 Florian Wartner
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Wake-word detection uses the openWakeWord library
+(https://github.com/dscripka/openWakeWord), licensed under the Apache
+License, Version 2.0; the installer installs it from PyPI. The first time
+wake-word detection starts, openWakeWord downloads its own supporting model
+files from its v0.5.1 GitHub release. Those files are not redistributed here.

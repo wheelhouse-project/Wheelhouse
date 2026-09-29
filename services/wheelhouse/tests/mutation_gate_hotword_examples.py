@@ -86,7 +86,7 @@ _IN_SCOPE = "test_the_rule_covers_something"
 MUTATIONS = [
     {
         "name": "click-trigger-revert",
-        "old": """            'Trigger "^(?:click|tap)\\\\s+(.+)$" with params ["g1"]: saying '
+        "old": """            'Trigger "^(?:click|clicks|tap)\\\\s+(.+)$" with params ["g1"]: saying '
 """,
         "new": """            'Trigger "^click\\\\s+(.+)$" with params ["g1"]: saying '
 """,

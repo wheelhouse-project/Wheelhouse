@@ -19,6 +19,7 @@ or calls launcher.main(). No logic-mirroring.
 import contextlib
 import logging
 import os
+import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import Mock, MagicMock, patch, call
@@ -56,6 +57,36 @@ def hermetic_launcher_logging(monkeypatch):
             return_value=Mock(name="stub launcher log listener"),
         ),
     )
+
+
+_REAL_ROTATE_LOG_FOR_NEW_CYCLE = launcher._rotate_log_for_new_cycle
+
+
+@pytest.fixture(autouse=True)
+def hermetic_log_rotation(monkeypatch):
+    """Keep every launcher.main() call in this module from rotating the
+    REPO-ROOT wheelhouse.log (wh-log-triple-rotation).
+
+    The real _rotate_log_for_new_cycle moves <project root>/wheelhouse.log,
+    and the project root comes from launcher.py's own __file__, so no
+    tmp_path fixture redirects it; in the main checkout that file is the
+    running app's live log. The launcher also sets LAUNCHER_ROTATED_ENV in
+    os.environ; setenv records the pre-test state, so teardown restores it
+    and later setup_logging tests in the same process still rotate. (delenv
+    with raising=False records nothing when the variable is absent, so it
+    would not undo the launcher's write.) "0" is not the skip value.
+
+    Tests that need the real function call _REAL_ROTATE_LOG_FOR_NEW_CYCLE
+    with a tmp_path root.
+    """
+    from utils.log_rotation import LAUNCHER_ROTATED_ENV
+
+    monkeypatch.setattr(
+        launcher,
+        "_rotate_log_for_new_cycle",
+        Mock(name="_rotate_log_for_new_cycle stub", return_value=None),
+    )
+    monkeypatch.setenv(LAUNCHER_ROTATED_ENV, "0")
 
 
 @pytest.fixture(autouse=True)
@@ -2637,3 +2668,214 @@ class TestRestartCycleRebuildsEverything:
                 f"the second cycle reused the Input process's event at "
                 f"position {index}"
             )
+
+
+class TestOneLogRotationPerStartCycle:
+    """wh-log-triple-rotation: the launcher rotates wheelhouse.log once per
+    start cycle, before the cycle's first launcher line and before any child
+    starts, and tells the children not to rotate again (boss ruling 13:36
+    2026-09-26, conditions 1-5)."""
+
+    _TWO_CYCLE_TIMES = [
+        100.0, 100.1, 100.2, 100.3, 100.4, 130.0,
+        200.0, 200.1, 200.2, 200.3, 200.4, 230.0,
+        300.0, 300.0, 300.0, 300.0, 300.0, 300.0,
+    ]
+
+    def _run(self, launcher_env, monkeypatch, cycles, rotate_side_effect=None):
+        """Run launcher.main() for 1 or 2 cycles; return the ordered events.
+
+        Events: ("rotate", <skip value at call>), ("configure",),
+        ("start", <process name>, <skip value at start>).
+        """
+        from utils.log_rotation import LAUNCHER_ROTATED_ENV
+
+        events = []
+        app_data = launcher_env["app_data"]
+        if cycles == 2:
+            (app_data / "wheelhouse.restart").write_text("")
+
+        def rotate(project_root):
+            events.append(("rotate", os.environ.get(LAUNCHER_ROTATED_ENV)))
+            if rotate_side_effect is not None:
+                return rotate_side_effect
+            return None
+
+        rotate_mock = Mock(side_effect=rotate)
+        monkeypatch.setattr(launcher, "_rotate_log_for_new_cycle", rotate_mock)
+        monkeypatch.setattr(
+            launcher, "_configure_launcher_logging",
+            Mock(side_effect=lambda root: events.append(("configure",)) or Mock()),
+        )
+
+        names = ["LogicProcess", "InputProcess", "GuiProcess"]
+        process_mocks = []
+        for i in range(3 * cycles):
+            proc = launcher_env["make_process"](
+                alive=False, exitcode=0, name=names[i % 3], pid=42 + i)
+            proc.start.side_effect = (
+                lambda n=names[i % 3]: events.append(
+                    ("start", n, os.environ.get(LAUNCHER_ROTATED_ENV))))
+            process_mocks.append(proc)
+        shm_mocks = []
+        for i in range(2 * cycles):
+            m = MagicMock()
+            m.name = f"shm_{i}"
+            shm_mocks.append(m)
+
+        with patch("services.wheelhouse.utils.system.get_app_data_path",
+                   return_value=str(app_data)), \
+             patch.object(launcher, "cleanup_stale_resources"), \
+             patch("launcher.shared_memory.SharedMemory", side_effect=shm_mocks), \
+             patch("launcher.multiprocessing.Queue", return_value=Mock()), \
+             patch("launcher.multiprocessing.Event",
+                   return_value=launcher_env["shutdown_event"]), \
+             patch("launcher.multiprocessing.Process", side_effect=process_mocks), \
+             patch.dict("sys.modules", launcher_env["sys_modules"]), \
+             patch.object(launcher, "time", _fake_time_ns(self._TWO_CYCLE_TIMES)):
+            launcher.main()
+        return events, rotate_mock
+
+    def test_each_cycle_rotates_once_before_its_children_start(
+        self, launcher_env, monkeypatch
+    ):
+        """Condition 3: a restart-flag restart rotates once more, before the
+        second cycle's children start; two cycles rotate exactly twice."""
+        events, rotate_mock = self._run(launcher_env, monkeypatch, cycles=2)
+
+        kinds = [e[0] for e in events]
+        assert kinds == [
+            "rotate", "configure",
+            "start", "start", "start",
+            "rotate",
+            "start", "start", "start",
+        ], events
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(launcher.__file__), "..", ".."))
+        for c in rotate_mock.call_args_list:
+            assert c.args == (project_root,)
+
+    def test_the_first_rotation_runs_before_the_launcher_writes_any_line(
+        self, launcher_env, monkeypatch
+    ):
+        """Condition 2: the first cycle rotates before the launcher's logging
+        starts, so the launcher's start lines open the new log."""
+        events, _ = self._run(launcher_env, monkeypatch, cycles=1)
+
+        assert events[0][0] == "rotate", events
+        assert events[1] == ("configure",), events
+
+    def test_children_start_with_the_skip_variable_set(
+        self, launcher_env, monkeypatch
+    ):
+        """Condition 4: every child starts with LAUNCHER_ROTATED_ENV = "1",
+        so setup_logging in Logic, Input, and GUI does not rotate again."""
+        events, _ = self._run(launcher_env, monkeypatch, cycles=2)
+
+        starts = [e for e in events if e[0] == "start"]
+        assert len(starts) == 6
+        assert all(e[2] == "1" for e in starts), starts
+
+    def test_a_failed_rotation_leaves_the_log_unrotated_and_still_starts(
+        self, launcher_env, monkeypatch, caplog
+    ):
+        """Condition 5: when the launcher's rotation raises, nobody rotates
+        for that cycle. The children still get the skip variable, so one
+        start never moves the file more than once; the log keeps the
+        previous run and the new run appends to it. The launcher logs a
+        warning and starts the children normally."""
+        failure = OSError("wheelhouse.log.2 is open in another program")
+        with caplog.at_level(logging.WARNING):
+            events, _ = self._run(
+                launcher_env, monkeypatch, cycles=1, rotate_side_effect=failure)
+
+        starts = [e for e in events if e[0] == "start"]
+        assert len(starts) == 3
+        assert all(e[2] == "1" for e in starts), starts
+        assert any(
+            "wheelhouse.log.2 is open in another program" in r.getMessage()
+            and r.levelno == logging.WARNING
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+
+class TestRotateLogForNewCycle:
+    """The launcher's rotation call against a temporary project root."""
+
+    def test_rotates_the_project_log_once(self, tmp_path):
+        log_file = tmp_path / "wheelhouse.log"
+        log_file.write_text("previous run\n", encoding="utf-8")
+
+        assert _REAL_ROTATE_LOG_FOR_NEW_CYCLE(str(tmp_path)) is None
+
+        assert (tmp_path / "wheelhouse.log.1").read_text(encoding="utf-8") == "previous run\n"
+        assert not (tmp_path / "wheelhouse.log.2").exists()
+        assert not log_file.exists() or log_file.stat().st_size == 0
+
+    def test_returns_the_error_instead_of_raising(self, tmp_path, monkeypatch):
+        failure = RuntimeError("Cannot acquire lock after 20 attempts")
+
+        def boom(path):
+            raise failure
+
+        monkeypatch.setattr(launcher, "rotate_log_for_new_run", boom)
+        assert _REAL_ROTATE_LOG_FOR_NEW_CYCLE(str(tmp_path)) is failure
+
+    def test_a_skipped_move_of_a_non_empty_log_is_reported(
+        self, tmp_path, monkeypatch
+    ):
+        """wh-log-triple-rotation.1.1: the library skips the move without
+        raising when the rename fails, so a False return for a log that
+        had content must reach the warning, not pass as success."""
+        (tmp_path / "wheelhouse.log").write_text("previous run\n", encoding="utf-8")
+        monkeypatch.setattr(launcher, "rotate_log_for_new_run", lambda path: False)
+
+        error = _REAL_ROTATE_LOG_FOR_NEW_CYCLE(str(tmp_path))
+
+        assert isinstance(error, OSError)
+        assert "could not be renamed" in str(error)
+
+    @pytest.mark.parametrize("content", [None, ""], ids=["absent", "empty"])
+    def test_nothing_to_move_is_not_reported(self, tmp_path, monkeypatch, content):
+        if content is not None:
+            (tmp_path / "wheelhouse.log").write_text(content, encoding="utf-8")
+        monkeypatch.setattr(launcher, "rotate_log_for_new_run", lambda path: False)
+
+        assert _REAL_ROTATE_LOG_FOR_NEW_CYCLE(str(tmp_path)) is None
+
+    @pytest.mark.skipif(
+        sys.platform != "win32", reason="Windows refuses to rename an open file"
+    )
+    def test_a_log_held_open_by_another_program_is_reported(self, tmp_path):
+        log_file = tmp_path / "wheelhouse.log"
+        log_file.write_text("previous run\n", encoding="utf-8")
+
+        with open(log_file, "a", encoding="utf-8"):
+            error = _REAL_ROTATE_LOG_FOR_NEW_CYCLE(str(tmp_path))
+
+        assert isinstance(error, OSError)
+        assert log_file.read_text(encoding="utf-8") == "previous run\n"
+        assert not (tmp_path / "wheelhouse.log.1").exists()
+
+    def test_the_launcher_file_handler_keeps_five_backups(
+        self, tmp_path, monkeypatch
+    ):
+        """Condition 1: the launcher's own handler keeps the same five
+        backups as setup_logging, so a size rotation by the launcher does
+        not drop .3 to .5."""
+        from concurrent_log_handler import ConcurrentRotatingFileHandler
+        from utils.log_rotation import LOG_BACKUP_COUNT
+
+        root = logging.getLogger()
+        saved = root.handlers.copy()
+        listener = _REAL_CONFIGURE_LAUNCHER_LOGGING(str(tmp_path))
+        try:
+            file_handlers = [
+                h for h in listener.handlers
+                if isinstance(h, ConcurrentRotatingFileHandler)
+            ]
+            assert len(file_handlers) == 1
+            assert file_handlers[0].backupCount == LOG_BACKUP_COUNT == 5
+        finally:
+            launcher._teardown_launcher_logging()
+            root.handlers[:] = saved

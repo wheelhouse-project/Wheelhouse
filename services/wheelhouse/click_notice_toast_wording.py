@@ -46,6 +46,10 @@ v5 "User-visible notice wording" table:
   | execution_failed:dda_no_default_action_then_sendinput_failed | Same as invoke_com_error. |
   | execution_failed:dda_expand_collapse             | Same as dda_unavailable. (wh-treeitem-dda-wrong-action) |
   | execution_failed:dda_expand_collapse_then_sendinput_failed | Same as invoke_com_error. |
+  | execution_failed:toggle_com_error                | Same as invoke_com_error. (wh-mcp-repo-mining.3) |
+  | execution_failed:select_com_error                | Same as invoke_com_error. |
+  | execution_failed:toggle_then_sendinput_failed    | Same as invoke_com_error. |
+  | execution_failed:select_then_sendinput_failed    | Same as invoke_com_error. |
   | execution_failed:click_point_obstructed          | "WheelHouse couldn't click '<matched name>' -- it could not confirm the control is at that spot on screen." (wh-explorer-navpane-click.1.1, reworded wh-winui-menu-click-refused.3) |
 
 (The retired ``invoke_pattern_unavailable`` tag was removed from the
@@ -133,6 +137,15 @@ _INVOKE_COM_ERROR_ALIASES = frozenset(
         # separate from invoke_com_error for telemetry; only the sentence is
         # shared, so no new user-visible copy is introduced.
         "invoke_then_coordinate_no_effect",
+        # wh-mcp-repo-mining.3: a Toggle() or Select() press raised after the
+        # call (the press may have acted, so the executor refused), or the
+        # gated coordinate click after a no-side-effect raise did not land.
+        # These are the Toggle / Select analogues of invoke_com_error and
+        # invoke_then_sendinput_failed, so they share that sentence.
+        "toggle_com_error",
+        "select_com_error",
+        "toggle_then_sendinput_failed",
+        "select_then_sendinput_failed",
     }
 )
 
@@ -402,6 +415,10 @@ def _compose_execution_failed(reason: str | None, matched_name: str | None) -> s
         )
     if reason == "grid_click_failed":
         return "Wheelhouse couldn't click at the grid point."
+    if reason == "pointer_click_failed":
+        # wh-voice-access-parity.2.5: a bare click word with no grid open
+        # clicks at the pointer; this is its failure notice.
+        return "Wheelhouse couldn't click at the pointer."
     if reason == "grid_move_failed":
         return "Wheelhouse couldn't move the pointer."
     if reason == "grid_drag_failed":

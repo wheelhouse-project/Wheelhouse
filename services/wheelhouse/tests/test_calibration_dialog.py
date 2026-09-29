@@ -636,7 +636,66 @@ def test_pystray_menu_has_teach_voice_item_marshalled_via_state_queue(manager):
     )
 
 
-def test_open_calibration_sends_session_open_and_shows(manager):
+@pytest.fixture
+def steal_foreground():
+    """Replace the Win32 foreground request so no test moves a real window."""
+    with patch("terminal_editor_window._steal_foreground") as steal:
+        yield steal
+
+
+def _record_window_calls(instance):
+    """Record the order of the Qt activation calls on a fake dialog."""
+    calls = []
+    instance.winId.return_value = 4242
+    instance.show.side_effect = lambda: calls.append(("show",))
+    instance.raise_.side_effect = lambda: calls.append(("raise_",))
+    instance.activateWindow.side_effect = (
+        lambda: calls.append(("activateWindow",))
+    )
+    return calls
+
+
+def test_open_calibration_takes_the_foreground_with_its_handle(
+    manager, steal_foreground
+):
+    """wh-calibration-window-front: 'learn my voice' arrives by the
+    Logic-to-GUI queue, so the GUI process holds no foreground right and
+    activateWindow() alone only flashes the taskbar button. The window must
+    also go through the terminal editor's AttachThreadInput bypass."""
+    mgr, _ = manager
+    with patch("calibration_dialog.CalibrationDialog") as mock_cls:
+        instance = MagicMock()
+        mock_cls.return_value = instance
+        calls = _record_window_calls(instance)
+        steal_foreground.side_effect = (
+            lambda hwnd: calls.append(("_steal_foreground", hwnd))
+        )
+        mgr._open_calibration()
+    steal_foreground.assert_called_once_with(4242)
+    # The foreground request comes last, after the Qt activation calls.
+    assert calls == [
+        ("show",),
+        ("raise_",),
+        ("activateWindow",),
+        ("_steal_foreground", 4242),
+    ], calls
+
+
+def test_open_calibration_foreground_failure_does_not_escape(
+    manager, steal_foreground
+):
+    mgr, _ = manager
+    steal_foreground.side_effect = OSError("SetForegroundWindow refused")
+    with patch("calibration_dialog.CalibrationDialog") as mock_cls:
+        instance = MagicMock()
+        mock_cls.return_value = instance
+        calls = _record_window_calls(instance)
+        mgr._open_calibration()
+    steal_foreground.assert_called_once_with(4242)
+    assert calls == [("show",), ("raise_",), ("activateWindow",)], calls
+
+
+def test_open_calibration_sends_session_open_and_shows(manager, steal_foreground):
     mgr, _ = manager
     with patch("calibration_dialog.CalibrationDialog") as mock_cls:
         instance = MagicMock()
@@ -650,7 +709,7 @@ def test_open_calibration_sends_session_open_and_shows(manager):
     instance.show.assert_called_once()
 
 
-def test_open_calibration_reuses_dialog(manager):
+def test_open_calibration_reuses_dialog(manager, steal_foreground):
     mgr, _ = manager
     with patch("calibration_dialog.CalibrationDialog") as mock_cls:
         instance = MagicMock()

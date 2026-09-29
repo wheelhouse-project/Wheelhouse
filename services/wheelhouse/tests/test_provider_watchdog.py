@@ -11,6 +11,12 @@ import main as main_module
 from state_manager import StateManager
 from stt import remote_stt_launcher as launcher_module
 
+# These tests switch to Parakeet to exercise the ordinary switch. The
+# switch first checks the Parakeet model on disk
+# (wh-parakeet-model-download-offer), so the check is made to answer
+# "complete" rather than depend on this computer having the model.
+pytestmark = pytest.mark.usefixtures("parakeet_model_present")
+
 
 @pytest.fixture
 def journey(tmp_path, monkeypatch, mock_config, mock_event_bus, mock_gui_queue):
@@ -657,3 +663,181 @@ def test_failed_switch_keeps_watching_the_engine_it_left_running(journey, monkey
         "the engine a failed switch left running must still be watched"
     )
     assert displayed["stt_provider"] == "google_stt"
+
+
+# wh-provider-native-crash-trace: the provider's supervisor writes the
+# child's stderr and one exit line per child exit to
+# <app data>/<provider>.stderr.log. The watchdog copies the new lines into
+# wheelhouse.log BEFORE its restart marks a new launch (ruling R2), and a
+# native crash is named in its notices with the display name as the
+# title (A6, R4, R5).
+
+_ACCESS_VIOLATION = 3221225477
+_RESTARTING_TEXT = (
+    "The Google Cloud speech engine stopped because of an error in its "
+    "program code (exit code 0xC0000005). WheelHouse is starting it again. "
+    "The file wheelhouse.log has the details."
+)
+_STOPPED_TEXT = (
+    "The Google Cloud speech engine stopped because of an error in its "
+    "program code (exit code 0xC0000005) and did not start again. "
+    "The file wheelhouse.log has the details."
+)
+
+
+def _stderr_path(journey, provider_name="google_stt"):
+    return journey.launcher.app_data_dir / f"{provider_name}.stderr.log"
+
+
+def _append_stderr(journey, text, provider_name="google_stt"):
+    with open(_stderr_path(journey, provider_name), "ab") as stream:
+        stream.write(text.encode("utf-8"))
+
+
+def _append_exit_line(journey, code, provider_name="google_stt"):
+    _append_stderr(
+        journey,
+        f"[launcher] {provider_name} process exited with code {code} "
+        f"(0x{code & 0xFFFFFFFF:08X}) after 1.0s\n",
+        provider_name,
+    )
+
+
+def _stderr_messages(caplog, provider_name="google_stt"):
+    prefix = f"[{provider_name} stderr] "
+    return [record.getMessage() for record in caplog.records
+            if record.getMessage().startswith(prefix)]
+
+
+@pytest.fixture
+def named_journey(journey):
+    """The journey with a display name unlike the provider name, so a
+    notice title shows which of the two it used."""
+    journey.launcher._providers[0]["display_name"] = "Google Cloud"
+    return journey
+
+
+def test_a_native_crash_after_ready_says_the_engine_is_starting_again(
+        named_journey):
+    journey = named_journey
+    seen = []
+    journey.notices.side_effect = lambda title, message: seen.append(
+        (title, message, len(journey.processes)))
+    journey.start().returncode = 1
+    _append_exit_line(journey, _ACCESS_VIOLATION)
+
+    journey.update()
+
+    assert len(journey.processes) == 2, "a native crash still gets its restart"
+    # The process count at the notice is 1: it was sent before the
+    # restart's spawn.
+    assert seen == [("Google Cloud", _RESTARTING_TEXT, 1)]
+
+
+@pytest.mark.parametrize("code", [
+    pytest.param(1, id="python-error"),
+    pytest.param(15, id="terminated"),
+    # Error severity, but Ctrl+C is not a crash (Boss e8 ruling 09:46
+    # 2026-09-25).
+    pytest.param(0xC000013A, id="ctrl-c"),
+])
+def test_an_ordinary_death_after_ready_restarts_without_a_notice(
+        named_journey, code):
+    journey = named_journey
+    journey.start().returncode = 1
+    _append_exit_line(journey, code)
+
+    journey.update()
+
+    assert len(journey.processes) == 2
+    journey.notices.assert_not_called()
+
+
+def test_a_native_crash_after_the_automatic_restart_says_it_stopped(
+        named_journey):
+    journey = named_journey
+    journey.start().returncode = 1
+    journey.update()
+    assert len(journey.processes) == 2, "first recovery must happen"
+    journey.launcher.signal_provider_ready()
+    journey.threads[-1].finish()
+    _append_exit_line(journey, _ACCESS_VIOLATION)
+    journey.processes[-1].returncode = 1
+
+    journey.update()
+    journey.finish_reports()
+
+    assert len(journey.processes) == 2, "one recovery is the whole retry budget"
+    journey.notices.assert_called_once_with("Google Cloud", _STOPPED_TEXT)
+
+
+def test_a_restart_that_cannot_begin_after_a_native_crash_says_it_stopped(
+        named_journey):
+    from unittest.mock import call
+
+    journey = named_journey
+    journey.start().returncode = 1
+    _append_exit_line(journey, _ACCESS_VIOLATION)
+    journey.launcher.ws_port = 0
+
+    journey.update()
+    journey.finish_reports()
+
+    assert len(journey.processes) == 1
+    assert journey.notices.call_args_list == [
+        call("Google Cloud", _RESTARTING_TEXT),
+        call("Google Cloud", _STOPPED_TEXT),
+    ]
+
+
+def test_the_watchdog_copies_the_stderr_lines_before_its_restart(
+        journey, caplog):
+    """Copied before the restart marks the new launch: a copy after it
+    would start from the new launch's offset and find nothing."""
+    import logging
+
+    journey.start().returncode = 1
+    _append_stderr(journey, "Windows fatal exception: access violation\n")
+    _append_exit_line(journey, _ACCESS_VIOLATION)
+
+    with caplog.at_level(logging.WARNING):
+        journey.update()
+
+    assert len(journey.processes) == 2
+    assert _stderr_messages(caplog) == [
+        "[google_stt stderr] Windows fatal exception: access violation",
+        "[google_stt stderr] [launcher] google_stt process exited with code "
+        "3221225477 (0xC0000005) after 1.0s",
+    ]
+
+
+def test_only_lines_written_after_the_launch_are_copied(journey, caplog):
+    """The launch marks the file's end, so an earlier run's crash is not
+    this launch's."""
+    import logging
+
+    _append_stderr(journey, "Fatal Python error: OLD RUN\n")
+    journey.start(ready=False).returncode = 1
+    _append_stderr(journey, "Fatal Python error: NEW RUN\n")
+
+    with caplog.at_level(logging.WARNING):
+        journey.threads[-1].finish()
+
+    assert _stderr_messages(caplog) == [
+        "[google_stt stderr] Fatal Python error: NEW RUN"]
+
+
+def test_a_ready_report_copies_the_lines_since_the_launch(journey, caplog):
+    """A crash the supervisor restarted by itself reaches the log at the
+    next ready (ruling R2)."""
+    import logging
+
+    journey.start(ready=False)
+    _append_stderr(journey, "Fatal Python error: RESTARTED BY SUPERVISOR\n")
+
+    with caplog.at_level(logging.WARNING):
+        journey.launcher.signal_provider_ready(
+            journey.launcher.launch_generation("google_stt"))
+
+    assert _stderr_messages(caplog) == [
+        "[google_stt stderr] Fatal Python error: RESTARTED BY SUPERVISOR"]

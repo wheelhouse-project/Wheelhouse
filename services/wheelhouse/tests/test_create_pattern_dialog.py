@@ -724,16 +724,44 @@ class TestGoalPage:
             != fix._text_output.placeholderText()
         )
 
-    def test_scratch_is_the_plain_simple_pane(self):
+    def test_last_goal_is_create_an_advanced_command(self):
+        # wh-advanced-command-choice: David's answer to QUESTIONS item 11
+        # renamed "Start from scratch". A screen reader reads the item's
+        # accessible text, which falls back to the visible text when no
+        # separate accessible text is set.
+        goal_list = _make_dialog()._goal_list
+        item = goal_list.item(goal_list.count() - 1)
+        assert item.data(Qt.ItemDataRole.UserRole) == "advanced"
+        assert item.text() == "Create an advanced command"
+        assert item.data(Qt.ItemDataRole.AccessibleTextRole) in (
+            None, item.text(),
+        )
+
+    def test_advanced_goal_opens_editor_with_advanced_ticked(self):
         dialog = _shown(_make_dialog())
-        _choose_goal(dialog, "scratch")
-        assert dialog.mode == "simple"
-        assert dialog._hotkey_radio.isChecked()  # untouched default
+        _choose_goal(dialog, "advanced")
+        assert dialog._root_stack.currentWidget() is dialog._editor_page
+        assert dialog.mode == "advanced"
+        assert dialog._advanced_toggle.isChecked()
+        assert dialog._panes.currentIndex() == 1
+        # The goal wording defaults still apply, so a later switch to
+        # simple mode shows the ordinary labels.
         assert (
             dialog._phrase_editor.row_edits()[0].placeholderText()
             == "e.g., save project"
         )
-        assert dialog.focusWidget() is dialog._phrase_editor.row_edits()[0]
+        # Focus lands in the first advanced field, not on a hidden
+        # simple-pane row.
+        assert dialog.focusWidget() is dialog._expression_edit
+
+    @pytest.mark.parametrize(
+        "key", ["run", "activate", "hotkey", "text", "correction"],
+    )
+    def test_other_goals_leave_advanced_unticked(self, key):
+        dialog = _shown(_make_dialog())
+        _choose_goal(dialog, key)
+        assert not dialog._advanced_toggle.isChecked()
+        assert dialog._panes.currentIndex() == 0
 
     def test_enter_on_list_activates_current_goal(self):
         # Keyboard-first (spec section 13): arrow keys move the current
@@ -2426,6 +2454,130 @@ class TestRepeatFieldValidation:
         )
         dialog._validate_advanced()
         assert "Unknown key name" not in dialog._steps_error_label.text()
+
+
+class TestNumberCaptureValidation:
+    """Advanced mode refuses Save when a command captures a number any way
+    other than (\\d+), and when a count parameter reads a group of another
+    shape (wh-number-capture-enforce, acceptance 2 and 3)."""
+
+    def _advanced_dialog(self, expression, steps):
+        entry = _simple_entry(raw_pattern=expression, raw_actions=steps)
+        del entry["phrases"]
+        dialog = _make_dialog(entry=entry, pattern_id=entry["id"])
+        dialog._validate_advanced()
+        return dialog
+
+    def test_bare_digit_form_shows_expression_error_and_blocks_save(self):
+        dialog = self._advanced_dialog(
+            r"^delete \d+$", [{"function": "press", "params": ["del"]}],
+        )
+        assert dialog._expression_error_label.text() == (
+            "The part '\\d+' does not accept number words such as 'five'. "
+            "Capture every number with (\\d+), so it matches both '5' and "
+            "'five'."
+        )
+        assert not dialog._save_btn.isEnabled()
+
+    def test_number_list_shows_expression_error_and_blocks_save(self):
+        dialog = self._advanced_dialog(
+            r"^delete (one|two|three)$",
+            [{"function": "press", "params": ["del"]}],
+        )
+        assert dialog._expression_error_label.text() == (
+            "The part '(one|two|three)' accepts only the numbers it lists. "
+            "Capture every number with (\\d+), so it matches both '5' and "
+            "'five'."
+        )
+        assert not dialog._save_btn.isEnabled()
+
+    def test_count_param_on_word_group_shows_steps_error_and_blocks_save(self):
+        dialog = self._advanced_dialog(
+            r"^delete (\w+)$",
+            [{"function": "press", "params": ["del", "g1"]}],
+        )
+        assert dialog._expression_error_label.text() == ""
+        assert dialog._steps_error_label.text() == (
+            "Step 'press' reads a number from group g1, but that group is "
+            "'(\\w+)'. Capture the number with (\\d+) or (\\d+)?, so it "
+            "matches both '5' and 'five'."
+        )
+        assert not dialog._save_btn.isEnabled()
+
+    def test_hk_repeat_on_word_group_blocks_save(self):
+        dialog = self._advanced_dialog(
+            r"^undo (\w+)$",
+            [{"function": "hk", "params": ["ctrl", "z", "g1"]}],
+        )
+        assert dialog._steps_error_label.text().startswith(
+            "Step 'hk' reads a number from group g1"
+        )
+        assert not dialog._save_btn.isEnabled()
+
+    def test_accepted_form_leaves_save_enabled(self):
+        dialog = self._advanced_dialog(
+            r"^back ?space\s*(\d+)?$",
+            [{"function": "press", "params": ["backspace", "g1"]}],
+        )
+        assert dialog._expression_error_label.text() == ""
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    def test_grid_number_list_read_by_grid_number_command_keeps_save(self):
+        # The shipped grid-number-word pattern: its list of 1 to 9 is
+        # exempt because grid_number_command reads the group, so Edit,
+        # Customize, and Duplicate of it still save.
+        dialog = self._advanced_dialog(
+            r"^((one|two|three|four|five|six|seven|eight|nine|too|to|for)[.!?]?)$",
+            [{"function": "grid_number_command", "params": ["g1", "g2"]}],
+        )
+        assert dialog._expression_error_label.text() == ""
+        assert dialog._steps_error_label.text() == ""
+        assert dialog._save_btn.isEnabled()
+
+    # A rule B error sits in the expression label, but the expression
+    # compiles, so the checks that need a compiled expression still run
+    # and show their own errors beside it.
+
+    def test_rule_b_error_keeps_the_type_error(self):
+        dialog = self._advanced_dialog(
+            r"^delete \d$", [{"function": "press", "params": ["del"]}],
+        )
+        dialog._adv_replacement_radio.setChecked(True)
+        dialog._on_adv_type_changed()
+        dialog._validate_advanced()
+        assert dialog._expression_error_label.text().startswith(
+            "The part '\\d' does not accept number words such as 'five'."
+        )
+        assert dialog._type_error_label.text() == (
+            "A replacement must not start with '^' -- Wheelhouse treats "
+            "'^'-anchored expressions as commands"
+        )
+
+    def test_rule_b_error_keeps_the_group_ref_error(self):
+        dialog = self._advanced_dialog(
+            r"^delete \d$", [{"function": "press", "params": ["del", "g1"]}],
+        )
+        assert dialog._expression_error_label.text().startswith(
+            "The part '\\d' does not accept number words such as 'five'."
+        )
+        assert dialog._steps_error_label.text() == (
+            "Step 'press': 'g1' points at capture group 1, but the "
+            "expression has only 0 capture group(s)"
+        )
+
+    def test_rule_b_error_keeps_the_rule_a_error(self):
+        dialog = self._advanced_dialog(
+            r"^delete (\w+) \d$",
+            [{"function": "press", "params": ["del", "g1"]}],
+        )
+        assert dialog._expression_error_label.text().startswith(
+            "The part '\\d' does not accept number words such as 'five'."
+        )
+        assert dialog._steps_error_label.text().startswith(
+            "Step 'press' reads a number from group g1, but that group is "
+            "'(\\w+)'."
+        )
 
 
 class TestPositionCarryOnCreate:

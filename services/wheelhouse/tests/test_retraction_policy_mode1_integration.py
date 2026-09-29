@@ -103,14 +103,13 @@ class NoOpTextParser:
 def make_processor(word_queue: asyncio.Queue, app: OrderedRecordingApp) -> SpeechProcessor:
     """Real SpeechProcessor over the manager's word_queue, dictation-only.
 
-    The catalog mock returns None from lookup/get_trailing_command so every
+    The catalog mock returns None from lookup so every
     word takes the immediate-DICTATE path -- one intelligent_insert_text per
     word, which is what makes the ordering assertion exact.
     """
     catalog = MagicMock()
     catalog.command_hotword = "x-ray"
     catalog.lookup.return_value = None
-    catalog.get_trailing_command.return_value = None
 
     processor = SpeechProcessor(
         word_queue=word_queue,

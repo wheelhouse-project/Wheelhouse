@@ -1217,8 +1217,13 @@ MUTATIONS = [
         "service": SHARED,
         "test_file": (CAPTURE_TESTS, SHARED_TESTS),
         "file": WINRT,
-        "old": "        return self._setup_ok and self._capture_alive",
-        "new": "        return self._setup_ok",
+        # Indent corrected 2026-09-24 (wh-mic-loss-capture-recovery): the
+        # line has sat under _lifecycle_lock since wh-stt-load-metrics.2.1.6,
+        # so the eight-space pattern matched four characters into it. This
+        # file's own runner has no line-start check, which is why that went
+        # unreported; the shared runner's --check reports it.
+        "old": "            return self._setup_ok and self._capture_alive",
+        "new": "            return self._setup_ok",
         # Catcher renamed for wh-stt-load-metrics.2.1.1:
         # test_winrt_stops_being_ready_when_the_poll_raises mocked
         # _poll_frames itself with side_effect=RuntimeError, a state the
@@ -1279,9 +1284,12 @@ MUTATIONS = [
         "service": SHARED,
         "test_file": (CAPTURE_TESTS, SHARED_TESTS),
         "file": WINRT,
-        "old": "                        self._capture_alive = False\n"
+        # Indent corrected 2026-09-24 (wh-mic-loss-capture-recovery): the
+        # write sits under a lock and a cycle test, eight spaces deeper than
+        # this pattern was written, so it matched eight characters in.
+        "old": "                                self._capture_alive = False\n"
                "                    time.sleep(0.1)",
-        "new": "                        pass\n"
+        "new": "                                pass\n"
                "                    time.sleep(0.1)",
         "expect": [
             "test_winrt_stops_being_ready_when_every_frame_poll_raises",
@@ -1314,13 +1322,17 @@ MUTATIONS = [
         # _lifecycle_lock (wh-stt-load-metrics.2.1.6). The lock stays in the
         # mutant so this mutation still tests only the liveness write; the
         # lock itself is what winrt-the-live-liveness-write-runs-outside-the-
-        # lock covers.
-        "old": "                with self._lifecycle_lock:\n"
-               "                    if self._running and self._cycle == cycle:\n"
-               "                        self._capture_alive = True",
-        "new": "                with self._lifecycle_lock:\n"
-               "                    if self._running and self._cycle == cycle:\n"
-               "                        pass",
+        # lock covers. Refreshed again for wh-mic-loss-capture-recovery,
+        # which nested the block under `if recovering is None or
+        # delivered:`; the `if` line anchors it.
+        "old": "                if recovering is None or delivered:\n"
+               "                    with self._lifecycle_lock:\n"
+               "                        if self._running and self._cycle == cycle:\n"
+               "                            self._capture_alive = True",
+        "new": "                if recovering is None or delivered:\n"
+               "                    with self._lifecycle_lock:\n"
+               "                        if self._running and self._cycle == cycle:\n"
+               "                            pass",
         "expect": [
             "test_winrt_is_ready_again_once_the_frame_polls_recover",
         ],
@@ -1385,8 +1397,12 @@ MUTATIONS = [
         "service": SHARED,
         "test_file": (CAPTURE_TESTS, SHARED_TESTS),
         "file": WINRT,
-        "old": "        while self._running and self._cycle == cycle:",
-        "new": "        while self._running:",
+        # wh-mic-loss-capture-recovery added the same `while` line to
+        # _rebuild, so the poll loop's own next line anchors this one.
+        "old": "        while self._running and self._cycle == cycle:\n"
+               "            if loss is not None and loss.event.is_set():",
+        "new": "        while self._running:\n"
+               "            if loss is not None and loss.event.is_set():",
         "expect": [
             "test_a_stale_poll_loop_ends_when_a_new_cycle_replaces_it",
         ],
@@ -1453,8 +1469,14 @@ MUTATIONS = [
         "service": SHARED,
         "test_file": (CAPTURE_TESTS, SHARED_TESTS),
         "file": WINRT,
-        "old": "            self._cleanup_graph(graph, mic_node, frame_output)",
-        "new": "            self._cleanup_graph()",
+        # Refreshed for wh-mic-loss-capture-recovery: the thread's own
+        # graph is now held in the `owned` list, and the same call also
+        # closes a lost graph in _capture_until_stopped, so the comment
+        # line before the finally's call anchors this one.
+        "old": "            # object, so no two of these can collide.\n"
+               "            self._cleanup_graph(*owned)",
+        "new": "            # object, so no two of these can collide.\n"
+               "            self._cleanup_graph()",
         "expect": [
             "test_each_cycle_closes_the_graph_it_created",
             "test_a_stale_capture_thread_does_not_disturb_the_next_cycle",
@@ -1640,9 +1662,15 @@ MUTATIONS = [
         "service": SHARED,
         "test_file": SHARED_TESTS,
         "file": DIAGNOSTICS,
+        # Refreshed for wh-mic-loss-capture-recovery, whose docstring edit
+        # ended the sentence after "raised" and put the fourth way (a lost
+        # microphone) on the next line; the "So" that anchored this
+        # pattern moved below it.
         "old": "once the capture thread has ended, or once\n"
-               "        POLL_FAILURES_BEFORE_DEAD consecutive frame polls have raised. So",
-        "new": "once the capture thread has ended. So",
+               "        POLL_FAILURES_BEFORE_DEAD consecutive frame polls have raised.\n"
+               "        Since wh-mic-loss-capture-recovery",
+        "new": "once the capture thread has ended.\n"
+               "        Since wh-mic-loss-capture-recovery",
         "expect": [
             "test_the_unavailable_docstring_states_every_way_readiness_says_no",
         ],
@@ -2321,10 +2349,12 @@ MUTATIONS = [
         "service": SHARED,
         "test_file": (CAPTURE_TESTS, SHARED_TESTS),
         "file": WINRT,
-        "old": "                consecutive_failures = 0\n"
-               "                with self._lifecycle_lock:\n",
-        "new": "                consecutive_failures = 0\n"
-               "                with __import__('contextlib').nullcontext():\n",
+        # Refreshed for wh-mic-loss-capture-recovery, which put the write
+        # under `if recovering is None or delivered:`.
+        "old": "                if recovering is None or delivered:\n"
+               "                    with self._lifecycle_lock:\n",
+        "new": "                if recovering is None or delivered:\n"
+               "                    with __import__('contextlib').nullcontext():\n",
         "expect": ["test_the_live_liveness_write_holds_the_lifecycle_lock"],
     },
     {
@@ -2422,16 +2452,19 @@ MUTATIONS = [
                '            # (wh-stt-load-metrics.2.1.13).\n'
                '            self._capture_thread = threading.Thread(\n'
                '                target=self._capture_loop,\n'
-               '                args=(cycle,),\n'
+               '                args=(cycle, stop_event),\n'
                '                daemon=True,\n'
                '                name="WinRTAudioCapture"\n'
                '            )\n'
                '            self._capture_thread.start()\n',
+        # args refreshed for wh-mic-loss-capture-recovery, which hands the
+        # thread its cycle's stop event. stop_event is bound inside the
+        # lock above, so the dedented mutant still reaches it.
         "new": '        self._start_time = time.time()\n'
                '\n'
                '        self._capture_thread = threading.Thread(\n'
                '            target=self._capture_loop,\n'
-               '            args=(cycle,),\n'
+               '            args=(cycle, stop_event),\n'
                '            daemon=True,\n'
                '            name="WinRTAudioCapture"\n'
                '        )\n'

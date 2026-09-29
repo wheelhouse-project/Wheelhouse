@@ -121,6 +121,8 @@ def _make_stack(overlay_state: OverlayState, *, grid_consumes: bool = False):
         text_parser=text_parser,
         app=app,
         logic_controller=lc,
+        # 0 (no open-utterance hold): these tests flush the buffer with the command timer, and the flush after the hold is the same code; tests/test_command_wait_open_utterance.py covers the default hold (badge cases included).
+        open_utterance_hold_ms=0,
     )
     speech_handler.speech_processor = processor
     return processor, app, lc
@@ -468,6 +470,65 @@ def test_a_pause_mid_sentence_keeps_every_word():
     assert " ".join(app.inserted_texts()).split() == [
         "one", "twelve", "is", "my", "number",
     ]
+
+
+# ---------------------------------------------------------------------------
+# The flagged last word is a confirmed utterance end (wh-remove-trailing-
+# submit, BOSS RULING 02:27 2026-09-27, Q3)
+# ---------------------------------------------------------------------------
+#
+# The in-process STT bridge (main.py _handle_stt_transcript) sets
+# end_of_utterance=True on the utterance's LAST REAL WORD, and the router
+# finalizes the buffer on that word, before the queued end marker arrives.
+# SpeechProcessor._utterance_end_is_confirmed answers True for that word
+# (its flagged-last-word arm), so the multi-word badge click fires at that
+# finalization. Without the arm the finalization is not a confirmed end,
+# the words type, and the end marker that follows finds nothing to click.
+# The trailing-command split was this arm's only guard test until
+# wh-remove-trailing-submit removed the split.
+
+def _speak_with_the_last_word_flagged(processor, app, lc, spoken: str):
+    """Speak ``spoken`` the in-process bridge's way, then the end marker.
+
+    Returns ``(clicks, typed)`` as they stood after the flagged last word
+    and BEFORE the end marker was processed.
+    """
+    before_marker: Dict[str, Any] = {}
+
+    async def _run():
+        words = spoken.split()
+        for index, one in enumerate(words):
+            await processor.process_word_event(WordEvent(
+                word=one,
+                start_of_utterance=(index == 0),
+                end_of_utterance=(index == len(words) - 1),
+                utterance_id=1,
+            ))
+        before_marker["clicks"] = list(lc.clicks)
+        before_marker["typed"] = list(app.inserted_texts())
+        await processor.process_word_event(_end_marker())
+
+    asyncio.run(_run())
+    return before_marker["clicks"], before_marker["typed"]
+
+
+@pytest.mark.parametrize(("spoken", "name"), MULTIWORD_SHADOWED)
+def test_a_flagged_last_word_confirms_the_end_and_clicks_the_badge(
+    spoken, name,
+):
+    processor, app, lc = _make_stack(OverlayState.PAINTED)
+    clicks_before_marker, typed_before_marker = (
+        _speak_with_the_last_word_flagged(processor, app, lc, spoken)
+    )
+
+    # The click came from the flagged word's own finalization, not from
+    # the end marker.
+    assert [click.name for click in clicks_before_marker] == [name]
+    assert typed_before_marker == []
+    # And the marker added nothing.
+    assert app.inserted_texts() == []
+    assert len(lc.clicks) == 1
+    assert lc.clicks[0].name == name
 
 
 # ---------------------------------------------------------------------------

@@ -187,6 +187,82 @@ class TestSettingsAcknowledgement:
         })
         manager._check_queues_and_events()
 
+    @staticmethod
+    def notices_shown(manager):
+        """Every text the settings path put on screen or in a Windows notice."""
+        import gui
+        texts = [kwargs['body'] for _, kwargs in manager._settings_notice.show_message.call_args_list
+                 ] if manager._settings_notice is not None else []
+        return texts + [args[1] for args, _ in gui.send_notice.call_args_list
+                        if args and args[0] == 'WheelHouse settings']
+
+    def test_settings_ack_single_save_shows_no_notice_until_it_fails(self, manager):
+        # wh-settings-save-notice-failure-only A1: no notice while a
+        # set_config_value save waits, and none when it succeeds.
+        manager.send_size_change_command(80)
+        command = manager.commands_to_logic_queue.get_nowait()
+        assert manager.settings_pending
+        assert self.notices_shown(manager) == []
+        assert manager.settings_status_text == ''
+        self.reply(manager, command['request_id'], True, 80)
+        assert not manager.settings_pending
+        assert self.notices_shown(manager) == []
+        # A failed save still shows its notice, unchanged.
+        manager.send_size_change_command(90)
+        command = manager.commands_to_logic_queue.get_nowait()
+        self.reply(manager, command['request_id'], False, 80)
+        failure = "Couldn't save settings. Restored the confirmed values."
+        assert self.notices_shown(manager) == [failure, failure]
+        manager._settings_notice.show_message.assert_called_once_with(
+            title='WheelHouse settings', body=failure, lifetime_ms=15000)
+
+    def test_settings_ack_group_save_reconcile_shows_no_notice_until_it_fails(self, manager):
+        # wh-settings-save-notice-failure-only A1: a set_config_values save
+        # that loses its answer reconciles without a notice; only the final
+        # failure after the three reconcile attempts shows one.
+        from PySide6.QtCore import QPoint
+
+        clock = {'now': 0.0}
+        with patch('time.monotonic', side_effect=lambda: clock['now']):
+            manager.send_resize_commit_command(90, QPoint(200, 300))
+            group = manager.commands_to_logic_queue.get_nowait()
+            assert group['action'] == 'set_config_values'
+            assert self.notices_shown(manager) == []
+            clock['now'] = 6.0
+            manager._check_queues_and_events()
+            query = manager.commands_to_logic_queue.get_nowait()
+            assert query['action'] == 'get_config_values'
+            assert self.notices_shown(manager) == []
+            assert manager.settings_status_text == ''
+            for now in (12.0, 18.0):
+                clock['now'] = now
+                manager._check_queues_and_events()
+                manager.commands_to_logic_queue.get_nowait()
+            assert self.notices_shown(manager) == []
+            clock['now'] = 24.0
+            manager._check_queues_and_events()
+        assert not manager.settings_pending
+        failure = "Couldn't confirm the settings. They may not have been saved."
+        assert self.notices_shown(manager) == [failure, failure]
+
+    def test_settings_ack_success_keeps_unrelated_failure_notice(self, manager):
+        # wh-settings-save-notice-failure-only.2.1: a success for request A
+        # proves nothing about request B's failure, so it must not close B's
+        # notice. A failure notice ends by its 15 s lifetime or a newer failure.
+        manager.send_size_change_command(80)
+        size_write = manager.commands_to_logic_queue.get_nowait()
+        assert manager.settings_pending
+        with patch.object(manager.commands_to_logic_queue, 'put_nowait', side_effect=Full):
+            manager.send_command({'action': 'set_config_value',
+                                  'key': 'FLOATING_BUTTON_VISIBLE', 'value': False})
+        failure = "Couldn't send settings. Restored the confirmed values."
+        assert manager.settings_status_text == failure
+        assert manager.settings_pending
+        self.reply(manager, size_write['request_id'], True, 80)
+        assert not manager.settings_pending
+        manager._settings_notice.close.assert_not_called()
+        assert manager.settings_status_text == failure
+
     def test_settings_ack_pending_until_reply(self, manager):
         manager.send_size_change_command(80)
         command = manager.commands_to_logic_queue.get_nowait()
@@ -282,7 +358,9 @@ class TestSettingsAcknowledgement:
         assert query['request_id'] == group['request_id']
         assert query['keys'] == ['FLOATING_BUTTON_POS']
         assert manager.commands_to_logic_queue.empty()
-        assert 'checking the current settings' in manager.settings_status_text.lower()
+        # The reconciliation check shows no notice
+        # (wh-settings-save-notice-failure-only).
+        assert manager.settings_status_text == ''
         manager.state_from_logic_queue.put_nowait({
             'action': 'config_values_result', 'request_id': group['request_id'],
             'values': {'FLOATING_BUTTON_POS': [200, 300]},
@@ -290,7 +368,7 @@ class TestSettingsAcknowledgement:
         manager._check_queues_and_events()
         assert not manager.settings_pending
         assert manager.settings_status_text == ''
-        manager._settings_notice.close.assert_called_once()
+        assert manager._settings_notice is None
 
     def test_settings_ack_timeout_retries_are_bounded_then_fail(self, manager):
         # wh-codex-merge-audit.4.1.3: three re-arms, then a definite failure.
@@ -337,7 +415,7 @@ class TestSettingsAcknowledgement:
         with patch('gui.send_notice', side_effect=RuntimeError('notification area gone')), \
              patch('gui.logger') as log:
             try:
-                manager._settings_show_status("Couldn't save settings.", failure=True)
+                manager._settings_show_status("Couldn't save settings.")
             except Exception as exc:
                 raised = exc
             logged = log.exception.called
@@ -410,16 +488,20 @@ class TestSettingsAckNoticeFallback:
     def test_settings_ack_notice_reaches_user_when_box_cannot_render(self, manager, delivered):
         """The Windows notice is the whole of the user's information here.
 
-        The notice box constructor raises, so _settings_show_status leaves
-        rendered False and the fallback is the only remaining path. Delivery is
-        measured at plyer, past send_notice's own availability checks and text
-        fitting, so removing the fallback call leaves the list empty.
+        The notice box constructor raises, so the Windows notice is the only
+        remaining path. A failed send is the trigger: since
+        wh-settings-save-notice-failure-only only a failure shows a settings
+        notice. Delivery is measured at plyer, past send_notice's own
+        availability checks and text fitting, so removing the fallback call
+        leaves the list empty.
         """
+        manager.commands_to_logic_queue = MagicMock()
+        manager.commands_to_logic_queue.put_nowait.side_effect = Full
         with patch('soft_allow_write_failed_toast.SoftAllowWriteFailedToast',
                    side_effect=RuntimeError('Qt unavailable')):
             manager.send_size_change_command(80)
         assert delivered == [{'title': 'WheelHouse settings',
-                              'message': 'Saving settings. Waiting for confirmation.',
+                              'message': "Couldn't send settings. Restored the confirmed values.",
                               'timeout': 15}]
 
 # wh-pytest-flaky-segfault: many classes here construct GuiManager,
@@ -3250,3 +3332,105 @@ class TestVoiceTeachingSitsInTheSttProviderSubmenu:
         entries = _window_every_entry(menu_manager)
         assert STT_SUBMENU_TITLE not in entries, entries
         assert VOICE_TEACHING_LABEL not in entries, entries
+
+
+# -----------------------------------------------------------------------
+# Parakeet without its model (wh-parakeet-model-download-offer)
+# -----------------------------------------------------------------------
+
+PARAKEET_NOT_INSTALLED_LABEL = "Parakeet (model not installed)"
+
+
+class TestParakeetNotInstalledEntry:
+    """A disabled Parakeet whose model is incomplete is still offered.
+
+    The state update carries it apart from the engine list
+    (``stt_providers_not_installed``), and both branches of
+    ``_create_menu`` list it after the engines. Picking it sends the
+    ordinary ``switch_stt_provider`` action; the Logic process decides what
+    happens. It is never shown as checked, even when the current engine
+    name is ``parakeet_tdt``, because it is not an engine that can run.
+    """
+
+    @pytest.fixture
+    def offer_manager(self, menu_manager):
+        menu_manager.stt_providers_available = ["google_stt"]
+        menu_manager.stt_provider_display_names = {"google_stt": "Google Cloud STT"}
+        menu_manager.stt_providers_not_installed = {
+            "parakeet_tdt": PARAKEET_NOT_INSTALLED_LABEL,
+        }
+        # A MagicMock event reports "set", and the queue check then
+        # shuts down before it reads the queue.
+        menu_manager.shutdown_event.is_set.return_value = False
+        return menu_manager
+
+    def test_the_tray_submenu_lists_the_entry_after_the_engines(self, offer_manager):
+        assert _tray_entries(offer_manager, submenu=STT_SUBMENU_TITLE) == [
+            "Google Cloud STT",
+            PARAKEET_NOT_INSTALLED_LABEL,
+            SEPARATOR_MARK,
+            VOICE_TEACHING_LABEL,
+        ]
+
+    def test_the_window_submenu_lists_the_entry_after_the_engines(self, offer_manager):
+        assert _window_entries(offer_manager, submenu=STT_SUBMENU_TITLE) == [
+            "Google Cloud STT",
+            PARAKEET_NOT_INSTALLED_LABEL,
+            SEPARATOR_MARK,
+            VOICE_TEACHING_LABEL,
+        ]
+
+    def test_the_tray_entry_is_never_checked(self, offer_manager):
+        offer_manager.stt_provider = "parakeet_tdt"
+        item = _tray_submenu_item(offer_manager, PARAKEET_NOT_INSTALLED_LABEL)
+        assert not item.checked
+
+    def test_the_window_entry_is_never_checked(self, offer_manager):
+        offer_manager.stt_provider = "parakeet_tdt"
+        _menu, _holder, action = _window_submenu_action(
+            offer_manager, PARAKEET_NOT_INSTALLED_LABEL,
+        )
+        assert not action.isCheckable()
+        assert not action.isChecked()
+
+    def test_the_tray_entry_sends_the_switch_action(self, offer_manager):
+        item = _tray_submenu_item(offer_manager, PARAKEET_NOT_INSTALLED_LABEL)
+        item(MagicMock())
+        offer_manager.commands_to_logic_queue.put_nowait.assert_called_with(
+            {'action': 'switch_stt_provider', 'provider': 'parakeet_tdt'}
+        )
+
+    def test_the_window_entry_sends_the_switch_action(self, offer_manager):
+        _menu, _holder, action = _window_submenu_action(
+            offer_manager, PARAKEET_NOT_INSTALLED_LABEL,
+        )
+        action.trigger()
+        offer_manager.commands_to_logic_queue.put_nowait.assert_called_with(
+            {'action': 'switch_stt_provider', 'provider': 'parakeet_tdt'}
+        )
+
+    def test_the_state_update_sets_the_entries(self, offer_manager):
+        offer_manager.stt_providers_not_installed = {}
+        msg = {
+            'action': 'state_update',
+            'stt_providers_available': ['google_stt'],
+            'stt_providers_not_installed': {
+                'parakeet_tdt': PARAKEET_NOT_INSTALLED_LABEL,
+            },
+        }
+        offer_manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(offer_manager, 'update_ui_state'):
+            offer_manager._check_queues_and_events()
+        assert offer_manager.stt_providers_not_installed == {
+            'parakeet_tdt': PARAKEET_NOT_INSTALLED_LABEL,
+        }
+
+    def test_a_state_update_without_the_key_clears_the_entries(self, offer_manager):
+        msg = {
+            'action': 'state_update',
+            'stt_providers_available': ['google_stt'],
+        }
+        offer_manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(offer_manager, 'update_ui_state'):
+            offer_manager._check_queues_and_events()
+        assert offer_manager.stt_providers_not_installed == {}

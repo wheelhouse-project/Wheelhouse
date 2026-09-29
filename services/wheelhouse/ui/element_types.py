@@ -28,8 +28,9 @@ class ClickGesture(str, enum.Enum):
     (``InvokePattern``, with the executor's existing fallbacks). It carries no
     button and no click count, because ``Invoke()`` has neither.
 
-    ``RIGHT_CLICK`` and ``DOUBLE_CLICK`` are PHYSICAL gestures. They cannot be
-    expressed through Invoke at all, so ``ClickExecutor`` routes them to the
+    ``RIGHT_CLICK``, ``DOUBLE_CLICK`` and ``TRIPLE_CLICK`` are PHYSICAL
+    gestures (``TRIPLE_CLICK`` added by wh-voice-access-parity.2.5). They
+    cannot be expressed through Invoke at all, so ``ClickExecutor`` routes them to the
     existing guarded coordinate-click path -- the same five-step pre-click
     verification and the same two occlusion hit-test layers -- with a different
     button or click count. See the "Gesture parameter" subsection of
@@ -46,6 +47,7 @@ class ClickGesture(str, enum.Enum):
     INVOKE = "invoke"
     RIGHT_CLICK = "right_click"
     DOUBLE_CLICK = "double_click"
+    TRIPLE_CLICK = "triple_click"
 
 
 # The gesture every pre-existing call site means: today's Invoke behaviour.

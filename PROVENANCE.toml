@@ -60,11 +60,26 @@ license = "Pixabay Content License"
 
 # --- Wake-word model -----------------------------------------------------
 # The default "computer" wake-word model is an openWakeWord community
-# model from the Home Assistant wakewords collection (MIT).
+# model from the Home Assistant wakewords collection (MIT, Copyright (c)
+# 2023 Florian Wartner). NOTICE carries the full MIT license text, which
+# the license requires in every copy.
 
 [[asset]]
 path = "services/stt_providers/shared/data/wake_words/computer_v2.onnx"
 origin = "https://github.com/fwartner/home-assistant-wakewords-collection (en/computer)"
+license = "MIT"
+
+# --- Silero VAD model ----------------------------------------------------
+# The voice-activity model every speech provider runs
+# (shared_audio/silero_vad.py), the upstream Silero v6.2 ONNX file from
+# snakers4/silero-vad tag v6.2.3, src/silero_vad/data/silero_vad.onnx
+# (MIT, Copyright (c) 2020-present Silero Team). NOTICE carries the full
+# MIT license text; docs/vendoring/SECURITY.md records its checksum
+# (wh-vad-releases-gil).
+
+[[asset]]
+path = "services/stt_providers/shared/shared_audio/vad_model/silero_vad_v6.2.3.onnx"
+origin = "https://github.com/snakers4/silero-vad (tag v6.2.3, src/silero_vad/data/silero_vad.onnx)"
 license = "MIT"
 
 # --- Project artwork ------------------------------------------------------

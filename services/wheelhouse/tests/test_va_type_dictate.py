@@ -21,9 +21,7 @@ test live here, and they behave differently today on purpose:
 
 2. TestTypeAndDictateAliases, TestBareEnterAndTab and TestSubmitGuard build
    their OWN self-contained temporary patterns.toml (via pytest's tmp_path,
-   the same technique already shipped in
-   services/wheelhouse/tests/test_speech_processor_trailing_command.py for
-   this exact epic) using the literal TOML text of the blocks staged in
+   the same technique the other speech-processor tests use) using the literal TOML text of the blocks staged in
    wh-voice-access-parity.1.9.toml. These tests exercise the fragment's own
    correctness in isolation and DO pass today -- they never touch the live
    production file, so nothing here makes patterns.toml pass early. A
@@ -252,11 +250,11 @@ actions = [
 # exercise the real first-match interaction between them.
 _BYPASS_PAIR = (_LITERAL_BYPASS_BLOCK, _TYPE_DICTATE_BLOCK)
 
-_TRAILING_SUBMIT_BLOCK = """
+_SUBMIT_BLOCK = """
 [[pattern]]
-pattern = '''submit'''
+pattern = '''^submit$'''
 doc_id = "submit-enter"
-position = "trailing"
+whole_utterance_only = true
 actions = [
     { function = "press_keys", params = ["enter"] }
 ]
@@ -299,8 +297,7 @@ async def _harness(tmp_path, *blocks):
 def _insert_text_values(outputs):
     """Text carried by every insertion-shaped output, in order.
 
-    Mirrors TestTrailingCommandLiteralEscape in
-    test_speech_processor_trailing_command.py: the insert_text action
+    The insert_text action
     surfaces as a generic ``intelligent_insert_text`` or ``insert_text`` IPC
     call, so check both possible param keys instead of the action name.
 
@@ -418,17 +415,15 @@ class TestTypeAndDictateAliases:
 
     @pytest.mark.asyncio
     async def test_literal_submit_escape_hatch_unaffected(self, tmp_path):
-        """Regression against the pre-existing shipped behavior covered by
-        services/wheelhouse/tests/test_speech_processor_trailing_command.py
-        ::TestTrailingCommandLiteralEscape -- "literal submit" must still
-        insert "submit" as text and must NOT press Enter, with this
-        fragment's new type-dictate-bypass block also in place.
+        """"literal submit" must still insert "submit" as text and must
+        NOT press Enter, with this fragment's new type-dictate-bypass block
+        also in place.
 
         The shipped literal-bypass block is unchanged by this fragment, so
         this is a check that the ADDED block does not disturb it.
         """
         h = await _harness(
-            tmp_path, *_BYPASS_PAIR, _TRAILING_SUBMIT_BLOCK,
+            tmp_path, *_BYPASS_PAIR, _SUBMIT_BLOCK,
         )
         await h.send_utterance(["literal", "submit"])
         await asyncio.sleep(0.1)
@@ -515,34 +510,23 @@ class TestBareEnterAndTab:
 
 
 # ----------------------------------------------------------------------------
-# THE REQUIRED GUARD TEST: bare enter must not endanger trailing "submit"
+# THE REQUIRED GUARD TEST: bare enter must not endanger "submit"
 # ----------------------------------------------------------------------------
 
 class TestSubmitGuard:
-    """Bead CAUTION, load bearing: the trailing-position "submit" command
-    already presses Enter at the end of an utterance, and the comment above
-    that entry in patterns.toml (lines 299-302) records that a leading
-    PLUS trailing pair for the SAME WORD silently pre-empts the trailing
-    intercept in single-word utterances -- that is why a leading "submit"
-    entry was removed previously. BLOCK 2 here is named "enter", a
-    DIFFERENT word from "submit", so the collision key
-    ({"enter"} vs {"submit"}) never overlaps -- verified directly via
-    PatternCatalog's own trailing/leading collision check (pattern_catalog.py
-    lines 663-676) in test_no_leading_trailing_word_collision below, not
-    just asserted behaviorally.
+    """Bead CAUTION, load bearing: BLOCK 2 here is named "enter", a
+    DIFFERENT word from "submit", so the bare-enter entry must not change
+    what "submit" does. Since wh-remove-trailing-submit, "submit" presses
+    Enter only as the whole utterance; after other words it is typed.
     """
 
     @pytest.mark.asyncio
-    async def test_hello_world_submit_still_types_words_and_presses_enter(
-        self, tmp_path,
-    ):
-        """The exact utterance named in the bead's CAUTION and ACCEPTANCE
-        CRITERIA, with the bare-enter entry present alongside literal-bypass
-        and the trailing submit-enter entry.
+    async def test_hello_world_submit_types_all_three_words(self, tmp_path):
+        """The utterance named in the bead's CAUTION, with the bare-enter
+        entry present alongside literal-bypass and the submit-enter entry.
         """
         h = await _harness(
-            tmp_path,
-            *_BYPASS_PAIR, _TRAILING_SUBMIT_BLOCK, _BARE_ENTER_BLOCK,
+            tmp_path, *_BYPASS_PAIR, _SUBMIT_BLOCK, _BARE_ENTER_BLOCK,
         )
         await h.send_word("hello", start_of_utterance=True, end_of_utterance=False)
         await h.send_word("world", start_of_utterance=False, end_of_utterance=False)
@@ -550,31 +534,17 @@ class TestSubmitGuard:
         await h.send_utterance_end_marker(h._utterance_counter)
         await asyncio.sleep(0.1)
 
-        assert h.get_dictation_texts() == ["hello", "world"], (
-            "the prefix must still be dictated verbatim with the bare-enter "
-            "entry present"
-        )
-        hotkeys = _hotkey_actions(h.get_outputs())
-        assert len(hotkeys) == 1, (
-            f"the trailing submit action must fire exactly once; got {hotkeys!r}"
-        )
-        assert hotkeys[0].params.get("keys") == ["enter"]
-        assert hotkeys[0].params.get("repeat") == 1
-        assert _press_key_actions(h.get_outputs()) == [], (
-            "the bare-enter entry (a different word from 'submit') must "
-            "not itself fire -- only the trailing hotkey_action path should"
-        )
+        assert h.get_dictation_texts() == ["hello", "world", "submit"]
+        assert _hotkey_actions(h.get_outputs()) == []
+        assert _press_key_actions(h.get_outputs()) == []
         await h.stop()
 
     @pytest.mark.asyncio
     async def test_lone_submit_still_fires_with_no_dictation(self, tmp_path):
-        """Regression against test_speech_processor_trailing_command.py
-        ::TestTrailingCommandSingleWord, with the bare-enter entry now also
-        present in the catalog.
-        """
+        """"submit" as the whole utterance presses Enter once, with the
+        bare-enter entry also present in the catalog."""
         h = await _harness(
-            tmp_path,
-            *_BYPASS_PAIR, _TRAILING_SUBMIT_BLOCK, _BARE_ENTER_BLOCK,
+            tmp_path, *_BYPASS_PAIR, _SUBMIT_BLOCK, _BARE_ENTER_BLOCK,
         )
         await h.send_word("submit", start_of_utterance=True, end_of_utterance=False)
         await h.send_utterance_end_marker(h._utterance_counter)
@@ -584,23 +554,4 @@ class TestSubmitGuard:
         hotkeys = _hotkey_actions(h.get_outputs())
         assert len(hotkeys) == 1
         assert hotkeys[0].params.get("keys") == ["enter"]
-        await h.stop()
-
-    @pytest.mark.asyncio
-    async def test_no_leading_trailing_word_collision(self, tmp_path):
-        """Direct code-level proof, not inference: run the SAME collision
-        check PatternCatalog itself runs at load time (pattern_catalog.py
-        lines 663-676, ``set(trailing_commands.keys()) & set(first_words.
-        keys())``) against the merged catalog and assert it is empty.
-        """
-        h = await _harness(
-            tmp_path,
-            *_BYPASS_PAIR, _TRAILING_SUBMIT_BLOCK, _BARE_ENTER_BLOCK,
-        )
-        assert "submit" in h.catalog.trailing_commands
-        assert "enter" in h.catalog.first_words
-        collisions = set(h.catalog.trailing_commands.keys()) & set(
-            h.catalog.first_words.keys()
-        )
-        assert collisions == set()
         await h.stop()

@@ -10,18 +10,18 @@
   <title>User guide · Wheelhouse</title>
   <link rel="icon" href="favicon.ico">
   <link rel="stylesheet" href="site.css">
-  
+  <script type="module" src="assistant-window.mjs"></script>
 </head>
 <body id="top">
   <a class="skip-link" href="#main">Skip to main content</a>
   <header class="site-header"><div class="header-inner wrap">
     <a class="brand" href="index.html" aria-label="Wheelhouse home"><span class="wheel" aria-hidden="true">☸</span> Wheelhouse<span class="brand-dot" aria-hidden="true">.</span></a>
-    <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="start.html">Get started</a><a href="guide.html" aria-current="page">User guide</a><a href="reference.html">Commands</a><a href="install.html">Installation</a><a href="help.html">Get help</a></nav>
+    <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="start.html">Get started</a><a href="guide.html" aria-current="page">User guide</a><a href="reference.html">Reference</a><a href="install.html">Installation</a><a href="voice-access.html">Voice Access</a><a href="help.html">Get help</a></nav>
     <a class="button small" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe" aria-label="Download for Windows">Download <span aria-hidden="true">↗</span></a>
   </div></header>
   <main id="main" tabindex="-1"><div class="document-heading wrap"><h1>User guide</h1><p class="lead">Choose a section from the contents below. If you’ve just installed Wheelhouse, I’d start with <a href="start.html#first-words">a few words in Notepad</a>.</p>
-    <div class="guide-links"><a href="guide.html">Using Wheelhouse</a><a href="install.html">Installation details</a><a href="reference.html">Commands &amp; settings</a></div></div>
-    <div class="document-layout wrap"><aside class="document-toc"><details open><summary>On this page</summary><nav aria-label="Page contents"><ul><li><a href="guide.html#overview">Overview</a></li><li><a href="guide.html#quick-start">Quick Start</a></li><li><a href="guide.html#where-to-go-next">Where to Go Next</a></li><li><a href="guide.html#speech-engines">Speech Engines</a><ul><li><a href="guide.html#account-requirements">Account requirements</a></li><li><a href="guide.html#local-and-cloud-engines-compared">Local and cloud engines compared</a></li><li><a href="guide.html#setting-up-google-cloud-credentials-only-if-you-chose-that-engine">Setting up Google Cloud credentials (only if you chose that engine)</a></li><li><a href="guide.html#adding-or-switching-engines-later">Adding or switching engines later</a></li><li><a href="guide.html#teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</a></li></ul></li><li><a href="guide.html#system-requirements">System Requirements</a><ul><li><a href="guide.html#minimum-requirements">Minimum requirements</a></li><li><a href="guide.html#recommended-requirements">Recommended requirements</a></li><li><a href="guide.html#graphics-cards">Graphics cards</a></li><li><a href="guide.html#estimating-performance">Estimating performance</a></li><li><a href="guide.html#what-speed-to-expect">What speed to expect</a></li><li><a href="guide.html#improving-performance-on-slower-hardware">Improving performance on slower hardware</a></li></ul></li><li><a href="guide.html#voice-commands">Voice Commands</a><ul><li><a href="guide.html#common-commands">Common Commands</a></li><li><a href="guide.html#usage-examples">Usage Examples</a></li><li><a href="guide.html#full-voice-command-reference">Full Voice Command Reference</a></li><li><a href="guide.html#selected-commands-in-detail">Selected Commands in Detail</a></li></ul></li><li><a href="guide.html#speech-modes">Speech Modes</a><ul><li><a href="guide.html#classification-of-spoken-input">Classification of spoken input</a></li><li><a href="guide.html#word-position-determines-classification">Word position determines classification</a></li><li><a href="guide.html#hotword-protected-commands">Hotword-protected commands</a></li><li><a href="guide.html#streaming-insertion">Streaming insertion</a></li><li><a href="guide.html#chaining-cursor-moves-with-then">Chaining cursor moves with &quot;then&quot;</a></li></ul></li><li><a href="guide.html#interaction-modes">Interaction Modes</a><ul><li><a href="guide.html#toggle-mode">Toggle mode</a></li><li><a href="guide.html#push-to-talk-mode">Push-to-talk mode</a></li><li><a href="guide.html#how-to-switch-between-the-modes">How to switch between the modes</a></li><li><a href="guide.html#choosing-a-mode">Choosing a mode</a></li></ul></li><li><a href="guide.html#floating-button-and-tray-icon">Floating Button and Tray Icon</a><ul><li><a href="guide.html#the-floating-button">The floating button</a></li><li><a href="guide.html#the-tray-icon">The tray icon</a></li><li><a href="guide.html#the-right-click-menu">The right-click menu</a></li></ul></li><li><a href="guide.html#configuration">Configuration</a><ul><li><a href="guide.html#settings-for-slower-hardware">Settings for slower hardware</a></li><li><a href="guide.html#speech-recognition-quality-settings">Speech recognition quality settings</a></li></ul></li><li><a href="guide.html#plugins">Plugins</a><ul><li><a href="guide.html#internal-panel">Internal Panel</a></li><li><a href="guide.html#sonos">Sonos</a></li><li><a href="guide.html#system-volume">System Volume</a></li><li><a href="guide.html#bravia-sony-tv">Bravia (Sony TV)</a></li><li><a href="guide.html#idle-monitor">Idle Monitor</a></li><li><a href="guide.html#window-positioning">Window Positioning</a></li><li><a href="guide.html#example-configuration">Example configuration</a></li><li><a href="guide.html#plugin-troubleshooting">Plugin troubleshooting</a></li></ul></li><li><a href="guide.html#troubleshooting">Troubleshooting</a><ul><li><a href="guide.html#setup-verification">Setup verification</a></li><li><a href="guide.html#common-problems">Common Problems</a></li><li><a href="guide.html#installer-troubleshooting">Installer troubleshooting</a></li></ul></li><li><a href="guide.html#getting-help">Getting Help</a></li></ul></nav></details></aside>
+    <div class="guide-links"><a href="guide.html">Using Wheelhouse</a><a href="install.html">Installation details</a><a href="reference.html">Actions &amp; settings</a></div></div>
+    <div class="document-layout wrap"><aside class="document-toc"><details open><summary>On this page</summary><nav aria-label="Page contents"><ul><li><a href="guide.html#overview">Overview</a></li><li><a href="guide.html#quick-start">Quick Start</a></li><li><a href="guide.html#where-to-go-next">Where to Go Next</a></li><li><a href="guide.html#speech-engines">Speech Engines</a><ul><li><a href="guide.html#teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</a></li></ul></li><li><a href="guide.html#system-requirements">System Requirements</a><ul><li><a href="guide.html#minimum-requirements">Minimum requirements</a></li><li><a href="guide.html#recommended-requirements">Recommended requirements</a></li><li><a href="guide.html#graphics-cards">Graphics cards</a></li><li><a href="guide.html#estimating-performance">Estimating performance</a></li><li><a href="guide.html#what-speed-to-expect">What speed to expect</a></li><li><a href="guide.html#improving-performance-on-slower-hardware">Improving performance on slower hardware</a></li></ul></li><li><a href="guide.html#voice-commands">Voice Commands</a><ul><li><a href="guide.html#common-commands">Common Commands</a></li><li><a href="guide.html#usage-examples">Usage Examples</a></li><li><a href="guide.html#full-voice-command-reference">Full Voice Command Reference</a></li><li><a href="guide.html#selected-commands-in-detail">Selected Commands in Detail</a></li></ul></li><li><a href="guide.html#speech-modes">Speech Modes</a><ul><li><a href="guide.html#classification-of-spoken-input">Classification of spoken input</a></li><li><a href="guide.html#word-position-determines-classification">Word position determines classification</a></li><li><a href="guide.html#commands-that-need-the-safety-word">Commands that need the safety word</a></li><li><a href="guide.html#streaming-insertion">Streaming insertion</a></li><li><a href="guide.html#chaining-cursor-moves-with-then">Chaining cursor moves with &quot;then&quot;</a></li></ul></li><li><a href="guide.html#interaction-modes">Interaction Modes</a><ul><li><a href="guide.html#toggle-mode">Toggle mode</a></li><li><a href="guide.html#push-to-talk-mode">Push-to-talk mode</a></li><li><a href="guide.html#how-to-switch-between-the-modes">How to switch between the modes</a></li><li><a href="guide.html#choosing-a-mode">Choosing a mode</a></li></ul></li><li><a href="guide.html#floating-button-and-tray-icon">Floating Button and Tray Icon</a><ul><li><a href="guide.html#the-floating-button">The floating button</a></li><li><a href="guide.html#the-tray-icon">The tray icon</a></li><li><a href="guide.html#the-right-click-menu">The right-click menu</a></li></ul></li><li><a href="guide.html#configuration">Configuration</a><ul><li><a href="guide.html#settings-for-slower-hardware">Settings for slower hardware</a></li><li><a href="guide.html#speech-recognition-quality-settings">Speech recognition quality settings</a></li></ul></li><li><a href="guide.html#plugins">Plugins</a><ul><li><a href="guide.html#internal-panel">Internal Panel</a></li><li><a href="guide.html#sonos">Sonos</a></li><li><a href="guide.html#system-volume">System Volume</a></li><li><a href="guide.html#bravia-sony-tv">Bravia (Sony TV)</a></li><li><a href="guide.html#idle-monitor">Idle Monitor</a></li><li><a href="guide.html#window-positioning">Window Positioning</a></li><li><a href="guide.html#example-configuration">Example configuration</a></li><li><a href="guide.html#plugin-troubleshooting">Plugin troubleshooting</a></li></ul></li><li><a href="guide.html#troubleshooting">Troubleshooting</a><ul><li><a href="guide.html#setup-verification">Setup verification</a></li><li><a href="guide.html#common-problems">Common Problems</a></li></ul></li><li><a href="guide.html#getting-help">Getting Help</a></li></ul></nav></details></aside>
     <article class="document-body"><h2 id="overview">Overview</h2>
 <p>Wheelhouse controls a Windows PC by voice. It performs five functions: dictating text into any application, executing spoken commands, switching windows, launching programs, and clicking on-screen controls by name. None of them require the keyboard or mouse. On a Logitech MX-series mouse, Wheelhouse can additionally assign screen brightness and volume to the thumb wheel.</p>
 <p><strong>Intended use.</strong> Wheelhouse is a general-purpose voice interface and an assistive technology. A user for whom a keyboard and mouse are painful, difficult or impossible can operate the computer through the voice interface alone.</p>
@@ -29,12 +29,12 @@
 <ul>
 <li>A Windows 10 or Windows 11 PC (64-bit)</li>
 <li>A microphone. A laptop's built-in microphone is usually adequate. If recognition accuracy is poor, a headset or external microphone is worth trying, and one can be connected after installing.</li>
-<li>About 10 GB of free disk space. Most of that is the speech model; the Python environments the program and its speech engines run in are the smaller part.</li>
+<li>About 10 GB of free disk space. The speech model is 2.5 GB of that; the program and the Python environments its speech engines run in take the rest.</li>
 </ul>
 <p>The installer provides everything else and checks the hardware before it begins. No account, subscription or prior installation of other software is required. The full requirements, including memory and processor, are in <a href="guide.html#system-requirements">System Requirements</a> below.</p>
 <p><strong>Where speech is processed.</strong> By default, Wheelhouse converts speech to text on the local machine. No audio or text is transmitted, and the application reports no telemetry. Cloud speech recognition is available; it is not the default, and it can be selected at install time or afterwards. <a href="guide.html#speech-engines">Speech Engines</a> compares the engines and states what each one transmits.</p>
 <p><strong>Operation.</strong> Wheelhouse converts microphone audio to text on the local machine and then classifies the result. Text matching a known command ("undo", "select all") is executed as that command. All other text is dictation, and is inserted into the focused window -- a document, an email, a chat field -- with capitalization and spacing applied automatically. Punctuation is spoken: "comma" and "period" insert the corresponding symbols. Text is inserted continuously while you speak, typically beginning within two seconds, rather than after the utterance ends. <a href="guide.html#speech-modes">Speech Modes</a> documents how the classification is decided.</p>
-<p><strong>Getting answers.</strong> The Wheelhouse Assistant answers questions about any part of this document in plain language, without requiring you to find the right section first. It also holds the full command and configuration reference, so it answers questions this document does not cover. See <a href="guide.html#getting-help">Getting Help</a>.</p>
+<p><strong>Getting answers.</strong> The Wheelhouse Assistant answers questions about any part of this document in plain language, without requiring you to find the right section first. It also holds the reference for actions, notices, and configuration settings, so it answers questions this document does not cover. See <a href="guide.html#getting-help">Getting Help</a>.</p>
 <p><strong>Project status.</strong> Wheelhouse is an open-source project with a single primary author. It is in daily use by the author, but it has been tested on a limited set of machines, so defects on untested hardware and in untested applications are expected. Report failures at https://github.com/wheelhouse-project/Wheelhouse</p>
 <hr />
 <h2 id="quick-start">Quick Start</h2>
@@ -57,82 +57,15 @@
 <p>Once the quick start works, continue with the section that matches the task.</p>
 <ul>
 <li><strong>Dictating text into email, documents and chat:</strong> <a href="guide.html#voice-commands">Voice Commands</a>, in particular the dictation and punctuation subsections, then <a href="guide.html#speech-modes">Speech Modes</a>.</li>
-<li><strong>Using the full command set:</strong> the complete <a href="guide.html#voice-commands">Voice Commands</a> reference, covering commands, formatting and navigation, then <a href="guide.html#configuration">Configuration</a>. Every shipped command and every user-facing setting in config.toml is also listed in the <a href="https://wheelhouse-project.org/reference.html">command and configuration reference</a>.</li>
+<li><strong>Using the full command set:</strong> the <a href="guide.html#voice-commands">Voice Commands</a> section, which lists every shipped command and covers formatting and navigation, then <a href="guide.html#configuration">Configuration</a>. Every user-facing setting in config.toml is listed in the <a href="https://wheelhouse-project.org/reference.html">configuration reference</a>.</li>
 <li><strong>Installing, configuring or diagnosing a fault:</strong> <a href="install.html#installation-and-setup">Installation and Setup</a>, then <a href="guide.html#configuration">Configuration</a>, then <a href="guide.html#troubleshooting">Troubleshooting</a>. For a question that none of those answer directly, the Wheelhouse Assistant answers from this document in plain language; see <a href="guide.html#getting-help">Getting Help</a>.</li>
 </ul>
 <hr />
 <h2 id="speech-engines">Speech Engines</h2>
-<h3 id="account-requirements">Account requirements</h3>
-<p>No account is required for the default configuration. Wheelhouse ships with the <strong>Parakeet</strong> engine as its default: it runs on the local processor, works offline, costs nothing, and transmits no audio. The installer downloads its model, and it is preselected in the settings.</p>
-<p>An account is required in one case: the <strong>Google Cloud</strong> speech engine, selected at the installer's speech-engine question. That engine processes speech on Google's servers and requires a Google Cloud account and a one-time credentials setup. The account is free and most personal use stays within Google's free tier; Google charges for use beyond it. One limitation: on a computer with less than 8 GB of memory the installer stops before installing anything. Its closing message mentions the cloud engine, but the installer cannot set that engine up on such a machine either, so the remedy is more memory or a different computer.</p>
-<p>A third engine, <strong>Distil-Whisper</strong>, runs locally on an NVIDIA graphics card with at least 4 GB of dedicated memory. The two installers differ here. The setup wizard lists it whatever graphics hardware is present; without a suitable card the install sets up Parakeet instead and says so on its final page, among the notices shown there. The command-line installer checks the hardware first and offers Distil-Whisper only when it finds a suitable card. It downloads its own model on first start, so the first launch takes several minutes.</p>
-<h3 id="local-and-cloud-engines-compared">Local and cloud engines compared</h3>
-<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
-<thead>
-<tr>
-<th>Aspect</th>
-<th>Local engines (Parakeet, Distil-Whisper)</th>
-<th>Cloud engine (Google Cloud)</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Accuracy</td>
-<td>Very good for everyday dictation and commands</td>
-<td>Very good; may have an edge on unusual names and vocabulary</td>
-</tr>
-<tr>
-<td>Latency</td>
-<td>Depends on your computer's speed; about 1.5-2 seconds to the first word on modern hardware</td>
-<td>Depends on your internet connection, not your computer</td>
-</tr>
-<tr>
-<td>Privacy</td>
-<td>Audio never leaves your machine</td>
-<td>Audio streams to Google's servers while you dictate</td>
-</tr>
-<tr>
-<td>Cost</td>
-<td>Free</td>
-<td>Free tier, then Google charges for use beyond it</td>
-</tr>
-<tr>
-<td>Account needed</td>
-<td>None</td>
-<td>A Google Cloud account and a one-time credentials setup</td>
-</tr>
-<tr>
-<td>Works offline</td>
-<td>Yes</td>
-<td>No</td>
-</tr>
-</tbody>
-</table></div>
-<h3 id="setting-up-google-cloud-credentials-only-if-you-chose-that-engine">Setting up Google Cloud credentials (only if you chose that engine)</h3>
-<p>This section applies only if you selected the <strong>Google Cloud</strong> speech engine at the installer's speech-engine question. With the default Parakeet engine, skip it: that engine requires no account and no credentials.</p>
-<p>If you selected Google Cloud, the installer ended with a warning that the engine requires credentials before it can transcribe, and referred you to "the Google Cloud section". This is that section.</p>
-<ol>
-<li>Create a Google Cloud account and a project at https://console.cloud.google.com/.</li>
-<li>In the project, enable the Cloud Speech-to-Text API.</li>
-<li>Create a service account (under IAM &amp; Admin &gt; Service Accounts) and give it the Cloud Speech Client role.</li>
-<li>Create a JSON key for that service account; a small file downloads.</li>
-<li>Move the file somewhere permanent on your computer.</li>
-<li>Open the settings file, <code>%LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml</code>, in Notepad. Find the <code>[stt.google]</code> section and put the full path to your key file in <code>credentials_file</code>, between the quotation marks. Write each backslash twice, because TOML reads a single backslash as an escape character:</li>
-</ol>
-<pre><code>[stt.google]
-credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
-</code></pre>
-<ol>
-<li>Save the file and restart Wheelhouse. The engine reads the key when it starts.</li>
-</ol>
-<p>There is a second method, and it needs no file editing: set an environment variable named GOOGLE_APPLICATION_CREDENTIALS to the full path of the key file (press the Windows key, type "environment variables", open "Edit environment variables for your account"), then close Wheelhouse and start it again from the Start menu. The menu item "Restart Wheelhouse" is not enough for this method: part of the program keeps running across it, and that part still holds the environment from before you set the variable. Google's own software reads that variable automatically. Wheelhouse uses the variable whenever <code>credentials_file</code> is empty, so set one or the other, not both.</p>
-<h3 id="adding-or-switching-engines-later">Adding or switching engines later</h3>
-<p>To switch between engines already set up on this computer, right-click either the floating button or the tray icon -- both open the same menu -- open <strong>STT Provider</strong>, and select the engine. The change takes effect at once: Wheelhouse stops the running engine, starts the one you chose, and then records it as last_provider in the stt section of the settings file so the next start comes back on it. The choice is recorded as soon as the new engine's process starts. If that process cannot be started at all, the choice is not recorded and the next start returns to the previous engine. If the process starts and the engine then fails its own startup, the choice stays recorded and the next start tries that engine again; select a working engine from the menu to change it. Switching to Google Cloud this way does not set up its credentials; see the Google Cloud section above.</p>
-<p>To add an engine that was never set up on this machine, re-run the installer and select that engine at its speech-engine question. The installer downloads and sets up what that engine requires, except that Distil-Whisper's model is downloaded by the engine itself the first time it starts. For example, moving from Google Cloud to Parakeet requires the re-run, because that is what downloads Parakeet's speech model; selecting it from the menu alone is not sufficient. Distil-Whisper is always added this way, since the installer sets it up only when it is selected.</p>
-<p>The same re-run repairs a missing or incomplete speech model, for example after an interrupted download. The installer detects an incomplete model and reinstalls it. Re-running the installer is safe at any time, and the speech-engine question defaults to the engine already installed, so pressing Enter keeps it. If the current engine is no longer available on this hardware, the PowerShell installer reports that before asking; the setup wizard does not.</p>
+<p>The installation guide describes the speech engines: the account each one needs, how they compare, and how to add or switch engines. See <a href="install.html#speech-engines">Speech Engines</a> in the installation guide.</p>
 <h3 id="teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</h3>
 <p>The Distil-Whisper engine sometimes misses short words spoken alone, such as "comma". A short session teaches Wheelhouse how you sound so it stops missing them. Start it by saying "learn my voice" or "calibrate my voice", or right-click either the floating button or the tray icon -- both open the same menu -- open <strong>STT Provider</strong>, and choose <strong>Teach WheelHouse your voice...</strong>.</p>
-<p>The session shows four words, one at a time, and asks you to say each word five times. It then asks for a cough or a throat clear, three separate times, to tell your words apart from your other sounds; this part can be skipped. No single step has a time limit, but if twenty minutes pass with no word or sound captured and no button selected, the session cancels itself, saving nothing. While the session is open, spoken words are used for the session only; nothing is typed into any window. The exception is an utterance that begins with the word "click", which passes to normal processing. Clicking by voice does not reach the window's buttons: "x-ray click cancel" begins with the hotword, so the session discards it, and "click cancel" without the hotword is not a click command, so it is dictated. Use the mouse or the keyboard for the window's buttons.</p>
+<p>The session shows four words, one at a time, and asks you to say each word five times. It then asks for a cough or a throat clear, three separate times, to tell your words apart from your other sounds; this part can be skipped. No single step has a time limit, but if twenty minutes pass with no word or sound captured and no button selected, the session cancels itself, saving nothing. While the session is open, spoken words are used for the session only; nothing is typed into any window. The exception is an utterance of "click" followed by at least one more word, which passes to normal processing. A bare "click" or "tap" does not pass: the session takes it, and nothing is typed. Clicking by voice does not reach the window's buttons: "x-ray click cancel" begins with the safety word, so the session discards it, and "click cancel" without the safety word is not a click command, so it is dictated. Use the mouse or the keyboard for the window's buttons.</p>
 <p><strong>Apply</strong> saves what the session learned and restarts the listening, which takes about ten seconds. Only the Distil-Whisper engine uses this teaching; the other engines do not need it. If a different engine is active, the window says so and changes nothing.</p>
 <hr />
 <h2 id="system-requirements">System Requirements</h2>
@@ -141,7 +74,8 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <ul>
 <li>Windows 10 or Windows 11, 64-bit</li>
 <li>A dual-core processor -- Wheelhouse will install and run, but speech recognition may respond slowly; 4 or more cores is the comfortable floor</li>
-<li>8 GB of RAM -- a hard minimum; below it, the installer stops and cannot proceed with any speech engine, including the cloud one</li>
+<li>8 GB of RAM for the offline speech engines, Parakeet and Distil-Whisper -- below it, the installer stops for those engines but still installs the Google Cloud engine (in the setup wizard, choose Google Cloud; the one-line command-line installer asks one question when no engine was chosen)</li>
+<li>6 GB of RAM for any speech engine, including the cloud one -- a hard minimum; below it, the installer stops for every engine, and adding memory is the only fix</li>
 <li>10 GB of free disk space</li>
 <li>An SSD is strongly recommended -- on an old spinning hard drive, startup and first responses are noticeably slower</li>
 <li>A working microphone</li>
@@ -176,7 +110,7 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 </ul>
 <p>If none of these produces acceptable response times, the Wheelhouse Assistant can help identify which setting to change for a specific machine; see <a href="guide.html#getting-help">Getting Help</a>.</p>
 <h2 id="voice-commands">Voice Commands</h2>
-<p>Wheelhouse converts speech into keystrokes, text, and system actions. Most commands require no prefix. The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands require <strong>"x-ray"</strong> first; they are written here with the "x-ray" prefix.</p>
+<p>Wheelhouse converts speech into keystrokes, text, and system actions. Most commands require no prefix. The safety word protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands require <strong>"x-ray"</strong> first. Most rows write the "x-ray" prefix in the first column; a few leave it out. The description of each of those rows says "Needs the safety word first", and "x-ray" is required for them too.</p>
 <p>There are two kinds of voice pattern. <strong>Commands</strong> perform an action -- press a key, switch a window, click a button -- and are normally spoken as a complete utterance: say the command, then pause. <strong>Replacements</strong> apply inline during dictation: spoken mid-sentence, the recognized word is replaced with a symbol or corrected text as the text is typed. All punctuation words ("period", "comma", "question mark") are replacements, so dictation does not have to stop to insert punctuation.</p>
 <h3 id="common-commands">Common Commands</h3>
 <div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
@@ -245,36 +179,1460 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <li>Say <strong>"paste"</strong> with the address bar focused, then <strong>"submit"</strong> to press Enter.</li>
 </ol>
 <h3 id="full-voice-command-reference">Full Voice Command Reference</h3>
-<p>Every voice command and replacement is listed, one row each, in the <a href="https://wheelhouse-project.org/reference.html">command and configuration reference</a>. This section covers the behavior a table cannot express: how to dictate a word that is also a command, the key names accepted by "press", and how navigation, punctuation, and clicking behave.</p>
+<p>Every voice command and replacement is listed below, one row each, in a table under its group heading. The text after each table covers the behavior a table cannot express: how to dictate a word that is also a command, the key names accepted by "press", and how navigation, punctuation, and clicking behave.</p>
 <h4 id="dictation-control">Dictation Control</h4>
-<p>These commands control what is typed and let you dictate a word that collides with a command. "literal [words]" types the words that follow exactly, bypassing all command and replacement processing. "insert [text]" inserts raw text with no capitalization, spacing, or formatting. "submit" presses Enter, and is also recognized as the last word of a sentence: "hello world submit" types "hello world" and then presses Enter. To type the word itself, say "literal submit".</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>literal [words]</td>
+<td>Types the words after "literal" exactly, skipping all command and replacement processing. Takes effect wherever it appears in an utterance, not only as the first word.</td>
+<td>The way to type a word that is also a command -- see "Selected Commands in Detail" in the Voice Commands section</td>
+</tr>
+<tr>
+<td>insert [text]</td>
+<td>Inserts raw text with no capitalization, spacing, or formatting applied</td>
+<td>Useful for exact fragments like an email address or a product code</td>
+</tr>
+<tr>
+<td>no space [words]</td>
+<td>Types the words that follow with every space removed</td>
+<td>e.g. "no space hello world" types "helloworld"</td>
+</tr>
+<tr>
+<td>item [number]</td>
+<td>Inserts a numbered list marker like "1."</td>
+<td>e.g. "item 1", "item 5"</td>
+</tr>
+<tr>
+<td>submit</td>
+<td>Presses Enter. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>submitted</td>
+<td>Presses Enter. Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>type [words] / dictate [words]</td>
+<td>Types the words that follow as ordinary dictation, so a phrase that would otherwise run as a command is written out instead</td>
+<td>e.g. "type delete all" writes those words rather than clearing the field</td>
+</tr>
+<tr>
+<td>enter</td>
+<td>Presses the Enter key. Fires only when it is the whole utterance.</td>
+<td>"submit" does the same</td>
+</tr>
+</tbody>
+</table></div>
+<p>These commands control what is typed and let you dictate a word that collides with a command. "literal [words]" types the words that follow exactly, bypassing all command and replacement processing. "insert [text]" inserts raw text with no capitalization, spacing, or formatting. "submit" presses Enter when it is the whole utterance.</p>
 <p>Utterances beginning with "okay Google", "ok Google", or "hey Google" are discarded, so speech aimed at a nearby voice assistant is not transcribed.</p>
 <h4 id="text-editing">Text Editing</h4>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>backspace [number]</td>
+<td>Deletes one character to the left, or that many with a number</td>
+<td>e.g. "backspace 5" or "backspace twenty three" -- say the count as digits or as words; the number is optional, counts capped at 50.</td>
+</tr>
+<tr>
+<td>delete [number]</td>
+<td>Deletes one character (or that many) to the right. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>e.g. "delete 5" or "delete twenty three" -- say the count as digits or as words; counts capped at 50. Say "erase" in place of "delete" here too, as in "erase 5".</td>
+</tr>
+<tr>
+<td>delete (or erase) word</td>
+<td>Deletes the entire word under the cursor</td>
+<td></td>
+</tr>
+<tr>
+<td>undo [number]</td>
+<td>Undoes the last action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Ctrl+Z; e.g. "undo 3". Common mishearings "undue" and "undu" also fire</td>
+</tr>
+<tr>
+<td>redo [number]</td>
+<td>Redoes the last undone action, or several. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Ctrl+Y; the common mishearing "redu" also fires</td>
+</tr>
+<tr>
+<td>new line</td>
+<td>Inserts a line break without submitting the field</td>
+<td>Works inline during dictation</td>
+</tr>
+<tr>
+<td>new paragraph</td>
+<td>Inserts two line breaks</td>
+<td>Works inline during dictation</td>
+</tr>
+<tr>
+<td>tab [number]</td>
+<td>Presses Tab that many times</td>
+<td>e.g. "tab 3" or "tab eleven" -- say the count as digits or as words; "indent 3" does the same. The number is required here; a bare "tab" spoken on its own presses Tab once, and "tab" inside a longer sentence is typed as the word</td>
+</tr>
+<tr>
+<td>shift tab</td>
+<td>Outdents (Shift+Tab)</td>
+<td>"outdent" does the same</td>
+</tr>
+<tr>
+<td>escape</td>
+<td>Presses the Escape key. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"dismiss" also works. "dismiss the meeting invite" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>press [keys] [number] times</td>
+<td>Presses any key or key combination by name, once, or that many times with "[number] times"</td>
+<td>e.g. "press enter", "press alt f4", "press f5", "press tab 3 times" or "press control z two times" -- say the count as digits or as words; the count is optional, counts capped at 30. See the press-keys detail subsection of the Voice Commands section</td>
+</tr>
+<tr>
+<td>copy</td>
+<td>Copies the current selection. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>copy line</td>
+<td>Copies the entire current line</td>
+<td></td>
+</tr>
+<tr>
+<td>copy all</td>
+<td>Copies everything in the current field</td>
+<td></td>
+</tr>
+<tr>
+<td>copy screen</td>
+<td>Starts the Windows screenshot snipping tool</td>
+<td></td>
+</tr>
+<tr>
+<td>cut</td>
+<td>Cuts the current selection. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"cut that" also works. Say it as the whole sentence; "cut the vegetables" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>paste</td>
+<td>Pastes the clipboard contents. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>x-ray replace all</td>
+<td>Selects everything and pastes over it</td>
+<td>Destructive -- requires the safety word</td>
+</tr>
+<tr>
+<td>select all</td>
+<td>Selects everything in the current field</td>
+<td></td>
+</tr>
+<tr>
+<td>delete (or erase) all</td>
+<td>Selects everything in the current field and deletes it</td>
+<td>Say it as the whole sentence. "delete all the files" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>select word</td>
+<td>Selects the word under the cursor</td>
+<td>"select this word" also works. "select word by word until it looks right" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>select line</td>
+<td>Selects the line under the cursor</td>
+<td>"select this line" also works. "select line six and copy it" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>select paragraph</td>
+<td>Selects the paragraph under the cursor</td>
+<td>"select this paragraph" also works. "select paragraph three of the contract" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>x-ray select [words]</td>
+<td>Selects the first place those words appear in the document. The words must match the document exactly, apart from capital letters.</td>
+<td>Wheelhouse shows a Windows notification when it selects nothing, so a screen reader can read the reason.</td>
+</tr>
+<tr>
+<td>save</td>
+<td>Saves the current document (Ctrl+S). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>x-ray find [text]</td>
+<td>Opens the app's find bar and types the search term</td>
+<td>e.g. "x-ray find invoice"</td>
+</tr>
+<tr>
+<td>replace</td>
+<td>Opens find-and-replace (Ctrl+H). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>search</td>
+<td>Copies the current selection and runs a web search for it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Select the text first</td>
+</tr>
+<tr>
+<td>delete (or erase) next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) next [number] words</td>
+<td>Selects that many words to the right of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) next [number] lines</td>
+<td>Moves to the start of the line, selects down that many lines, and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) previous / last [number] lines</td>
+<td>Moves to the start of the line, selects up that many lines, and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and deletes them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>delete (or erase) this word</td>
+<td>Moves to the start of the word under the cursor, selects the whole word, and deletes it. Fires only when it is the whole utterance.</td>
+<td>"delete word" runs the same three keystrokes</td>
+</tr>
+<tr>
+<td>delete (or erase) line</td>
+<td>Selects the whole line the cursor is on and deletes its text. Fires only when it is the whole utterance.</td>
+<td>"delete this line" does the same; the line break stays, so the line is left empty</td>
+</tr>
+<tr>
+<td>delete (or erase) paragraph</td>
+<td>Moves to the start of the paragraph the cursor is in, selects the whole paragraph, and deletes it. Fires only when it is the whole utterance.</td>
+<td>"delete this paragraph" does the same</td>
+</tr>
+<tr>
+<td>cut next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut next [number] words</td>
+<td>Selects that many words to the right of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut next [number] lines</td>
+<td>Moves to the start of the line, selects down that many lines, and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] lines</td>
+<td>Moves to the start of the line, selects up that many lines, and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>cut previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and cuts them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The cut text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] words</td>
+<td>Selects that many words to the right of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] lines</td>
+<td>Moves to the start of the line, selects down that many lines, and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] lines</td>
+<td>Moves to the start of the line, selects up that many lines, and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>copy previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and copies them to the clipboard. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. The copied text is left on the clipboard instead of being restored at the end of the utterance</td>
+</tr>
+<tr>
+<td>select next / forward / right / write [number] characters</td>
+<td>Selects that many characters to the right of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>select next / forward / right / write [number] words</td>
+<td>Selects that many words to the right of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>select next / forward / right / write [number] lines</td>
+<td>Selects down that many lines from the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>select next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>select previous / last / backward / left [number] characters</td>
+<td>Selects that many characters to the left of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>select previous / last / backward / left [number] words</td>
+<td>Selects that many words to the left of the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>select previous / last / backward / left [number] lines</td>
+<td>Selects up that many lines from the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>select previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>unselect / unselect that / clear selection</td>
+<td>Drops the selection with a Right Arrow key press, leaving the cursor at the right-hand end of what was selected. Fires only when it is the whole utterance.</td>
+<td>Nothing is deleted; with nothing selected the cursor moves one character right</td>
+</tr>
+<tr>
+<td>tab</td>
+<td>Presses the Tab key once. Fires only when it is the whole utterance.</td>
+<td>"tab [number]" presses it that many times</td>
+</tr>
+</tbody>
+</table></div>
 <p>Common mishearings of "undo" and "redo" ("undue", "undu", "redu") are accepted, so the command still fires on those spellings. Deletion counts for "backspace" and "delete" are capped at 50. "tab [number]" requires the number. A bare "tab" spoken on its own presses Tab once; "tab" inside a longer sentence is typed as the word.</p>
 <p>Say "erase" in place of "delete" in any delete command. "erase word", "erase all" and "erase 5" do the same as "delete word", "delete all" and "delete 5". The word "backspace" has no such alternative.</p>
 <p>Wherever a command takes <strong>[number]</strong>, say the count either way: as digits ("backspace 15") or as words ("backspace fifteen", "delete twenty three"). Words up to "nine hundred ninety nine" are read, and each command still applies its own limit afterwards.</p>
-<p>A spoken count can run to more than one word, so a command with a count waits until no further word could make the number larger, and at the latest until the end of the sentence. "backspace twenty three" deletes twenty-three characters, and "backspace 23" does the same. The wait depends on the number, not on how many words you used: "fifteen" and "ninety nine" are finished as spoken, while "twenty" and "fifty" could still grow into "twenty three" or "fifty five", so those wait for the next word. Every count command behaves this way, including "backspace". Chained "go" and "grab" moves, and moves without a unit word, read their counts differently, one word at a time; see the paragraph on counts further down this section.</p>
+<p>A spoken count can run to more than one word, so a command with a count waits until no further word could make the number larger, and at the latest until the end of the sentence. "backspace twenty three" deletes twenty-three characters, and "backspace 23" does the same. The wait depends on the number, not on how many words you used: "fifteen" and "ninety nine" are finished as spoken, while "twenty" and "fifty" could still grow into "twenty three" or "fifty five", so those wait for the next word. Every count command behaves this way, including "backspace". Chained "go" and "grab" moves, and moves with neither a unit word nor "times", read their counts differently, one word at a time; see the paragraph on counts further down this section.</p>
 <h5 id="the-press-keys-command-in-detail">The "press [keys]" Command in Detail</h5>
 <p>"press [keys]" sends any keyboard shortcut. Modifiers are held down first regardless of spoken order, so "press delete control" equals "press control delete". If any word in the phrase is unrecognized, nothing is pressed, and the whole phrase, "press" included, is typed as dictation. Hyphenated tokens from the speech engine, such as "f-11" or "control-alt", are split automatically.</p>
 <p><strong>Modifier keys</strong>: control (or ctrl), alt, shift, windows (or win).</p>
 <p><strong>Navigation and editing keys</strong>: enter (or return), escape, tab, backspace, delete (or del), insert, space, home, end, page up, page down, up, down, left, right, caps lock, print screen, pause.</p>
-<p><strong>Function keys</strong>: f1 through f12.</p>
+<p><strong>Function keys</strong>: f1 through f12. The letter and the number can be separate words: "press f 5" and "press f five" both press F5.</p>
 <p><strong>Letters</strong>: any single letter a through z.</p>
-<p><strong>Digits</strong>: 0 through 9 are key names in any position, so "press control 2" presses Ctrl+2. "press" takes no repeat count.</p>
+<p><strong>Digits</strong>: 0 through 9 are key names, so "press control 2" presses Ctrl+2. Right after "f", a number from 1 to 12 names a function key instead; "press f 0" presses F and 0 together.</p>
+<p><strong>Repeat count</strong>: end the phrase with "[number] times" to press the keys that many times: "press tab 3 times", "press control z two times", "press down arrow twenty times". Say the count as digits or as words; counts are capped at 30, and "1 time" is accepted. The word "times" is required: without it a trailing number is part of the keys, so "press control 2" presses Ctrl+2 once and "press f 5" presses F5 once.</p>
 <p><strong>Symbols by spoken name</strong>: the following are pressed correctly -- backtick, semicolon, slash (forward slash), backslash (back slash), comma, period (dot), single quote (apostrophe), left/right bracket (open/close bracket), equals (equal), minus (hyphen, dash), and the parentheses: left parenthesis (left paren, open parenthesis, open paren) presses Shift+9, and right parenthesis (right paren, close parenthesis, close paren) presses Shift+0, which type "(" and ")" on a US keyboard layout. Other symbol names are not reliable in "press": the shifted symbols (colon, tilde, pipe, question mark, double quote, braces, less than, greater than, plus, underscore) produce the wrong character, and hash, at, ampersand, asterisk, caret, percent, dollar, and exclamation press nothing. To type any of those, dictate them as punctuation words instead; <a href="guide.html#punctuation-and-symbols">Punctuation and Symbols</a> below handles every symbol.</p>
 <p><strong>Examples</strong>: "press control shift t", "press f5", "press alt f4", "press windows d", "press left bracket".</p>
 <h4 id="text-formatting">Text Formatting</h4>
-<p>Formatting commands apply to the current selection: select first, with the mouse or "select word" / "select line", then say the command. The case and shape transforms cover UPPERCASE, lowercase, capitalize, title case, and the programming styles snake_case, camelCase, PascalCase, and kebab-case. The wrapping commands ("parentheses", "brackets", "braces", "angle brackets", "quotes", "single quotes") enclose the selection in those characters; spoken with no selection, they insert an empty pair with the cursor between them. Words spoken after a wrapping word in the same utterance are wrapped verbatim: symbol words such as "colon" are typed literally rather than converted. Three commands apply character formatting through the host application's own keyboard shortcuts: "bold text", "italics", and "underline". None of the three needs the hotword, and each fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed. Twenty-four more commands select a range and format it in one step: "bold", "italicize", or "underline", then "next" or "previous" ("last" also works), an optional count, and a unit -- words, lines, paragraphs, or characters. For example, "bold next 3 words" or "underline previous line". These also need no hotword and fire only as your whole utterance.</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>uppercase</td>
+<td>Converts the selection to UPPERCASE. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"upper case" and "uppercase that" also work</td>
+</tr>
+<tr>
+<td>all caps / all caps that</td>
+<td>Converts the selection to UPPERCASE. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>lowercase</td>
+<td>Converts the selection to lowercase. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"lower case" and "lowercase that" also work</td>
+</tr>
+<tr>
+<td>no caps / no caps that</td>
+<td>Converts the selection to lowercase. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>capitalize</td>
+<td>Capitalizes the first letter of the selection and lowercases the rest. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"capitalize that" also works</td>
+</tr>
+<tr>
+<td>cap / cap that</td>
+<td>Capitalizes the first letter of the selection and lowercases the rest. Applies only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>title case</td>
+<td>Converts the selection to Title Case</td>
+<td></td>
+</tr>
+<tr>
+<td>snake case</td>
+<td>Converts the selection to snake_case</td>
+<td></td>
+</tr>
+<tr>
+<td>camel case</td>
+<td>Converts the selection to camelCase</td>
+<td></td>
+</tr>
+<tr>
+<td>pascal case</td>
+<td>Converts the selection to PascalCase</td>
+<td></td>
+</tr>
+<tr>
+<td>kebab case</td>
+<td>Converts the selection to kebab-case</td>
+<td></td>
+</tr>
+<tr>
+<td>compress</td>
+<td>Removes the spaces from the selection, joining the words together. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>no space / no space that</td>
+<td>Removes the spaces from the selected text, joining the words together. Fires only when it is the whole utterance.</td>
+<td>Acts on the selected text only; with nothing selected it does not act on the last dictated words</td>
+</tr>
+<tr>
+<td>bold</td>
+<td>Bolds the selection (Ctrl+B). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"bold text", "bold that", "boldface", "boldface that", "bold face", and "bold face that" also work. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italics</td>
+<td>Italicizes the selection (Ctrl+I). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"italicize" and "italicize that" also work. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline</td>
+<td>Underlines the selection (Ctrl+U). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"underline that" also works. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>parentheses [text]</td>
+<td>Wraps the selection in ( ), inserts an empty ( ) pair, or inserts the spoken text wrapped</td>
+<td>"parentheses hello" gives "(hello)"</td>
+</tr>
+<tr>
+<td>brackets [text]</td>
+<td>Wraps the selection in [ ], inserts an empty pair, or wraps the spoken text</td>
+<td></td>
+</tr>
+<tr>
+<td>braces [text]</td>
+<td>Wraps the selection in { }, inserts an empty pair, or wraps the spoken text</td>
+<td></td>
+</tr>
+<tr>
+<td>angle brackets [text]</td>
+<td>Wraps the selection in &lt; &gt;, inserts an empty pair, or wraps the spoken text</td>
+<td></td>
+</tr>
+<tr>
+<td>quotes [text]</td>
+<td>Wraps the selection in double quotes, inserts an empty pair, or wraps the spoken text</td>
+<td></td>
+</tr>
+<tr>
+<td>single quotes [text]</td>
+<td>Wraps the selection in single quotes, inserts an empty pair, or wraps the spoken text</td>
+<td></td>
+</tr>
+<tr>
+<td>bold next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold next [number] words</td>
+<td>Selects that many words to the right of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold next [number] lines</td>
+<td>Selects down that many lines from the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>bold previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and makes them bold. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] words</td>
+<td>Selects that many words to the right of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] lines</td>
+<td>Selects down that many lines from the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>italicize previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and makes them italic. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] words</td>
+<td>Selects that many words to the right of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] lines</td>
+<td>Selects down that many lines from the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>underline previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and underlines them. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. Works in apps that support rich text</td>
+</tr>
+<tr>
+<td>uppercase next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase next [number] words</td>
+<td>Selects that many words to the right of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase next [number] lines</td>
+<td>Selects down that many lines from the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>uppercase previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and converts them to UPPERCASE. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "upper case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] words</td>
+<td>Selects that many words to the right of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] lines</td>
+<td>Selects down that many lines from the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>lowercase previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and converts them to lowercase. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "lower case" also works</td>
+</tr>
+<tr>
+<td>capitalize next [number] characters</td>
+<td>Selects that many characters to the right of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] characters</td>
+<td>Selects that many characters to the left of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>capitalize next [number] words</td>
+<td>Selects that many words to the right of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] words</td>
+<td>Selects that many words to the left of the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>capitalize next [number] lines</td>
+<td>Selects down that many lines from the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] lines</td>
+<td>Selects up that many lines from the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>capitalize next [number] paragraphs</td>
+<td>Selects that many paragraphs below the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>capitalize previous / last [number] paragraphs</td>
+<td>Selects that many paragraphs above the cursor and capitalizes the first letter of the selection and lowercases the rest. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+</tbody>
+</table></div>
+<p>Formatting commands apply to the current selection: select first, with the mouse or "select word" / "select line", then say the command. The case and shape transforms cover UPPERCASE, lowercase, capitalize, title case, and the programming styles snake_case, camelCase, PascalCase, and kebab-case. The wrapping commands ("parentheses", "brackets", "braces", "angle brackets", "quotes", "single quotes") enclose the selection in those characters; spoken with no selection, they insert an empty pair with the cursor between them. Words spoken after a wrapping word in the same utterance are wrapped verbatim: symbol words such as "colon" are typed literally rather than converted. Three commands apply character formatting through the host application's own keyboard shortcuts: "bold text", "italics", and "underline". None of the three needs the safety word, and each fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed. Forty-eight more commands select a range and format it in one step: "bold", "italicize", "underline", "uppercase", "lowercase", or "capitalize", then "next" or "previous" ("last" also works), an optional count, and a unit -- words, lines, paragraphs, or characters. For example, "bold next 3 words" or "underline previous line". These also need no safety word and fire only as your whole utterance.</p>
 <h4 id="navigation">Navigation</h4>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>go [where]</td>
+<td>Moves the cursor without touching the keyboard: go home / go end / go top / go bottom / go left / go right, with counts, word and paragraph units, and "then"-chained "grab" steps that select along the way</td>
+<td>See the text below the Navigation table for the full move list</td>
+</tr>
+<tr>
+<td>go up [number] lines / move up [number] lines</td>
+<td>Moves the cursor up that many lines. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go down [number] lines / move down [number] lines</td>
+<td>Moves the cursor down that many lines. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go up [number] paragraphs / move up [number] paragraphs</td>
+<td>Moves the cursor back that many paragraphs (Ctrl and Up Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go down [number] paragraphs / move down [number] paragraphs</td>
+<td>Moves the cursor forward that many paragraphs (Ctrl and Down Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go left [number] characters / move left [number] characters</td>
+<td>Moves the cursor left that many characters. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "move backward [number] characters" and "go backward [number] characters" also work</td>
+</tr>
+<tr>
+<td>go right [number] characters / move right [number] characters</td>
+<td>Moves the cursor right that many characters. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "move forward [number] characters" and "go forward [number] characters" also work. "go write [number] characters" and "move write [number] characters" also work, because speech recognition can hear "right" as "write"</td>
+</tr>
+<tr>
+<td>go left [number] words / move left [number] words</td>
+<td>Moves the cursor back that many words (Ctrl and Left Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go right [number] words / move right [number] words</td>
+<td>Moves the cursor forward that many words (Ctrl and Right Arrow). Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "write" in place of "right" also works, because speech recognition can hear "right" as "write"</td>
+</tr>
+<tr>
+<td>go up [number] times / move up [number] times</td>
+<td>Presses the Up Arrow key that many times. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go down [number] times / move down [number] times</td>
+<td>Presses the Down Arrow key that many times. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go left [number] times / move left [number] times</td>
+<td>Presses the Left Arrow key that many times. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>go right [number] times / move right [number] times</td>
+<td>Presses the Right Arrow key that many times. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "write" in place of "right" also works, because speech recognition can hear "right" as "write"</td>
+</tr>
+<tr>
+<td>move slider up [number] times / go slider up [number] times</td>
+<td>Presses the Up Arrow key that many times, for moving a focused slider. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>move slider down [number] times / go slider down [number] times</td>
+<td>Presses the Down Arrow key that many times, for moving a focused slider. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>move slider left [number] times / go slider left [number] times</td>
+<td>Presses the Left Arrow key that many times, for moving a focused slider. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30</td>
+</tr>
+<tr>
+<td>move slider right [number] times / go slider right [number] times</td>
+<td>Presses the Right Arrow key that many times, for moving a focused slider. Fires only when it is the whole utterance.</td>
+<td>The number is optional and defaults to 1; counts are capped at 30. "write" in place of "right" also works, because speech recognition can hear "right" as "write"</td>
+</tr>
+<tr>
+<td>go to home / go to the beginning of the line</td>
+<td>Moves the cursor to the start of the current line (Home). Fires only when it is the whole utterance.</td>
+<td>"go to the start of the line" also works. "move to the beginning of the line" also works ("move to home" does not)</td>
+</tr>
+<tr>
+<td>go to the top / go to the top of the document</td>
+<td>Moves the cursor to the very start of the document (Ctrl+Home). Fires only when it is the whole utterance.</td>
+<td>"go to the beginning of the document" and "go to the start of the document" also work. "move to the top" and "move to the beginning of the document" also work ("move to the top of the document" does not)</td>
+</tr>
+<tr>
+<td>go to the bottom / go to the bottom of the document</td>
+<td>Moves the cursor to the very end of the document (Ctrl+End). Fires only when it is the whole utterance.</td>
+<td>"go to the end of the document" also works. "move to the bottom" and "move to the end of the document" also work ("move to the bottom of the document" does not)</td>
+</tr>
+<tr>
+<td>go to the end of the line / go to the end</td>
+<td>Moves the cursor to the end of the current line (End). Fires only when it is the whole utterance.</td>
+<td>"move to the end of the line" also works ("move to the end" does not)</td>
+</tr>
+<tr>
+<td>go to the beginning of the word</td>
+<td>Moves the cursor back one word (Ctrl and Left Arrow). Fires only when it is the whole utterance.</td>
+<td>"go to the start of the word" also works; each app decides where a word boundary falls. "move to" works as well as "go to"</td>
+</tr>
+<tr>
+<td>go to the end of the word</td>
+<td>Moves the cursor forward one word (Ctrl and Right Arrow). Fires only when it is the whole utterance.</td>
+<td>Each app decides where a word boundary falls, so the cursor may land at the start of the next word. "move to" works as well as "go to"</td>
+</tr>
+<tr>
+<td>go to the beginning of the paragraph</td>
+<td>Moves the cursor back one paragraph (Ctrl and Up Arrow). Fires only when it is the whole utterance.</td>
+<td>"go to the start of the paragraph" also works. "move to" works as well as "go to"</td>
+</tr>
+<tr>
+<td>go to the end of the paragraph</td>
+<td>Moves the cursor forward one paragraph (Ctrl and Down Arrow). Fires only when it is the whole utterance.</td>
+<td>Each app decides where a paragraph boundary falls, so the cursor may land at the start of the next paragraph. "move to" works as well as "go to"</td>
+</tr>
+<tr>
+<td>move to the beginning of the selection / go to the beginning of the selection</td>
+<td>Presses Left Arrow, which drops the selection and leaves the cursor at its left-hand end. Fires only when it is the whole utterance.</td>
+<td>With nothing selected the cursor moves one character left</td>
+</tr>
+<tr>
+<td>move to the end of the selection / go to the end of the selection</td>
+<td>Presses Right Arrow, which drops the selection and leaves the cursor at its right-hand end. Fires only when it is the whole utterance.</td>
+<td>With nothing selected the cursor moves one character right</td>
+</tr>
+<tr>
+<td>scroll down [number]</td>
+<td>Turns the mouse wheel down, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The number is how many wheel notches to send, up to 50; e.g. "scroll down 3". The count can be digits or spoken words, so "scroll down eleven" works whether your speech provider writes numbers as digits or as words. The command turns the wheel without moving the pointer, so it scrolls whatever a real wheel turn would scroll from where the pointer already sits</td>
+</tr>
+<tr>
+<td>scroll up [number]</td>
+<td>Turns the mouse wheel up, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The number is how many wheel notches to send, up to 50; e.g. "scroll up 3". The count can be digits or spoken words, so "scroll up eleven" works whether your speech provider writes numbers as digits or as words.</td>
+</tr>
+<tr>
+<td>scroll left [number]</td>
+<td>Turns the sideways mouse wheel left, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. The number is how many wheel notches to send, up to 50. The count can be digits or spoken words, so "scroll left eleven" works whether your speech provider writes numbers as digits or as words.</td>
+</tr>
+<tr>
+<td>scroll right [number]</td>
+<td>Turns the sideways mouse wheel right, without moving or pressing the mouse. Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. The number is how many wheel notches to send, up to 50. The count can be digits or spoken words, so "scroll right eleven" works whether your speech provider writes numbers as digits or as words. "write" in place of "right" also works, because speech recognition can hear "right" as "write".</td>
+</tr>
+<tr>
+<td>start scrolling down</td>
+<td>Keeps turning the mouse wheel down until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The scroll keeps going with no further speech, so you can read a long page hands-free. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so, in case the stop command is not heard. If Windows refuses to move the wheel, which can happen over a window that runs as administrator, the scroll stops early and shows a different notification. Any scroll command you say while it runs replaces it, so only one scroll is ever going.</td>
+</tr>
+<tr>
+<td>start scrolling up</td>
+<td>Keeps turning the mouse wheel up until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The scroll keeps going with no further speech. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so.</td>
+</tr>
+<tr>
+<td>start scrolling left</td>
+<td>Keeps turning the sideways mouse wheel left until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so.</td>
+</tr>
+<tr>
+<td>start scrolling right</td>
+<td>Keeps turning the sideways mouse wheel right until you say "stop scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>Needs an application that reads the sideways wheel; many do not. Say "stop scrolling" to end it. It also stops on its own after two minutes and shows a notification saying so. "write" in place of "right" also works, because speech recognition can hear "right" as "write".</td>
+</tr>
+<tr>
+<td>stop scrolling</td>
+<td>Stops a scroll that was started with "start scrolling". Fires only when the phrase is the whole utterance; inside a longer sentence the words are typed normally.</td>
+<td>The words are "stop scrolling" and not "stop" on its own. A command for the single word "stop" would take that word out of everything you dictate. Saying it when nothing is scrolling does nothing at all.</td>
+</tr>
+</tbody>
+</table></div>
 <p>"go" moves the cursor; "grab" moves it while extending the selection. Several moves chain in one utterance with "then". The utterance must begin with "go": "grab" is valid only chained after a "go" move -- "go home then grab to end". Spoken on its own, "grab ..." is typed as dictation.</p>
-<p>Counts can be digits ("3") or spoken words ("one", "fifteen", "twenty three"). A single move that names a unit accepts a count of up to five words: "go right twenty three words", "go up 3 lines", "go left 5 characters", "go down 2 paragraphs". In a chained move, and in a move without a unit word, a count is one word, so say "twenty-three" there as a single hyphenated word rather than two separate words. Counts above 50 move 50. A digit count above 999 is typed as dictation instead of moving the cursor; leading zeroes do not count, so "0001" still moves one. "to", "too", and "for" are accepted as sound-alikes for 2 and 4, so "go right to words" moves two words. If any part of a "go" utterance cannot be parsed, the whole phrase is typed as dictation instead, so an unrecognized phrase does not move the cursor.</p>
+<p>Counts can be digits ("3") or spoken words ("one", "fifteen", "twenty three"). A single move that names a unit accepts a count of up to five words: "go right twenty three words", "go up 3 lines", "go left 5 characters", "go down 2 paragraphs". In a chained move, and in a move with neither a unit word nor "times", a count is one word, so say "twenty-three" there as a single hyphenated word rather than two separate words. Counts above 30 move 30. In a chained move, and in a move with neither a unit word nor "times", a digit count above 999 is typed as dictation instead of moving the cursor; a single move with a unit word or "times" moves 30 for such a count. Leading zeroes do not count, so "0001" still moves one. "to", "too", and "for" are accepted as sound-alikes for 2 and 4, so "go right to words" moves two words. If any part of a "go" utterance cannot be parsed, the whole phrase is typed as dictation instead, so an unrecognized phrase does not move the cursor.</p>
 <h4 id="punctuation-and-symbols">Punctuation and Symbols</h4>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>period</td>
+<td>Types . inline during dictation</td>
+<td>"full stop" also works</td>
+</tr>
+<tr>
+<td>comma</td>
+<td>Types , inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>colon</td>
+<td>Types : inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>semicolon</td>
+<td>Types ; inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>question mark</td>
+<td>Types ? inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>exclamation point</td>
+<td>Types ! inline during dictation</td>
+<td>"exclamation mark" also works</td>
+</tr>
+<tr>
+<td>apostrophe</td>
+<td>Types ' inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>hyphen</td>
+<td>Types - inline during dictation</td>
+<td>"minus sign" also works</td>
+</tr>
+<tr>
+<td>dash</td>
+<td>Types an em dash (the long dash) inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>slash</td>
+<td>Types / inline during dictation</td>
+<td>"forward slash" also works</td>
+</tr>
+<tr>
+<td>backslash</td>
+<td>Types \ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>backtick</td>
+<td>Types ` inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>at sign</td>
+<td>Types @ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>hashtag</td>
+<td>Types # inline during dictation</td>
+<td>"number sign" and "pound sign" also work</td>
+</tr>
+<tr>
+<td>dollar sign</td>
+<td>Types $ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>percent</td>
+<td>Types % inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>caret sign</td>
+<td>Types ^ inline during dictation</td>
+<td>Also fires if heard as "carrot sign"</td>
+</tr>
+<tr>
+<td>ampersand</td>
+<td>Types &amp; inline during dictation</td>
+<td>Say "ampersand"; "and sign" types the words</td>
+</tr>
+<tr>
+<td>asterisk</td>
+<td>Types * inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>underscore</td>
+<td>Types _ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>plus sign</td>
+<td>Types + inline during dictation, with a space on each side: "a plus sign b" types "a + b"</td>
+<td>No space goes before + at the start of a line, after a space, or right after one of = + &lt; &gt; | ! * - % ^ &amp; : ~ ?, so "plus sign plus sign" types ++</td>
+</tr>
+<tr>
+<td>equal sign</td>
+<td>Types = inline during dictation, with a space on each side: "x equal sign y" types "x = y"</td>
+<td>Also fires if heard as "equals sign", "equal sine", or "equals sine". Because of that, dictating "equals sine" types = instead of the word sine. No space goes before = at the start of a line, after a space, or right after one of = + &lt; &gt; | ! * - % ^ &amp; : ~ ?, so "less than sign equal sign" types &lt;= and "exclamation mark equal sign" types !=</td>
+</tr>
+<tr>
+<td>tilde</td>
+<td>Types ~ inline during dictation</td>
+<td>Also fires if heard as "tilda"</td>
+</tr>
+<tr>
+<td>vertical bar</td>
+<td>Types the pipe character inline during dictation, with a space on each side, as in "a | b"</td>
+<td>"pipe character" also works. No space goes before the pipe character at the start of a line, after a space, or right after one of = + &lt; &gt; | ! * - % ^ &amp; : ~ ?, so "vertical bar vertical bar" types two pipe characters together</td>
+</tr>
+<tr>
+<td>ellipsis</td>
+<td>Types ... inline during dictation</td>
+<td>"dot dot dot" also works</td>
+</tr>
+<tr>
+<td>space bar</td>
+<td>Types a single literal space inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>open bracket</td>
+<td>Types [ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>close bracket</td>
+<td>Types ] inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>open brace</td>
+<td>Types { inline during dictation</td>
+<td>"left brace" also works</td>
+</tr>
+<tr>
+<td>close brace</td>
+<td>Types } inline during dictation</td>
+<td>"right brace" also works</td>
+</tr>
+<tr>
+<td>open parentheses</td>
+<td>Types ( inline during dictation</td>
+<td>"left parentheses" also works</td>
+</tr>
+<tr>
+<td>close parentheses</td>
+<td>Types ) inline during dictation</td>
+<td>"right parentheses" also works</td>
+</tr>
+<tr>
+<td>open quotes</td>
+<td>Types a double quote inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>close quotes</td>
+<td>Types a double quote inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>open single quote</td>
+<td>Types a single quote inline during dictation</td>
+<td>"begin single quote" also works</td>
+</tr>
+<tr>
+<td>close single quote</td>
+<td>Types a single quote inline during dictation</td>
+<td>"end single quote" also works</td>
+</tr>
+<tr>
+<td>less than sign</td>
+<td>Types &lt; inline during dictation, with a space on each side: "a less than sign b" types "a &lt; b"</td>
+<td>No space goes before &lt; at the start of a line, after a space, or right after one of = + &lt; &gt; | ! * - % ^ &amp; : ~ ?, so "less than sign equal sign" types &lt;=</td>
+</tr>
+<tr>
+<td>greater than sign</td>
+<td>Types &gt; inline during dictation, with a space on each side: "a greater than sign b" types "a &gt; b"</td>
+<td>No space goes before &gt; at the start of a line, after a space, or right after one of = + &lt; &gt; | ! * - % ^ &amp; : ~ ?, so "greater than sign greater than sign" types &gt;&gt;</td>
+</tr>
+<tr>
+<td>euro sign</td>
+<td>Types € inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>yen sign</td>
+<td>Types ¥ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>pound sterling sign</td>
+<td>Types £ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>copyright sign</td>
+<td>Types © inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>registered sign</td>
+<td>Types ® inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>section sign</td>
+<td>Types § inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>paragraph sign</td>
+<td>Types ¶ inline during dictation</td>
+<td>"paragraph mark" also works</td>
+</tr>
+<tr>
+<td>degree symbol</td>
+<td>Types ° inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>multiplication sign</td>
+<td>Types × inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>division sign</td>
+<td>Types ÷ inline during dictation</td>
+<td></td>
+</tr>
+<tr>
+<td>colin</td>
+<td>Mishear tolerance: inserts : when "colin" is the entire utterance. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>come</td>
+<td>Mishear tolerance: inserts , when "come", "kama", "commer", or "come on" is the entire utterance. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
 <p>Punctuation and symbol words are replacements: spoken as part of a sentence, the symbol is typed in place of the word, no pause required. Every punctuation and symbol word -- period, comma, colon, question mark, and the rest -- behaves this way.</p>
 <p>Two mishearing tolerances are built in, because the default local engine frequently mishears "comma" and "colon": spoken as an entire utterance, <strong>"colin"</strong> inserts ":" and <strong>"come"</strong>, <strong>"kama"</strong>, <strong>"commer"</strong>, or <strong>"come on"</strong> inserts ",". Within a longer sentence these words are dictated normally. To type one as a standalone word, use "literal come" or "literal colin".</p>
 <p>If the recognizer regularly mishears another word, add a personal correction in the Pattern Manager ("patterns"); it applies inline like the built-in punctuation words.</p>
 <h4 id="application-switching-and-system">Application Switching and System</h4>
-<p>"x-ray activate [app name]" brings the named application's window forward. When nothing by that name has a window open, Wheelhouse starts the program instead of doing nothing: a pattern whose target is a program file (.exe) is run directly, and a spoken name is looked up among your installed programs, by Start menu shortcut and by the names Windows itself resolves. An exact name is preferred; failing that, a name that begins with the words you said. If more than one installed program matches, Wheelhouse starts none of them and lists the names, so you can say the full name of the one you meant; if none matches, it says so. The built-in "notepad" and "browser" take the program-file path, and "browser" resolves to the Windows default browser when spoken. The System commands operate on windows and on Windows itself. Seven need the hotword: "x-ray close window", because it discards unsaved work; "x-ray close tab"; the four searches, "x-ray search windows for [text]", "x-ray search on google for [text]", "x-ray search on bing for [text]", and "x-ray search on youtube for [text]"; and the short Google form "x-ray search for [text]", in which the word "for" is optional. Every other System command works without the hotword, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed. Those include "zoom in", "zoom out", "create tab", "create window", "windows settings", which opens Windows Settings, "maximize", "minimize", and "desktop", which shows the desktop. In most browsers "create tab" (Ctrl+N) opens a new window rather than a tab, and "create window" (Ctrl+Shift+N) opens a private or incognito window.</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>x-ray activate [app name]</td>
+<td>Brings the named application's window forward; when nothing by that name is open, Wheelhouse looks the name up among your installed programs and starts it</td>
+<td>e.g. "x-ray activate outlook"; when more than one installed program matches the name, Wheelhouse starts none of them and lists them, so you can say the full name</td>
+</tr>
+<tr>
+<td>browser</td>
+<td>Brings your default web browser to the front. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Wheelhouse looks up which browser is your Windows default at the moment you speak</td>
+</tr>
+<tr>
+<td>notepad</td>
+<td>Brings Notepad to the front. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>switch to [app name] / go to [app name] / show [app name]</td>
+<td>Brings the named application's window forward, starting it when nothing by that name is open. Needs the safety word first.</td>
+<td>e.g. "x-ray switch to outlook"; the same action as "x-ray activate [app name]", including the program lookup</td>
+</tr>
+<tr>
+<td>close [app name] / exit [app name] / quit [app name]</td>
+<td>Brings the named application's window forward and then closes it (Alt+F4). Needs the safety word first.</td>
+<td>Destructive -- requires the safety word</td>
+</tr>
+<tr>
+<td>minimize [app name]</td>
+<td>Brings the named application's window forward and then sends Windows and Down Arrow. Needs the safety word first.</td>
+<td>That one keystroke has two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size.</td>
+</tr>
+<tr>
+<td>maximize [app name]</td>
+<td>Brings the named application's window forward and then maximizes it (Windows and Up Arrow). Needs the safety word first.</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>zoom in</td>
+<td>Zooms in (Ctrl and plus)</td>
+<td></td>
+</tr>
+<tr>
+<td>zoom out</td>
+<td>Zooms out (Ctrl and minus)</td>
+<td></td>
+</tr>
+<tr>
+<td>create tab</td>
+<td>Sends Ctrl+N</td>
+<td>New tab in most editors; note that in most browsers Ctrl+N opens a new window, not a tab</td>
+</tr>
+<tr>
+<td>create window</td>
+<td>Sends Ctrl+Shift+N</td>
+<td>New window in editors; opens a private/incognito window in most browsers</td>
+</tr>
+<tr>
+<td>x-ray close window</td>
+<td>Closes the active window (Alt+F4)</td>
+<td>Requires the safety word</td>
+</tr>
+<tr>
+<td>maximize</td>
+<td>Maximizes the active window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>minimize</td>
+<td>Sends Windows and Down Arrow to the active window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>That one keystroke has two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size. "restore window" sends the same keystroke.</td>
+</tr>
+<tr>
+<td>desktop</td>
+<td>Shows the desktop (Windows+D). Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>Windows settings</td>
+<td>Opens the Windows Settings app</td>
+<td>Also fires if heard as "Window settings"</td>
+</tr>
+<tr>
+<td>close tab</td>
+<td>Closes the current tab (Ctrl+W). Needs the safety word first.</td>
+<td>What Ctrl+W closes is decided by the app</td>
+</tr>
+<tr>
+<td>restore window</td>
+<td>Sends Windows and Down Arrow to the active window. Fires only when it is the whole utterance.</td>
+<td>The same keystroke as "minimize", so it has the same two results: it takes a maximized window back to its normal size, and it minimizes a window that is already at its normal size.</td>
+</tr>
+<tr>
+<td>snap window to the left</td>
+<td>Snaps the active window to the left half of the screen (Windows and Left Arrow). Fires only when it is the whole utterance.</td>
+<td>"the" is optional: "snap window to left" also works</td>
+</tr>
+<tr>
+<td>snap window to the right</td>
+<td>Snaps the active window to the right half of the screen (Windows and Right Arrow). Fires only when it is the whole utterance.</td>
+<td>"the" is optional: "snap window to right" also works. "write" in place of "right" also works, because speech recognition can hear "right" as "write"</td>
+</tr>
+<tr>
+<td>snap window to the top</td>
+<td>Snaps the active window to the top of the screen (Windows, Alt and Up Arrow). Fires only when it is the whole utterance.</td>
+<td>"the" is optional: "snap window to top" also works</td>
+</tr>
+<tr>
+<td>snap window to the bottom</td>
+<td>Snaps the active window to the bottom of the screen (Windows, Alt and Down Arrow). Fires only when it is the whole utterance.</td>
+<td>"the" is optional: "snap window to bottom" also works</td>
+</tr>
+<tr>
+<td>minimize all windows</td>
+<td>Minimizes every open window (Windows+M). Fires only when it is the whole utterance.</td>
+<td>"minimize all" does the same</td>
+</tr>
+<tr>
+<td>show task switcher / list all windows / show all windows</td>
+<td>Opens Task View, the Windows overview of every open window (Windows+Tab). Fires only when it is the whole utterance.</td>
+<td></td>
+</tr>
+<tr>
+<td>keyboard</td>
+<td>Toggles the Windows On-Screen Keyboard (Windows, Ctrl and O). Fires only when it is the whole utterance.</td>
+<td>One word, both directions: it opens the keyboard when closed and closes it when open. The earlier show and hide phrasings were removed because they promised a direction the toggle cannot deliver</td>
+</tr>
+<tr>
+<td>search windows for [words]</td>
+<td>Opens Windows Search and types what you say into it. Needs the safety word first.</td>
+<td></td>
+</tr>
+<tr>
+<td>search on google for [words] / search for [words]</td>
+<td>Opens a Google search for the words you say in your default browser. Needs the safety word first.</td>
+<td>"search [words]" without "for" does the same</td>
+</tr>
+<tr>
+<td>search on bing for [words]</td>
+<td>Opens a Bing search for the words you say in your default browser. Needs the safety word first.</td>
+<td></td>
+</tr>
+<tr>
+<td>search on youtube for [words]</td>
+<td>Opens a YouTube search for the words you say in your default browser. Needs the safety word first.</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
+<p>"x-ray activate [app name]" brings the named application's window forward. When nothing by that name has a window open, Wheelhouse starts the program instead of doing nothing: a pattern whose target is a program file (.exe) is run directly, and a spoken name is looked up among your installed programs, by Start menu shortcut and by the names Windows itself resolves. An exact name is preferred; failing that, a name that begins with the words you said. If more than one installed program matches, Wheelhouse starts none of them and lists the names, so you can say the full name of the one you meant; if none matches, it says so. The built-in "notepad" and "browser" take the program-file path, and "browser" resolves to the Windows default browser when spoken. The System commands operate on windows and on Windows itself. Seven need the safety word: "x-ray close window", because it discards unsaved work; "x-ray close tab"; the four searches, "x-ray search windows for [text]", "x-ray search on google for [text]", "x-ray search on bing for [text]", and "x-ray search on youtube for [text]"; and the short Google form "x-ray search for [text]", in which the word "for" is optional. Every other System command works without the safety word, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed. Those include "zoom in", "zoom out", "create tab", "create window", "windows settings", which opens Windows Settings, "maximize", "minimize", and "desktop", which shows the desktop. In most browsers "create tab" (Ctrl+N) opens a new window rather than a tab, and "create window" (Ctrl+Shift+N) opens a private or incognito window.</p>
 <h4 id="mouse-control">Mouse Control</h4>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>show grid</td>
+<td>Lays a numbered three-by-three grid over the screen the front window is on, for moving the pointer by voice</td>
+<td>Opening the grid removes the numbered overlay; the two are never on screen together. "apply grid" also works. "show grid lines on the chart" on its own is typed as ordinary text, not treated as this command. See the text below the Mouse Control table</td>
+</tr>
+<tr>
+<td>hide grid</td>
+<td>Closes the grid without clicking anything</td>
+<td>"dismiss grid" also works. "hide grid lines before printing" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>grid next screen</td>
+<td>Moves the open grid to the next monitor, restarted at full size</td>
+<td></td>
+</tr>
+<tr>
+<td>[number 1-9]</td>
+<td>Redraws the open grid inside that cell, narrowing the target. With the grid closed and the numbered overlay showing, the number clicks the control with that label. With neither showing, numbers are ordinary dictation and are typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>number [1-9]</td>
+<td>Same cell narrowing with the word "number" first ("number five"), which speech engines hear more reliably than a single word. With the grid closed and the numbered overlay showing, the phrase clicks the control with that label. With neither showing, the phrase is ordinary dictation and is typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>click / tap / right click / double click / triple click</td>
+<td>Clicks at the center of the grid's current cell and closes the grid; a number in the same utterance narrows first ("x-ray click 5"). With no grid open, the words click at the current pointer position; a triple click there selects a line of text. Say "literal click" to type the word. When voice clicking is turned off, the words are typed normally.</td>
+<td></td>
+</tr>
+<tr>
+<td>mark</td>
+<td>Pins the start point of a drag at the current cell center and restarts the grid so you can navigate to the destination</td>
+<td></td>
+</tr>
+<tr>
+<td>drag</td>
+<td>Holds the left button at the marked point, moves gradually to the current cell center, and releases -- a complete drag and drop</td>
+<td>Requires a "mark" first; without one, a notice explains the step</td>
+</tr>
+<tr>
+<td>move here / go here</td>
+<td>Moves the pointer to the current cell center without pressing anything, for hover menus and tooltips</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
 <p>The <strong>mouse grid</strong> moves the pointer to any point on screen by voice, including points clicking by name cannot reach: applications that hide their controls from accessibility tools, drawing canvases, maps, games. Say <strong>"show grid"</strong> to lay a numbered three-by-three grid over the screen the front window is on. Saying a cell's number, <strong>1 through 9</strong>, redraws the grid inside that cell; repeat until the center sits on the target. The word "number" may precede each number -- engines hear "number five" more reliably than a single word. Then say the action:</p>
 <div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
 <thead>
@@ -293,11 +1651,15 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <td>double click there</td>
 </tr>
 <tr>
+<td>triple click</td>
+<td>triple click there, which selects a line of text</td>
+</tr>
+<tr>
 <td>right click</td>
 <td>right click there</td>
 </tr>
 <tr>
-<td>move here</td>
+<td>move here / go here</td>
 <td>moves the pointer there without clicking</td>
 </tr>
 <tr>
@@ -319,17 +1681,130 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 </tbody>
 </table></div>
 <p>A number in the same utterance narrows first: "x-ray click 5" narrows into cell 5, then clicks its center. All actions close the grid except "mark", "grid next screen", and a "drag" with no mark.</p>
+<p><strong>With no grid open</strong>, "click", "tap", "right click", "double click", and "triple click" spoken as your whole utterance click at the pointer's current position. Inside a longer sentence the words are typed. To type one of them on its own, say "literal click". When voice clicking is turned off (<code>enabled</code> in the click section of the settings file), the words are typed.</p>
 <p><strong>Dragging</strong> is two steps. Navigate to the point to drag from and say <strong>"mark"</strong> -- a pin appears and the grid restarts at full size. Navigate to the destination and say <strong>"drag"</strong>: the left button is pressed at the pin, the pointer moves gradually -- many applications ignore a pointer that jumps instantly -- and the button is released. No button is held while you navigate, so a pause or a misheard word between the steps cannot drop anything in the wrong place. "drag" without a "mark" shows a notice and presses nothing; the pin is forgotten when the grid closes.</p>
 <p>While the grid is open, a spoken number on its own belongs to the grid and is not typed. With the grid closed and the numbered overlay showing, a number spoken as your whole utterance clicks the control with that label. With neither showing, the same words are ordinary dictation. The grid and the numbered overlay are never open together: "show grid" removes the numbers, "show numbers" closes the grid. Narrowing stops once cells reach <code>grid_min_cell_px</code> (click section of the settings file) -- a cell that small is already within a click's precision -- and drag speed is <code>drag_duration_ms</code> next to it.</p>
 <p>No commands move the pointer continuously (no "mouse up" / "mouse down"); the grid places it at a chosen point instead. Volume and screen brightness are mapped to the thumb wheel of a Logitech MX-series mouse; see <a href="guide.html#plugins">Plugins</a>.</p>
 <h4 id="voice-element-clicking">Voice Element Clicking</h4>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>click [name]</td>
+<td>Clicks the button, link, menu item, or other control with that name; add a role word to narrow the search, or give the overlay number instead of a name while the numbered overlay is showing. Needs the safety word first, as "x-ray click cancel".</td>
+<td>See the text below the Voice Element Clicking table</td>
+</tr>
+<tr>
+<td>show numbers</td>
+<td>Paints a number on every clickable control in the front window</td>
+<td>Numbers stay up until you say "hide numbers". "apply numbers" and "show numbers here" also work. "show numbers in the report" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>hide numbers</td>
+<td>Removes the numbers</td>
+<td>"dismiss numbers" also works. "hide numbers on the chart" on its own is typed as ordinary text, not treated as this command.</td>
+</tr>
+<tr>
+<td>right click [name] / double click [name]</td>
+<td>Clicks the named control with a right click or a double click instead of a normal click; also works with a number while the numbered overlay is showing ("right click 3"). Presses a real mouse click at the control's center, with the same checks as a normal click. Useful where a normal click is not enough: File Explorer items open on a double click, and a right click opens the context menu.</td>
+<td></td>
+</tr>
+</tbody>
+</table></div>
 <p>Wheelhouse can click buttons, links, menu items, and other on-screen controls. A control is selected in one of two ways: by its <strong>name</strong>, or by displaying a <strong>number</strong> on every clickable control and clicking that number -- "x-ray click 5". The numbered overlay covers controls with no spoken name, such as icon-only toolbar buttons, and cases where several controls share a name.</p>
-<p><strong>Clicking by name</strong>: say "click", then the name of the control. "the" may precede the name and is ignored; a role word may follow to restrict the search to one kind of control. Plain "click [name]" needs the "x-ray" hotword first -- say "x-ray click cancel" -- because otherwise any sentence opening with "click" or "tap" would be taken as a command. "right click [name]" and "double click [name]" need no hotword. <strong>Role words</strong>: <strong>button</strong>, <strong>link</strong> (a hyperlink), <strong>menu</strong> (a menu item), <strong>tab</strong>, <strong>checkbox</strong> (or <strong>check box</strong>), and <strong>box</strong> / <strong>field</strong> / <strong>input</strong> (a text entry field). With no role word, any clickable control matching the name is considered. A role word spoken with no name -- "x-ray click button" -- is treated as a name and searches for a control named "button".</p>
+<p><strong>Clicking by name</strong>: say "click", then the name of the control. "the" may precede the name and is ignored; a role word may follow to restrict the search to one kind of control. Plain "click [name]" needs the safety word "x-ray" first -- say "x-ray click cancel" -- because otherwise any sentence opening with "click" or "tap" would be taken as a command. "right click [name]" and "double click [name]" need no safety word. <strong>Role words</strong>: <strong>button</strong>, <strong>link</strong> (a hyperlink), <strong>menu</strong> (a menu item), <strong>tab</strong>, <strong>checkbox</strong> (or <strong>check box</strong>), and <strong>box</strong> / <strong>field</strong> / <strong>input</strong> (a text entry field). With no role word, any clickable control matching the name is considered. A role word spoken with no name -- "x-ray click button" -- is treated as a name and searches for a control named "button".</p>
 <p><strong>Right click and double click</strong>: "right click [name]" and "double click [name]" work wherever "click [name]" works, and "right click 3" / "double click 3" work while the numbered overlay is showing. These press a real mouse click at the control's center, with the same safety checks as a normal click. They cover what a normal click cannot: a right click opens a control's context menu, and File Explorer items open on a double click.</p>
 <p><strong>The numbered overlay</strong>: "show numbers" displays a number on every clickable control in the front window, "x-ray click 3" clicks the control labelled 3, and "hide numbers" removes the numbers. Until then they stay up: clicking a numbered control repaints them in place, and they follow whichever window is in front. When "click [name]" matches more than one control closely, the numbers appear on those candidates only. With the mouse grid closed, a number spoken as your whole utterance ("7", "number seventy four") also clicks the control with that label; while the grid is open, a bare number belongs to the grid. A control whose own name is a digit -- a calculator "7" -- needs a role word: "x-ray click 7 button" clicks the calculator key rather than the control labelled 7. If the numbers no longer align after a page scrolls or changes, say "show numbers" again. Over the Pattern Manager the numbers follow its list: when you filter, add, remove, edit, expand, or collapse rows, Wheelhouse numbers the list again, and clicking the number of a pattern or category row selects that row and shows its details.</p>
 <p><strong>Outcomes</strong>: a successful click produces no notice. A failure produces a brief notice near the floating button and the tray icon: <strong>not found</strong> ("No match for [name]"; the numbered overlay is the alternative), <strong>ambiguous</strong> (the numbered overlay opens on the candidates; the "Found [A] and [B] -- be more specific" notice appears only when the overlay cannot open), and <strong>could not complete the click</strong> (the wording states the reason: control disabled, click timed out, or overlay stale and must be reapplied). Notices are rate-limited, so repeated failures do not produce repeated notices.</p>
 <h4 id="wheelhouse-control">Wheelhouse Control</h4>
-<p>These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- and replaces the selection with the result. The AI is told not to reword the text or add or remove words. The command requires that server to be configured and reachable, shows its progress on screen rather than out loud ("Correcting..."), then a notice with the outcome (for example "Done.", "No changes needed." or "Cancelled."), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under <a href="guide.html#selected-commands-in-detail">Selected Commands in Detail</a>, which also covers adding others. "boost" adds the selected text to the speech recognition hints when the running engine applies hints (see "boost" below), "patterns" opens the Pattern Manager, "help" opens the Wheelhouse Assistant in the default browser after a short explanation window, and "x-ray cancel fix" stops a correction or rewrite still running. Every command in this paragraph written without the "x-ray" prefix needs no hotword, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+<thead>
+<tr>
+<th>Say this</th>
+<th>What happens</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>push to talk mode</td>
+<td>Switches to press-and-hold listening: Wheelhouse listens only while you hold the floating button</td>
+<td>A notification confirms the switch</td>
+</tr>
+<tr>
+<td>click to talk mode</td>
+<td>Switches back to toggle listening (click to start, click to stop) -- the default</td>
+<td></td>
+</tr>
+<tr>
+<td>stop listening</td>
+<td>Switches listening off, as clicking the floating button does while it listens. Applies only when the words are the whole utterance; inside a longer sentence they dictate normally.</td>
+<td>In toggle mode, say the wake word ("computer") to switch listening back on. In push-to-talk mode the wake word ends only the idle pause, so the way back is the next hold of the floating button. A notice confirms that listening is off</td>
+</tr>
+<tr>
+<td>help</td>
+<td>Opens the Wheelhouse Assistant (the official online help) in your browser, after a short explanation window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"open voice access help" also opens it. Uses the gem_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured and no window appears. The explanation window is the same one the Help menu item shows, and both take the same route through the Logic process; ticking "Do not show this again" and selecting Assistant sets explain_before_open to false under [ai.help], which turns the window off for the command and the menu item alike. If Windows cannot start a browser, the notice "Wheelhouse could not open your browser." appears</td>
+</tr>
+<tr>
+<td>patterns</td>
+<td>Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>"pattern manager", "what can I say", "show commands", "show all commands", and "show command list" also open it; see "Selected Commands in Detail" in the Voice Commands section</td>
+</tr>
+<tr>
+<td>learn my voice</td>
+<td>Opens the voice-teaching window, where Wheelhouse learns how you sound so it stops missing short words</td>
+<td>"calibrate my voice" also works; only the Distil-Whisper speech engine uses it; See "Teaching Wheelhouse your voice" in the Speech Engines section</td>
+</tr>
+<tr>
+<td>x-ray fix</td>
+<td>Sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- then replaces the selection with the result. The AI is told not to reword the text or add or remove words</td>
+<td>Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure</td>
+</tr>
+<tr>
+<td>simplify</td>
+<td>Rewrites the selected text in plain language, using shorter sentences and simpler words. Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Same AI server and same safeguards as "x-ray fix"; the selection comes back as plain text, so formatting applied in a word processor is lost</td>
+</tr>
+<tr>
+<td>shorten</td>
+<td>Rewrites the selected text more briefly, cutting repetition and padding. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Same AI server and same safeguards as "x-ray fix"</td>
+</tr>
+<tr>
+<td>x-ray make formal</td>
+<td>Rewrites the selected text in a formal register, avoiding contractions and casual wording</td>
+<td>Same AI server and same safeguards as "x-ray fix"</td>
+</tr>
+<tr>
+<td>pirate</td>
+<td>Rewrites the selected text the way a pirate would say it. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>Ships as a worked example: it is the same action as the three above with a different sentence in the pattern file. See "Selected Commands in Detail" in the Voice Commands section for writing your own.</td>
+</tr>
+<tr>
+<td>x-ray translate to [language]</td>
+<td>Translates the selected text into the language you name, for example "x-ray translate to spanish" or "x-ray translate to brazilian portuguese". Keeps every fact and leaves names and numbers as they are.</td>
+<td>Same AI server and same safeguards as "x-ray fix"; say the language in English and in lower case, as one or more plain words with no punctuation. How good the translation is depends on the model you have configured.</td>
+</tr>
+<tr>
+<td>x-ray cancel fix</td>
+<td>Cancels an in-progress fix or rewrite</td>
+<td></td>
+</tr>
+<tr>
+<td>boost</td>
+<td>Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally.</td>
+<td>See "Selected Commands in Detail" in the Voice Commands section -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation</td>
+</tr>
+</tbody>
+</table></div>
+<p>These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- and replaces the selection with the result. The AI is told not to reword the text or add or remove words. The command requires that server to be configured and reachable, shows its progress on screen rather than out loud ("Correcting..."), then a notice with the outcome (for example "Done.", "No changes needed." or "Cancelled."), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under <a href="guide.html#selected-commands-in-detail">Selected Commands in Detail</a>, which also covers adding others. "boost" adds the selected text to the speech recognition hints when the running engine applies hints (see "boost" below), "patterns" opens the Pattern Manager, "help" opens the Wheelhouse Assistant in the default browser after a short explanation window, and "x-ray cancel fix" stops a correction or rewrite still running. Every command in this paragraph written without the "x-ray" prefix needs no safety word, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.</p>
 <p>Three further commands act on text through the host application: "x-ray find [text]" opens its find box and searches for the words spoken, "replace" opens its find-and-replace box, and "search" copies the selection and searches the web for it in the default browser.</p>
 <p>"stop listening", said as the whole utterance, switches the microphone off. No voice command switches it on, because nothing is transcribed while listening is off. In toggle mode the wake word ("computer") is the voice route back on, and you can also click either the floating button or the tray icon. In push-to-talk mode the wake word ends only the idle pause, so after "stop listening" the way back is the next hold of the floating button; listening lasts only as long as that button is held, the hold works on the floating button alone, and a click on either surface has no effect. The right-click menu's <strong>Speech Enabled</strong> item is the exception: in push-to-talk mode it switches listening on and changes the mode to toggle mode.</p>
 <p>The in-app help chat window is disabled in this release, and the voice patterns that opened it are switched off. "help" opens the Wheelhouse Assistant in the browser; see <a href="guide.html#getting-help">Getting Help</a>.</p>
@@ -342,9 +1817,9 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <p><strong>Only an engine that applies hints accepts "boost".</strong> <strong>Google Cloud Speech-to-Text</strong> applies saved hints without further configuration. <strong>Parakeet, the default engine</strong>, applies them only when hint biasing is on. Hint biasing is off by default because it slowed recognition by roughly 25 percent per utterance in the project's measurements. To switch it on, set enabled = true under [hotwords] in Parakeet's own config file. Then restart Wheelhouse, and accept the slower recognition. With biasing on, Parakeet accepts "boost" when its hints loaded, or when no hint is saved yet. If its hints failed to load, its ready notice says why. <strong>Distil-Whisper</strong> applies hints only when the [hotwords] switch in its config file is on. That switch is off as shipped, because biasing degrades its recognition, and it is marked for experiments only.</p>
 <p><strong>Under an engine that does not apply hints, "boost" is dictation.</strong> Wheelhouse types the word "boost" in place of the selection. It copies nothing, saves no hint, and shows no notice. In most applications, "undo" removes the typed word and restores the selected text. The same rule covers any pattern with the action "Teach word to speech engine", including a pattern you made yourself. The Pattern Manager's "Try it" field gives the same answer: under such an engine it reports no command for "boost".</p>
 <p><strong>"patterns" (the Pattern Manager)</strong></p>
-<p>This opens the <strong>Pattern Manager</strong>, which lists every voice command and text replacement, grouped by category. Selecting an entry shows its trigger phrase, its action, and whether it requires the hotword.</p>
-<p>The Pattern Manager can <strong>view</strong> any pattern, including every built-in one; <strong>create</strong> personal patterns, such as a shortcut that types an email address, a correction for a misheard word, or a command that opens a program; <strong>edit</strong> and <strong>delete</strong> user-created patterns; <strong>customize</strong> a built-in pattern, where a personal copy with the same trigger overrides it and deleting that copy restores the shipped behavior; and <strong>change the command hotword</strong> from "x-ray" to another word.</p>
-<p>Personal patterns live in a separate per-machine file, preserved across upgrades; the shipped patterns file is never modified. That file is <code>user_patterns.toml</code>, in the folder <code>%LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\data</code>. It does not exist until you first save a pattern or change the hotword, and the Pattern Manager is the tool that edits it.</p>
+<p>This opens the <strong>Pattern Manager</strong>, which lists every voice command and text replacement, grouped by category. Selecting an entry shows its trigger phrase, its action, and whether it requires the safety word. Tick "Only my patterns" (Alt+M) to list only the patterns you added, duplicated, or customized; it works together with the filter box.</p>
+<p>The Pattern Manager can <strong>view</strong> any pattern, including every built-in one; <strong>create</strong> personal patterns, such as a shortcut that types an email address, a correction for a misheard word, or a command that opens a program; <strong>edit</strong> and <strong>delete</strong> user-created patterns; <strong>customize</strong> a built-in pattern, where a personal copy with the same trigger overrides it and deleting that copy restores the shipped behavior; and <strong>change the safety word</strong> from "x-ray" to another word. To write your own expression or add several actions (advanced mode), click Add Pattern and choose <strong>Create an advanced command</strong>, or tick the <strong>Advanced</strong> check box in the editor. A new pattern of yours runs before the built-in patterns. A built-in pattern that you edit keeps the built-in's place in the order. Wheelhouse tries the patterns in order, and the first match wins, so a new pattern of yours beats a built-in pattern that matches the same words, and an edited built-in runs only when no pattern ahead of it matches.</p>
+<p>Personal patterns live in a separate per-machine file, preserved across upgrades; the shipped patterns file is never modified. That file is <code>user_patterns.toml</code>, in the folder <code>%LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\data</code>. It does not exist until you first save a pattern or change the safety word, and the Pattern Manager is the tool that edits it.</p>
 <p><strong>Running a program from a pattern.</strong> Two actions run programs. <strong>Run a program</strong> starts a program or a command line and does not wait for it to finish. <strong>Run a program and capture its text</strong> runs one program without a shell, waits for it to finish, and keeps the text it printed for the steps after it. A Python script runs the same way, through the Python interpreter. For example, a pattern that inserts what <code>C:\scripts\example.py</code> prints needs two steps in advanced mode. The first step uses <strong>Run a program and capture its text</strong>, with <code>python</code> in its program field and <code>C:\scripts\example.py</code> in an argument field that <strong>Add argument</strong> creates. The second step uses <strong>Insert text</strong>, with <code>run_capture</code> as its text: that is the name of the first step's action, and it stands for the text the script printed, which the step inserts at the cursor. The capture waits for the number of seconds in its timeout field, or for 10 seconds when that field is empty, and never for longer than 60 seconds. The 10-second default is the setting run_capture_timeout_default_s under [actions]. The printed text can hold at most output_cap_chars characters, a setting under [actions] that is 10000 by default. Longer output is not cut short: the step fails instead. The step also fails when the program is still running at the end of the wait, which stops the program, and when the program exits with an error code. A failed step stops the pattern, so nothing is inserted, and Wheelhouse types the spoken words as ordinary dictation instead. Every action and its parameters are listed in the <a href="https://wheelhouse-project.org/reference.html#action-reference">Action Reference</a>.</p>
 <p><strong>Rewriting the selected text</strong></p>
 <p>With text selected, <strong>"simplify"</strong> sends it to the AI server to be rewritten in plain language and replaces the selection with the result. <strong>"shorten"</strong> removes repetition and padding, <strong>"x-ray make formal"</strong> removes contractions and casual wording, and <strong>"pirate"</strong> rewrites the text in pirate speech. <strong>"x-ray translate to [language]"</strong> translates the selection into the language named -- "x-ray translate to spanish", "x-ray translate to brazilian portuguese"; multi-word names are recognised. All five use the same AI server as "x-ray fix" and leave the original in place if the request fails; they show "Rewriting..." where "x-ray fix" shows "Correcting...", then an outcome notice.</p>
@@ -357,8 +1832,8 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <p>Selecting a paragraph and saying "x-ray reading level" then rewrites it. Two constraints on that instruction: <strong>describe the style only</strong> -- Wheelhouse itself supplies the wording that preserves layout and keeps instructions inside the selected text from redirecting the AI, and duplicating either degrades the result -- and <strong>end with "Return only the rewritten text."</strong>, without which the AI is liable to prefix a sentence of commentary that is then pasted into the document.</p>
 <p><strong>"x-ray cancel fix"</strong> stops a request that is still running -- a correction or any of the rewrites -- and nothing is pasted.</p>
 <p><strong>"help"</strong></p>
-<p>Opens the Wheelhouse Assistant, the project's online help, in the default browser, where questions can be asked in plain language. The address is the gem_url setting in [ai.help], which points at the assistant by default. If the setting still holds the address of the retired ChatGPT assistant, which earlier releases shipped as the default, "help" opens the Wheelhouse Assistant instead.</p>
-<p>A short explanation window comes first, the same one the <strong>Help</strong> menu item shows: it explains that the assistant runs inside Google Gemini and that a sign-in is needed, and its <strong>Assistant</strong> button opens the browser. Ticking <strong>Do not show this again</strong> and selecting <strong>Assistant</strong> sets explain_before_open to false under [ai.help], after which "help" opens the browser directly. See <a href="guide.html#getting-help">Getting Help</a>.</p>
+<p>Opens the Wheelhouse Assistant, the project's online help, in the default browser, where questions can be asked in plain language. The address is the gem_url setting in [ai.help], which points at the assistant by default. If the setting still holds the address of the retired ChatGPT assistant, which earlier releases shipped as the default, "help" opens the Wheelhouse Assistant instead. The same applies to the address of the retired Gemini Gem.</p>
+<p>A short explanation window comes first, the same one the <strong>Help</strong> menu item shows: it explains that the Wheelhouse Assistant runs on Google's Gemini Notebook, so you must sign in with a Google Account, and its <strong>Assistant</strong> button opens the browser. Ticking <strong>Do not show this again</strong> and selecting <strong>Assistant</strong> sets explain_before_open to false under [ai.help], after which "help" opens the browser directly. While explain_before_open is false and the file help_explainer_notebook_shown.toml is missing from the data folder next to the settings file, the window appears at every Help with the box already ticked. Only the <strong>Assistant</strong> button writes that file, so after <strong>Cancel</strong> the window appears again at the next Help; select <strong>Assistant</strong> with the box still ticked to keep the window off. See <a href="guide.html#getting-help">Getting Help</a>.</p>
 <h2 id="speech-modes">Speech Modes</h2>
 <p>Wheelhouse has no command mode and no dictation mode to switch between. Each utterance is classified as it arrives, using the position of the words within the phrase.</p>
 <h3 id="classification-of-spoken-input">Classification of spoken input</h3>
@@ -369,14 +1844,14 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 </ul>
 <h3 id="word-position-determines-classification">Word position determines classification</h3>
 <ul>
-<li><strong>The first word of a phrase is a candidate command.</strong> When speech starts after a pause, the first word is checked against the set of known command openings. If it could begin a command, it is held briefly -- well under a second -- to see whether the following word or two completes one. "delete five" spoken as its own phrase runs the command. If the words match no command, they are typed as ordinary text; no words are discarded.</li>
+<li><strong>The first word of a phrase is a candidate command.</strong> When speech starts after a pause, the first word is checked against the set of known command openings. If it could begin a command, it is held briefly -- well under a second -- to see whether the following word or two completes one. If you are still speaking when that time ends, the hold continues until the next word arrives or the phrase ends, for at most five more seconds with the shipped settings. "delete five" spoken as its own phrase runs the command. If the words match no command, they are typed as ordinary text; no words are discarded.</li>
 <li><strong>Words in the middle of a phrase are dictation.</strong> "I want to delete five items" is typed in full, including the word "delete", because "delete" did not begin the phrase.</li>
 <li><strong>Replacement words apply in any position.</strong> Words such as "comma" and "period" are replaced whether they occur first, last, or mid-sentence, since their purpose is to appear within dictation.</li>
 </ul>
-<h3 id="hotword-protected-commands">Hotword-protected commands</h3>
-<p>The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands run only when the utterance begins with "x-ray", as in "x-ray close window". Other commands do not require it. The hotword follows the same position rule: "x-ray" carries its special meaning only as the first word of a phrase, and is typed as text anywhere else. If "x-ray" is followed by something that is not a command, the whole phrase including "x-ray" is typed as text.</p>
+<h3 id="commands-that-need-the-safety-word">Commands that need the safety word</h3>
+<p>The safety word protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands run only when the utterance begins with "x-ray", as in "x-ray close window". Other commands do not require it. The safety word follows the same position rule: "x-ray" carries its special meaning only as the first word of a phrase, and is typed as text anywhere else. If "x-ray" is followed without a pause by words that are not a command, the whole phrase including "x-ray" is typed as text. If you pause after "x-ray" for longer than the command wait (700 ms with the shipped settings), only the words spoken after the pause are typed.</p>
 <h3 id="streaming-insertion">Streaming insertion</h3>
-<p>Recognized words are inserted while speech continues, rather than after the utterance ends. Two exceptions are brief holds, both fractions of a second: one at the start of a phrase while a command match is evaluated, and a similar one around replacement words. A third exception is not a hold. While Wheelhouse reads the window -- to put numbers on the controls, or to find a control named in a "click" command -- a word spoken in that moment is dropped instead of typed, and it is not typed afterwards. Wheelhouse drops it deliberately: a word held until the read finished would be typed seconds later, into whatever had focus by then. The refusal lasts no longer than the read itself, and it cannot continue without limit.</p>
+<p>Recognized words are inserted while speech continues, rather than after the utterance ends. Two exceptions are brief holds, normally fractions of a second: one at the start of a phrase while a command match is evaluated, which can last longer while you are still speaking, as described above, and a similar one around replacement words. A third exception is not a hold. While Wheelhouse reads the window -- to put numbers on the controls, or to find a control named in a "click" command -- a word spoken in that moment is dropped instead of typed, and it is not typed afterwards. Wheelhouse drops it deliberately: a word held until the read finished would be typed seconds later, into whatever had focus by then. The refusal lasts no longer than the read itself, and it cannot continue without limit.</p>
 <h3 id="chaining-cursor-moves-with-then">Chaining cursor moves with "then"</h3>
 <p>Cursor movements and text selections can be chained into one phrase with "then":</p>
 <ul>
@@ -449,7 +1924,7 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <li><strong>Show Floating Button</strong> -- show or hide the floating button. The checkmark shows whether it is visible.</li>
 <li><strong>Interim Results</strong> -- selects whether words are typed as they are recognized and corrected afterwards, or held until the phrase ends. The first is the streaming insertion described under <a href="guide.html#speech-modes">Speech Modes</a>; switching this off trades the immediate feedback for text that arrives already settled.</li>
 <li><strong>Push-to-Talk Mode</strong> -- switch between the two interaction modes. The checkmark shows when push-to-talk is active.</li>
-<li><strong>STT Provider</strong> -- select the speech engine. Only engines set up on this computer are listed. See <a href="guide.html#speech-engines">Speech Engines</a>. The last item in this list, <strong>Teach WheelHouse your voice...</strong>, opens the voice-teaching session for the Distil-Whisper engine. See <a href="guide.html#teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</a>.</li>
+<li><strong>STT Provider</strong> -- select the speech engine. Only engines set up on this computer are listed, plus <strong>Parakeet (model not installed)</strong> when the installer turned Parakeet off because its speech model is missing. See <a href="guide.html#speech-engines">Speech Engines</a>. The last item in this list, <strong>Teach WheelHouse your voice...</strong>, opens the voice-teaching session for the Distil-Whisper engine. See <a href="guide.html#teaching-wheelhouse-your-voice">Teaching Wheelhouse your voice</a>.</li>
 <li><strong>AI Model</strong> -- select the AI model. The list holds the model named in the settings file and, for a local AI server, the models that server offers. The configured model always appears as a normal checked item, even when the server no longer offers it; the menu does not report a missing model. When the AI features are switched off or no AI server is configured, the list holds one unavailable item, "AI disabled" or "AI not configured".</li>
 <li><strong>Pattern Manager</strong> -- open the editor for personal voice patterns. See <a href="guide.html#voice-commands">Voice Commands</a>.</li>
 <li><strong>Debug</strong> -- switch detailed logging on or off. Leave it off except when diagnosing or reporting a problem.</li>
@@ -468,9 +1943,9 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <ul>
 <li>Change one setting at a time, then restart Wheelhouse so the change takes effect.</li>
 <li>To restore the defaults, copy <code>config.toml.example</code> over <code>config.toml</code> in that same folder.</li>
-<li>The Sonos and Sony Bravia plugin sections near the bottom of the file are off by default; their comments say to turn them on only if you own that hardware.</li>
+<li>The Sonos and Sony Bravia plugin sections, headed <code>[plugins.sonos]</code> and <code>[plugins.bravia]</code>, are off by default; their comments say to turn them on only if you own that hardware.</li>
 </ul>
-<p><strong>The per-setting reference</strong> -- every user-facing key that the shipped config.toml contains, its default, and what it does -- is in the <a href="https://wheelhouse-project.org/reference.html">command and configuration reference</a>. The three optional Sonos settings that the file leaves commented out are described under <a href="guide.html#plugins">Plugins</a>. Two settings are worth knowing before opening it. Transcript logging (LOG_TRANSCRIPTS) is off by default, which keeps dictated words and clipboard contents out of the log files; turn it on only while diagnosing a recognition problem, then turn it back off. The AI server's API key is never stored in config.toml: if your server requires one, set the WHEELHOUSE_AI_API_KEY environment variable instead, keeping the key out of a file that could be copied or shared.</p>
+<p><strong>The per-setting reference</strong> -- every user-facing key that the shipped config.toml contains, its default, and what it does -- is in the <a href="https://wheelhouse-project.org/reference.html">configuration reference</a>. The three optional Sonos settings that the file leaves commented out are described under <a href="guide.html#plugins">Plugins</a>. The file also leaves PATTERN_MANAGER_FONT_SIZE commented out: the font size, in points, of the Pattern Manager window. In that window, Ctrl+= makes the text larger, Ctrl+- makes it smaller, and Ctrl+0 returns it to the default size, and each change is saved to this setting. The allowed range is 7 to 24; a value outside it is moved to the nearest end. The value must be a whole number written without a decimal point: 12.0 is ignored. Two settings are worth knowing before opening the reference. Transcript logging (LOG_TRANSCRIPTS) is off by default, which keeps dictated words and clipboard contents out of the log files; turn it on only while diagnosing a recognition problem, then turn it back off. The AI server's API key is never stored in config.toml: if your server requires one, set the WHEELHOUSE_AI_API_KEY environment variable instead, keeping the key out of a file that could be copied or shared.</p>
 <p>The rest of this section covers the two most common adjustments: performance on slower hardware, and recognition quality. For a setting not covered here, the Wheelhouse Assistant answers questions about any key in the reference; see <a href="guide.html#getting-help">Getting Help</a>.</p>
 <h3 id="settings-for-slower-hardware">Settings for slower hardware</h3>
 <p>If Wheelhouse feels laggy or unreliable on an older computer, these changes help, roughly in order of impact:</p>
@@ -506,7 +1981,7 @@ credentials_file = &quot;C:\\Users\\yourname\\keys\\wheelhouse-speech.json&quot;
 <li><code>volume_step_db</code> -- loudness change per wheel step, in decibels (default 1.5).</li>
 <li><code>min_volume_db</code> / <code>max_volume_db</code> -- the volume floor and ceiling (defaults -96.0 and 0.0).</li>
 </ul>
-<p>Fully local, no network. Both volume plugins can stay enabled: at startup Wheelhouse picks one to receive volume commands -- Sonos when the Windows output device is external and a discovered Sonos reports that it is receiving television audio, System Volume in every other case.</p>
+<p>Fully local, no network. Both volume plugins can stay enabled: at startup Wheelhouse picks one to receive volume commands -- Sonos when the Windows output device is external and a discovered Sonos reports that it is receiving television audio, System Volume in every other case. The choice does not look at <code>plugins.sonos.enabled</code>: when the output is a Sonos speaker, the volume router hands the command to Sonos without checking that setting, so with the Sonos plugin off no plugin changes the volume.</p>
 <h3 id="bravia-sony-tv">Bravia (Sony TV)</h3>
 <p>Brings a Sony Bravia TV used as a computer monitor into Wheelhouse's brightness control, so the brightness scroll zone can dim and brighten the TV itself. Enable with <code>plugins.bravia.enabled</code> (default: disabled). Settings:</p>
 <ul>
@@ -555,7 +2030,7 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 <h3 id="setup-verification">Setup verification</h3>
 <p>Run these five checks in order. Stop at the first that fails and read the entry it names.</p>
 <ol>
-<li><strong>Did the installer finish without error lines?</strong> If not, see "Installer failures" below.</li>
+<li><strong>Did the installer finish without error lines?</strong> If not, see <a href="install.html#installer-troubleshooting">Installer troubleshooting</a> in the installation guide.</li>
 <li><strong>Do Windows Sound settings show the microphone receiving sound?</strong> Right-click the speaker icon on the taskbar, open Sound settings, open Input, and speak. If the input meter does not move, see "Microphone not detected."</li>
 <li><strong>Is the Wheelhouse icon present in the system tray?</strong> The tray icon is the check that matters: the floating button can be switched off from the menu on either surface, so its absence does not mean the program failed to start. If the tray icon is missing, see "Wheelhouse does not start and neither the tray icon nor the floating button appears."</li>
 <li><strong>Open Notepad, click in the empty page, and say "hello".</strong> If the word does not appear, see "Dictation not appearing in text fields."</li>
@@ -596,8 +2071,8 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 <p><strong>Command words are typed as text instead of running</strong></p>
 <ul>
 <li><em>Symptom:</em> "close window" is typed into the document instead of closing the window.</li>
-<li><em>Likely cause:</em> Expected behavior. The hotword protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands require "x-ray" first.</li>
-<li><em>Action:</em> Say "x-ray close window". The command reference marks which commands require the hotword.</li>
+<li><em>Likely cause:</em> Expected behavior. The safety word protects commands that would be disruptive or hard to undo if they fired while you were dictating. These commands require "x-ray" first.</li>
+<li><em>Action:</em> Say "x-ray close window". The Voice Commands section of this document marks which commands require the safety word.</li>
 </ul>
 <p><strong>Dictation not appearing in text fields</strong></p>
 <ul>
@@ -625,15 +2100,13 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
 <li><em>Action, in order:</em> confirm [ai] enabled = true and [ai.server] base_url is set (an empty base_url disables AI by design); confirm the server is reachable at that address and that the [ai.server] model name is one it provides; raise [ai.server] timeout_s if the server is slow to respond; and for a remote server requiring a key, set the WHEELHOUSE_AI_API_KEY environment variable -- the key is never stored in the settings file -- and restart Wheelhouse.</li>
 <li><em>Note:</em> An unreachable AI server does not affect dictation, voice commands, or any other feature.</li>
 </ul>
-<h3 id="installer-troubleshooting">Installer troubleshooting</h3>
-<p><strong>Installer failures</strong></p>
-<p>Each installer failure message and its action is listed under <a href="install.html#installation-failure-messages">Installation failure messages</a>; re-running the installer is safe and interrupted downloads resume.</p>
 <hr />
 <h2 id="getting-help">Getting Help</h2>
-<p><strong>The Wheelhouse Assistant is the first place to ask.</strong> It is a Google Gemini assistant holding this entire document, the full command and configuration reference, and the project's own notes on how each part behaves. It answers questions in plain language, reads an error message or a log excerpt and identifies the likely cause, and names the specific setting to change and the file it belongs in. It covers material this document summarizes, so it can answer questions no section here addresses.</p>
-<p><a href="https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A">https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A</a></p>
-<p>Three ways to reach it: the address above, the <strong>Help</strong> item in the right-click menu on the floating button or the tray icon, and the spoken command "help". All three open the same assistant in the default browser. Gemini asks for a sign-in first; a Google account, an Apple account, or an email address works, and the free tier is sufficient.</p>
-<p>The menu item and the spoken command show a short explanation window first, headed <strong>Ask the Wheelhouse Assistant</strong>. It says what the assistant is, that it runs inside Google Gemini, that a sign-in is needed, and what signing in involves. Its <strong>Assistant</strong> button opens the assistant; <strong>Cancel</strong>, or the Escape key, closes the window and opens nothing. Tick <strong>Do not show this again</strong> and then select <strong>Assistant</strong>, and Help opens the browser directly from then on. If Windows cannot start a browser, Wheelhouse shows the notice "Wheelhouse could not open your browser." To bring the window back, set <code>explain_before_open = true</code> under <code>[ai.help]</code> in the settings file; see <a href="guide.html#configuration">Configuration</a>.</p>
+<p><strong>The Wheelhouse Assistant is the first place to ask.</strong> It holds this entire document, the reference for actions, notices, and configuration settings, and the project's own notes on how each part behaves. It answers questions in plain language, reads an error message or a log excerpt and identifies the likely cause, and names the specific setting to change and the file it belongs in. It covers material this document summarizes, so it can answer questions no section here addresses.</p>
+<p><a href="https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview">https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview</a></p>
+<p>Three ways to reach it: the address above, the <strong>Help</strong> item in the right-click menu on the floating button or the tray icon, and the spoken command "help". All three open the same assistant in the default browser.</p>
+<p>The Wheelhouse Assistant runs on Google's Gemini Notebook, so you must sign in with a Google Account. The account is free, and Google does not ask for a credit card. You can use an email address you already have; a Gmail address is not necessary. To create an account, click "Create account" on the Google sign-in page. If you are signed in with a work or school account and the Assistant does not open, sign in with a personal account instead.</p>
+<p>The menu item and the spoken command show a short explanation window first, headed <strong>Ask the Wheelhouse Assistant</strong>. It says what the assistant is and repeats the Google Account text above. Its <strong>Assistant</strong> button opens the assistant; <strong>Cancel</strong>, or the Escape key, closes the window and opens nothing. Tick <strong>Do not show this again</strong> and then select <strong>Assistant</strong>, and Help opens the browser directly from then on. While <code>explain_before_open</code> is false and the file help_explainer_notebook_shown.toml is missing from the data folder next to the settings file, the window appears at every Help with the box already ticked. Only the <strong>Assistant</strong> button writes that file, so after <strong>Cancel</strong> the window appears again at the next Help; select <strong>Assistant</strong> with the box still ticked to keep the window off. If Windows cannot start a browser, Wheelhouse shows the notice "Wheelhouse could not open your browser." To bring the window back, set <code>explain_before_open = true</code> under <code>[ai.help]</code> in the settings file; see <a href="guide.html#configuration">Configuration</a>.</p>
 <p>The assistant does not have access to a particular computer, so it cannot read logs that are not pasted into it, and it does not know about changes made after the release it was built from.</p>
 <p><strong>Reporting a defect.</strong> A problem in Wheelhouse itself -- something that behaves incorrectly rather than something that needs explaining -- goes to the project:</p>
 <ul>
@@ -649,7 +2122,7 @@ device_name = &quot;SONY TV&quot;  # must exactly match the device name in Windo
       <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
       <a href="#top">Back to top ↑</a>
     </nav>
-    <p class="fine-print">Documentation for Wheelhouse 1.2.0. Speech recognition runs on your computer by default; cloud options are optional.</p>
+    <p class="fine-print">Documentation for Wheelhouse 1.2.1. Speech recognition runs on your computer by default; cloud options are optional.</p>
   </footer>
 </body>
 </html>

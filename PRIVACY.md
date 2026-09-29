@@ -54,15 +54,15 @@ Uninstalling removes all of the above: the application, both AppData folders, an
 
 # Wheelhouse Assistant
 
-The Wheelhouse project also publishes the **Wheelhouse Assistant**, a Google Gemini Gem, at <https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A>. The assistant is separate from the Wheelhouse desktop application. You use it in your web browser, and Gemini asks you to sign in first: a Google account, an Apple account, or an email address works, and a free account is enough. Nothing you say to the assistant touches the desktop application, and the desktop application sends nothing to it.
+The Wheelhouse project also publishes the **Wheelhouse Assistant** at <https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview>. The Wheelhouse Assistant runs on Google's Gemini Notebook, so you must sign in with a Google Account. The account is free, and Google does not ask for a credit card. The assistant is separate from the Wheelhouse desktop application. You use it in your web browser. Nothing you say to the assistant touches the desktop application, and the desktop application sends nothing to it.
 
 ## How it works
 
-The assistant holds the current Wheelhouse documentation as stored files in its own Knowledge section: the help document, the installation guide, and the command and configuration reference. It reads those stored files and answers from them.
+The assistant holds the Wheelhouse documentation as one source: a Google Doc that joins the help document, the installation guide, and the action, notice, and configuration reference. It reads that source and answers from it.
 
 The assistant retrieves nothing while it answers. It makes no request to the Wheelhouse project, to GitHub, or to any other site, so using it tells the project nothing at all.
 
-The project keeps those stored files current by rewriting them when it publishes a release. That rewrite runs on a project maintainer's machine. It carries documentation to Google and carries nothing back.
+The project rewrites that Google Doc when it publishes a release. That rewrite runs on a project maintainer's machine. It carries documentation to Google and carries nothing back.
 
 ## What the project receives
 
@@ -77,7 +77,7 @@ The project:
 
 ## Google
 
-Your conversations with the Wheelhouse Assistant are processed by Google as part of providing the Gemini service. They are subject to Google's own terms of service and privacy policy, and to whatever data settings you have chosen in the account you signed in with. Read those before you dictate anything sensitive to the assistant.
+Your conversations with the Wheelhouse Assistant are processed by Google as part of providing the Gemini Notebook service. They are subject to Google's own terms of service and privacy policy, and to whatever data settings you have chosen in the account you signed in with. Read those before you dictate anything sensitive to the assistant.
 
 Unless you separately choose to share information with the Wheelhouse project (for example, by opening a GitHub issue or discussion), the project does not receive your conversation history.
 

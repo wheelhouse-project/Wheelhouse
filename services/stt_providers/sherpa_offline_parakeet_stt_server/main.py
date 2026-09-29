@@ -41,6 +41,7 @@ from shared_stt.audio_processor import (
     AudioProcessor,
     LOAD_METRICS_LOGGER_NAME,
 )
+from shared_stt.mic_notice import MicOutageNotifier
 from shared_stt.redact import redact_transcript
 from shared_stt.startup_refusal import (
     REFUSAL_EXIT_CODE,
@@ -230,8 +231,15 @@ class ParakeetServer:
         self.display_name = resolve_display_name(model_config)
 
         audio_config = AudioConfig(rate=sample_rate, channels=1, chunk_ms=chunk_ms)
+        # The capture sees a lost microphone; this provider owns the
+        # forwarder that can tell the user (wh-mic-loss-notice). The
+        # forwarder is built below the capture, so the notifier reads it
+        # at each call, and does nothing while there is none.
+        outage_notifier = MicOutageNotifier(
+            self.display_name, lambda: getattr(self, 'forwarder', None))
         try:
-            self.audio_capture = get_audio_provider(config=audio_config)
+            self.audio_capture = get_audio_provider(
+                config=audio_config, outage_callback=outage_notifier)
         except RuntimeError as exc:
             # The factory refuses when winsdk is missing and there is no
             # second capture path to fall back to

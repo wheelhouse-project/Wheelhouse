@@ -104,7 +104,6 @@ def make_retraction_processor(app=None):
     catalog = MagicMock()
     catalog.command_hotword = "x-ray"
     catalog.lookup.return_value = None
-    catalog.get_trailing_command.return_value = None
     processor = SpeechProcessor(
         word_queue=asyncio.Queue(),
         catalog=catalog,

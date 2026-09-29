@@ -94,6 +94,61 @@ def get_restart_flag_path(app_name: str) -> str:
     return os.path.join(app_data_path, f"{app_name.lower()}.restart")
 
 
+#: Size above which the stderr file is moved aside when a child starts.
+# crewcut: a rough bound checked only at child start, so one long run can
+# grow the file past it. Remove the limit by rotating inside the child's
+# writes, which needs a pipe and a reader -- the thing this file avoids.
+STDERR_LOG_MAX_BYTES = 1024 * 1024
+
+
+def get_stderr_log_path(app_name: str) -> str:
+    """Get the file that receives the provider's stderr.
+
+    WheelHouse reads the same file: remote_stt_launcher.py builds
+    ``<app_data_dir>/<provider_name>.stderr.log``, and each provider's
+    app_name equals its lower-case provider name
+    (wh-provider-native-crash-trace).
+    """
+    app_data_path = get_app_data_path()
+    os.makedirs(app_data_path, exist_ok=True)
+    return os.path.join(app_data_path, f"{app_name.lower()}.stderr.log")
+
+
+def _open_stderr_log(path: str):
+    """Open the stderr file for one child, moving a large file aside.
+
+    A file, never a pipe: a pipe that nobody reads stops the provider
+    inside its write once the buffer fills, and a pipe whose reader has
+    exited makes the write fail. A file has neither problem, and the
+    provider keeps writing after WheelHouse exits.
+    """
+    try:
+        if os.path.getsize(path) > STDERR_LOG_MAX_BYTES:
+            os.replace(path, path + ".1")
+    except OSError:
+        # Missing file, or a provider left behind by an earlier
+        # WheelHouse still holds it: keep appending.
+        pass
+    return open(path, "ab")
+
+
+def _append_exit_line(path: str, app_name: str, exit_code: int,
+                      uptime: float) -> None:
+    """Record the child's exit code where WheelHouse can read it.
+
+    The launcher itself exits 0 whatever the child's code was, so this
+    line is the only way the code leaves this process. On Windows the
+    code is the unsigned 32-bit value GetExitCodeProcess returns.
+    """
+    line = (f"[launcher] {app_name} process exited with code {exit_code} "
+            f"(0x{exit_code:08X}) after {uptime:.1f}s\n")
+    try:
+        with open(path, "ab") as stream:
+            stream.write(line.encode("ascii", "backslashreplace"))
+    except OSError as e:
+        logger.warning(f"Failed to record the exit code in {path}: {e}")
+
+
 def should_restart(
     exit_code: int,
     uptime: float,
@@ -239,8 +294,18 @@ def run_launcher(config: LauncherConfig) -> None:
     logger.info(f"Python executable: {sys.executable}")
     logger.info(f"Restart flag path: {restart_flag_path}")
 
+    # PYTHONFAULTHANDLER makes the child's interpreter enable faulthandler
+    # before its first import, so a native crash -- even one inside an
+    # extension module's import -- writes the Python stack to stderr
+    # (wh-provider-native-crash-trace).
+    child_env = os.environ.copy()
+    child_env["PYTHONFAULTHANDLER"] = "1"
+    stderr_log_path = get_stderr_log_path(config.app_name)
+    logger.info(f"Provider error output: {stderr_log_path}")
+
     while should_restart_process and crash_count < config.max_crashes:
         start_time = time.time()
+        stderr_log = None
 
         try:
             # Start the main STT process
@@ -248,11 +313,22 @@ def run_launcher(config: LauncherConfig) -> None:
             cmd = [sys.executable, main_script]
             if config.forward_args:
                 cmd.extend(config.forward_args)
+            try:
+                stderr_log = _open_stderr_log(stderr_log_path)
+            except OSError as e:
+                # The provider still starts; its stderr stays on the console.
+                logger.warning(f"Cannot open {stderr_log_path}: {e}")
             logger.info(f"Starting {config.app_name} process: {' '.join(cmd)}")
             _subprocess = subprocess.Popen(
                 cmd,
-                cwd=launcher_dir
+                cwd=launcher_dir,
+                env=child_env,
+                stderr=stderr_log,
             )
+            # The child holds its own handle now.
+            if stderr_log is not None:
+                stderr_log.close()
+                stderr_log = None
 
             # Write PID file
             with open(pid_file_path, 'w') as f:
@@ -263,12 +339,16 @@ def run_launcher(config: LauncherConfig) -> None:
             exit_code = _subprocess.returncode
 
             logger.info(f"{config.app_name} process exited with code {exit_code}")
+            _append_exit_line(stderr_log_path, config.app_name, exit_code,
+                              time.time() - start_time)
 
         except Exception as e:
             logger.error(f"Failed to start/monitor {config.app_name} process: {e}")
             exit_code = 1
 
         finally:
+            if stderr_log is not None:
+                stderr_log.close()
             _subprocess = None
             # Clean up PID file
             if os.path.exists(pid_file_path):

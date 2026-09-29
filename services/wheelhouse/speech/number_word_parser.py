@@ -7,7 +7,8 @@ command count, and speech/navigation/parser.py's cursor counts all read
 numbers through this function. Two tables used to sit beside it, both
 stopping at ten, which is why "backspace fifteen" pressed backspace once
 and typed the word. Each caller still applies its OWN cap after parsing:
-50 for a key repeat, MAX_COUNT 50 for cursor navigation, 999 for a badge.
+30 for a hotkey repeat (HOTKEY_REPEAT_CAP), 50 for a single-key press,
+MAX_COUNT 30 for cursor navigation, 999 for a badge.
 
 Two caller differences are keyword options rather than separate tables --
 see parse_number_word for what each one admits and why:
@@ -137,6 +138,12 @@ _PHRASE_WORDS = sorted(
     | {"hundred", "and"},
     key=lambda word: (-len(word), word),
 )
+
+# Read-only views of the vocabulary for speech/number_capture_rule.py,
+# which refuses a command group that lists these words instead of
+# capturing (\d+) (wh-number-capture-enforce).
+PHRASE_WORDS = frozenset(_PHRASE_WORDS)
+ALIAS_WORDS = frozenset(_ALIASES)
 
 _WORD_ALTERNATION = "|".join(re.escape(word) for word in _PHRASE_WORDS)
 

@@ -40,11 +40,10 @@ Run it from services/stt_providers/shared:
 
     uv run python tools/record_capture.py --seconds 45 --out C:/tmp/nvda-winrt.wav
 
-This script only records. Scoring is a separate step, because the number the
-bead compares against was produced by Wheelhouse's own detector, which lives
-in the other service and the other virtual environment:
+This script only records. Scoring is a separate step, with the shipped
+detector:
 
-    services/wheelhouse/scripts/score_vad_leak.py
+    services/stt_providers/shared/tools/score_vad_leak.py
 """
 
 from __future__ import annotations
@@ -135,8 +134,8 @@ def main() -> int:
     print(f"    RMS level       {rms_db:.1f} dBFS")
     print(f"    provider stats  {provider.get_stats()}")
     print()
-    print("Now score it from services/wheelhouse:")
-    print(f"    uv run python scripts/score_vad_leak.py {out_path}")
+    print("Now score it from services/stt_providers/shared:")
+    print(f"    uv run python tools/score_vad_leak.py {out_path}")
     return 0
 
 

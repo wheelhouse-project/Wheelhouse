@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import random
 from ctypes import wintypes
 from unittest.mock import MagicMock, patch
 
@@ -44,6 +45,8 @@ from ui.element_types import WalkSnapshotSummary, WalkSnapshotSummaryItem
 from shared.overlay_dpi_resolver import OverlayPaintRect
 from shared.monitor_geometry import _NativeMonitor
 from PySide6.QtCore import QRect, QRectF
+
+import overlay_brave_layout_data as brave_data
 
 
 # ---------------------------------------------------------------------------
@@ -2892,6 +2895,2266 @@ class TestNudgePrefersStayingAttached:
         # above); ring-1 inward is fully on the desktop -- clean but
         # DETACHED -- and comes first in ring order. Attached must win.
         assert got == (1770.0, 118.0, 1920.0, 148.0)
+
+
+# ---------------------------------------------------------------------------
+# Interior toolbar runs (wh-overlay-toolbar-badges-cover-icons)
+# ---------------------------------------------------------------------------
+
+# David's layout: Brave on the Gemini Gem page, rebuilt from the evidence
+# screenshot tmp/evidence/2026-09-24-brave-toolbar-badges-cover-icons.webp
+# in the developer's checkout (2000 x 1130 image px,
+# untracked). Scale K = 2000 / 1280 = 1.5625 image px per logical px, so the
+# monitor is 1280 x 720 logical. Four checks agree with K: the active tab
+# fill spans 374 image px for a 240 dp Chromium tab (1.558); the toolbar
+# button pitch is 47 image px for 30 dp (1.567); the caption button pitch is
+# 71 image px for about 45 dp (1.578); the 8 pt bubble ink is 18 image px for
+# 12 logical px (1.5). The boxes below are image px; _david_layout divides
+# them by K. Numbers are the screenshot's badge numbers.
+_DAVID_K = 2000.0 / 1280.0
+_DAVID_MON = (1280.0, 720.0)
+_DAVID_TOOLBAR_Y = 97.5  # toolbar button centre y, image px
+_DAVID_BTN = 28.0  # Chromium toolbar button, logical px (30 dp pitch - 2)
+_DAVID_NAV = 40.0  # Gemini page icon button, logical px
+
+
+def _david_sq(cx, cy, side):
+    """An image-px box centred on (cx, cy), ``side`` logical px square."""
+    half = side * _DAVID_K / 2.0
+    return (cx - half, cy - half, cx + half, cy + half)
+
+
+_DAVID_LAYOUT_IMAGE_PX = [
+    (1, "Minimize", (1782.5, 0, 1853.5, 66)),
+    (2, "Restore", (1853.5, 0, 1924.5, 66)),
+    (3, "Close", (1924.5, 0, 1995.5, 66)),
+    (4, "Back", _david_sq(35, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (5, "Forward", _david_sq(81, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (6, "Reload", _david_sq(128, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (7, "Home", _david_sq(175, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (8, "View site information", _david_sq(235, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (9, "Pill icon 9", _david_sq(1383, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (10, "Pill icon 10", _david_sq(1439, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (11, "Pill icon 11", _david_sq(1495, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (12, "Pill icon 12", _david_sq(1553, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (13, "Extension 13", _david_sq(1610, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (14, "Extension 14", _david_sq(1657, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (15, "Extension 15", _david_sq(1704, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (16, "Extension 16", _david_sq(1750, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (17, "Extension 17", _david_sq(1797, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (18, "Extension 18", _david_sq(1844, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (19, "Extension 19", _david_sq(1890, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (20, "Menu", _david_sq(1975, _DAVID_TOOLBAR_Y, _DAVID_BTN)),
+    (21, "Gemini star", _david_sq(40, 169, _DAVID_NAV)),
+    (22, "Three-dot menu", _david_sq(1954.5, 174, _DAVID_NAV)),
+    (23, "Nav item 23", _david_sq(40.5, 230.5, _DAVID_NAV)),
+    (44, "Google", (8, 10, 382, 60)),
+    (45, "Gemini", (392, 10, 766, 60)),
+    (46, "Close tab", _david_sq(743, 35, 16)),
+    (47, "New tab", _david_sq(801, 35, _DAVID_BTN)),
+]
+
+
+def _david_layout():
+    """David's layout as ``(number, name, x, y, w, h)`` in logical px
+    (rounded to 0.1 px, as the design-stage probe measured it)."""
+    out = []
+    for number, name, box in _DAVID_LAYOUT_IMAGE_PX:
+        left, top, right, bottom = (round(v / _DAVID_K, 1) for v in box)
+        out.append((number, name, left, top, right - left, bottom - top))
+    return out
+
+
+# The ruling's synthetic browser layouts (C2), 1920 x 1080 logical: a
+# caption-button row, the left navigation run (5 icons), a wide address
+# field, and the right extension run (12 icons), plus per layout:
+# (a) a tab strip above; (b) short text links directly below the toolbar;
+# (c) an icon-only bookmarks bar directly below; (d) (c) plus the tab strip.
+_C2_MON = (1920.0, 1080.0)
+_C2_CAPTIONS = [
+    ("Minimize", 1782, 40, 46, 32),
+    ("Restore", 1828, 40, 46, 32),
+    ("Close", 1874, 40, 46, 32),
+]
+_C2_LEFT = [
+    (name, 8 + 24 * k, 90, 24, 24)
+    for k, name in enumerate(("Back", "Forward", "Reload", "Home", "SiteInfo"))
+]
+_C2_ADDRESS = [("Address", 140, 88, 1350, 28)]
+_C2_RIGHT = [(f"Ext{k}", 1500 + 24 * k, 90, 24, 24) for k in range(12)]
+_C2_LINKS = [
+    ("About", 16, 122, 48, 20),
+    ("Store", 72, 122, 44, 20),
+    ("Gmail", 1600, 122, 44, 20),
+    ("Images", 1656, 122, 52, 20),
+]
+_C2_BOOKMARKS = [(f"BM{k}", 8 + 28 * k, 120, 28, 28) for k in range(64)]
+_C2_TABS = [
+    ("Tab0", 8, 40, 240, 40),
+    ("Tab1", 248, 40, 240, 40),
+    ("TabClose1", 462, 52, 16, 16),
+    ("NewTab", 494, 46, 28, 28),
+]
+
+
+def _c2_layout(key):
+    """Layout (a)-(d) as ``(number, name, x, y, w, h)``, numbered in order."""
+    controls = _C2_CAPTIONS + _C2_LEFT + _C2_ADDRESS + _C2_RIGHT
+    if key == "b":
+        controls = controls + _C2_LINKS
+    if key in ("c", "d"):
+        controls = controls + _C2_BOOKMARKS
+    if key in ("a", "b", "d"):
+        controls = controls + _C2_TABS
+    return [
+        (i + 1, name, x, y, w, h)
+        for i, (name, x, y, w, h) in enumerate(controls)
+    ]
+
+
+def _rect_intersection(a, b):
+    """The (l, t, r, b) intersection of two rects, or None when they do not
+    overlap by area."""
+    left, top = max(a[0], b[0]), max(a[1], b[1])
+    right, bottom = min(a[2], b[2]), min(a[3], b[3])
+    if right <= left or bottom <= top:
+        return None
+    return (left, top, right, bottom)
+
+
+def _segments_cross(a, b, c, d):
+    """True when segment a-b properly crosses segment c-d."""
+    def orient(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return (v > 1e-9) - (v < -1e-9)
+    return (
+        orient(a, b, c) * orient(a, b, d) < 0
+        and orient(c, d, a) * orient(c, d, b) < 0
+    )
+
+
+class TestInteriorToolbarRunRow:
+    """A packed run of small icons away from every monitor edge -- a
+    browser's address-bar row -- gets ONE badge row just BELOW the row band,
+    in icon order, instead of per-badge corner placement, which covered most
+    of each icon (wh-overlay-toolbar-badges-cover-icons; RULING #3: below
+    only, with a sideways shift past a blocker; when no position works the
+    run keeps today's placement).
+
+    Every layout runs with the real badge size at the shipped 8 pt font, at
+    four display scales. "Today's placement" is computed in the same test by
+    patching out the interior pass (``_interior_run_placements_phys``), which
+    is exactly the placement before this change.
+    """
+
+    DPRS = (1.0, 1.5, 2.0, 3.0)
+    # A control this size or smaller (logical px, both sides) is an icon for
+    # the "covers no other icon" assertion, independent of the production
+    # small-control rule: it includes the caption buttons at every scale.
+    ICON_MAX_LOGICAL = 48.0
+
+    @staticmethod
+    def _mgr(mod):
+        # The shipped default font size ([click] overlay_badge_font_pt).
+        return mod.OverlayPaintWindowManager(badge_font_pt=8)
+
+    @staticmethod
+    def _badges(mod, spec, dpr, mon):
+        mon_w, mon_h = mon
+        monitor = _NativeMonitor(
+            hmonitor=1,
+            rect_phys=QRect(0, 0, int(mon_w * dpr), int(mon_h * dpr)),
+            dpi=int(96 * dpr),
+        )
+        return [
+            (
+                mod._TargetPaintRect(
+                    x=float(x), y=float(y), width=float(w), height=float(h),
+                    monitor=monitor, hmonitor=1, screen=None,
+                    target_name=name,
+                ),
+                number,
+            )
+            for number, name, x, y, w, h in spec
+        ]
+
+    @staticmethod
+    def _place(mgr, badges, dpr, mon, *, today=False):
+        mon_w, mon_h = mon
+        if today:
+            with patch.object(
+                mgr, "_interior_run_placements_phys", return_value={}
+            ):
+                return mgr._numeral_badge_placements_phys(
+                    badges, dpr, mon_w * dpr, mon_h * dpr,
+                    corner="top_right",
+                )
+        return mgr._numeral_badge_placements_phys(
+            badges, dpr, mon_w * dpr, mon_h * dpr, corner="top_right",
+        )
+
+    @staticmethod
+    def _box(rect, dpr):
+        return (
+            rect.x * dpr, rect.y * dpr,
+            (rect.x + rect.width) * dpr, (rect.y + rect.height) * dpr,
+        )
+
+    @classmethod
+    def _small_indexes(cls, mgr, mod, badges, dpr):
+        """Controls that count as icons or small controls: the production
+        small rule (real badge size) OR icon-sized in logical px."""
+        out = set()
+        for j, (rect, number) in enumerate(badges):
+            bw, bh = mgr._numeral_badge_size(number, dpr)
+            box = cls._box(rect, dpr)
+            production_small = (
+                box[2] - box[0] < mod._BADGE_SMALL_CONTROL_FACTOR * bw
+                and box[3] - box[1] < mod._BADGE_SMALL_CONTROL_FACTOR * bh
+            )
+            icon_sized = (
+                rect.width <= cls.ICON_MAX_LOGICAL
+                and rect.height <= cls.ICON_MAX_LOGICAL
+            )
+            if production_small or icon_sized:
+                out.add(j)
+        return out
+
+    @classmethod
+    def _assert_runs_below(cls, mgr, mod, badges, placements, runs, dpr, mon):
+        """Acceptance 1-2 for each run: one row below the row band; each
+        badge covers at most one corner quarter of its own icon and no other
+        icon; badge order matches icon order."""
+        ctrl = [cls._box(r, dpr) for r, _n in badges]
+        small = cls._small_indexes(mgr, mod, badges, dpr)
+        for run in runs:
+            for i in run:
+                fp = placements[i][2]
+                own = ctrl[i]
+                inter = _rect_intersection(fp, own)
+                if inter is not None:
+                    mid_x = (own[0] + own[2]) / 2.0
+                    mid_y = (own[1] + own[3]) / 2.0
+                    one_column = inter[2] <= mid_x or inter[0] >= mid_x
+                    one_row = inter[3] <= mid_y or inter[1] >= mid_y
+                    assert one_column and one_row, (badges[i][1], fp, own)
+                for j in small:
+                    if j != i:
+                        assert _rects_disjoint(fp, ctrl[j]), (
+                            badges[i][1], badges[j][1], fp, ctrl[j],
+                        )
+            rects = [placements[i][2] for i in run]
+            band_bottom = max(ctrl[i][3] for i in run)
+            # One row, below the band.
+            assert len({r[1] for r in rects}) == 1, rects
+            assert rects[0][1] >= band_bottom, (rects[0], band_bottom)
+            # Badge x-centres increase in icon order.
+            centres = [(r[0] + r[2]) / 2.0 for r in rects]
+            assert all(a < b for a, b in zip(centres, centres[1:])), centres
+
+    @classmethod
+    def _assert_disjoint_and_uncrossed(cls, mgr, mod, badges, placements,
+                                       dpr, mon):
+        """Acceptance 2 over the whole layout: no two badges overlap, and no
+        two detached leader lines cross."""
+        rects = [p[2] for p in placements if p is not None]
+        for a in range(len(rects)):
+            for b in range(a + 1, len(rects)):
+                assert _rects_disjoint(rects[a], rects[b]), (
+                    rects[a], rects[b],
+                )
+        margin = mgr._badge_box_margin_phys(dpr)
+        segments = []
+        for (rect, number), placement in zip(badges, placements):
+            fp = placement[2]
+            box = cls._box(rect, dpr)
+            if (
+                mod._bubble_drawing_state(fp, box, dpr)
+                != mod._BUBBLE_STATE_DETACHED
+            ):
+                continue
+            bubble = (
+                fp[0] + margin, fp[1] + margin,
+                fp[2] - margin, fp[3] - margin,
+            )
+            segments.append((number, mod._leader_anchor_points(
+                bubble, box, mon[0] * dpr, mon[1] * dpr,
+            )))
+        for a in range(len(segments)):
+            for b in range(a + 1, len(segments)):
+                (na, (p1, p2)), (nb, (p3, p4)) = segments[a], segments[b]
+                assert not _segments_cross(p1, p2, p3, p4), (na, nb)
+
+    @classmethod
+    def _assert_no_more_cover_than_today(cls, mgr, mod, badges, placements,
+                                         today, dpr, *, top_strip=False):
+        """C5: no badge covers more of any small control (its own included)
+        by visible-bubble area than it does on today's placement.
+
+        ``top_strip=True`` applies RULING 1A (David, 2026-09-25 09:23): a
+        badge that comes from ABOVE a control (the badge's top is above the
+        control's top) may cover the control's top strip, at most
+        ``_INTERIOR_ROW_MAX_COVER_FRACTION`` of its height -- a toolbar row
+        over the page controls just below the toolbar."""
+        margin = mgr._badge_box_margin_phys(dpr)
+        ctrl = [cls._box(r, dpr) for r, _n in badges]
+        small = cls._small_indexes(mgr, mod, badges, dpr)
+
+        def cover(fp, j):
+            bubble = (
+                fp[0] + margin, fp[1] + margin,
+                fp[2] - margin, fp[3] - margin,
+            )
+            inter = _rect_intersection(bubble, ctrl[j])
+            if inter is None:
+                return 0.0
+            area = (ctrl[j][2] - ctrl[j][0]) * (ctrl[j][3] - ctrl[j][1])
+            return (
+                (inter[2] - inter[0]) * (inter[3] - inter[1]) / area
+            )
+
+        def strip_only(fp, j):
+            top, bottom = ctrl[j][1], ctrl[j][3]
+            return fp[1] < top and fp[3] - top <= (
+                mod._INTERIOR_ROW_MAX_COVER_FRACTION * (bottom - top)
+            )
+
+        for i, (new, old) in enumerate(zip(placements, today)):
+            for j in small:
+                if top_strip and strip_only(new[2], j):
+                    continue
+                assert cover(new[2], j) <= cover(old[2], j) + 1e-9, (
+                    badges[i][1], badges[j][1],
+                )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_david_layout_rows_below_both_runs(self, overlay_mgr, dpr):
+        # The reported layout: badges 4-8 and 9-20 covered their icons.
+        #
+        # The outcome depends on the badge size, because the toolbar's
+        # bottom (76.4 logical px) lies close to the top edge-cluster band
+        # (_EDGE_CLUSTER_BAND_FACTOR = 3 badge heights). With the native
+        # 8 pt badge (about 23 x 25 logical px) the band ends at about
+        # 75 px, above the toolbar: the edge-cluster pass claims nothing,
+        # and both runs get a row below. With the 8 pt badge that the
+        # offscreen Qt platform measures (about 30 x 28 logical px) the
+        # band reaches 84-87 px: the edge-cluster pass claims both runs,
+        # and every badge keeps today's placement. The branch reads the
+        # band from the badge size and the constant, never from the
+        # edge-cluster pass, so a defect in that pass cannot pick the
+        # lenient branch.
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        badges = self._badges(mod, _david_layout(), dpr, _DAVID_MON)
+        numbers = [n for _r, n in badges]
+        runs = [
+            [numbers.index(k) for k in range(4, 9)],
+            [numbers.index(k) for k in range(9, 21)],
+        ]
+        in_runs = {i for run in runs for i in run}
+        placements = self._place(mgr, badges, dpr, _DAVID_MON)
+        today = self._place(mgr, badges, dpr, _DAVID_MON, today=True)
+        badge_w, badge_h = mgr._numeral_badge_size(1, dpr)
+        size = f"one-digit badge {badge_w / dpr:.1f}x{badge_h / dpr:.1f}"
+        toolbar_bottom = max(
+            (badges[i][0].y + badges[i][0].height) * dpr for i in in_runs
+        )
+        if toolbar_bottom <= mod._EDGE_CLUSTER_BAND_FACTOR * badge_h:
+            # Larger badge (offscreen platform): the edge-cluster pass
+            # owns both runs, and nothing changes from today.
+            mon_w, mon_h = _DAVID_MON
+            edge = mgr._edge_cluster_placements_phys(
+                badges, dpr, mon_w * dpr, mon_h * dpr,
+                mod.QFontMetricsF(mgr._numeral_font(dpr)),
+            )
+            assert in_runs <= set(edge), size
+            assert placements == today, size
+            self._assert_no_more_cover_than_today(
+                mgr, mod, badges, placements, today, dpr,
+            )
+            return
+        # Native 8 pt badge: both runs get a row below.
+        self._assert_runs_below(
+            mgr, mod, badges, placements, runs, dpr, _DAVID_MON,
+        )
+        self._assert_disjoint_and_uncrossed(
+            mgr, mod, badges, placements, dpr, _DAVID_MON,
+        )
+        # The page controls 21-23 keep today's placement, and so does
+        # every other badge outside the two runs.
+        for k in (21, 22, 23):
+            i = numbers.index(k)
+            assert placements[i] == today[i], k
+        for i in range(len(badges)):
+            if i not in in_runs:
+                assert placements[i] == today[i], badges[i][1]
+        self._assert_no_more_cover_than_today(
+            mgr, mod, badges, placements, today, dpr,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_tab_row_above_rows_below_both_runs(self, overlay_mgr, dpr):
+        # Layout (a): a tab strip above, nothing directly below.
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        spec = _c2_layout("a")
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        names = [name for _n, name, *_rest in spec]
+        runs = [
+            [names.index(name) for name, *_r in _C2_LEFT],
+            [names.index(name) for name, *_r in _C2_RIGHT],
+        ]
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, runs, dpr, _C2_MON,
+        )
+        self._assert_disjoint_and_uncrossed(
+            mgr, mod, badges, placements, dpr, _C2_MON,
+        )
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        self._assert_no_more_cover_than_today(
+            mgr, mod, badges, placements, today, dpr,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    @pytest.mark.parametrize("key", ["b", "c", "d"])
+    def test_small_controls_below_keep_todays_placement(
+        self, overlay_mgr, key, dpr
+    ):
+        # Layouts (b) short text links, (c) an icon-only bookmarks bar, and
+        # (d) bookmarks plus a tab strip, all directly below the toolbar:
+        # the sideways shift cannot clear them, so both runs keep today's
+        # per-badge placement (below only; no attempt above the toolbar).
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        badges = self._badges(mod, _c2_layout(key), dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        assert placements == today
+        self._assert_no_more_cover_than_today(
+            mgr, mod, badges, placements, today, dpr,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_area_overlapping_controls_do_not_join_a_run(
+        self, overlay_mgr, dpr
+    ):
+        # Four 24 px icons where the third overlaps the second by area:
+        # the overlap splits the run into two pairs, too short for a row,
+        # so every badge keeps today's placement. The same four icons
+        # packed without overlap do form a row (the contrast case).
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        overlapping = [
+            (1, "A", 500, 400, 24, 24),
+            (2, "B", 524, 400, 24, 24),
+            (3, "B2", 540, 400, 24, 24),
+            (4, "C", 564, 400, 24, 24),
+        ]
+        badges = self._badges(mod, overlapping, dpr, _C2_MON)
+        assert self._place(mgr, badges, dpr, _C2_MON) == self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+        packed = [
+            (n, name, 500 + 24 * k, 400, 24, 24)
+            for k, (n, name, *_r) in enumerate(overlapping)
+        ]
+        badges = self._badges(mod, packed, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        assert placements != self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [[0, 1, 2, 3]], dpr, _C2_MON,
+        )
+
+    # -- Mutation-gate guards (tests/mutation_gate_overlay_interior_row.py).
+    # Each test below was added because a mutation of the interior pass
+    # survived the layout tests above; its docstring names the mutation.
+
+    @staticmethod
+    def _badge_w_logical(mgr, number, dpr):
+        return mgr._numeral_badge_size(number, dpr)[0] / dpr
+
+    @staticmethod
+    def _assert_all_disjoint(placements):
+        rects = [p[2] for p in placements if p is not None]
+        for a in range(len(rects)):
+            for b in range(a + 1, len(rects)):
+                assert _rects_disjoint(rects[a], rects[b]), (
+                    rects[a], rects[b],
+                )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_a_run_of_exactly_three_gets_a_row(self, overlay_mgr, dpr):
+        """Three packed icons are a run (mutations min-run-3-to-4,
+        min-run-compare-inclusive)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        spec = [(k + 1, f"I{k}", 500 + 24 * k, 400, 24, 24) for k in range(3)]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        assert placements != self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [[0, 1, 2]], dpr, _C2_MON,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_row_grouping_tolerates_half_a_badge_height(
+        self, overlay_mgr, dpr
+    ):
+        """Icons whose vertical centres differ by less than half a badge
+        height still form one row (mutation row-tolerance-to-zero)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        badge_h = mgr._numeral_badge_size(1, dpr)[1] / dpr
+        offsets = (0.0, 0.2, 0.4, 0.1)
+        spec = [
+            (k + 1, f"I{k}", 500 + 24 * k, 400 + off * badge_h, 24, 24)
+            for k, off in enumerate(offsets)
+        ]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [[0, 1, 2, 3]], dpr, _C2_MON,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_a_gap_of_one_badge_width_ends_the_run(self, overlay_mgr, dpr):
+        """A gap of 1.5 badge widths ends the run: the three packed icons
+        get a row, and the pair after the gap is left to the per-badge
+        path, level with its icons rather than in the row (mutation
+        join-gap-to-three). The pair keeps exactly today's boxes: the rows
+        never change the per-badge walk
+        (wh-overlay-toolbar-badges-cover-icons.1.1)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        gap = 1.5 * self._badge_w_logical(mgr, 3, dpr)
+        spec = [(k + 1, f"I{k}", 500 + 24 * k, 400, 24, 24) for k in range(3)]
+        spec += [
+            (k + 4, f"P{k}", 572 + gap + 24 * k, 400, 24, 24)
+            for k in range(2)
+        ]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [[0, 1, 2]], dpr, _C2_MON,
+        )
+        band_bottom = 424 * dpr
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        for i in (3, 4):
+            assert placements[i][2][1] < band_bottom, placements[i]
+            assert placements[i] == today[i], placements[i]
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_a_gap_under_one_badge_width_keeps_the_run(
+        self, overlay_mgr, dpr
+    ):
+        """Icons separated by three quarters of a badge width are still one
+        run and get a row (mutation join-gap-to-half, which ends the run
+        at half a badge width and leaves three single icons)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        pitch = 24 + 0.75 * self._badge_w_logical(mgr, 1, dpr)
+        spec = [
+            (k + 1, f"I{k}", 500 + pitch * k, 400, 24, 24) for k in range(3)
+        ]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        assert placements != self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [[0, 1, 2]], dpr, _C2_MON,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_row_top_clears_the_band_and_the_gap(self, overlay_mgr, dpr):
+        """The row's top is the lowest bottom of the run and of every
+        numbered control sharing the band under the row's span, plus the
+        collision gap (mutations row-top-ignores-band-neighbours,
+        row-top-drops-the-gap). Two packed runs whose icons end at y 114;
+        the right run sits inside a wide pill control that ends at y 116
+        (Brave's address-bar pill), and the left run is far from it. The
+        pill is wider than two badge widths, so it is not small and does
+        not block the row."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        w = self._badge_w_logical(mgr, 1, dpr)
+        spec = [(k + 1, f"L{k}", 300 + 24 * k, 90, 24, 24) for k in range(3)]
+        spec += [(k + 4, f"R{k}", 800 + 24 * k, 90, 24, 24) for k in range(3)]
+        pill_w = 72 + 2 * w + 8
+        spec.append((7, "Pill", 800 - w - 4, 88, pill_w, 28))
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        left, right = [0, 1, 2], [3, 4, 5]
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [left, right], dpr, _C2_MON,
+        )
+        gap = mod._BADGE_COLLISION_GAP_PX * dpr
+        pill_lo, pill_hi = (800 - w - 4) * dpr, (800 - w - 4 + pill_w) * dpr
+        # Preconditions: the pill is not small, the left row stays clear of
+        # the pill in x, and the right row lies inside the pill's span.
+        assert pill_w >= mod._BADGE_SMALL_CONTROL_FACTOR * w
+        assert max(placements[i][2][2] for i in left) < pill_lo
+        assert min(placements[i][2][0] for i in right) > pill_lo
+        assert max(placements[i][2][2] for i in right) < pill_hi
+        for i in left:
+            assert placements[i][2][1] == pytest.approx(114 * dpr + gap)
+        for i in right:
+            assert placements[i][2][1] == pytest.approx(116 * dpr + gap)
+
+    @classmethod
+    def _loose_pitch(cls, mgr, mod, dpr):
+        """An icon pitch (logical px) at which one-digit badges centred on
+        their icons do not touch, so the row chain pushes nothing: the
+        badge width plus the collision gap plus 2, rounded up. It stays
+        under 24 + one badge width, so the icons still form one run."""
+        w = cls._badge_w_logical(mgr, 1, dpr)
+        return math.ceil(w + mod._BADGE_COLLISION_GAP_PX) + 2
+
+    def _shift_case(self, mod, mgr, dpr, target_logical):
+        """Three icons (a loose pitch, no chain push) and one small blocker
+        below them. The blocker is placed so that the row clears it after a
+        right shift of ``target_logical - 0.5`` logical px AND after a left
+        shift of the same length (the blocker's trailing strip is on the
+        right for the top-right corner). Returns (badges, row_lo_phys)."""
+        w = self._badge_w_logical(mgr, 1, dpr)
+        pitch = self._loose_pitch(mgr, mod, dpr)
+        strip = w + mod._BADGE_COLLISION_GAP_PX
+        lo = 500 + 12 - w / 2.0
+        hi = 500 + 2 * pitch + 12 + w / 2.0
+        clear = target_logical - 0.5
+        blocker_left = hi - clear
+        blocker_right = lo + clear - strip
+        assert blocker_right > blocker_left
+        spec = [
+            (k + 1, f"I{k}", 500 + pitch * k, 400, 24, 24) for k in range(3)
+        ]
+        spec.append(
+            (4, "Blocker", blocker_left, 428,
+             blocker_right - blocker_left, 20)
+        )
+        return self._badges(mod, spec, dpr, _C2_MON), lo * dpr
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_blocked_row_takes_the_smallest_clear_shift(
+        self, overlay_mgr, dpr
+    ):
+        """A blocked row moves by the smallest whole logical-px step that
+        clears the blocker, trying right before left (mutations
+        shift-step-1-to-4, shift-left-before-right)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        w = self._badge_w_logical(mgr, 1, dpr)
+        pitch = self._loose_pitch(mgr, mod, dpr)
+        # Just over half of (row width + blocker strip + a 13 px blocker):
+        # inside the 3-badge-width range and not a multiple of 4.
+        target = math.ceil((13 + 2 * w + 3 + 2 * pitch) / 2.0) + 1
+        if target % 4 == 0:
+            target += 1
+        assert target <= 3 * w
+        badges, lo_phys = self._shift_case(mod, mgr, dpr, target)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [[0, 1, 2]], dpr, _C2_MON,
+        )
+        assert placements[0][2][0] == pytest.approx(lo_phys + target * dpr)
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_shift_range_ends_at_three_badge_widths(self, overlay_mgr, dpr):
+        """A row that must move more than three badge widths keeps today's
+        placement (mutation shift-range-3-to-6)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        w_phys = mgr._numeral_badge_size(1, dpr)[0]
+        target = int(3 * w_phys / dpr) + 3
+        badges, _lo = self._shift_case(mod, mgr, dpr, target)
+        assert target <= 6 * w_phys / dpr
+        assert self._place(mgr, badges, dpr, _C2_MON) == self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_unblocked_row_aims_each_badge_at_its_icon(
+        self, overlay_mgr, dpr
+    ):
+        """An unblocked row does not move: each badge of a loose run is
+        centred on its icon (mutation shift-never-zero). A packed run of
+        two-digit badges is chained at badge width plus the collision gap
+        and centred on the run (mutations chain-drops-the-gap,
+        no-overflow-split, overflow-all-to-the-left)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        pitch = self._loose_pitch(mgr, mod, dpr)
+        loose = [
+            (k + 1, f"I{k}", 500 + pitch * k, 400, 24, 24) for k in range(3)
+        ]
+        badges = self._badges(mod, loose, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        for (rect, _n), p in zip(badges, placements):
+            fp = p[2]
+            assert (fp[0] + fp[2]) / 2.0 == pytest.approx(
+                (rect.x + rect.width / 2.0) * dpr
+            )
+        packed = [
+            (k + 10, f"E{k}", 500 + 24 * k, 400, 24, 24) for k in range(6)
+        ]
+        badges = self._badges(mod, packed, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [list(range(6))], dpr, _C2_MON,
+        )
+        gap = mod._BADGE_COLLISION_GAP_PX * dpr
+        lefts = [p[2][0] for p in placements]
+        widths = [p[0] for p in placements]
+        for k in range(1, 6):
+            assert lefts[k] - lefts[k - 1] == pytest.approx(
+                widths[k - 1] + gap
+            )
+        badge_mid = sum((p[2][0] + p[2][2]) / 2.0 for p in placements) / 6
+        icon_mid = sum((r.x + r.width / 2.0) * dpr for r, _n in badges) / 6
+        assert badge_mid == pytest.approx(icon_mid)
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_wide_control_below_does_not_block_the_row(
+        self, overlay_mgr, dpr
+    ):
+        """A wide numbered control directly below the run (a page link row)
+        does not block the row; the row may cover part of its box
+        (mutation wide-controls-block-too). The link reaches 4 px past the
+        left row's right end, so its own badge, in the strip beyond its
+        right edge, is clear of the row and keeps its placement without
+        the rows. A link that ends under the row puts its badge in the
+        row's way: see test_row_avoids_a_badge_the_walk_placed."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        spec = _c2_layout("a")
+        # The left row: five one-digit badges chained by the collision gap,
+        # centred on the run (x 8 to 128), moved onto the monitor.
+        w = self._badge_w_logical(mgr, 1, dpr)
+        row_w = 5 * w + 4 * mod._BADGE_COLLISION_GAP_PX
+        row_right = max(68 + row_w / 2.0, row_w)
+        spec.append(
+            (len(spec) + 1, "Page link", 0, 120, math.ceil(row_right) + 4, 20)
+        )
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        names = [name for _n, name, *_rest in spec]
+        runs = [
+            [names.index(name) for name, *_r in _C2_LEFT],
+            [names.index(name) for name, *_r in _C2_RIGHT],
+        ]
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, runs, dpr, _C2_MON,
+        )
+        self._assert_all_disjoint(placements)
+        link = names.index("Page link")
+        row_box = placements[runs[0][0]][2]
+        link_box = self._box(badges[link][0], dpr)
+        # Precondition: the row covers part of the link's box.
+        assert _rect_intersection(row_box, link_box) is not None
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        assert placements[link] == today[link]
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_row_avoids_a_badge_the_walk_placed(self, overlay_mgr, dpr):
+        """A wide page link directly below the left run that ENDS under the
+        run: its badge, placed as it is without the rows, lies where the
+        unshifted left row would go. The row must not land on it: it
+        shifts past it or the run keeps today's placement. Every badge
+        outside the two runs keeps today's placement, the right run gets
+        its row, and no two badges overlap
+        (wh-overlay-toolbar-badges-cover-icons.1.1, mutation
+        rows-ignore-walked-badges)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        spec = _c2_layout("a")
+        spec.append((len(spec) + 1, "Page link", 0, 120, 100, 20))
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        names = [name for _n, name, *_rest in spec]
+        left = [names.index(name) for name, *_r in _C2_LEFT]
+        right = [names.index(name) for name, *_r in _C2_RIGHT]
+        link = names.index("Page link")
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        # Precondition: a row that ignored the walked badges would put a
+        # left-run badge on the link's badge.
+        mon_w, mon_h = _C2_MON
+        blind = mgr._interior_run_placements_phys(
+            badges, dpr, mon_w * dpr, mon_h * dpr,
+            mod.QFontMetricsF(mgr._numeral_font(dpr)), {}, {},
+            corner="top_right",
+        )
+        assert any(
+            i in blind and not _rects_disjoint(blind[i][2], today[link][2])
+            for i in left
+        )
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [right], dpr, _C2_MON,
+        )
+        self._assert_all_disjoint(placements)
+        for i in range(len(badges)):
+            if i not in left and i not in right:
+                assert placements[i] == today[i], badges[i][0].target_name
+        if any(placements[i] != today[i] for i in left):
+            self._assert_runs_below(
+                mgr, mod, badges, placements, [left], dpr, _C2_MON,
+            )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_accepted_row_frees_its_walk_footprints(self, overlay_mgr, dpr):
+        """Once a run takes its row, its badges' walk footprints are gone
+        and must not block a later run's row
+        (wh-overlay-toolbar-badges-cover-icons.1.1, mutation
+        accepted-members-stay-obstacles). Run A: three 16 px icons at a
+        loose pitch, one-digit badges; its last badge's walk footprint sits
+        in the strip past its last icon and reaches below the band. Run B,
+        just over one badge width to the right: six packed 16 px icons with
+        two-digit badges, whose row overflows to the left into that strip.
+        B's row must be free to use the strip."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        pitch = self._loose_pitch(mgr, mod, dpr)
+        a_right = 500 + 2 * pitch + 16
+        sep = math.ceil(self._badge_w_logical(mgr, 3, dpr)) + 2
+        spec = [(k + 1, f"A{k}", 500 + pitch * k, 400, 16, 16) for k in range(3)]
+        spec += [
+            (k + 10, f"B{k}", a_right + sep + 16 * k, 400, 16, 16)
+            for k in range(6)
+        ]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        run_a, run_b = [0, 1, 2], list(range(3, 9))
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [run_a, run_b], dpr, _C2_MON,
+        )
+        self._assert_all_disjoint(placements)
+        stale = today[run_a[-1]][2]
+        # Precondition: A's last walk footprint overlaps B's row in height.
+        row_b = [placements[i][2] for i in run_b]
+        assert stale[1] < row_b[0][3] and stale[3] > row_b[0][1], (
+            stale, row_b[0],
+        )
+        # B's row uses the strip the stale footprint would have blocked.
+        assert any(
+            not _rects_disjoint(stale, r) for r in row_b
+        ), (stale, row_b)
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_left_corner_keeps_the_blockers_leading_strip_free(
+        self, overlay_mgr, dpr
+    ):
+        """For a left corner the small blocker's free strip is on its LEFT
+        (mutations left-corner-strip-dropped, strip-side-swapped): the
+        blocker sits just right of the row's unshifted span, so only its
+        left strip reaches the row."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        w = self._badge_w_logical(mgr, 1, dpr)
+        strip = w + mod._BADGE_COLLISION_GAP_PX
+        hi = 500 + 48 + 12 + w / 2.0
+        spec = [(k + 1, f"I{k}", 500 + 24 * k, 400, 24, 24) for k in range(3)]
+        spec.append((4, "Blocker", hi + 5, 428, 20, 20))
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        mon_w, mon_h = _C2_MON
+        placements = mgr._numeral_badge_placements_phys(
+            badges, dpr, mon_w * dpr, mon_h * dpr, corner="top_left",
+        )
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [[0, 1, 2]], dpr, _C2_MON,
+        )
+        strip_left = (hi + 5 - strip) * dpr
+        for i in range(3):
+            assert placements[i][2][2] <= strip_left + 1e-9, (
+                placements[i][2], strip_left,
+            )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_adjacent_runs_rows_do_not_overlap(self, overlay_mgr, dpr):
+        """Two runs in one row, separated by just over one badge width: the
+        overflow of each two-digit row reaches into the gap, and the second
+        row must avoid the first (mutations placed-badges-do-not-block,
+        rows-do-not-seed-later-runs)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        w2 = self._badge_w_logical(mgr, 15, dpr)
+        gap_px = mod._BADGE_COLLISION_GAP_PX
+        sep = math.ceil(w2) + 2
+        # Preconditions: the separation ends the first run, and the two
+        # rows, each centred on its run, would overlap in the gap.
+        assert sep >= mod._INTERIOR_RUN_JOIN_GAP_FACTOR * w2
+        assert 6 * w2 + 5 * gap_px > 144 + sep
+        spec = [
+            (k + 10, f"A{k}", 500 + 24 * k, 400, 24, 24) for k in range(6)
+        ]
+        spec += [
+            (k + 16, f"B{k}", 644 + sep + 24 * k, 400, 24, 24)
+            for k in range(6)
+        ]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        self._assert_runs_below(
+            mgr, mod, badges, placements,
+            [list(range(6)), list(range(6, 12))], dpr, _C2_MON,
+        )
+        self._assert_all_disjoint(placements)
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_row_never_shifts_off_the_monitor(self, overlay_mgr, dpr):
+        """A run ending 30 px from the right monitor edge, with a blocker
+        that a right shift of one badge width plus 13 px would clear: that
+        shift leaves the monitor, the left shift is out of range, so the
+        run keeps today's placement (mutation
+        row-may-leave-the-monitor-sideways)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        mon_w, _mon_h = _C2_MON
+        w = self._badge_w_logical(mgr, 1, dpr)
+        pitch = self._loose_pitch(mgr, mod, dpr)
+        first = mon_w - 30 - 24 - pitch * 4
+        spec = [
+            (k + 1, f"I{k}", first + pitch * k, 400, 24, 24)
+            for k in range(5)
+        ]
+        lo = first + 12 - w / 2.0
+        spec.append((6, "Blocker", lo - 5, 429, 15, 20))
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        for p in placements:
+            assert 0.0 <= p[2][0] and p[2][2] <= mon_w * dpr, p
+        assert placements == self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_row_below_the_monitor_bottom_falls_back(self, overlay_mgr, dpr):
+        """A loose run 6 px above the bottom monitor edge (too loose for the
+        edge-cluster pass): a row below it would leave the monitor, so the
+        run keeps today's placement (mutation
+        row-may-leave-the-monitor-below)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        mon_w, mon_h = _C2_MON
+        # Four px looser than the loose pitch: the run is too loose for the
+        # edge-cluster pass (its badge slots fit in the run's own length)
+        # and still tight enough to be one interior run.
+        pitch = self._loose_pitch(mgr, mod, dpr) + 4
+        spec = [
+            (k + 1, f"I{k}", 500 + pitch * k, mon_h - 30, 24, 24)
+            for k in range(5)
+        ]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        metrics = mod.QFontMetricsF(mgr._numeral_font(dpr))
+        assert mgr._edge_cluster_placements_phys(
+            badges, dpr, mon_w * dpr, mon_h * dpr, metrics,
+        ) == {}
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        for p in placements:
+            assert p[2][3] <= mon_h * dpr, p
+        assert placements == self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_edge_cluster_run_is_not_claimed_again(self, overlay_mgr, dpr):
+        """A packed run at the top monitor edge belongs to the edge-cluster
+        pass; the interior pass leaves it alone (mutation
+        call-site-ignores-edge-clusters)."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        mon_w, mon_h = _C2_MON
+        spec = [(k + 1, f"I{k}", 600 + 24 * k, 4, 24, 24) for k in range(5)]
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        metrics = mod.QFontMetricsF(mgr._numeral_font(dpr))
+        assert len(mgr._edge_cluster_placements_phys(
+            badges, dpr, mon_w * dpr, mon_h * dpr, metrics,
+        )) == 5
+        assert self._place(mgr, badges, dpr, _C2_MON) == self._place(
+            mgr, badges, dpr, _C2_MON, today=True,
+        )
+
+    # -- No new badge overlap (wh-overlay-toolbar-badges-cover-icons.1.1).
+    # A row must never make two badges overlap that do not overlap on
+    # today's placement. The first build seeded the rows into the per-badge
+    # walk, which rerouted the collision nudges of badges outside every run
+    # and stacked some of them on a packed multi-row icon grid.
+
+    @staticmethod
+    def _overlap_pairs(placements):
+        """Index pairs of badges whose footprints overlap by area."""
+        rects = [(i, p[2]) for i, p in enumerate(placements) if p is not None]
+        out = set()
+        for a in range(len(rects)):
+            for b in range(a + 1, len(rects)):
+                if not _rects_disjoint(rects[a][1], rects[b][1]):
+                    out.add((rects[a][0], rects[b][0]))
+        return out
+
+    @staticmethod
+    def _packed_grid(rows, cols, x0, y0, side, pitch_x, pitch_y):
+        """A grid of ``side`` px square icons, numbered in reading order."""
+        return [
+            (r * cols + c + 1, f"G{r}_{c}",
+             x0 + c * pitch_x, y0 + r * pitch_y, side, side)
+            for r in range(rows) for c in range(cols)
+        ]
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_packed_icon_grid_adds_no_badge_overlap(self, overlay_mgr, dpr):
+        """The reviewer's grid (an emoji-picker shape): 5 rows x 10 columns
+        of 24 px icons at a 24 x 26 px pitch, at (300, 200). No pair of
+        badges overlaps unless the same pair overlaps on today's placement,
+        and no badge covers more of a small control than today. The first
+        build stacked badges 25 on 35 and 26 on 37 here."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        spec = self._packed_grid(5, 10, 300, 200, 24, 24, 26)
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        new_pairs = self._overlap_pairs(placements) - self._overlap_pairs(today)
+        assert not new_pairs, sorted(
+            (badges[a][1], badges[b][1]) for a, b in new_pairs
+        )
+        self._assert_no_more_cover_than_today(
+            mgr, mod, badges, placements, today, dpr,
+        )
+
+    @classmethod
+    def _random_layout(cls, rng):
+        """One packed small-icon layout: a multi-row icon grid (two draws in
+        three) or a toolbar row with optional neighbours above and below.
+        Returns ``(description, spec)``."""
+        if rng.random() < 2.0 / 3.0:
+            rows, cols = rng.randint(3, 7), rng.randint(4, 14)
+            side = rng.randint(20, 28)
+            pitch_x = side + rng.randint(0, 4)
+            pitch_y = side + rng.randint(0, 4)
+            x0, y0 = rng.randint(100, 1300), rng.randint(100, 750)
+            desc = (f"grid {rows}x{cols} side {side} pitch "
+                    f"{pitch_x}x{pitch_y} at ({x0}, {y0})")
+            return desc, cls._packed_grid(
+                rows, cols, x0, y0, side, pitch_x, pitch_y,
+            )
+        side = rng.randint(20, 28)
+        pitch = side + rng.randint(0, 2)
+        count = rng.randint(3, 16)
+        x0, y0 = rng.randint(100, 1300), rng.randint(150, 800)
+        controls = [
+            (f"T{k}", x0 + pitch * k, y0, side, side) for k in range(count)
+        ]
+        parts = [f"toolbar {count} x {side} pitch {pitch} at ({x0}, {y0})"]
+        if rng.random() < 0.5:
+            gap = rng.randint(2, 10)
+            controls += [
+                (f"Tab{k}", x0 - 20 + 240 * k, y0 - gap - 40, 240, 40)
+                for k in range(3)
+            ]
+            parts.append(f"tabs {gap} above")
+        below = rng.choice(("none", "links", "icons"))
+        gap = rng.randint(2, 30)
+        if below == "links":
+            lx = x0 - 30
+            for k in range(rng.randint(2, 8)):
+                w = rng.randint(36, 70)
+                controls.append((f"Link{k}", lx, y0 + side + gap, w, 20))
+                lx += w + rng.randint(6, 30)
+        elif below == "icons":
+            bside = rng.randint(20, 28)
+            controls += [
+                (f"B{k}", x0 - 40 + (bside + 2) * k, y0 + side + gap,
+                 bside, bside)
+                for k in range(rng.randint(3, 20))
+            ]
+        parts.append(f"{below} {gap} below")
+        spec = [
+            (i + 1, name, x, y, w, h)
+            for i, (name, x, y, w, h) in enumerate(controls)
+        ]
+        return ", ".join(parts), spec
+
+    def test_random_packed_layouts_add_no_badge_overlap(self, overlay_mgr):
+        """120 seeded packed small-icon layouts (icon grids and toolbar rows)
+        at the four display scales: no layout gains a pair of overlapping
+        badges over today's placement, and no badge covers more of a small
+        control than today (C5), except that a row may cover the top strip
+        of a control just below it (RULING 1A, David 2026-09-25 09:23;
+        before that ruling C5 held here without the exception). The
+        reviewer measured 23 of 120 such grids gaining overlaps on the
+        first build. At least one layout in ten must take a row, so a pass
+        that never places a row cannot pass."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        rng = random.Random(20260925)
+        failures = []
+        changed = 0
+        for k in range(120):
+            desc, spec = self._random_layout(rng)
+            dpr = rng.choice(self.DPRS)
+            badges = self._badges(mod, spec, dpr, _C2_MON)
+            placements = self._place(mgr, badges, dpr, _C2_MON)
+            today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+            if placements != today:
+                changed += 1
+            new_pairs = (
+                self._overlap_pairs(placements) - self._overlap_pairs(today)
+            )
+            if new_pairs:
+                failures.append((k, dpr, desc, "overlap", sorted(
+                    (badges[a][1], badges[b][1]) for a, b in new_pairs
+                )[:4]))
+                continue
+            try:
+                self._assert_no_more_cover_than_today(
+                    mgr, mod, badges, placements, today, dpr,
+                    top_strip=True,
+                )
+            except AssertionError as exc:
+                failures.append((k, dpr, desc, "C5", str(exc)[:80]))
+        assert not failures, (len(failures), failures[:6])
+        assert changed >= 12, changed
+
+    # -- KNOWN LIMIT 7 (RULING #4 on wh-overlay-toolbar-badges-cover-icons):
+    # walked badges block the row. A wide page link directly below a run,
+    # whose badge at today's placement lies inside the row's span, makes the
+    # row shift sideways or fall back to today's per-badge placement. The
+    # ruling's example is native Qt. The offscreen Qt platform measures the
+    # 8 pt badge about 35 percent larger (31 x 29 px against 23 x 25 px at
+    # dpr 1.0), which moves the link's badge and widens the shift range; the
+    # branches below read the Qt platform name, never a placement, so a
+    # defect in the pass cannot pick the lenient branch.
+
+    @staticmethod
+    def _offscreen_platform():
+        from PySide6.QtGui import QGuiApplication
+        return QGuiApplication.platformName() == "offscreen"
+
+    @staticmethod
+    def _link_layout(link_x, link_w):
+        """C2 layout (a) plus one 20 px high page link at (link_x, 120),
+        directly below the left run. Returns (spec, left, right, link)."""
+        spec = _c2_layout("a")
+        spec.append((len(spec) + 1, "Page link", link_x, 120, link_w, 20))
+        names = [name for _n, name, *_rest in spec]
+        left = [names.index(name) for name, *_r in _C2_LEFT]
+        right = [names.index(name) for name, *_r in _C2_RIGHT]
+        return spec, left, right, names.index("Page link")
+
+    @staticmethod
+    def _walk_blind_rows(mgr, mod, badges, dpr, mon):
+        """The rows the interior pass places when it is given no walk
+        footprints: the row a walk-blind search would pick."""
+        mon_w, mon_h = mon
+        metrics = mod.QFontMetricsF(mgr._numeral_font(dpr))
+        edge = mgr._edge_cluster_placements_phys(
+            badges, dpr, mon_w * dpr, mon_h * dpr, metrics,
+        )
+        return mgr._interior_run_placements_phys(
+            badges, dpr, mon_w * dpr, mon_h * dpr, metrics, edge, {},
+            corner="top_right",
+        )
+
+    @classmethod
+    def _leader_details(cls, mgr, mod, badges, placements, i, dpr, mon):
+        """Badge i's bubble drawing state and leader anchor points."""
+        fp = placements[i][2]
+        box = cls._box(badges[i][0], dpr)
+        margin = mgr._badge_box_margin_phys(dpr)
+        bubble = (
+            fp[0] + margin, fp[1] + margin, fp[2] - margin, fp[3] - margin,
+        )
+        return (
+            mod._bubble_drawing_state(fp, box, dpr),
+            mod._leader_anchor_points(
+                bubble, box, mon[0] * dpr, mon[1] * dpr,
+            ),
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    def test_walked_link_badge_leaves_the_left_run_as_today(
+        self, overlay_mgr, dpr
+    ):
+        """KNOWN LIMIT 7, test L7a: layout (a) plus a 100 x 20 page link at
+        (0, 120). Native Qt: a walk-blind row would put a left-run badge on
+        the link's badge, no shift in range clears it, and the left run
+        keeps today's placement exactly -- the same footprints and the same
+        bubble state and leader anchors (mutations rows-ignore-walked-badges,
+        no-fallback-to-todays-path). Both platforms: every badge outside the
+        two runs keeps today's placement, the right run takes its row below,
+        no pair of badges overlaps that does not overlap today, and C5 holds.
+        Offscreen the larger badge lets the left row take a position
+        (measured 2026-09-25: unshifted at dpr 1.0, shifted 43-44 logical
+        px at 1.5-3.0), so the fallback is asserted on native Qt only."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        spec, left, right, link = self._link_layout(0, 100)
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        if not self._offscreen_platform():
+            # Precondition: the walk-blind row lands on the link's badge.
+            blind = self._walk_blind_rows(mgr, mod, badges, dpr, _C2_MON)
+            assert any(
+                i in blind
+                and not _rects_disjoint(blind[i][2], today[link][2])
+                for i in left
+            ), (blind, today[link])
+            for i in left:
+                assert placements[i] == today[i], (
+                    badges[i][0].target_name, placements[i], today[i],
+                )
+                assert self._leader_details(
+                    mgr, mod, badges, placements, i, dpr, _C2_MON,
+                ) == self._leader_details(
+                    mgr, mod, badges, today, i, dpr, _C2_MON,
+                ), badges[i][0].target_name
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [right], dpr, _C2_MON,
+        )
+        for i in range(len(badges)):
+            if i not in left and i not in right:
+                assert placements[i] == today[i], badges[i][0].target_name
+        new_pairs = self._overlap_pairs(placements) - self._overlap_pairs(today)
+        assert not new_pairs, sorted(
+            (badges[a][0].target_name, badges[b][0].target_name)
+            for a, b in new_pairs
+        )
+        self._assert_no_more_cover_than_today(
+            mgr, mod, badges, placements, today, dpr,
+        )
+
+    @pytest.mark.parametrize("dpr", DPRS)
+    @pytest.mark.parametrize("link_x, link_w", [
+        pytest.param(0, 130, id="x0-w130"),
+        pytest.param(32, 200, id="x32-w200"),
+    ])
+    def test_walked_link_badge_shifts_the_left_row_clear(
+        self, overlay_mgr, link_x, link_w, dpr
+    ):
+        """KNOWN LIMIT 7, test L7b: layout (a) plus a 20 px high page link
+        at (0, 120) 130 wide or at (32, 120) 200 wide. Native Qt: a
+        walk-blind row would put a left-run badge on the link's badge, and
+        the left run still takes its row, moved sideways off the walk-blind
+        position (mutations rows-ignore-walked-badges, and no sideways
+        shift). The shift is not a fixed length: it differs per dpr
+        (measured 2026-09-25: -2/-1 and +28/+27 logical px), so the test
+        asserts the row moved and is clear of the link's badge. Both
+        platforms: both runs take a row below, the left row does not touch
+        the link's badge, no pair of badges overlaps that does not overlap
+        today, C5 holds, and every badge outside the runs keeps today's
+        placement. Offscreen the walk-blind row misses the link's badge at
+        some scales, so "moved" is asserted wherever it hits."""
+        _m, mod, _ = overlay_mgr
+        mgr = self._mgr(mod)
+        spec, left, right, link = self._link_layout(link_x, link_w)
+        badges = self._badges(mod, spec, dpr, _C2_MON)
+        placements = self._place(mgr, badges, dpr, _C2_MON)
+        today = self._place(mgr, badges, dpr, _C2_MON, today=True)
+        blind = self._walk_blind_rows(mgr, mod, badges, dpr, _C2_MON)
+        blind_hits_link = any(
+            i in blind and not _rects_disjoint(blind[i][2], today[link][2])
+            for i in left
+        )
+        if not self._offscreen_platform():
+            assert blind_hits_link, (blind, today[link])
+        self._assert_runs_below(
+            mgr, mod, badges, placements, [left, right], dpr, _C2_MON,
+        )
+        for i in left:
+            assert _rects_disjoint(placements[i][2], today[link][2]), (
+                badges[i][0].target_name, placements[i][2], today[link][2],
+            )
+        if blind_hits_link:
+            for i in left:
+                assert placements[i][2][0] != blind[i][2][0], (
+                    badges[i][0].target_name, placements[i][2], blind[i][2],
+                )
+        new_pairs = self._overlap_pairs(placements) - self._overlap_pairs(today)
+        assert not new_pairs, sorted(
+            (badges[a][0].target_name, badges[b][0].target_name)
+            for a, b in new_pairs
+        )
+        self._assert_no_more_cover_than_today(
+            mgr, mod, badges, placements, today, dpr,
+        )
+        for i in range(len(badges)):
+            if i not in left and i not in right:
+                assert placements[i] == today[i], badges[i][0].target_name
+
+
+def _brave_spec(layout):
+    """A layout of tests/overlay_brave_layout_data.py as the
+    ``(number, name, x, y, w, h)`` spec that
+    ``TestInteriorToolbarRunRow._badges`` takes (the data holds no names;
+    the name is the badge number). ``measured-mirrored`` is the page-free
+    measured layout mirrored left to right: Back touches the RIGHT monitor
+    edge and the taskbar is at the left edge."""
+    if layout == "measured":
+        items = brave_data.measured_layout()
+    elif layout == "measured-no-page":
+        items = brave_data.measured_layout(page=False)
+    elif layout == "measured-mirrored":
+        mon_w = brave_data.MEASURED_MONITOR_LOGICAL[0]
+        items = [
+            (n, mon_w - x - w, y, w, h, ctype)
+            for n, x, y, w, h, ctype in brave_data.measured_layout(page=False)
+        ]
+    else:
+        assert layout == "google", layout
+        items = brave_data.google_like_layout()
+    return [(n, f"#{n}", x, y, w, h) for n, x, y, w, h, _ctype in items]
+
+
+class TestEdgeColumnSkipsToolbarRuns:
+    """The left and right edge-cluster passes must not claim a control that
+    belongs to a horizontal run of three or more small icons (PART 2 of
+    wh-overlay-toolbar-badges-cover-icons, RULING of Boss e8, 09:16
+    2026-09-25).
+
+    Measured on Brave (2026-09-25, scale 3.0; numbers only in
+    tests/overlay_brave_layout_data.py): Back touches the left monitor edge,
+    so the left-edge pass grouped a pinned tab with Back and Forward into a
+    column and put their badges beside the toolbar, on Reload. Back and
+    Forward belong to the address-bar run, whose badges the interior-run row
+    places below the icons.
+
+    The existing TestEdgeClusterColumn tests are the guard that edge
+    columns which are NOT horizontal runs keep their placement: the
+    two-across tray columns (test_packed_tray_corner_forms_ordered_column,
+    test_same_row_pair_lines_nest_instead_of_crossing,
+    test_left_edge_same_row_pair_keeps_left_first), the single-file left
+    column (test_left_edge_cluster_mirrors_to_right_column), and the bottom
+    and top rows, which this exclusion does not touch
+    (test_packed_bottom_tray_row_forms_ordered_row,
+    test_corner_row_never_mistaken_for_vertical_column).
+    """
+
+    _R = TestInteriorToolbarRunRow
+
+    @pytest.mark.parametrize(
+        "layout", ["measured", "google", "measured-mirrored"],
+    )
+    def test_edge_column_claims_neither_back_nor_forward(
+        self, overlay_mgr, layout
+    ):
+        # Acceptance (a). The branch reads the top-edge band from the badge
+        # size and the constant, never from the edge pass: with the native
+        # 8 pt badge (24 logical px high at scale 3.0) the top band ends at
+        # 72 logical px, above the toolbar's bottom (74), and no edge pass
+        # may claim Back or Forward. The offscreen Qt platform measures the
+        # badge about 35 percent larger; its top band reaches past the
+        # toolbar, and the TOP-edge pass may then own the toolbar run as a
+        # row BELOW it. A left or right column is never below the toolbar:
+        # its badges sit beside the icons.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        dpr = brave_data.MEASURED_DPR
+        mon = brave_data.MEASURED_MONITOR_LOGICAL
+        badges = self._R._badges(mod, _brave_spec(layout), dpr, mon)
+        edge = mgr._edge_cluster_placements_phys(
+            badges, dpr, mon[0] * dpr, mon[1] * dpr,
+            mod.QFontMetricsF(mgr._numeral_font(dpr)),
+        )
+        band_bottom = brave_data.TOOLBAR_BAND_BOTTOM_PHYS
+        badge_h = mgr._numeral_badge_size(1, dpr)[1]
+        for i in (brave_data.BACK, brave_data.FORWARD):
+            if band_bottom > mod._EDGE_CLUSTER_BAND_FACTOR * badge_h:
+                assert i not in edge, (i + 1, edge.get(i))
+            elif i in edge:
+                assert edge[i][2][1] >= band_bottom, (i + 1, edge[i])
+
+    def test_measured_left_group_gets_its_row_below(self, overlay_mgr):
+        # Acceptance (b): the measured layout without its page controls.
+        # Badges 4-8 (Back, Forward, Reload, split view, site information)
+        # sit below their icons in one row, in icon order; none covers more
+        # than one corner quarter of its own icon or any other icon, and no
+        # two badges of the layout overlap.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        dpr = brave_data.MEASURED_DPR
+        mon = brave_data.MEASURED_MONITOR_LOGICAL
+        badges = self._R._badges(
+            mod, _brave_spec("measured-no-page"), dpr, mon,
+        )
+        placements = self._R._place(mgr, badges, dpr, mon)
+        left = list(brave_data.LEFT_GROUP)
+        assert [badges[i][1] for i in left] == [4, 5, 6, 7, 8]
+        self._R._assert_runs_below(
+            mgr, mod, badges, placements, [left], dpr, mon,
+        )
+        self._R._assert_all_disjoint(placements)
+
+
+class TestToolbarRowOverPageControls:
+    """The toolbar row may cover the top strip of page controls lying
+    wholly below the toolbar band and move their badges (RULING of David
+    via Boss e8, 2026-09-25 09:23, option 1A, on
+    wh-overlay-toolbar-badges-cover-icons; it replaces RULING #3's
+    fallback for this case, and the row still goes below the run only).
+
+    Measured on Brave (Gmail, scale 3.0): Gmail's header controls and
+    their badges sit directly under the toolbar and blocked the row at
+    every sideways shift, so the toolbar badges fell back onto the icons.
+    Acceptance (e) and (f) run on the numbers-only layouts of
+    tests/overlay_brave_layout_data.py; (g) and (h) on constructed
+    layouts whose geometry is derived from the measured badge size, so
+    they hold on the native and the offscreen Qt platform alike.
+    """
+
+    _R = TestInteriorToolbarRunRow
+
+    @staticmethod
+    def _page_indexes(layout):
+        if layout == "measured":
+            return set(brave_data.PAGE)
+        return set(range(
+            brave_data.PAGE[0],
+            brave_data.PAGE[0] + len(brave_data.GOOGLE_PAGE_ITEMS_LOGICAL),
+        ))
+
+    @pytest.mark.parametrize("layout", ["measured", "google"])
+    def test_toolbar_rows_below_icons_over_page_controls(
+        self, overlay_mgr, layout
+    ):
+        # Acceptance (e) (measured Gmail layout) and (f) (google.com-like
+        # layout): badges 4-8 and 10-18 sit in rows below their icons, each
+        # covers at most one corner quarter of its own icon and no other
+        # icon of the toolbar, badge order follows icon order, and no two
+        # badges overlap anywhere in the walk. Only page badges move.
+        #
+        # The offscreen Qt platform measures the 8 pt badge about 35
+        # percent larger; its top edge-cluster band then reaches past the
+        # toolbar (see test_edge_column_claims_neither_back_nor_forward),
+        # the TOP-edge pass owns the toolbar, and this pass changes
+        # nothing to the toolbar badges. The branch reads the band from the
+        # badge size and the constant, never from a placement.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        dpr = brave_data.MEASURED_DPR
+        mon = brave_data.MEASURED_MONITOR_LOGICAL
+        badges = self._R._badges(mod, _brave_spec(layout), dpr, mon)
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        groups = [list(brave_data.LEFT_GROUP), list(brave_data.RIGHT_GROUP)]
+        assert [badges[i][1] for i in groups[0]] == [4, 5, 6, 7, 8]
+        assert [badges[i][1] for i in groups[1]] == list(range(10, 19))
+        band_bottom = brave_data.TOOLBAR_BAND_BOTTOM_PHYS
+        badge_h = mgr._numeral_badge_size(1, dpr)[1]
+        if band_bottom <= mod._EDGE_CLUSTER_BAND_FACTOR * badge_h:
+            edge = mgr._edge_cluster_placements_phys(
+                badges, dpr, mon[0] * dpr, mon[1] * dpr,
+                mod.QFontMetricsF(mgr._numeral_font(dpr)),
+            )
+            assert {i for g in groups for i in g} <= set(edge)
+            for i in (i for g in groups for i in g):
+                assert placements[i] == today[i], i + 1
+            return
+        ctrl = [self._R._box(r, dpr) for r, _n in badges]
+        small = self._R._small_indexes(mgr, mod, badges, dpr)
+        for group in groups:
+            rects = [placements[i][2] for i in group]
+            assert len({r[1] for r in rects}) == 1, rects
+            assert rects[0][1] >= band_bottom, (rects[0], band_bottom)
+            centres = [(r[0] + r[2]) / 2.0 for r in rects]
+            assert all(a < b for a, b in zip(centres, centres[1:])), centres
+            for i in group:
+                fp, own = placements[i][2], ctrl[i]
+                inter = _rect_intersection(fp, own)
+                if inter is not None:
+                    mid_x = (own[0] + own[2]) / 2.0
+                    mid_y = (own[1] + own[3]) / 2.0
+                    assert inter[2] <= mid_x or inter[0] >= mid_x, (i, fp)
+                    assert inter[3] <= mid_y or inter[1] >= mid_y, (i, fp)
+                for j in small - {i}:
+                    inter = _rect_intersection(fp, ctrl[j])
+                    if inter is None:
+                        continue
+                    # Only the top strip of a page control wholly below
+                    # the toolbar band.
+                    top, bottom = ctrl[j][1], ctrl[j][3]
+                    assert top >= band_bottom, (i + 1, j + 1)
+                    assert inter[3] - top <= (
+                        mod._INTERIOR_ROW_MAX_COVER_FRACTION * (bottom - top)
+                    ), (
+                        i + 1, j + 1,
+                    )
+        self._R._assert_all_disjoint(placements)
+        page = self._page_indexes(layout)
+        in_groups = {i for g in groups for i in g}
+        moved = [
+            i for i in range(len(badges))
+            if i not in in_groups and placements[i] != today[i]
+        ]
+        # The row displaced page badges, and nothing outside the page moved.
+        # A badge moves only when a toolbar row covers where it stood: the
+        # page badges below the rows keep their places.
+        assert moved, "no page badge moved: the row cannot have been blocked"
+        row_rects = [placements[i][2] for g in groups for i in g]
+        for i in moved:
+            assert i in page, i + 1
+            assert ctrl[i][1] >= band_bottom, i + 1
+            assert any(
+                not _rects_disjoint(today[i][2], r) for r in row_rects
+            ), (i + 1, today[i][2])
+
+    # -- constructed layouts for (g) and (h) ------------------------------
+    # The panel comes FIRST in walk order, so the per-badge walk places its
+    # badge before any icon badge and the spot does not depend on the icon
+    # badges' collision nudges.
+
+    @classmethod
+    def _run_row(cls, mgr, mod, spec, dpr, mon):
+        """The interior-row rects (physical px) of the run in ``spec``,
+        placed alone, in spec order."""
+        badges = cls._R._badges(mod, spec, dpr, mon)
+        placements = cls._R._place(mgr, badges, dpr, mon)
+        today = cls._R._place(mgr, badges, dpr, mon, today=True)
+        assert placements != today, "the run alone must take its row"
+        return [p[2] for p in placements]
+
+    @staticmethod
+    def _assert_placed_again_around_the_row(
+        mgr, badges, placements, panel, row, dpr, mon,
+    ):
+        """The displaced panel badge is where the per-badge placement puts
+        it with the row as its only obstacle (the only other badges in
+        these layouts are the row's), so it moved no farther than the row
+        demands."""
+        bw, bh = mgr._numeral_badge_size(badges[panel][1], dpr)
+        ctrl = [TestInteriorToolbarRunRow._box(r, dpr) for r, _n in badges]
+        assert placements[panel][2] == mgr._numeral_badge_placement_phys(
+            badges[panel][0], bw, bh, dpr, mon[0] * dpr, mon[1] * dpr, ctrl,
+            corner="top_right", placed_badges=list(row),
+        )
+
+    def _top_strip_case(self, mgr, mod, dpr, *, tall_monitor):
+        """Acceptance (g): five small icons at the TOP monitor edge, one
+        logical px taller than a badge, spaced so that the top
+        edge-cluster pass finds the run unpacked and leaves it alone (the
+        gap between icons stays under one badge width, so they still form
+        one run), on a monitor exactly as wide as their badge row, so the
+        row cannot shift. A page panel lying wholly below the band spans
+        the monitor width; its walked badge sits in its top-right corner,
+        under the row. With ``tall_monitor`` False the monitor ends just
+        below the row and the panel runs off its bottom, so every place
+        the per-badge placement tries for the displaced badge is off the
+        monitor or on a row badge. Returns (badges, run indexes, panel
+        index, monitor, the run's row rects)."""
+        w = self._R._badge_w_logical(mgr, 1, dpr)
+        h = mgr._numeral_badge_size(1, dpr)[1] / dpr
+        pitch = math.ceil(w + mod._BADGE_COLLISION_GAP_PX) + 8
+        icon_h = math.ceil(h) + 1
+        icons = [
+            (k + 1, f"I{k}", pitch * k, 0, 24, icon_h) for k in range(5)
+        ]
+        row = self._run_row(mgr, mod, icons, dpr, _C2_MON)
+        mon_w = row[-1][2] / dpr + 0.5
+        row_bottom = row[0][3] / dpr
+        mon_h = row_bottom + 1.0 if not tall_monitor else 600.0
+        spec = [(6, "Panel", 0, icon_h, mon_w, 200)] + icons
+        mon = (mon_w, mon_h)
+        return (
+            self._R._badges(mod, spec, dpr, mon), list(range(1, 6)), 0,
+            mon, row,
+        )
+
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_displaced_badge_without_room_keeps_todays_placement(
+        self, overlay_mgr, dpr
+    ):
+        # Acceptance (g): the displaced badge cannot move without
+        # overlapping a badge, so the row is dropped: the run keeps
+        # today's placement and the panel's badge stays where it was.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        badges, run, panel, mon, row = self._top_strip_case(
+            mgr, mod, dpr, tall_monitor=False,
+        )
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        # Precondition: the panel's walked badge lies under the run's row,
+        # so only a move could free the row.
+        assert any(
+            not _rects_disjoint(today[panel][2], r) for r in row
+        ), (today[panel], row)
+        assert placements == today
+
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_displaced_badge_with_room_moves_and_the_row_is_taken(
+        self, overlay_mgr, dpr
+    ):
+        # The same layout on a taller monitor: the panel's badge moves
+        # clear of the row, to the place the per-badge placement gives it
+        # around the row, still attached to the panel; the run takes its
+        # row below the icons, and no two badges overlap.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        badges, run, panel, mon, row = self._top_strip_case(
+            mgr, mod, dpr, tall_monitor=True,
+        )
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        assert any(
+            not _rects_disjoint(today[panel][2], r) for r in row
+        ), (today[panel], row)
+        assert [placements[i][2] for i in run] == row
+        assert placements[panel] != today[panel]
+        self._assert_placed_again_around_the_row(
+            mgr, badges, placements, panel, row, dpr, mon,
+        )
+        self._R._assert_runs_below(
+            mgr, mod, badges, placements, [run], dpr, mon,
+        )
+        self._R._assert_all_disjoint(placements)
+        fp = placements[panel][2]
+        assert fp[0] >= 0.0 and fp[2] <= mon[0] * dpr
+        assert fp[1] >= 0.0 and fp[3] <= mon[1] * dpr
+        assert mod._bubble_drawing_state(
+            fp, self._R._box(badges[panel][0], dpr), dpr,
+        ) != mod._BUBBLE_STATE_DETACHED
+
+    @staticmethod
+    def _shifted_page_spec(shift, *, mirrored):
+        """The measured layout WITH its page, the Gmail header cluster
+        (controls with 900 < x < 1200 and 80 < y < 200, logical px) moved
+        ``shift`` logical px to the right, as ``_brave_spec`` returns it.
+        ``mirrored`` then mirrors the whole layout left to right with the
+        formula of ``_brave_spec("measured-mirrored")``."""
+        mon_w = brave_data.MEASURED_MONITOR_LOGICAL[0]
+        spec = []
+        for n, x, y, w, h, _ctype in brave_data.measured_layout():
+            if 900 < x < 1200 and 80 < y < 200:
+                x += shift
+            if mirrored:
+                x = mon_w - x - w
+            spec.append((n, f"#{n}", x, y, w, h))
+        return spec
+
+    @pytest.mark.parametrize("mirrored", [False, True])
+    @pytest.mark.parametrize("shift", [4, 8, 12, 16])
+    def test_displaced_page_badge_never_moves_detached(
+        self, overlay_mgr, shift, mirrored
+    ):
+        # wh-overlay-toolbar-badges-cover-icons.2.1: with the Gmail header
+        # cluster shifted a few px (density, zoom or window width), every
+        # attached place around badges 47 and 48 was taken, and the move
+        # put them 18-95 logical px away from their controls, one on the
+        # taskbar. A displaced badge may move only to a place ATTACHED to
+        # its own control; otherwise the row is dropped and every badge
+        # keeps its walk placement.
+        #
+        # A badge that moved into a ROW may sit detached below its icon by
+        # design (the row's y is shared), so row members are left out: a
+        # changed page badge that belongs to no horizontal run of small
+        # controls (the production run definition, over the controls the
+        # edge-cluster pass leaves) can only be a displaced badge. With
+        # the offscreen Qt platform's larger badge, such a row can reach
+        # page controls (badges 88 and 89 at shifts 4 and 8).
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        dpr = brave_data.MEASURED_DPR
+        mon = brave_data.MEASURED_MONITOR_LOGICAL
+        badges = self._R._badges(
+            mod, self._shifted_page_spec(shift, mirrored=mirrored), dpr, mon,
+        )
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        ctrl = [self._R._box(r, dpr) for r, _n in badges]
+        cluster = mgr._edge_cluster_placements_phys(
+            badges, dpr, mon[0] * dpr, mon[1] * dpr,
+            mod.QFontMetricsF(mgr._numeral_font(dpr)),
+        )
+        sizes = {
+            i: mgr._numeral_badge_size(n, dpr)
+            for i, (_r, n) in enumerate(badges)
+        }
+        runs = mgr._small_control_runs(
+            [(i, *ctrl[i]) for i in range(len(badges)) if i not in cluster],
+            sizes, mgr._numeral_badge_size(1, dpr)[1],
+        )
+        members = {b[0] for run in runs for b in run}
+        for i in brave_data.PAGE:
+            if placements[i] == today[i] or i in members:
+                continue
+            assert mod._bubble_drawing_state(
+                placements[i][2], ctrl[i], dpr,
+            ) != mod._BUBBLE_STATE_DETACHED, (
+                badges[i][1], placements[i][2], ctrl[i],
+            )
+        for number in (47, 48):
+            i = number - 1
+            assert badges[i][1] == number
+            assert mod._bubble_drawing_state(
+                placements[i][2], ctrl[i], dpr,
+            ) != mod._BUBBLE_STATE_DETACHED, (
+                number, placements[i][2], ctrl[i],
+            )
+
+        # No two badges overlap unless they already overlap in the
+        # walk-only placement. On the native Qt platform the walk-only
+        # placement has no overlapping pair, so no two badges overlap at
+        # all; the offscreen platform's larger badge makes the walk itself
+        # overlap a few (for example 122 and 124), which this pass does
+        # not cause.
+        def _pairs(pl):
+            rects = [p[2] for p in pl]
+            return {
+                (a, b) for a in range(len(rects))
+                for b in range(a + 1, len(rects))
+                if not _rects_disjoint(rects[a], rects[b])
+            }
+
+        assert _pairs(placements) <= _pairs(today)
+
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_displaced_badge_whose_only_clear_move_is_detached_drops_row(
+        self, overlay_mgr, dpr
+    ):
+        # wh-overlay-toolbar-badges-cover-icons.2.1, constructed: the
+        # _top_strip_case frame on a tall monitor, with a thin page panel
+        # (6 logical px high) whose top lies 2 px above the row's bottom.
+        # The row covers a third of the panel, so the panel yields; its
+        # walked badge lies under the row. Every attached place for the
+        # panel's badge is on a row badge, and the only clear place the
+        # per-badge placement finds is far below the panel. The move fails,
+        # so the row is dropped and every badge keeps its walk footprint.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        w = self._R._badge_w_logical(mgr, 1, dpr)
+        h = mgr._numeral_badge_size(1, dpr)[1] / dpr
+        pitch = math.ceil(w + mod._BADGE_COLLISION_GAP_PX) + 8
+        icon_h = math.ceil(h) + 1
+        icons = [
+            (k + 1, f"I{k}", pitch * k, 0, 24, icon_h) for k in range(5)
+        ]
+        row = self._run_row(mgr, mod, icons, dpr, _C2_MON)
+        mon = (row[-1][2] / dpr + 0.5, 600.0)
+        panel_top = row[0][3] / dpr - 2.0
+        spec = [(6, "Panel", 0, panel_top, mon[0], 6)] + icons
+        badges = self._R._badges(mod, spec, dpr, mon)
+        panel = 0
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        # Preconditions: the walked badge lies under the row, and the
+        # per-badge placement with the row as the only obstacle clears the
+        # row but lands detached from the panel.
+        assert any(
+            not _rects_disjoint(today[panel][2], r) for r in row
+        ), (today[panel], row)
+        bw, bh = mgr._numeral_badge_size(6, dpr)
+        ctrl = [self._R._box(r, dpr) for r, _n in badges]
+        alone = mgr._numeral_badge_placement_phys(
+            badges[panel][0], bw, bh, dpr, mon[0] * dpr, mon[1] * dpr, ctrl,
+            corner="top_right", placed_badges=list(row),
+        )
+        assert all(_rects_disjoint(alone, r) for r in row), alone
+        assert mod._bubble_drawing_state(
+            alone, ctrl[panel], dpr,
+        ) == mod._BUBBLE_STATE_DETACHED, alone
+        assert placements == today
+
+    def _top_icons(self, mgr, mod, dpr):
+        """The five top-edge icons of ``_top_strip_case`` and the rects of
+        their row (physical px), placed alone. Returns (icons spec, row,
+        badge width and height in logical px)."""
+        w = self._R._badge_w_logical(mgr, 1, dpr)
+        h = mgr._numeral_badge_size(1, dpr)[1] / dpr
+        pitch = math.ceil(w + mod._BADGE_COLLISION_GAP_PX) + 8
+        icon_h = math.ceil(h) + 1
+        icons = [
+            (k + 1, f"I{k}", pitch * k, 0, 24, icon_h) for k in range(5)
+        ]
+        return icons, self._run_row(mgr, mod, icons, dpr, _C2_MON), w, h
+
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_row_over_more_than_the_cap_blocks_an_attached_move(
+        self, overlay_mgr, dpr
+    ):
+        # The cover cap (RULING 1A) with an ATTACHED move: the
+        # _top_strip_case frame on a tall monitor, with a page panel whose
+        # top lies on the band's bottom and whose height is 1.5 times the
+        # strip the row would cover (a badge height plus the gap), so the
+        # row would cover two thirds of it, more than
+        # _INTERIOR_ROW_MAX_COVER_FRACTION. The panel's badge could move
+        # to an attached place clear of the row, so only the cap keeps the
+        # row blocked: every badge keeps its walk placement.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        icons, row, _w, _h = self._top_icons(mgr, mod, dpr)
+        mon = (row[-1][2] / dpr + 0.5, 600.0)
+        band_bottom = icons[0][5]
+        covered = row[0][3] / dpr - band_bottom
+        spec = [(6, "Panel", 0, band_bottom, mon[0], 1.5 * covered)] + icons
+        badges = self._R._badges(mod, spec, dpr, mon)
+        panel = 0
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        # Preconditions: the row covers two thirds of the panel (over the
+        # shipped cap of one half; written as a number so a mutated cap
+        # cannot fail here), the walked badge lies under the row, and the
+        # per-badge placement with the row as the only obstacle is clear of
+        # it and ATTACHED.
+        assert covered / spec[0][5] == pytest.approx(2.0 / 3.0)
+        assert any(
+            not _rects_disjoint(today[panel][2], r) for r in row
+        ), (today[panel], row)
+        bw, bh = mgr._numeral_badge_size(6, dpr)
+        ctrl = [self._R._box(r, dpr) for r, _n in badges]
+        alone = mgr._numeral_badge_placement_phys(
+            badges[panel][0], bw, bh, dpr, mon[0] * dpr, mon[1] * dpr, ctrl,
+            corner="top_right", placed_badges=list(row),
+        )
+        assert all(_rects_disjoint(alone, r) for r in row), alone
+        assert mod._bubble_drawing_state(
+            alone, ctrl[panel], dpr,
+        ) != mod._BUBBLE_STATE_DETACHED, alone
+        assert placements == today
+
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_failed_move_drops_the_row_although_a_later_shift_works(
+        self, overlay_mgr, dpr
+    ):
+        # The one-attempt rule (KNOWN LIMIT 8) with an ATTACHED move at a
+        # later shift. The _top_strip_case icons, and a thin page panel
+        # (6 logical px high, its top 2 px above the row's bottom, so it
+        # yields) from the monitor's left edge to two badge widths plus
+        # the gap plus 10 px. Its walked badge sits in the trailing strip
+        # right of the panel, under the row at every shift the monitor
+        # allows. At shift 0 the row covers every attached place, so the
+        # move lands detached and fails. A shift that clears the place one
+        # badge width left of the panel's inside corner would let the move
+        # land there, attached; the row is still dropped, and every badge
+        # keeps its walk placement.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        icons, row, w, _h = self._top_icons(mgr, mod, dpr)
+        bw, bh = mgr._numeral_badge_size(6, dpr)
+        gap = mod._BADGE_COLLISION_GAP_PX
+        panel_right = math.ceil(2 * bw / dpr + gap) + 10
+        row_w = (row[-1][2] - row[0][0]) / dpr
+        mon = (row_w + panel_right + bw / dpr - 1.0, 600.0)
+        panel_top = row[0][3] / dpr - 2.0
+        spec = [(6, "Panel", 0, panel_top, panel_right, 6)] + icons
+        badges = self._R._badges(mod, spec, dpr, mon)
+        panel = 0
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        ctrl = [self._R._box(r, dpr) for r, _n in badges]
+
+        def _alone(dx_logical):
+            shifted = [
+                (r[0] + dx_logical * dpr, r[1], r[2] + dx_logical * dpr, r[3])
+                for r in row
+            ]
+            fp = mgr._numeral_badge_placement_phys(
+                badges[panel][0], bw, bh, dpr, mon[0] * dpr, mon[1] * dpr,
+                ctrl, corner="top_right", placed_badges=shifted,
+            )
+            clear = all(_rects_disjoint(fp, r) for r in shifted)
+            attached = mod._bubble_drawing_state(
+                fp, ctrl[panel], dpr,
+            ) != mod._BUBBLE_STATE_DETACHED
+            return clear, attached
+
+        # Preconditions: the walked badge lies under the row; at shift 0
+        # the move is clear but detached; a later shift that stays on the
+        # monitor and within the shift range gives a clear ATTACHED move.
+        assert any(
+            not _rects_disjoint(today[panel][2], r) for r in row
+        ), (today[panel], row)
+        assert _alone(0) == (True, False)
+        steps = int(
+            mod._INTERIOR_RUN_SHIFT_BADGE_WIDTHS
+            * max(r[2] - r[0] for r in row) / dpr
+            / mod._INTERIOR_RUN_SHIFT_STEP_LOGICAL_PX
+        )
+        later = [
+            d for d in range(1, steps + 1)
+            if row[-1][2] / dpr + d <= mon[0] and _alone(d) == (True, True)
+        ]
+        assert later, "no later shift gives an attached move"
+        assert placements == today
+
+    @staticmethod
+    def _neighbour_spec(*, mirrored):
+        """Codex's layout for wh-overlay-toolbar-badges-cover-icons.2.2,
+        logical px on the 1920 x 1080 monitor, in walk order: toolbar
+        icons #4-#8 (24 x 24, 30 px pitch, y 200), then page header
+        controls #19 and #20 (40 x 40, just below the toolbar) and #21
+        (120 x 40, below both). ``mirrored`` mirrors it left to right."""
+        mon_w = _C2_MON[0]
+        items = [(4 + k, 400 + 30 * k, 200, 24, 24) for k in range(5)] + [
+            (19, 400, 234, 40, 40),
+            (20, 440, 234, 40, 40),
+            (21, 380, 274, 120, 40),
+        ]
+        return [
+            (n, f"#{n}", mon_w - x - w if mirrored else x, y, w, h)
+            for n, x, y, w, h in items
+        ]
+
+    @pytest.mark.parametrize(
+        "corner, mirrored", [("top_right", False), ("top_left", True)],
+    )
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_displaced_badge_never_moves_onto_another_control(
+        self, overlay_mgr, dpr, corner, mirrored
+    ):
+        # wh-overlay-toolbar-badges-cover-icons.2.2 (Codex): the toolbar
+        # row displaces the walked badges of #19 and #20, and the per-badge
+        # placement, which accepts an attached place on ANOTHER control
+        # when no clean one is left, moved both onto #21 while each stayed
+        # attached to its own control. A displaced badge may move only to a
+        # place that overlaps no other numbered control's box; otherwise the
+        # row is dropped and every badge keeps its walk placement. Mirrored
+        # with the top-left corner, the same holds.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        mon = _C2_MON
+        badges = self._R._badges(
+            mod, self._neighbour_spec(mirrored=mirrored), dpr, mon,
+        )
+
+        def _placements(today):
+            args = (badges, dpr, mon[0] * dpr, mon[1] * dpr)
+            if not today:
+                return mgr._numeral_badge_placements_phys(*args, corner=corner)
+            with patch.object(
+                mgr, "_interior_run_placements_phys", return_value={}
+            ):
+                return mgr._numeral_badge_placements_phys(*args, corner=corner)
+
+        placements = _placements(today=False)
+        today = _placements(today=True)
+        run = set(range(5))
+        ctrl = [self._R._box(r, dpr) for r, _n in badges]
+        # Precondition: the row the run takes alone covers the walked badge
+        # of #19 or #20, so the row can form only by displacing it.
+        alone = mgr._numeral_badge_placements_phys(
+            badges[:5], dpr, mon[0] * dpr, mon[1] * dpr, corner=corner,
+        )
+        row = [p[2] for p in alone]
+        assert any(
+            not _rects_disjoint(today[i][2], r) for i in (5, 6) for r in row
+        ), (row, today[5], today[6])
+        for i in range(len(badges)):
+            if i in run or placements[i] == today[i]:
+                continue
+            for k in range(len(badges)):
+                if k == i:
+                    continue
+                assert _rects_disjoint(placements[i][2], ctrl[k]), (
+                    badges[i][1], badges[k][1], placements[i][2], ctrl[k],
+                )
+
+    def _band_case(self, mgr, mod, dpr, *, top_offset):
+        """Acceptance (h): five 24 px icons away from the monitor edges,
+        the first one 5 px shorter than the rest, on a monitor that ends
+        half a logical px past the badge row (no shift to the right). A
+        200 x 200 panel stands left of the row's span, its right edge half
+        a logical px left of the row's first badge, so its walked badge
+        (right of the panel, at the panel's top, clear of the short first
+        icon) overlaps the row at every shift that stays on the monitor.
+        The panel's top is ``top_offset`` logical px below the band's
+        bottom: -1 overlaps the band, 0 lies wholly below it. Returns
+        (badges, run indexes, panel index, monitor, the run's row
+        rects)."""
+        x0, y0 = 400, 200
+        icons = [
+            (k + 1, f"I{k}", x0 + 24 * k, y0, 24, 19 if k == 0 else 24)
+            for k in range(5)
+        ]
+        row = self._run_row(mgr, mod, icons, dpr, _C2_MON)
+        mon = (row[-1][2] / dpr + 0.5, 600.0)
+        panel_right = row[0][0] / dpr - 0.5
+        spec = [
+            (6, "Panel", panel_right - 200, y0 + 24 + top_offset, 200, 200),
+        ] + icons
+        return (
+            self._R._badges(mod, spec, dpr, mon), list(range(1, 6)), 0,
+            mon, row,
+        )
+
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_control_overlapping_the_band_still_blocks_the_row(
+        self, overlay_mgr, dpr
+    ):
+        # Acceptance (h): the panel's top is 1 px above the band's bottom,
+        # so it is not wholly below the toolbar band and its badge still
+        # blocks the row as before RULING 1A: every badge keeps today's
+        # placement. The row covers far less than half of the 200 px
+        # panel, so only the wholly-below rule keeps it blocked; with the
+        # panel's top on the band's bottom (next test) the row is taken.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        badges, run, panel, mon, row = self._band_case(
+            mgr, mod, dpr, top_offset=-1,
+        )
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        assert any(
+            not _rects_disjoint(today[panel][2], r) for r in row
+        ), (today[panel], row)
+        assert placements == today
+
+    @pytest.mark.parametrize("dpr", TestInteriorToolbarRunRow.DPRS)
+    def test_control_wholly_below_the_band_yields_to_the_row(
+        self, overlay_mgr, dpr
+    ):
+        # The boundary of (h): the panel's top lies exactly on the band's
+        # bottom, so the panel is wholly below the band; the row takes its
+        # place below the icons and the panel's badge moves clear.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        badges, run, panel, mon, row = self._band_case(
+            mgr, mod, dpr, top_offset=0,
+        )
+        placements = self._R._place(mgr, badges, dpr, mon)
+        today = self._R._place(mgr, badges, dpr, mon, today=True)
+        assert any(
+            not _rects_disjoint(today[panel][2], r) for r in row
+        ), (today[panel], row)
+        assert [placements[i][2] for i in run] == row
+        assert placements[panel] != today[panel]
+        self._assert_placed_again_around_the_row(
+            mgr, badges, placements, panel, row, dpr, mon,
+        )
+        self._R._assert_runs_below(
+            mgr, mod, badges, placements, [run], dpr, mon,
+        )
+        self._R._assert_all_disjoint(placements)
+
+
+class TestEdgeRowSkipsToolbarRunIcons:
+    """A top- or bottom-edge row must not cover an icon of a horizontal run
+    of small icons that reaches into the edge band (OPTION A of Boss e8's
+    RULING, 09:49 2026-09-25, on wh-overlay-toolbar-badges-cover-icons).
+    When it would, the row is dropped and its badges take the per-badge
+    placement they get without it.
+
+    Measured on Brave (Gmail, scale 3.0, six pinned tabs): the top-edge
+    pass laid the pinned-tab badges out as one row just below the tabs, on
+    the address-bar icons (badge 99 on Back, 100-104 on icons 5-8).
+    KNOWN LIMIT: the pinned-tab badges that fall back may cover their own
+    tabs (the per-badge tab-strip placement; the tab strip is out of
+    scope).
+    """
+
+    _R = TestInteriorToolbarRunRow
+
+    def test_measured_pinned_tab_badges_leave_the_toolbar_icons_clear(
+        self, overlay_mgr
+    ):
+        # Acceptance (j): on the measured Gmail layout no badge covers any
+        # address-bar toolbar icon except its own, and a toolbar badge
+        # covers at most one corner quarter of its own icon; the toolbar
+        # badges keep their rows below the icons in icon order (as in the
+        # 1A test); no two badges overlap. On the offscreen Qt platform the
+        # top band reaches past the toolbar and the top-edge row, below the
+        # toolbar, owns the toolbar and the tabs; the same assertions hold,
+        # except that the larger badges of the right-edge TASKBAR column
+        # reach over the menu icon there (badge 120 by 10 px) and overlap
+        # each other; that column is out of scope, and with the 8 pt
+        # native badge it clears both. The
+        # branch reads the band from the badge size and the constant,
+        # never from a placement.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        dpr = brave_data.MEASURED_DPR
+        mon = brave_data.MEASURED_MONITOR_LOGICAL
+        badges = self._R._badges(mod, _brave_spec("measured"), dpr, mon)
+        placements = self._R._place(mgr, badges, dpr, mon)
+        ctrl = [self._R._box(r, dpr) for r, _n in badges]
+        groups = [list(brave_data.LEFT_GROUP), list(brave_data.RIGHT_GROUP)]
+        toolbar = [i for g in groups for i in g]
+        band_bottom = brave_data.TOOLBAR_BAND_BOTTOM_PHYS
+        badge_h = mgr._numeral_badge_size(1, dpr)[1]
+        exempt = (
+            set(brave_data.TASKBAR)
+            if band_bottom <= mod._EDGE_CLUSTER_BAND_FACTOR * badge_h
+            else set()
+        )
+        for i, placement in enumerate(placements):
+            if placement is None or i in exempt:
+                continue
+            for j in toolbar:
+                if j != i:
+                    assert _rects_disjoint(placement[2], ctrl[j]), (
+                        i + 1, j + 1, placement[2], ctrl[j],
+                    )
+        for group in groups:
+            rects = [placements[i][2] for i in group]
+            assert len({r[1] for r in rects}) == 1, rects
+            assert rects[0][1] >= band_bottom, (rects[0], band_bottom)
+            centres = [(r[0] + r[2]) / 2.0 for r in rects]
+            assert all(a < b for a, b in zip(centres, centres[1:])), centres
+            for i in group:
+                inter = _rect_intersection(placements[i][2], ctrl[i])
+                if inter is not None:
+                    own = ctrl[i]
+                    mid_x = (own[0] + own[2]) / 2.0
+                    mid_y = (own[1] + own[3]) / 2.0
+                    assert inter[2] <= mid_x or inter[0] >= mid_x, i + 1
+                    assert inter[3] <= mid_y or inter[1] >= mid_y, i + 1
+        self._R._assert_all_disjoint([
+            p for i, p in enumerate(placements) if i not in exempt
+        ])
+
+    # -- constructed layouts for (k) and the fallback ----------------------
+    # Badge 30 x 24 at scale 1.0 (patched), so the edge band is 72 px and a
+    # control is small below 60 px wide and 48 px high. Six 24 px wide
+    # "tabs" packed against the monitor edge (198 px of badges in a 144 px
+    # run) take a row just beyond their inner side; three or two 24 px
+    # icons stand under that row.
+
+    _MON_H = 1080.0
+
+    @classmethod
+    def _edge_case(cls, mod, side, *, tab_h, icon_top, icon_h, icons):
+        """The tabs and ``icons`` icons, laid out against the TOP edge and
+        mirrored top to bottom for ``side == "bottom"``. Returns (badges,
+        tab indexes, icon indexes)."""
+        mon = TestEdgeClusterColumn._mon()
+        spec = [(600 + 24 * k, 0, 24, tab_h) for k in range(6)]
+        spec += [(640 + 24 * k, icon_top, 24, icon_h) for k in range(icons)]
+        if side == "bottom":
+            spec = [(x, cls._MON_H - y - h, w, h) for x, y, w, h in spec]
+        badges = [
+            (TestEdgeClusterColumn._rect(mon, x, y, w, h), n + 1)
+            for n, (x, y, w, h) in enumerate(spec)
+        ]
+        return badges, list(range(6)), list(range(6, 6 + icons))
+
+    @staticmethod
+    def _run_edge_and_place(mgr, mod, badges):
+        """(edge-pass output, placements, placements without any edge
+        row), all with the patched 30 x 24 badge."""
+        metrics = mod.QFontMetricsF(mgr._numeral_font(1.0))
+        with patch.object(mgr, "_numeral_badge_size", return_value=(30, 24)):
+            edge = mgr._edge_cluster_placements_phys(
+                badges, 1.0, 1920.0, 1080.0, metrics,
+            )
+            placements = mgr._numeral_badge_placements_phys(
+                badges, 1.0, 1920.0, 1080.0, corner="top_right",
+            )
+            with patch.object(
+                mgr, "_edge_cluster_placements_phys", return_value={}
+            ):
+                without = mgr._numeral_badge_placements_phys(
+                    badges, 1.0, 1920.0, 1080.0, corner="top_right",
+                )
+        return edge, placements, without
+
+    @staticmethod
+    def _assert_row_formed(edge, placements, tabs, badges, icons):
+        """The tabs' badges form the edge row, and it covers at least one
+        of the icons (the case really puts an icon under the row)."""
+        assert set(tabs) <= set(edge), sorted(edge)
+        rects = [placements[i][2] for i in tabs]
+        assert rects == [edge[i][2] for i in tabs]
+        assert len({r[1] for r in rects}) == 1, rects
+        lefts = [r[0] for r in rects]
+        assert lefts == sorted(lefts)
+        boxes = [
+            (r.x, r.y, r.x + r.width, r.y + r.height) for r, _n in badges
+        ]
+        assert any(
+            not _rects_disjoint(r, boxes[j]) for r in rects for j in icons
+        ), (rects, [boxes[j] for j in icons])
+
+    @pytest.mark.parametrize("side", ["top", "bottom"])
+    def test_row_over_a_run_reaching_into_the_band_falls_back(
+        self, overlay_mgr, side
+    ):
+        # Three 24 x 30 icons at y 46-76: they reach into the 72 px band
+        # but end past it (not edge-cluster members), like the measured
+        # address-bar icons under the pinned tabs. The tabs' row (y 43-67)
+        # would cover them, so the row is dropped and every badge takes
+        # the placement it gets without the edge row.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        badges, tabs, icons = self._edge_case(
+            mod, side, tab_h=40, icon_top=46, icon_h=30, icons=3,
+        )
+        edge, placements, without = self._run_edge_and_place(
+            mgr, mod, badges,
+        )
+        assert not set(tabs) & set(edge), sorted(edge)
+        assert placements == without
+
+    @pytest.mark.parametrize("side", ["top", "bottom"])
+    def test_row_over_two_icons_still_forms(self, overlay_mgr, side):
+        # Acceptance (k): the same place under the row, but two icons are
+        # not a run (three or more), so the row forms and covers them.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        badges, tabs, icons = self._edge_case(
+            mod, side, tab_h=40, icon_top=46, icon_h=30, icons=2,
+        )
+        edge, placements, _without = self._run_edge_and_place(
+            mgr, mod, badges,
+        )
+        self._assert_row_formed(edge, placements, tabs, badges, icons)
+
+    @pytest.mark.parametrize("side", ["top", "bottom"])
+    def test_row_over_a_run_wholly_past_the_band_still_forms(
+        self, overlay_mgr, side
+    ):
+        # Acceptance (k): three icons whose inner edge lies exactly on the
+        # band's end (y 72) do not reach into the band, so they are page
+        # content, not toolbar chrome next to the edge cluster: the row
+        # (y 63-87, below 60 px tabs) forms over their top strip, as the
+        # toolbar row of RULING 1A may. The measured layout on the
+        # offscreen Qt platform has this shape (the top row over Gmail's
+        # header icons).
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        badges, tabs, icons = self._edge_case(
+            mod, side, tab_h=60, icon_top=72, icon_h=24, icons=3,
+        )
+        edge, placements, _without = self._run_edge_and_place(
+            mgr, mod, badges,
+        )
+        self._assert_row_formed(edge, placements, tabs, badges, icons)
+
+    @pytest.mark.parametrize("side", ["right", "left"])
+    def test_column_over_a_run_icon_still_forms(self, overlay_mgr, side):
+        # OPTION A drops top and bottom rows only; a left or right column
+        # keeps its placement. Three 24 px tray icons stacked at the right
+        # edge (x 1896) form a column just left of them (x 1863-1893); a
+        # run of three 24 px icons at y 1000 ends at x 1864, one px under
+        # the column, and lies outside the edge band (its members are not
+        # column candidates). Mirrored left to right for ``side ==
+        # "left"``.
+        _m, mod, _ = overlay_mgr
+        mgr = self._R._mgr(mod)
+        mon = TestEdgeClusterColumn._mon()
+        spec = [(1896, 990 + 24 * k, 24, 24) for k in range(3)]
+        spec += [(1792 + 24 * k, 1000, 24, 24) for k in range(3)]
+        if side == "left":
+            spec = [(1920 - x - w, y, w, h) for x, y, w, h in spec]
+        badges = [
+            (TestEdgeClusterColumn._rect(mon, x, y, w, h), n + 1)
+            for n, (x, y, w, h) in enumerate(spec)
+        ]
+        tray, icons = [0, 1, 2], [3, 4, 5]
+        edge, placements, _without = self._run_edge_and_place(
+            mgr, mod, badges,
+        )
+        assert set(tray) <= set(edge), sorted(edge)
+        rects = [placements[i][2] for i in tray]
+        assert rects == [edge[i][2] for i in tray]
+        assert len({(r[0], r[2]) for r in rects}) == 1, rects
+        boxes = [
+            (r.x, r.y, r.x + r.width, r.y + r.height) for r, _n in badges
+        ]
+        assert any(
+            not _rects_disjoint(r, boxes[j]) for r in rects for j in icons
+        ), (rects, [boxes[j] for j in icons])
 
 
 # ===========================================================================

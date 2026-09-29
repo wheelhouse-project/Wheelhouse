@@ -77,10 +77,6 @@ def make_pipeline(retract_response=None):
     catalog = MagicMock()
     catalog.command_hotword = "x-ray"
     catalog.lookup.return_value = None
-    # wh-2vz: real PatternCatalog returns None for words not in the
-    # trailing-commands map. MagicMock's default truthy return would
-    # make SpeechProcessor capture every word as a trailing candidate.
-    catalog.get_trailing_command.return_value = None
 
     processor = SpeechProcessor(
         word_queue=queue,

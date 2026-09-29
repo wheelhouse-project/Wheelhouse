@@ -38,7 +38,8 @@ class E2EPipelineHarness:
     def __init__(self, catalog=None, context_kwargs: Optional[dict] = None,
                  greedy_timeout_ms: Optional[int] = None,
                  foreground_hwnd: Optional[int] = None,
-                 action_handler_foreground: bool = False):
+                 action_handler_foreground: bool = False,
+                 open_utterance_hold_ms: Optional[int] = 0):
         self.word_queue: asyncio.Queue = asyncio.Queue()
         self._utterance_counter = 0
         self._elapsed = 0.0
@@ -90,6 +91,8 @@ class E2EPipelineHarness:
             replacement_timeout_ms=400,
             command_timeout_ms=1000,
             hotword=self.hotword,
+            # 0 (no open-utterance hold): these tests flush the buffer with the command timer, and the flush after the hold is the same code; the default hold is covered by tests/test_command_wait_open_utterance.py, which passes None here.
+            open_utterance_hold_ms=open_utterance_hold_ms,
         )
         if greedy_timeout_ms is not None:
             processor_kwargs["greedy_timeout_ms"] = greedy_timeout_ms

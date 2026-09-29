@@ -137,7 +137,6 @@ def make_processor(logic_controller: Any = None):
     catalog = MagicMock()
     catalog.command_hotword = "x-ray"
     catalog.lookup.return_value = None
-    catalog.get_trailing_command.return_value = None
     text_parser = MockTextParser()
 
     processor = SpeechProcessor(
@@ -440,6 +439,44 @@ class TestReplacementsRefusedDuringARead:
             consumed = await self._rule(engine, steps)
             assert consumed is True
         assert app.actions == []
+
+    @pytest.mark.asyncio
+    async def test_no_spaces_insert_refuses_the_whole_rule_up_front(self):
+        """wh-voice-access-parity.1.14: insert_raw_no_spaces pastes text
+        like insert_raw, so the rule is refused before its first step.
+        The leading hk proves the refusal is rule-level: the per-payload
+        gate alone would let the hk reach Input first."""
+        controller = FakeController(since=time.monotonic())
+        proc, app, _parser = make_processor(controller)
+        engine = _engine(proc, app)
+
+        consumed = await self._rule(
+            engine,
+            [
+                {"function": "hk", "params": ["end"]},
+                {"function": "insert_raw_no_spaces", "params": ["a b"]},
+            ],
+        )
+        assert consumed is True
+        assert app.actions == [], (
+            "a step of a rule that pastes text reached Input during a read"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_spaces_insert_pastes_when_no_read_is_in_flight(self):
+        controller = FakeController(since=None)
+        proc, app, _parser = make_processor(controller)
+        engine = _engine(proc, app)
+
+        consumed = await self._rule(
+            engine,
+            [{"function": "insert_raw_no_spaces", "params": ["a b c"]}],
+        )
+        assert consumed is True
+        assert [
+            (a.get("action"), a.get("params", {}).get("text"))
+            for a in app.actions
+        ] == [("raw_insert_text", "abc")]
 
     @pytest.mark.asyncio
     async def test_an_editor_routed_replacement_passes_during_a_read(self):
@@ -1354,6 +1391,19 @@ class TestAiTransformsGatedDuringARead:
         match = re.search(r"fix", "fix")
         return engine._execute_rule(match, steps, None, "command")
 
+    @staticmethod
+    def _ready_ai():
+        """An AI service that is ready and idle, so a transform that is
+        not refused goes on to send capture_selected_text."""
+        ai = MagicMock()
+        ai.is_ready = MagicMock(return_value=True)
+        ai.is_processing = MagicMock(return_value=False)
+        ai._processing_lock = asyncio.Lock()
+        ai.speak = AsyncMock()
+        ai.speak_brief = AsyncMock()
+        ai.cancel_requested = False
+        return ai
+
     def _transform_rig(self, proc, app, controller,
                        mark_read_during_model=False):
         from speech.actions import ActionFunctions
@@ -1362,13 +1412,7 @@ class TestAiTransformsGatedDuringARead:
         handler.speech_processor = proc
         af = ActionFunctions(handler)
 
-        ai = MagicMock()
-        ai.is_ready = MagicMock(return_value=True)
-        ai.is_processing = MagicMock(return_value=False)
-        ai._processing_lock = asyncio.Lock()
-        ai.speak = AsyncMock()
-        ai.speak_brief = AsyncMock()
-        ai.cancel_requested = False
+        ai = self._ready_ai()
         af._get_ai_service = lambda: ai
 
         async def fake_model(_ai, text):
@@ -1391,6 +1435,12 @@ class TestAiTransformsGatedDuringARead:
         controller = FakeController(since=time.monotonic())
         proc, app, _parser = make_processor(controller)
         engine = _engine(proc, app)
+        # wh-voice-access-parity.1.14.1.3: a ready, idle AI service, so a
+        # rule that is not refused reaches the capture. With the MagicMock
+        # service the "Already processing" check returned first and the
+        # test passed with the refusal removed.
+        ready_ai = self._ready_ai()
+        engine.action_functions._get_ai_service = lambda: ready_ai
 
         for steps in (
             [{"function": "fix_text_ai"}],

@@ -400,6 +400,7 @@ class TestSendStateUpdate:
             "SHOW_SPEECH_PULSE",
             "settings_persisted", "stt_provider",
             "stt_providers_available", "stt_provider_display_names",
+            "stt_providers_not_installed",
             "ai_provider", "ai_providers_available",
             "ai_provider_display_names",
             "interim_results_enabled", "debug_mode",

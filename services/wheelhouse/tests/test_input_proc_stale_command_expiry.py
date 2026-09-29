@@ -51,6 +51,7 @@ import faulthandler
 import logging
 import pickle
 import queue
+import re
 import struct
 import threading
 import time
@@ -314,7 +315,7 @@ class _WatchedDispatch(list):
     """The watch's in-flight dispatch, with its own reading recorded.
 
     _DispatchWatch.poll takes _current under the lock and then UNPACKS it
-    into five names. Every decision it makes about the dispatch -- in flight
+    into seven names. Every decision it makes about the dispatch -- in flight
     at all, held past the limit, reported recently enough to suppress --
     comes after that unpack, so observing the unpack is observing the
     watchdog reach the dispatch. The event belongs to ONE dispatch, because
@@ -1080,11 +1081,48 @@ def test_a_command_carrying_a_bool_deadline_is_still_executed(harness):
 
 
 def _stall_reports(caplog):
-    """Every stall report in the captured records, in order."""
+    """Every stall report in the captured records, in order.
+
+    Matched on the stall line's own fixed wording. The WARNING stack line
+    lists file paths, and a path such as "installed" contains "stalled", so
+    a bare word match would count it. The level alone cannot tell them
+    apart either: the recovery line is also ERROR.
+    """
     return [
         record for record in caplog.records
-        if "stalled" in record.getMessage().lower()
+        if "command loop stalled inside a handler" in record.getMessage()
     ]
+
+
+def test_stall_reports_skips_a_stack_line_whose_path_says_installed():
+    """The stack line lists file paths, and a path can hold "stalled".
+
+    A counter that matched the word anywhere would count the WARNING stack
+    line as a stall report whenever WheelHouse runs from a directory such as
+    "installed", which would satisfy the repeat waits one report early.
+    """
+    def record(level, msg):
+        return logging.LogRecord(
+            "input_proc", level, __file__, 0, msg, None, None,
+        )
+
+    stack = record(
+        logging.WARNING,
+        "stack of the command loop held by start_overlay_walk, innermost "
+        "call last (0 outer frames omitted). trace_id=- request_id=-\n"
+        '  File "C:/Program Files/installed/WheelHouse/input_proc.py", '
+        "line 1, in run",
+    )
+    stall = record(
+        logging.ERROR,
+        "Input command loop stalled inside a handler: start_overlay_walk "
+        "has held the single command loop for 7.0s",
+    )
+
+    class _Captured:
+        records = [stack, stall]
+
+    assert _stall_reports(_Captured()) == [stall]
 
 
 def test_a_continuing_stall_is_repeated_but_not_on_every_poll(
@@ -1169,6 +1207,173 @@ def test_a_stall_that_ends_is_reported_as_recovered(
             "the provider finally answered and nothing said so; every stall "
             "in the log would read as though it never ended"
         )
+
+
+# wh-overlay-walk-vscode-stall. A value the blocked function below holds in a
+# local variable, standing in for the user's spoken words. The stack report
+# must name the function and never carry a local's value.
+_PRIVATE_LOCAL_VALUE = "private-spoken-words-5c1e"
+
+
+def _held_inside_a_provider_call(handler):
+    """The deliberately blocked call the stack report must name."""
+    spoken_words = _PRIVATE_LOCAL_VALUE  # noqa: F841 -- read only by the test
+    handler.entered_walk.set()
+    handler.entered_stall.set()
+    handler.release.wait(timeout=_WAIT_TIMEOUT_S)
+
+
+def _stack_reports(caplog):
+    """Every command-loop stack report in the captured records, in order."""
+    return [
+        record for record in caplog.records
+        if "stack of the command loop" in record.getMessage()
+    ]
+
+
+def test_the_first_stall_report_names_the_blocked_function_once(
+    harness, monkeypatch, caplog,
+):
+    """The first stall report logs the command loop's stack; repeats do not.
+
+    wh-overlay-walk-vscode-stall. A VS Code screen read held the loop for
+    244 s and the log could not say which call held it. The stack names the
+    blocking function and line. It is logged once per dispatch, because a
+    repeat every 10 s would bury the stall lines under identical stacks, and
+    it carries frames only, never a local variable's value.
+    """
+    monkeypatch.setattr(input_proc, "_DISPATCH_STALL_REPORT_S", 0.05)
+    monkeypatch.setattr(input_proc, "_DISPATCH_STALL_REPEAT_S", 0.2)
+    monkeypatch.setattr(input_proc, "_WATCHDOG_POLL_S", 0.01)
+    monkeypatch.setattr(
+        harness.handler, "start_overlay_walk",
+        lambda **kwargs: _held_inside_a_provider_call(harness.handler),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=input_proc.logger.name):
+        harness.send(
+            "start_overlay_walk", deadline=time.monotonic() + 3600.0,
+            request_id="stack-request-id",
+        )
+        assert harness.handler.entered_walk.wait(timeout=_WAIT_TIMEOUT_S)
+        # At least two stall reports, so the once-only rule is observed
+        # against a real repeat and not against a single report.
+        assert _wait_until(
+            lambda: len(_stall_reports(caplog)) >= 2, _WAIT_TIMEOUT_S,
+        ), "the stall was not reported twice, so the repeat rule is unobserved"
+        harness.handler.release.set()
+
+        # Counted only after the recovery line. poll() writes a stack while
+        # it holds _report_lock and end() takes that lock before writing the
+        # recovery line, so every stack for this dispatch is in caplog by
+        # then. Counting right after the second stall line could miss a
+        # repeat stack that poll() was about to write.
+        def recovered():
+            return any(
+                "recovered" in record.getMessage().lower()
+                and "start_overlay_walk" in record.getMessage()
+                for record in caplog.records
+            )
+
+        assert _wait_until(recovered, _WAIT_TIMEOUT_S), (
+            "the walk never reported its recovery, so the stack count below "
+            "could still grow"
+        )
+        stacks = [record.getMessage() for record in _stack_reports(caplog)]
+
+    assert len(stacks) == 1, (
+        f"{len(stacks)} stack reports for one dispatch; the first stall "
+        "report must carry the stack and the repeats must not"
+    )
+    assert "_held_inside_a_provider_call" in stacks[0], (
+        "the stack report does not name the function that held the loop, so "
+        "the next 244 s stall is as unexplained as the last one"
+    )
+    assert "stack-request-id" in stacks[0], (
+        "the stack report does not name the request it belongs to"
+    )
+    for record in caplog.records:
+        assert _PRIVATE_LOCAL_VALUE not in record.getMessage(), (
+            "a log line carries a local variable's value; locals can hold the "
+            "user's spoken words"
+        )
+        assert _PRIVATE_LOCAL_VALUE not in (record.exc_text or "")
+
+
+def test_a_failed_stack_capture_still_reports_the_stall(monkeypatch, caplog):
+    """The stack capture never costs the stall report or raises out of poll.
+
+    wh-overlay-walk-vscode-stall. The stall line is the report that already
+    works; the stack is an addition to it. A capture that raised out of poll
+    would be swallowed by _run_dispatch_watchdog's wrapper together with the
+    stall line, so the freeze would be silent again.
+    """
+    def refuse():
+        raise RuntimeError("frames unavailable")
+
+    monkeypatch.setattr(input_proc.sys, "_current_frames", refuse)
+    watch = input_proc._DispatchWatch()
+    watch.begin("start_overlay_walk", "rid-1", "trace-1", time.monotonic() - 60.0)
+
+    with caplog.at_level(logging.WARNING, logger=input_proc.logger.name):
+        watch.poll()
+
+    assert _stall_reports(caplog), (
+        "a failed stack capture cost the stall report itself"
+    )
+
+
+# The frame cap for the test below. Measured 2026-09-24 on Python 3.12: the
+# held command-loop thread has 9 frames, and _held_inside_a_provider_call is
+# the 3rd from the innermost end (under Event.wait and Condition.wait). A cap
+# of 5 keeps it with 2 frames to spare, so an extra frame inside Event.wait
+# in a later Python does not push it out. The outermost 5 frames (thread
+# bootstrap down to input_process_main) exclude it with 2 frames to spare as
+# well, so the cap still separates the two ends. 4 outer frames are omitted.
+_SMALL_STACK_CAP = 5
+
+
+def test_a_capped_stack_keeps_the_innermost_frames(
+    harness, monkeypatch, caplog,
+):
+    """A stack longer than the cap loses its OUTER frames, never the inner.
+
+    wh-overlay-walk-vscode-stall. The blocking call is at the innermost end
+    of the stack, so a cap that kept the outermost frames would list the
+    thread bootstrap and the command loop and drop the one frame the report
+    exists to name. The shipped cap of 60 is larger than any stack the other
+    tests produce, so only a smaller cap exercises the cut.
+    """
+    monkeypatch.setattr(input_proc, "_STACK_REPORT_MAX_FRAMES", _SMALL_STACK_CAP)
+    monkeypatch.setattr(input_proc, "_DISPATCH_STALL_REPORT_S", 0.05)
+    monkeypatch.setattr(input_proc, "_WATCHDOG_POLL_S", 0.01)
+    monkeypatch.setattr(
+        harness.handler, "start_overlay_walk",
+        lambda **kwargs: _held_inside_a_provider_call(harness.handler),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=input_proc.logger.name):
+        harness.send(
+            "start_overlay_walk", deadline=time.monotonic() + 3600.0,
+            request_id="capped-stack-request-id",
+        )
+        assert harness.handler.entered_walk.wait(timeout=_WAIT_TIMEOUT_S)
+        assert _wait_until(
+            lambda: len(_stack_reports(caplog)) >= 1, _WAIT_TIMEOUT_S,
+        ), "no stack report was logged for the stalled dispatch"
+        stack = _stack_reports(caplog)[0].getMessage()
+        harness.handler.release.set()
+
+    omitted = re.search(r"\((\d+) outer frames omitted\)", stack)
+    assert omitted is not None, f"the stack report states no omitted count:\n{stack}"
+    assert int(omitted.group(1)) > 0, (
+        f"the stack was not longer than the cap of {_SMALL_STACK_CAP}, so "
+        f"the cut this test pins never happened:\n{stack}"
+    )
+    assert "_held_inside_a_provider_call" in stack, (
+        "the capped stack dropped the innermost frames; the blocked function "
+        f"is the one frame the report exists to name:\n{stack}"
+    )
 
 
 def test_a_dispatch_that_was_never_reported_is_not_announced_as_recovered(

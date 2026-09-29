@@ -360,7 +360,7 @@ class TestPickerSections:
 
 # Catalog entry name -> the pattern that actually ships for it.
 RENAMED_COMMAND_ACTIONS = {
-    "show_overlay_command": "^(?:show|apply) numbers$",
+    "show_overlay_command": "^(?:show numbers|apply numbers|show numbers here)$",
     "hide_overlay_command": "^(?:hide|dismiss) numbers$",
     "grid_show_command": "^(?:show|apply) grid$",
     "grid_dismiss_command": "^(?:hide|dismiss) grid$",

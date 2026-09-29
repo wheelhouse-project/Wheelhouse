@@ -100,8 +100,9 @@ async def test_visibility_round_trip_uses_real_handler_and_saved_outcome(
 def test_visibility_toggle_is_pending_until_confirmation(manager):
     manager.toggle_button_visibility()
     assert manager.settings_pending
-    assert "waiting for confirmation" in manager.settings_status_text.lower()
-    manager._settings_notice.setAccessibleName.assert_called_with(manager.settings_status_text)
+    # No notice while the save waits (wh-settings-save-notice-failure-only).
+    assert manager.settings_status_text == ""
+    assert manager._settings_notice is None
 
 
 def test_repeated_toggles_follow_latest_pending_target(manager):
@@ -138,7 +139,7 @@ async def test_visibility_unknown_outcome_reconciles_without_toggling_again(mana
     manager._check_settings_timeout()
     read = manager.commands_to_logic_queue.get_nowait()
     assert read == {"action": "get_config_values", "request_id": command["request_id"], "keys": [KEY]}
-    assert "outcome unknown" in manager.settings_status_text.lower()
+    assert manager.settings_status_text == ""
     await dispatch(read)
     manager._check_queues_and_events()
     assert not manager.settings_pending

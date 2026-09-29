@@ -123,6 +123,13 @@ FLOATING_BUTTON_POS = [
 ]
 FLOATING_BUTTON_VISIBLE = true
 
+# Font size, in points, of the Pattern Manager window. Ctrl+= (larger),
+# Ctrl+- (smaller) and Ctrl+0 (the system default size) in that window
+# change it and save it here. Allowed range 7 to 24: a value outside the range is moved to the
+# nearest end, and a value that is not a whole number is ignored. When this
+# key is absent, the window uses the system default font size.
+# PATTERN_MANAGER_FONT_SIZE = 12
+
 SPEECH_ENABLED_ON_STARTUP = true
 SHOW_SPEECH_PULSE = true
 ICON_PATH = "WheelHouse.ico"
@@ -299,11 +306,14 @@ gpu_layers = 99
 startup_timeout_seconds = 90
 
 [ai.help]
-gem_url = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+gem_url = "https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
 max_response_tokens = 800
 # Show the window that explains the Wheelhouse Assistant before the browser
 # opens. The window's "Do not show this again" check box sets this to false.
-# Set it back to true to see the explanation again.
+# Set it back to true to see the explanation again. If this was false before
+# the assistant moved to the Gemini Notebook, the window appears one more time
+# with the box already ticked. Select Assistant with the box still ticked to
+# keep the window off.
 explain_before_open = true
 
 [click]

@@ -22,6 +22,13 @@ from typing import TYPE_CHECKING, Optional
 
 import psutil
 
+from stt.provider_stderr import (
+    ProviderStderrTail,
+    is_native_crash,
+    native_crash_message,
+)
+from stt import parakeet_model
+
 try:
     import tomllib
 except ImportError:
@@ -32,6 +39,11 @@ if TYPE_CHECKING:
     from typing import Callable
 
 logger = logging.getLogger(__name__)
+
+# The tray-menu entry for a disabled Parakeet whose speech model is not on
+# the computer. Picking it asks Logic to offer the installer instead of
+# starting an engine (wh-parakeet-model-download-offer, boss ruling B1).
+PARAKEET_NOT_INSTALLED_LABEL = "Parakeet (model not installed)"
 
 # Type alias for notification callback
 NotifyCallback = "Callable[[str, str], None]"
@@ -109,6 +121,15 @@ DEFAULT_STARTUP_TIMEOUT = 90
 _LATE_DEATH_POLL_INTERVAL = 1.0
 _LATE_DEATH_WATCH_LIMIT = 300.0
 
+# A provider PID file can outlive its provider (an unclean exit, a Windows
+# restart), and Windows reuses process ids. The child launcher writes the
+# file after the provider starts, so a process that started more than this
+# many seconds after the file was written is not the provider
+# (wh-parakeet-model-download-offer, A7).
+_PID_FILE_START_SLACK = 2.0
+# When the start time is not readable, the process names a provider can run as.
+_PROVIDER_PROCESS_NAMES = frozenset({"python.exe", "pythonw.exe", "uv.exe"})
+
 
 class RemoteSTTLauncher:
     """Discovers and manages remote STT provider lifecycle.
@@ -159,12 +180,20 @@ class RemoteSTTLauncher:
                 app_data_dir = Path.home() / ".wheelhouse"
         self.app_data_dir = Path(app_data_dir)
         self.app_data_dir.mkdir(parents=True, exist_ok=True)
+        # Each provider's stderr file, read into wheelhouse.log at every
+        # death and ready (wh-provider-native-crash-trace).
+        self._stderr_tail = ProviderStderrTail(self.app_data_dir)
 
         self.ws_host = ws_host
         self.ws_port = ws_port
         self.wake_word_config: dict = wake_word_config or {}
         self.google_credentials_file: str = google_credentials_file
         self._providers: Optional[list[dict]] = None
+        # The folder of a disabled Parakeet provider, for the tray menu
+        # alone (get_not_installed_providers). Scanned once, like
+        # _providers, and cleared with it by invalidate_cache.
+        self._disabled_parakeet_scanned: bool = False
+        self._disabled_parakeet_dir: Optional[Path] = None
         self._ws_manager: Optional["WebSocketManager"] = None
         self._notify_callback: Optional["NotifyCallback"] = None
         self._show_working_callback: Optional["Callable[[str, Optional[int]], None]"] = None
@@ -254,6 +283,8 @@ class RemoteSTTLauncher:
     def invalidate_cache(self) -> None:
         """Clear the provider cache, forcing re-discovery on next get_providers()."""
         self._providers = None
+        self._disabled_parakeet_scanned = False
+        self._disabled_parakeet_dir = None
 
     def set_websocket_manager(self, ws_manager: "WebSocketManager") -> None:
         """Set the WebSocket manager for sending commands to providers.
@@ -645,6 +676,18 @@ class RemoteSTTLauncher:
         logger.debug(
             f"Provider ready signal received (launch generation {generation})"
         )
+        # The supervisor restarts a child that crashes soon after its
+        # start, so a crash it recovered from reaches wheelhouse.log only here
+        # (wh-provider-native-crash-trace, ruling R2). On the event loop
+        # thread: copy_new reads at most 16 KB of a local file and never
+        # raises.
+        with self._launch_signals_lock:
+            provider_name = (
+                None if generation is None
+                else self._provider_of_generation(generation)
+            )
+        if provider_name is not None:
+            self._stderr_tail.copy_new(provider_name)
 
     def signal_provider_startup_failed(
         self, generation: Optional[int] = None
@@ -716,6 +759,9 @@ class RemoteSTTLauncher:
                 f"startup monitor had already finished (launch "
                 f"generation {target})"
             )
+            # No monitor is left to copy the error output, and the next
+            # launch's mark would skip it (R2).
+            self._stderr_tail.copy_new(name)
             if not self._report_stopped_off_loop(name, target):
                 self._restore_unspent_report(target)
         with self._launch_signals_lock:
@@ -830,6 +876,7 @@ class RemoteSTTLauncher:
         # launch, and comparison and write in one step
         # (wh-launch-generation.2.6, .2.14).
         self._end_starting_state(provisional_generation)
+        self._stderr_tail.copy_new(orphan)
         if not self._report_stopped_off_loop(orphan, provisional_generation):
             self._restore_unspent_report(provisional_generation)
 
@@ -1281,6 +1328,7 @@ class RemoteSTTLauncher:
                 logger.warning(
                     f"Provider {provider_name} reported a failed startup"
                 )
+                self._stderr_tail.copy_new(provider_name)
                 if self.launch_is_current(generation):
                     self._hide_working(generation)
                 # The failure that reaches here belongs to THIS launch:
@@ -1407,6 +1455,7 @@ class RemoteSTTLauncher:
                 f"Reporting it stopped rather than waiting on a provider "
                 f"that already said it failed (wh-launch-generation.2.3)."
             )
+            self._stderr_tail.copy_new(provider_name)
             if self.launch_is_current(generation):
                 self._hide_working(generation)
             # The provider's own message already told the user what is
@@ -1430,11 +1479,20 @@ class RemoteSTTLauncher:
                 f"Provider {provider_name} did not send ready notification within {timeout}s "
                 f"and subprocess is not alive."
             )
+            # The supervisor has exited, so its stderr file is complete.
+            # A fault in native code is named in the notice, with its
+            # code (wh-provider-native-crash-trace, A6 and R4).
+            exit_code = self._stderr_tail.copy_new(provider_name)
+            failure_text = "Failed to start - try restarting Wheelhouse"
+            if is_native_crash(exit_code):
+                failure_text = native_crash_message(
+                    display_name, exit_code, restarting=False
+                )
             if self.launch_is_current(generation):
                 self._hide_working(generation)
                 self._notify(
                     display_name,
-                    "Failed to start - try restarting Wheelhouse",
+                    failure_text,
                     generation,
                 )
             # The starting state ends here for the same reason it ends
@@ -1575,11 +1633,21 @@ class RemoteSTTLauncher:
         # stamp.2.1.2), so by the time this watch fires there is nothing
         # left of this launch's starting state to end
         # (wh-provider-late-death-watch).
+        #
+        # The supervisor has exited, so its stderr file is complete. A
+        # fault in native code is named in the notice, with its code
+        # (wh-provider-native-crash-trace, A6 and R4).
+        exit_code = self._stderr_tail.copy_new(provider_name)
+        failure_text = "Failed to start - try restarting Wheelhouse"
+        if is_native_crash(exit_code):
+            failure_text = native_crash_message(
+                display_name, exit_code, restarting=False
+            )
         if self.launch_is_current(generation):
             self._hide_working(generation)
             self._notify(
                 display_name,
-                "Failed to start - try restarting Wheelhouse",
+                failure_text,
                 generation,
             )
         self._provider_stopped(
@@ -1695,6 +1763,134 @@ class RemoteSTTLauncher:
                 return provider
         return None
 
+    def get_not_installed_providers(self) -> list[dict]:
+        """Engines the tray menu offers although discover_providers leaves them out.
+
+        Today that is one engine at most: Parakeet, when its provider
+        config.toml says enabled = false and its speech model is not
+        complete. The installer writes enabled = false when it finds no
+        model (install-wheelhouse.ps1 Disable-ParakeetWithoutModel), which
+        takes Parakeet off the menu, so the user could not ask for the
+        model. The entry is {"name": "parakeet_tdt", "display_name":
+        PARAKEET_NOT_INSTALLED_LABEL}; picking it sends the ordinary
+        switch, and Logic offers the installer instead of starting it
+        (wh-parakeet-model-download-offer).
+
+        Only the tray-menu builder calls this. discover_providers() and
+        get_providers() keep leaving a disabled provider out, because
+        their other callers choose the startup engine and the fallback,
+        and a disabled Parakeet there could be started (boss ruling B1).
+
+        An enabled Parakeet is never listed here: discovery lists it, and
+        the Logic check still catches an incomplete model when it is
+        picked. The model is checked at every call; the provider folder
+        scan is cached until invalidate_cache(). Never raises.
+        """
+        try:
+            if any(
+                p.get("name") == parakeet_model.PROVIDER_NAME
+                for p in self.get_providers()
+            ):
+                return []
+            service_dir = self._find_disabled_parakeet_dir()
+            if service_dir is None:
+                return []
+            if parakeet_model.parakeet_model_complete(service_dir):
+                return []
+        except Exception as exc:  # noqa: BLE001 -- a menu query must not raise
+            logger.warning(f"Could not check for a Parakeet without its model: {exc}")
+            return []
+        return [{
+            "name": parakeet_model.PROVIDER_NAME,
+            "display_name": PARAKEET_NOT_INSTALLED_LABEL,
+        }]
+
+    def _find_disabled_parakeet_dir(self) -> Optional[Path]:
+        """The folder whose [provider] names Parakeet with enabled = false.
+
+        A template provider does not count, as in discover_providers.
+        """
+        if self._disabled_parakeet_scanned:
+            return self._disabled_parakeet_dir
+        found: Optional[Path] = None
+        if self.services_dir.exists():
+            for service_dir in sorted(self.services_dir.iterdir()):
+                config_path = service_dir / "config.toml"
+                if not service_dir.is_dir() or not config_path.exists():
+                    continue
+                try:
+                    with open(config_path, "rb") as f:
+                        config = tomllib.load(f)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"Skipping unreadable {config_path}: {exc}")
+                    continue
+                section = config.get("provider")
+                if not isinstance(section, dict):
+                    continue
+                if section.get("name") != parakeet_model.PROVIDER_NAME:
+                    continue
+                if section.get("enabled", True) or section.get("template", False):
+                    continue
+                found = service_dir
+                break
+        self._disabled_parakeet_dir = found
+        self._disabled_parakeet_scanned = True
+        return found
+
+    def running_provider_pids(self) -> list[int]:
+        """Process ids of the provider processes this launcher knows are running.
+
+        The supervisor subprocesses it started that have not exited, and
+        the live processes named in the providers' PID files (the child
+        launcher writes the provider's own id there). The installer launch
+        waits for these before it starts the installer
+        (wh-parakeet-model-download-offer). Never raises.
+        """
+        pids: list[int] = []
+        for proc in list(self._subprocesses.values()):
+            try:
+                if proc.poll() is None:
+                    pids.append(int(proc.pid))
+            except Exception:  # noqa: BLE001
+                continue
+        names = list(self._subprocesses) + [
+            p["name"] for p in (self._providers or []) if p.get("name")
+        ]
+        for name in dict.fromkeys(names):
+            pid_file = self._get_pid_file_path(name)
+            try:
+                pid = int(pid_file.read_text().strip())
+            except (OSError, ValueError):
+                continue
+            if pid not in pids and self._pid_file_names_live_provider(pid, pid_file):
+                pids.append(pid)
+        return pids
+
+    def _pid_file_names_live_provider(self, pid: int, pid_file: Path) -> bool:
+        """Whether ``pid``, read from ``pid_file``, is a live provider process.
+
+        A PID file can outlive its provider, and Windows reuses process
+        ids, so a live process is counted only when it started no later
+        than _PID_FILE_START_SLACK seconds after the file was written. When
+        its start time is not readable (AccessDenied), it is counted only
+        when its name is one in _PROVIDER_PROCESS_NAMES. A process that no
+        longer exists, or any other failure, is not counted. Never raises.
+        """
+        try:
+            if pid <= 0 or not psutil.pid_exists(pid):
+                return False
+            written = pid_file.stat().st_mtime
+            process = psutil.Process(pid)
+            try:
+                started = process.create_time()
+            except psutil.AccessDenied:
+                return process.name().lower() in _PROVIDER_PROCESS_NAMES
+            return started <= written + _PID_FILE_START_SLACK
+        except psutil.NoSuchProcess:
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
     def _get_pid_file_path(self, provider_name: str) -> Path:
         """Get the PID file path for a provider.
 
@@ -1761,6 +1957,12 @@ class RemoteSTTLauncher:
     def _terminate_stale_provider(self, provider_name: str) -> None:
         """Terminate a stale provider process from a previous WheelHouse session.
 
+        The PID file can outlive its provider and Windows reuses process
+        ids, so the process is stopped only when
+        _pid_file_names_live_provider() says the file names a live
+        provider (wh-stale-provider-pid-reuse). The PID and port files are
+        removed in every case.
+
         Args:
             provider_name: Provider name (for PID/port file lookup).
         """
@@ -1769,13 +1971,19 @@ class RemoteSTTLauncher:
 
         try:
             pid = int(pid_file.read_text().strip())
-            proc = psutil.Process(pid)
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                proc.kill()
-            logger.info(f"Terminated stale provider {provider_name} (PID {pid})")
+            if self._pid_file_names_live_provider(pid, pid_file):
+                proc = psutil.Process(pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                logger.info(f"Terminated stale provider {provider_name} (PID {pid})")
+            else:
+                logger.info(
+                    f"Did not stop stale provider {provider_name} (PID {pid}): "
+                    "no live provider process has that id"
+                )
         except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError, OSError) as e:
             logger.debug(f"Could not terminate stale provider {provider_name}: {e}")
 
@@ -1858,14 +2066,34 @@ class RemoteSTTLauncher:
                 return
             signal.reported = True
             retry_used = signal.watchdog_retry_used
+        # Copied HERE, before the restart below marks a new launch and
+        # moves the read position past these lines (ruling R2). A fault
+        # in native code is named in each notice below, with its code and
+        # the display name as the title (wh-provider-native-crash-trace,
+        # A6, R4, R5); other codes keep the titles and texts they had.
+        exit_code = self._stderr_tail.copy_new(provider_name)
+        native_crash = is_native_crash(exit_code)
+        title = provider_name
+        if native_crash:
+            title = self._display_name_of(provider_name)
         if retry_used:
             self._report_watchdog_stopped(provider_name, generation)
             self._notify(
-                provider_name,
+                title,
+                native_crash_message(title, exit_code, restarting=False)
+                if native_crash else
                 "Speech provider stopped after its automatic restart - try restarting Wheelhouse",
                 generation, owner=provider_name,
             )
             return
+        if native_crash:
+            # Before the restart: the notice names this launch, and the
+            # restart replaces it, after which the notice is dropped.
+            self._notify(
+                title,
+                native_crash_message(title, exit_code, restarting=True),
+                generation, owner=provider_name,
+            )
         record_refused = False
 
         def record_restart(new_generation):
@@ -1888,10 +2116,20 @@ class RemoteSTTLauncher:
             # A stamped spawn failure already reported its newer generation.
             self._report_watchdog_stopped(provider_name, generation)
             self._notify(
-                provider_name,
+                title,
+                native_crash_message(title, exit_code, restarting=False)
+                if native_crash else
                 "Speech provider could not restart - try restarting Wheelhouse",
                 generation, owner=provider_name,
             )
+
+    def _display_name_of(self, provider_name: str) -> str:
+        """The provider's resolved display name, or its name when
+        discovery does not know it."""
+        provider = self.get_provider_by_name(provider_name)
+        if provider is None:
+            return provider_name
+        return provider.get("display_name", provider_name)
 
     def start_provider(
         self, provider_name: str, *, _watchdog_generation: Optional[int] = None,
@@ -1960,7 +2198,8 @@ class RemoteSTTLauncher:
                 # Port mismatch or missing - old provider from previous session
                 logger.warning(
                     f"Provider {provider_name} running on port {stored_port}, "
-                    f"but current port is {self.ws_port} - terminating stale process"
+                    f"but current port is {self.ws_port} - stopping the old provider "
+                    "if its PID file still names a live provider"
                 )
                 self._terminate_stale_provider(provider_name)
 
@@ -2095,6 +2334,10 @@ class RemoteSTTLauncher:
             # empty screen (wh-launch-addressed-notices).
             self._show_working(f"Loading {display_name}", generation)
 
+            # This launch's stderr lines start at the file's present
+            # end; an earlier run's lines are not its own
+            # (wh-provider-native-crash-trace).
+            self._stderr_tail.mark_launch(provider_name)
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(service_dir),

@@ -5,7 +5,7 @@ Run it from services/wheelhouse:
 
     python tests/mutation_gate_held_tail.py
 
-Stage 2 replaces the three hold-slot attributes with one kind-tagged
+Stage 2 replaces the hold-slot attributes with one kind-tagged
 slot, ``SpeechProcessor._held_tail``, behind compatibility properties,
 one top-of-loop advance (``_advance_held_tail``), one unified flush
 (``_flush_held_tail_as_dictation``), and one end-of-utterance consume
@@ -13,11 +13,13 @@ one top-of-loop advance (``_advance_held_tail``), one unified flush
 new dispatch layer: a wrong kind check, a dropped guard, or a flipped
 dispatch would preserve the structure tests while changing behaviour.
 So the catchers here are drawn from BOTH the new structure tests
-(tests/test_held_tail.py) and the absorbed behaviour suites
-(tests/test_speech_processor_trailing_command.py,
-tests/test_speech_processor_bare_number.py).
+(tests/test_held_tail.py) and the absorbed behaviour suite
+(tests/test_speech_processor_bare_number.py). The trailing-command kind,
+its suite, and the three mutations that covered it
+(advance-trailing-noop, advance-consumes-event, consume-dispatch-flip)
+were removed by wh-remove-trailing-submit.
 
-Nine mutations of speech/speech_processor.py:
+Seven mutations of speech/speech_processor.py:
 
   clear-ignores-kind      A None-assignment clears the tail whatever
                           kind it holds. Every kind flush method ends
@@ -34,13 +36,8 @@ Nine mutations of speech/speech_processor.py:
   eviction-log-dropped    Cross-kind arming overwrites silently. The
                           loud eviction is the tripwire for a future
                           event type that forgets the unified flush.
-  advance-trailing-noop   The advance dispatch stops flushing a held
-                          trailing word on a following event; the word
-                          then wrongly fires as a command at the end
-                          marker instead of dictating.
-  advance-consumes-event  The trailing advance claims the arriving
-                          event after flushing, swallowing the
-                          following word.
+  eviction-log-unredacted The eviction log line prints the held words
+                          without redaction.
   start-guard-dropped     The bare-number extend check stops requiring
                           a non-opening word at its NEW location inside
                           _advance_held_tail; two utterances fuse into
@@ -49,16 +46,12 @@ Nine mutations of speech/speech_processor.py:
                           this refactor moved).
   end-marker-advances     The top-of-loop guard stops excluding the
                           utterance-end marker, so the tail flushes as
-                          dictation instead of consuming (no Enter
-                          press, no click).
-  consume-dispatch-flip   The end-of-utterance consume dispatches the
-                          trailing kind to its dictation flush instead
-                          of firing the action.
+                          dictation instead of consuming (no click).
   unified-flush-flip      The unified flush dispatches the prefix kind
-                          to the trailing flush (a cross-kind no-op),
+                          to the bare-number flush (a cross-kind no-op),
                           leaving the held words unsent.
 
-All nine must be caught, and "caught" means the expected test failed on
+All seven must be caught, and "caught" means the expected test failed on
 its own assertion. Reported as errors, never as a verdict:
 pattern-not-found, an ambiguous pattern, a mutation that does not
 compile, a per-mutation timeout, a suite-timeout abort, any pytest
@@ -81,9 +74,8 @@ SERVICE = Path(__file__).resolve().parent.parent
 SRC = SERVICE / "speech" / "speech_processor.py"
 
 HELD_TAIL = "tests/test_held_tail.py"
-TRAILING = "tests/test_speech_processor_trailing_command.py"
 BARE = "tests/test_speech_processor_bare_number.py"
-ALL_FILES = [HELD_TAIL, TRAILING, BARE]
+ALL_FILES = [HELD_TAIL, BARE]
 
 PYTEST_ARGS = ["-p", "no:randomly", "-q", "-rfE", "--tb=line"]
 
@@ -160,31 +152,6 @@ MUTATIONS = [
         "expect": ["test_eviction_log_redacts_the_held_words"],
     },
     {
-        "name": "advance-trailing-noop",
-        "files": [TRAILING],
-        "old": """        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
-            return False
-""",
-        "new": """        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            return False
-""",
-        "expect": ["test_submit_followed_by_more_words_is_dictated_verbatim"],
-    },
-    {
-        "name": "advance-consumes-event",
-        "files": [TRAILING],
-        "old": """        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
-            return False
-""",
-        "new": """        if tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
-            return True
-""",
-        "expect": ["test_submit_followed_by_more_words_is_dictated_verbatim"],
-    },
-    {
         "name": "start-guard-dropped",
         "files": [BARE],
         "old": """        if (
@@ -200,7 +167,7 @@ MUTATIONS = [
     },
     {
         "name": "end-marker-advances",
-        "files": [TRAILING, BARE],
+        "files": [BARE],
         # 7a34abb5 added a fourth condition, the lifecycle-reset
         # exclusion, so the three-condition anchor stopped matching and
         # this mutation reported pattern-not-found in every run since
@@ -224,37 +191,25 @@ MUTATIONS = [
                 return
 """,
         "expect": [
-            "test_lone_submit_fires_action_with_no_dictation",
             "test_bare_digit_final_executes_click",
         ],
-    },
-    {
-        "name": "consume-dispatch-flip",
-        "files": [TRAILING],
-        "old": """        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._consume_pending_trailing_word_at_utterance_end()
-""",
-        "new": """        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
-""",
-        "expect": ["test_lone_submit_fires_action_with_no_dictation"],
     },
     {
         "name": "unified-flush-flip",
         "files": [HELD_TAIL],
         "old": """        if tail.kind is _HeldTailKind.REPLACEMENT_PREFIX:
             await self._flush_pending_replacement_prefix_as_dictation()
-        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
         else:
             await self._flush_pending_bare_number_as_dictation()
+
+    async def _consume_held_tail_at_utterance_end(
 """,
         "new": """        if tail.kind is _HeldTailKind.REPLACEMENT_PREFIX:
-            await self._flush_pending_trailing_word_as_dictation()
-        elif tail.kind is _HeldTailKind.TRAILING_COMMAND:
-            await self._flush_pending_trailing_word_as_dictation()
+            await self._flush_pending_bare_number_as_dictation()
         else:
             await self._flush_pending_bare_number_as_dictation()
+
+    async def _consume_held_tail_at_utterance_end(
 """,
         "expect": ["test_unified_flush_prefix_joins_words"],
     },

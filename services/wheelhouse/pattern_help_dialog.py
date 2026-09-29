@@ -30,6 +30,22 @@ from speech.action_catalog import ACTION_CATALOG
 # actually matches patterns with.
 REGEX_CHECKER_URL = "https://regex101.com/?flavor=python"
 
+# The "Numbers in commands" section (wh-number-capture-enforce). Plain text,
+# escaped into the page by build_help_html so the backslashes and quotes
+# stay visible. The editor's Save refusals in speech/number_capture_rule.py
+# enforce the same rule.
+_NUMBERS_PARAGRAPHS = (
+    'Capture every number with (\\d+). It accepts digits and number words, '
+    'so it matches both "5" and "five". The speech engine can return either '
+    'form for the same spoken number. Write (\\d+)? when the number is '
+    'optional, as in ^back ?space\\s*(\\d+)?$.',
+    "Other forms accept less. \\d and [0-9] accept digits only. A list of "
+    "number words, such as (one|two|three), accepts only the words it lists. "
+    "Advanced mode does not save a command that matches a number in one of "
+    "those forms. The mouse grid commands are the one exception. They list "
+    "1 to 9 on purpose, because the grid has nine cells.",
+)
+
 
 def link_is_external(url: str) -> bool:
     """True when a clicked link should open in the system browser, False
@@ -103,9 +119,10 @@ def build_function_reference_html(catalog=ACTION_CATALOG) -> str:
 _TOC = (
     ("what-are-patterns", "What are patterns?"),
     ("commands-vs-replacements", "Commands vs replacements"),
-    ("wake-word", "The wake word"),
+    ("safety-word", "The safety word"),
     ("editor", "What the editor can do"),
     ("advanced-mode", "Advanced mode"),
+    ("numbers", "Numbers in commands"),
     ("function-reference", "Function reference"),
     ("basic-actions", "&nbsp;&nbsp;&#8226; Basic actions"),
     ("advanced-actions", "&nbsp;&nbsp;&#8226; Advanced actions"),
@@ -117,6 +134,9 @@ def build_help_html() -> str:
     function reference. Pure: no Qt, no I/O."""
     toc_links = "<br/>".join(
         f'<a href="#{anchor}">{title}</a>' for anchor, title in _TOC
+    )
+    numbers_paragraphs = "\n    ".join(
+        f"<p>{html.escape(text)}</p>" for text in _NUMBERS_PARAGRAPHS
     )
     # Qt drops anchor names that wrap zero characters, so every anchor
     # wraps its heading text (verified by test_pattern_help.py against the
@@ -144,13 +164,13 @@ def build_help_html() -> str:
     mid-sentence types "." &#8212; the rest of the sentence is typed
     unchanged.</p>
 
-    <h3><a name="wake-word">The wake word</a></h3>
-    <p>The wake word (for example "x-ray") is a safety prefix that
-    prevents accidental triggers. When a command requires the wake word,
-    you must say it immediately before the trigger phrase. The current
-    wake word is shown at the top of the Pattern Manager window, where
-    you can also change it.</p>
-    <p>Require the wake word for:</p>
+    <h3><a name="safety-word">The safety word</a></h3>
+    <p>The safety word (for example "x-ray") is a prefix word that
+    prevents accidental triggers. When a command requires the safety
+    word, you must say it immediately before the trigger phrase. The
+    current safety word is shown at the top of the Pattern Manager
+    window, where you can also change it.</p>
+    <p>Require the safety word for:</p>
     <ul>
         <li>Destructive commands (close window, cut)</li>
         <li>Triggers that could come up in normal speech (save,
@@ -191,6 +211,9 @@ def build_help_html() -> str:
     same checker the editor links to; WheelHouse matches patterns with
     Python's regular-expression engine, and the link preselects that
     flavor.</p>
+
+    <h3><a name="numbers">Numbers in commands</a></h3>
+    {numbers_paragraphs}
 
     <h3><a name="function-reference">Function reference</a></h3>
     <p>Generated from the same catalog the editor's function picker

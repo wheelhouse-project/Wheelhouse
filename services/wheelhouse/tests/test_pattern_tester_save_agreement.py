@@ -163,8 +163,9 @@ class TestTwoRulesClaimOneBuiltin:
     """Case A. Editing the claimant the merge displaced, not the slot holder.
 
     Both user rules name ``escape-key``. The LAST one in file order holds
-    the built-in's slot and the first is appended after every built-in. The
-    simulation replaced the first row it found carrying that doc_id, which
+    the built-in's slot and the first goes in front of every built-in (it
+    was appended after them until QUESTIONS-2026-09-28.md item 12, option
+    three). The simulation replaced the first row it found carrying that doc_id, which
     is the slot holder -- the wrong row -- and dropped it, so the draft
     appeared to win a phrase the slot holder actually keeps.
     """
@@ -202,22 +203,28 @@ class TestTwoRulesClaimOneBuiltin:
             f"{'win' if actually_won else 'lose'}"
         )
 
-    def test_the_rule_holding_the_slot_still_answers_after_the_edit(
+    def test_the_edited_rule_answers_ahead_of_the_rule_holding_the_slot(
         self, tmp_path,
     ):
         """The save's own answer, stated on its own.
 
         The second rule holds the built-in's slot before and after the
-        edit, because it is still the last claimant in file order. It is
-        what "expand" reaches.
+        edit, because it is still the last claimant in file order. The
+        edited rule holds no slot, so it stands in front of every built-in
+        and reaches "expand" first.
+
+        Renamed from test_the_rule_holding_the_slot_still_answers_after_the_edit,
+        which asserted "second": the edited rule used to follow every
+        built-in. Changed for QUESTIONS-2026-09-28.md item 12, option three
+        (wh-user-rule-precedence).
         """
         bench = self._bench(tmp_path)
         edited = PatternManager.pattern_id("^grow$")
         bench.save(edited, _save_data("^expand(?: slowly)?$", "draft"))
-        assert _typed(bench.responder("expand")) == ["second"]
+        assert _typed(bench.responder("expand")) == ["draft"]
 
     def test_the_edited_rule_still_runs_under_its_own_phrase(self, tmp_path):
-        """It is not lost, only later in the order."""
+        """It is not lost."""
         bench = self._bench(tmp_path)
         edited = PatternManager.pattern_id("^grow$")
         bench.save(edited, _save_data("^expand(?: slowly)?$", "draft"))
@@ -275,7 +282,11 @@ class TestTheClaimantHasNoBuiltRow:
         edited = PatternManager.pattern_id("^grow$")
         bench.save(edited, _save_data("^undo(?: last)?$", "draft"))
         assert bench.responder("escape") == [{"function": "hk", "params": ["escape"]}]
-        assert bench.responder("undo") == [{"function": "hk", "params": ["ctrl", "z"]}]
+        # The moved rule holds no slot and now answers "undo" ahead of the
+        # shipped undo built-in: QUESTIONS-2026-09-28.md item 12, option
+        # three (wh-user-rule-precedence). It used to answer only
+        # "undo last".
+        assert _typed(bench.responder("undo")) == ["draft"]
         assert _typed(bench.responder("undo last")) == ["draft"]
 
 
@@ -408,10 +419,47 @@ class TestTheRulesTheSimulationMustCopy:
     ):
         """The draft's row is a USER row.
 
-        The edited rule claims ``undo-last``, the LAST built-in, and saves
-        under the FIRST built-in's own expression. A simulation that found
-        its row by expression alone would pick the built-in at slot 0 and
-        report the draft answering a phrase the built-in answers.
+        The edited rule holds ``undo-last``'s slot and carries the FIRST
+        built-in's own expression. A simulation that found its row by
+        expression alone would pick the built-in at slot 0 and report the
+        draft answering a phrase the built-in answers.
+
+        Changed for QUESTIONS-2026-09-28.md item 12, option three
+        (wh-user-rule-precedence): this case used to edit a rule of the
+        person's own onto ``^escape$``. Such a rule holds no slot and now
+        stands in front of every built-in, so the draft really answers and
+        the case no longer tells a user row from the built-in. An edit of
+        the action alone keeps the trigger, so the rule keeps its
+        ``doc_id`` and its slot behind the escape built-in, which keeps the
+        question this test asks. The moved-claimant case is the next test.
+        """
+        bench = _Bench(
+            tmp_path,
+            _user_block("^escape$", doc_id="undo-last", output="only")
+            + 'origin = "user"\n',
+        )
+        edited = PatternManager.pattern_id("^escape$")
+        draft = _draft("^escape$", "draft", edited, doc_id="undo-last")
+
+        preview = bench.preview(draft, "escape")
+        assert preview["draft_error"] is None, preview["draft_error"]
+
+        bench.save(edited, _save_data("^escape$", "draft"))
+        assert _typed(bench.responder("escape")) == [], (
+            "the shipped escape built-in still answers first; it is a "
+            "hotkey, so it types nothing"
+        )
+        assert preview["winner"] == "existing", preview
+
+    def test_a_claimant_moved_onto_a_builtins_expression_answers_first(
+        self, tmp_path,
+    ):
+        """The original case of the test above (wh-user-rule-precedence).
+
+        The edited rule claims ``undo-last`` and saves under the FIRST
+        built-in's own expression. The save detaches it from ``undo-last``
+        and it holds no built-in's slot, so it runs ahead of the escape
+        built-in, and the preview must say the same.
         """
         bench = _Bench(
             tmp_path,
@@ -425,11 +473,11 @@ class TestTheRulesTheSimulationMustCopy:
         assert preview["draft_error"] is None, preview["draft_error"]
 
         bench.save(edited, _save_data("^escape$", "draft"))
-        assert _typed(bench.responder("escape")) == [], (
-            "the shipped escape built-in still answers first; it is a "
-            "hotkey, so it types nothing"
+        assert _typed(bench.responder("escape")) == ["draft"], (
+            "the moved rule holds no slot and answers before the shipped "
+            "escape built-in"
         )
-        assert preview["winner"] == "existing", preview
+        assert preview["winner"] == "draft", preview
 
     def test_the_preview_leaves_the_catalog_alone(self, tmp_path):
         """Asking is not saving.
@@ -590,17 +638,42 @@ class TestTheOwnRuleMarkReachesThePreview:
         )
         return actually_won
 
+    @staticmethod
+    def _spy(bench, monkeypatch):
+        """Collect the pattern lists the preview builds."""
+        built = []
+        real_build = bench.catalog.build_from_user_entries
+
+        def spy(entries):
+            rows = real_build(entries)
+            built.append(rows)
+            return rows
+
+        monkeypatch.setattr(bench.catalog, "build_from_user_entries", spy)
+        return built
+
+    @staticmethod
+    def _rows(rows):
+        return [(row["raw_pattern"], bool(row.get("is_user"))) for row in rows]
+
     def test_a_new_rule_copying_a_builtin_does_not_take_it_over(
-        self, tmp_path,
+        self, tmp_path, monkeypatch,
     ):
         """A create. The save marks the block, so the preview must too.
 
         Without the mark in the previewed block the simulation reads the
         draft as a rule saved before ids existed, resolves it onto the
-        built-in whose expression it copied, and shows the person their
-        new rule winning a phrase the built-in actually keeps.
+        built-in whose expression it copied, and shows the built-in gone
+        when the save keeps it.
+
+        Changed for QUESTIONS-2026-09-28.md item 12, option three
+        (wh-user-rule-precedence): the new rule now stands in front of the
+        built-in and answers "escape" either way, so the check compares
+        the previewed list with the saved one, where the built-in must
+        still be present. It used to compare who answers "escape".
         """
         bench = _Bench(tmp_path, "")
+        built = self._spy(bench, monkeypatch)
         draft = {
             "pattern_type": "command",
             "expression": "^escape$",
@@ -622,20 +695,24 @@ class TestTheOwnRuleMarkReachesThePreview:
         assert created["success"], created
         assert bench.catalog.reload()
 
-        assert self._agree(bench, preview, "mine", "escape") is False
-        assert bench.responder("escape") == [
-            {"function": "hk", "params": ["escape"]}
-        ]
+        assert self._agree(bench, preview, "mine", "escape") is True
+        saved = self._rows(bench.catalog.get_all_patterns())
+        assert ("^escape$", False) in saved
+        assert self._rows(built[0]) == saved
 
     def test_an_edit_of_the_persons_own_rule_keeps_it_independent(
-        self, tmp_path,
+        self, tmp_path, monkeypatch,
     ):
         """An edit of a marked block. The mark survives, so both agree.
 
         ``update_pattern`` carries the stored key forward, so this rule is
-        still the person's own after the edit and the built-in still
-        answers ``escape``. A preview that dropped the key would show the
-        draft taking the built-in over.
+        still the person's own after the edit and the built-in stays in
+        the list. A preview that dropped the key would show the draft
+        taking the built-in over.
+
+        Changed for QUESTIONS-2026-09-28.md item 12, option three
+        (wh-user-rule-precedence): the edited rule now stands in front of
+        the built-in and answers ``escape``; it used to follow it.
         """
         user = (
             "[[pattern]]\n"
@@ -645,6 +722,7 @@ class TestTheOwnRuleMarkReachesThePreview:
             "\n"
         )
         bench = _Bench(tmp_path, user)
+        built = self._spy(bench, monkeypatch)
         edited = PatternManager.pattern_id("^escape$")
         draft = _draft("^escape(?: now)?$", "draft", edited)
 
@@ -654,22 +732,32 @@ class TestTheOwnRuleMarkReachesThePreview:
 
         bench.save(edited, _save_data("^escape(?: now)?$", "draft"))
 
-        assert self._agree(bench, preview, "draft", "escape") is False
-        assert bench.responder("escape") == [
-            {"function": "hk", "params": ["escape"]}
-        ]
+        assert self._agree(bench, preview, "draft", "escape") is True
+        saved = self._rows(bench.catalog.get_all_patterns())
+        assert ("^escape$", False) in saved
+        assert self._rows(built[0]) == saved
 
-    def test_an_edit_that_keeps_a_pre_doc_id_overrides_words(self, tmp_path):
+    def test_an_edit_that_keeps_a_pre_doc_id_overrides_words(
+        self, tmp_path, monkeypatch,
+    ):
         """The third state: the key must NOT appear on this edit.
 
         This rule was saved before ids existed and replaces its built-in by
         expression text alone. The edit changes only the action, so the
         text association still holds and the rule keeps the built-in's
         place. A preview that carried the draft's own mark into the edited
-        block would read the rule as independent and show the built-in
-        winning a phrase the person's rule actually keeps.
+        block would read the rule as independent and keep the built-in in
+        the list beside it.
+
+        The list comparison was added for QUESTIONS-2026-09-28.md item 12,
+        option three (wh-user-rule-precedence). An independent rule now
+        stands in front of the built-in, so it answers "escape" as the
+        slot holder does, and the winner alone no longer tells the two
+        apart; the previewed list still shows the built-in the save
+        replaced.
         """
         bench = _Bench(tmp_path, _user_block("^escape$", output="legacy"))
+        built = self._spy(bench, monkeypatch)
         edited = PatternManager.pattern_id("^escape$")
         draft = _draft("^escape$", "draft", edited)
 
@@ -680,3 +768,8 @@ class TestTheOwnRuleMarkReachesThePreview:
         bench.save(edited, _save_data("^escape$", "draft"))
 
         assert self._agree(bench, preview, "draft", "escape") is True
+        saved = self._rows(bench.catalog.get_all_patterns())
+        assert ("^escape$", False) not in saved, (
+            "the edited rule keeps the escape built-in's slot"
+        )
+        assert self._rows(built[0]) == saved

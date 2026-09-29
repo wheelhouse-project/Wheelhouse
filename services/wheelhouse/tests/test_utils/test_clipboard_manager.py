@@ -86,3 +86,42 @@ class TestClipboardContext:
 
         with clipboard_context(retries=5, delay=0.05):
             pass
+
+
+class TestSelectWindowsClipboard:
+    """The process-start step that skips pyperclip's OS detection.
+
+    Without it, the first copy() or paste() in each process runs
+    pyperclip.determine_clipboard, which calls platform.system(); on Windows
+    that can start a "cmd ver" child process. On a slow host that start
+    held the Input command loop for 12.4 s and a spoken command expired
+    (wh-input-first-paste-stall).
+    """
+
+    def test_paste_after_start_step_runs_no_os_detection(self, monkeypatch):
+        import platform
+        import subprocess
+
+        import pyperclip
+
+        from utils.clipboard_manager import select_windows_clipboard
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("OS detection ran after the start step")
+
+        # A fresh process: both pyperclip functions are still the lazy stubs.
+        monkeypatch.setattr(pyperclip, "copy", pyperclip.lazy_load_stub_copy)
+        monkeypatch.setattr(pyperclip, "paste", pyperclip.lazy_load_stub_paste)
+        # platform.system itself must raise: uname() is cached, and
+        # _win32_ver tries WMI before _syscmd_ver, so patching only
+        # _syscmd_ver and Popen passes without the start step.
+        monkeypatch.setattr(platform, "system", _forbidden)
+        monkeypatch.setattr(platform, "_syscmd_ver", _forbidden)
+        monkeypatch.setattr(platform, "_uname_cache", None, raising=False)
+        monkeypatch.setattr(subprocess, "Popen", _forbidden)
+
+        select_windows_clipboard()
+        pyperclip.paste()
+
+        # No real copy(): the developer's clipboard is never replaced.
+        assert pyperclip.copy.__name__ == "copy_windows"

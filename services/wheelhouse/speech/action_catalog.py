@@ -143,7 +143,7 @@ ACTION_CATALOG = (
                 "name": "repeat",
                 "summary": (
                     "Optional last value: how many times to press the "
-                    "combination (capped at 50); often a capture group "
+                    "combination (capped at 30); often a capture group "
                     "like g1 so the spoken number is used."
                 ),
                 "kind": "number",
@@ -348,10 +348,21 @@ ACTION_CATALOG = (
                 ),
                 "kind": "keys",
             },
+            {
+                "name": "repeat",
+                "summary": (
+                    "Optional repeat count as digits or a number word "
+                    "(capped at 30); the capture group g2 in "
+                    '"press tab 3 times".'
+                ),
+                "kind": "number",
+            },
         ],
         "example": (
-            'Trigger "^press\\s*(.+)$" with params ["g1"]: saying '
-            '"press control alt delete" presses Ctrl+Alt+Delete.'
+            'Trigger "^press\\s*(.+?)(?:\\s+(\\d+)\\s+times?)?$" with params '
+            '["g1", "g2"]: saying "press control alt delete" presses '
+            'Ctrl+Alt+Delete, and "press tab 3 times" presses Tab three '
+            "times."
         ),
         "audience": "advanced",
         "group": "Keyboard",
@@ -428,6 +439,29 @@ ACTION_CATALOG = (
         "group": "Text",
     },
     {
+        "name": "insert_raw_no_spaces",
+        "label": "Insert text with no spaces",
+        "summary": (
+            "Inserts text at the cursor via paste with every space "
+            "removed, and no added space, capitalization, or cleanup."
+        ),
+        "params": [
+            {
+                "name": "text",
+                "summary": (
+                    "The words to join; may be a capture group like g1."
+                ),
+                "kind": "text",
+            },
+        ],
+        "example": (
+            'Trigger "^no space (.+)$" with params ["g1"]: saying '
+            '"no space hello world" inserts "helloworld".'
+        ),
+        "audience": "advanced",
+        "group": "Text",
+    },
+    {
         "name": "select_phrase",
         "label": "Select a spoken phrase",
         "summary": (
@@ -447,7 +481,7 @@ ACTION_CATALOG = (
         "example": (
             'Trigger "^select (.+)$" with params ["g1"]: saying '
             '"x-ray select brown fox" selects the first "brown fox" in the '
-            "document. This one needs the hotword first."
+            "document. This one needs the safety word first."
         ),
         "audience": "advanced",
         "group": "Text",
@@ -629,9 +663,9 @@ ACTION_CATALOG = (
             },
         ],
         "example": (
-            'Trigger "^(?:click|tap)\\s+(.+)$" with params ["g1"]: saying '
+            'Trigger "^(?:click|clicks|tap)\\s+(.+)$" with params ["g1"]: saying '
             '"x-ray click submit button" clicks the button labeled Submit. '
-            "This one needs the hotword first."
+            "This one needs the safety word first."
         ),
         "audience": "advanced",
         "group": "Clicking",
@@ -645,9 +679,11 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^(?:show|apply) numbers$" with no params: saying '
+            'Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no '
+            'params: saying '
             "\"show numbers\" shows the badges; then \"x-ray click 4\" "
-            "clicks control number 4. \"apply numbers\" does the same."
+            "clicks control number 4. \"apply numbers\" and \"show numbers "
+            "here\" do the same."
         ),
         "audience": "advanced",
         "group": "Clicking",
@@ -775,8 +811,10 @@ ACTION_CATALOG = (
         "name": "grid_number_command",
         "label": "Mouse-grid number",
         "summary": (
-            "Narrows the open mouse grid to the spoken cell (1-9); with "
-            "the grid closed the number types as normal dictation."
+            "Narrows the open mouse grid to the spoken cell (1-9). With "
+            "the grid closed and the numbered overlay showing, the number "
+            "clicks the control with that label; with neither showing, "
+            "the number types as normal dictation."
         ),
         "params": [
             {
@@ -798,7 +836,9 @@ ACTION_CATALOG = (
         ],
         "example": (
             'Saying "five" with the grid open zooms the grid into cell '
-            '5; with the grid closed it types "five".'
+            '5; with the grid closed and the numbered overlay showing it '
+            'clicks the control labeled 5; with neither showing it types '
+            '"five".'
         ),
         "audience": "advanced",
         "group": "Mouse grid",
@@ -808,8 +848,10 @@ ACTION_CATALOG = (
         "label": "Mouse-grid bare click",
         "summary": (
             "Clicks at the open mouse grid's current cell center (click, "
-            "right click, or double click); with the grid closed the "
-            "words type as normal dictation."
+            "tap, right click, double click, or triple click); with the "
+            "grid closed it clicks at the current pointer position. The "
+            "words type as dictation only when voice clicking is turned "
+            "off; say \"literal click\" to type the word."
         ),
         "params": [
             {
@@ -823,7 +865,9 @@ ACTION_CATALOG = (
         ],
         "example": (
             'With the grid narrowed to the target, saying "right click" '
-            "opens the context menu at the cell center."
+            "opens the context menu at the cell center; with no grid "
+            'open, saying "triple click" selects the line under the '
+            "pointer."
         ),
         "audience": "advanced",
         "group": "Mouse grid",
@@ -988,14 +1032,15 @@ ACTION_CATALOG = (
         "name": "fix_text_ai",
         "label": "Fix text with AI",
         "summary": (
-            "Captures the text in the focused field, sends it to the "
-            "configured AI for correction, and pastes the corrected "
-            "version back."
+            "Captures the selected text, or all the text in the focused "
+            "field when nothing is selected, sends it to the configured "
+            "AI for correction, and pastes the corrected version back."
         ),
         "params": [],
         "example": (
             'Trigger "^fix" with no params: saying "x-ray fix" corrects '
-            "the text in the focused field."
+            "the selected text, or all the text in the focused field when "
+            "nothing is selected."
         ),
         "audience": "advanced",
         "group": "AI",
@@ -1004,9 +1049,10 @@ ACTION_CATALOG = (
         "name": "rewrite_text_ai",
         "label": "Rewrite text with AI",
         "summary": (
-            "Captures the text in the focused field, sends it to the "
-            "configured AI to be rewritten in the style you describe, and "
-            "pastes the rewritten version back. You write the style "
+            "Captures the selected text, or all the text in the focused "
+            "field when nothing is selected, sends it to the configured "
+            "AI to be rewritten in the style you describe, and pastes the "
+            "rewritten version back. You write the style "
             "sentence and nothing else: Wheelhouse adds the wording that "
             "keeps the layout intact and the wording that stops the "
             "highlighted text from redirecting the AI."
@@ -1085,7 +1131,7 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^help$" with no params: saying "x-ray help" opens '
+            'Trigger "^help$" with no params: saying "help" opens '
             "the help page."
         ),
         "audience": "advanced",
@@ -1100,8 +1146,8 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^patterns?$" with no params: saying "x-ray '
-            'patterns" opens the Pattern Manager.'
+            'Trigger "^patterns?$" with no params: saying "patterns" '
+            'opens the Pattern Manager.'
         ),
         "audience": "advanced",
         "group": "Wheelhouse",

@@ -126,7 +126,9 @@ class SpeechPipelineHarness:
             app=self.mock_app,
             replacement_timeout_ms=400,
             command_timeout_ms=1000,
-            hotword="x-ray"
+            hotword="x-ray",
+            # 0 (no open-utterance hold): these tests flush the buffer with the command timer, and the flush after the hold is the same code; tests/test_command_wait_open_utterance.py covers the default hold.
+            open_utterance_hold_ms=0,
         )
         # Production wires speech_handler.speech_processor to the real
         # processor; action functions (the cursor_navigate dictation

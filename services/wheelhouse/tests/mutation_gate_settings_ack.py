@@ -92,10 +92,26 @@ MUTATIONS = [
     ('cancel-abandons-writer', 'config_service.py', [
         ('cancelled = True', 'raise  # mutated: abandon owned completion'),
     ], 'test_staged_settings_cancel_waits_for_disk_outcome'),
-    ('status-clear-dropped', 'gui.py', [
-        ("elif not self.settings_pending:\n            self.settings_status_text = ''",
-         "elif not self.settings_pending:\n            pass"),
-    ], 'test_settings_ack_superseded_request_leaves_no_reconciliation_ghost'),
+    # wh-settings-save-notice-failure-only.2.1: a success must not close a
+    # failure notice; this restores the old success close.
+    ('success-close-restored', 'gui.py', [
+        ("            self._settings_show_status(\"Couldn't save settings. Restored the confirmed values.\")\n",
+         "            self._settings_show_status(\"Couldn't save settings. Restored the confirmed values.\")\n"
+         "        elif not self.settings_pending:\n"
+         "            self.settings_status_text = ''\n"
+         "            if self._settings_notice is not None:\n"
+         "                self._settings_notice.close()\n"),
+    ], 'test_settings_ack_success_keeps_unrelated_failure_notice'),
+    # wh-settings-save-notice-failure-only: only a failure shows a notice.
+    ('waiting-notice-restored', 'gui.py', [
+        ("        # No notice while the save waits or when it succeeds; only a failure\n"
+         "        # shows one (wh-settings-save-notice-failure-only).\n",
+         "        self._settings_show_status('Saving settings. Waiting for confirmation.')\n"),
+    ], 'test_settings_ack_single_save_shows_no_notice_until_it_fails'),
+    ('checking-notice-restored', 'gui.py', [
+        ("            # The check is silent; only a final failure shows a notice.\n",
+         "            self._settings_show_status('Settings outcome unknown. Checking the current settings.')\n"),
+    ], 'test_settings_ack_group_save_reconcile_shows_no_notice_until_it_fails'),
     # wh-codex-merge-audit.4.1.3 and .4.1.6 (stage 4 audit fix).
     ('audit4_rearm-bound-removed', 'gui.py', [
         ("            if pending['attempts'] >= 3:\n"
@@ -105,12 +121,12 @@ MUTATIONS = [
          "            pending['attempts'] += 1"),
     ], 'test_settings_ack_timeout_retries_are_bounded_then_fail'),
     ('audit4_notice-guard-removed', 'gui.py', [
-        ("            # send_notice does not catch its own delivery failures.\n"
-         "            try:\n"
-         "                send_notice('WheelHouse settings', text, timeout=15)\n"
-         "            except Exception:\n"
-         "                logger.exception('Could not deliver the settings notice')",
-         "            send_notice('WheelHouse settings', text, timeout=15)"),
+        ("        # send_notice does not catch its own delivery failures.\n"
+         "        try:\n"
+         "            send_notice('WheelHouse settings', text, timeout=15)\n"
+         "        except Exception:\n"
+         "            logger.exception('Could not deliver the settings notice')",
+         "        send_notice('WheelHouse settings', text, timeout=15)"),
     ], 'test_settings_ack_notice_delivery_failure_is_logged_not_raised'),
     ('audit4_drain-tick-guard-removed', 'gui.py', [
         ("        try:\n"

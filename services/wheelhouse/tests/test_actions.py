@@ -185,9 +185,27 @@ class TestHotkey:
         assert result["params"]["keys"] == ["ctrl", "z"]
         assert result["params"]["repeat"] == 1
 
-    def test_repeat_capped_at_50(self, action_funcs):
-        result = action_funcs.hotkey("ctrl", "z", "100")
-        assert result["params"]["repeat"] == 50
+    # wh-voice-access-parity.1.15.4: hotkey_action pauses 100 ms between
+    # repeats, so 30 repeats add 2.9 s and stay inside the 5.0 s wait for
+    # the Input process's answer (Boss e8 ruling 2026-09-26 11:49).
+    @pytest.mark.parametrize("spoken", ["31", "50", "100"])
+    def test_repeat_capped_at_30(self, action_funcs, spoken):
+        result = action_funcs.hotkey("ctrl", "z", spoken)
+        assert result["params"]["repeat"] == 30
+
+    def test_repeat_of_30_is_kept(self, action_funcs):
+        result = action_funcs.hotkey("ctrl", "z", "thirty")
+        assert result["params"]["repeat"] == 30
+
+    def test_action_catalog_states_the_hotkey_repeat_cap(self):
+        """The Pattern Manager and the reference describe the "hk" repeat
+        parameter from action_catalog.py; the cap they state must be the
+        cap hotkey() applies (wh-voice-access-parity.1.15.4)."""
+        from speech.action_catalog import CATALOG_BY_NAME
+        from speech.actions import HOTKEY_REPEAT_CAP
+        repeat = next(p for p in CATALOG_BY_NAME["hk"]["params"]
+                      if p["name"] == "repeat")
+        assert f"capped at {HOTKEY_REPEAT_CAP})" in repeat["summary"]
 
     def test_invalid_last_arg_kept_as_key(self, action_funcs):
         result = action_funcs.hotkey("ctrl", "z", "nonsense")

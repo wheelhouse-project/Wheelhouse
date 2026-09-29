@@ -26,6 +26,21 @@ import time
 logger = logging.getLogger(__name__)
 
 
+def select_windows_clipboard():
+    """Select pyperclip's Windows clipboard at process start. Never raises.
+
+    Without this, the first pyperclip copy() or paste() in each process runs
+    pyperclip's OS detection, which calls platform.system() and can start a
+    "cmd ver" child process; on a slow host that start held the Input
+    command loop for 12.4 s (wh-input-first-paste-stall). On failure the
+    lazy detection stays in place, so the process still starts.
+    """
+    try:
+        pyperclip.set_clipboard("windows")
+    except Exception as e:
+        logger.warning(f"Could not select the Windows clipboard: {e}")
+
+
 class clipboard_context:
     """Context manager that saves and restores clipboard text content.
 

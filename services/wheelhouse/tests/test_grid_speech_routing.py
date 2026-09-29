@@ -159,6 +159,7 @@ def _make_controller(
         "_grid_monitor_context_off_loop",
         "_grid_gesture_buttons",
         "_put_grid_gui_event",
+        "handle_pointer_click",
     ):
         setattr(c, name, getattr(LogicController, name).__get__(c))
 
@@ -199,7 +200,10 @@ def _make_controller(
         captured["action"] = action
         captured["params"] = params
         override = getattr(c, "_mouse_response", None)
-        if action in ("click_point", "move_pointer", "perform_drag"):
+        if action in (
+            "click_point", "move_pointer", "perform_drag",
+            "click_at_pointer",
+        ):
             if isinstance(override, BaseException):
                 raise override
             if override is not None:
@@ -263,7 +267,9 @@ def _gui(c, action: str) -> list:
 def _mouse_calls(c) -> list:
     return [
         (a, p) for (a, p, _t) in c._captured["calls"]
-        if a in ("click_point", "move_pointer", "perform_drag")
+        if a in (
+            "click_point", "move_pointer", "perform_drag", "click_at_pointer",
+        )
     ]
 
 
@@ -554,6 +560,29 @@ def test_bare_click_acts_at_current_center():
     assert action == "click_point"
     assert params["x"] == center.x and params["y"] == center.y
     assert params["button"] == "right"
+
+
+def test_triple_click_with_the_grid_open_clicks_the_center_three_times():
+    """R4 of RULING 22:16 (wh-voice-access-parity.2.5).
+
+    Without its own entry in _grid_gesture_buttons a TRIPLE_CLICK gesture
+    would fall through to a silent single left click at the grid center.
+    """
+    c = _make_controller(grid_open=True)
+    center = cell_center(cell_rect(MON, 5))
+    _run(c, c.handle_grid_command("refine", "tr", number=5))
+    consumed = _run(
+        c,
+        c.handle_grid_command(
+            "click", "tr", gesture=ClickGesture.TRIPLE_CLICK,
+        ),
+    )
+    assert consumed is True
+    assert not c.grid_overlay_state.is_open
+    ((action, params),) = _mouse_calls(c)
+    assert action == "click_point"
+    assert (params["x"], params["y"]) == (center.x, center.y)
+    assert (params["button"], params["click_count"]) == ("left", 3)
 
 
 def test_dismiss_clears_and_closes():
@@ -975,13 +1004,135 @@ def test_a_homophone_with_no_grid_and_no_badges_still_types(spoken):
     assert processor.badge_clicks == [spoken]
 
 
-def test_bare_click_grid_closed_dictates():
+@pytest.mark.parametrize(("spoken", "button", "count"), [
+    pytest.param("click", "left", 1, id="click"),
+    pytest.param("click.", "left", 1, id="click-period"),
+    pytest.param("tap", "left", 1, id="tap"),
+    pytest.param("right click", "right", 1, id="right-click"),
+    pytest.param("double click", "left", 2, id="double-click"),
+    pytest.param("triple click", "left", 3, id="triple-click"),
+    pytest.param("triple-click", "left", 3, id="triple-hyphen-click"),
+])
+def test_bare_click_grid_closed_clicks_at_the_pointer(spoken, button, count):
+    """wh-voice-access-parity.2.5 (David approved 2026-08-24).
+
+    With the grid closed, the bare click words click where the pointer
+    is instead of typing. The send goes through the real Logic path
+    (_dispatch_mouse_action: the grid pointer lock and the session
+    fence), as the Input action click_at_pointer. This test replaced
+    test_bare_click_grid_closed_dictates, which pinned the old
+    dictation fallback.
+    """
+    c = _make_controller(grid_open=False)
+    functions, sent, dictated, processor = _make_actions(c)
+    _run(c, functions.grid_click_command(spoken))
+    ((action, params),) = _mouse_calls(c)
+    assert action == "click_at_pointer"
+    assert (params["button"], params["click_count"]) == (button, count)
+    assert params.get("trace_id")
+    assert "x" not in params and "y" not in params
+    assert dictated == []
+    assert sent == []
+    assert processor.text_parser.dictation_fallback_this_parse is False
+    assert _notices(c) == []
+
+
+def test_bare_click_with_clicking_disabled_still_dictates():
+    """[click] enabled = false keeps today's dictation fallback."""
+    c = _make_controller(grid_open=False, enabled=False)
+    functions, sent, dictated, processor = _make_actions(c)
+    _run(c, functions.grid_click_command("click"))
+    assert _mouse_calls(c) == []
+    assert dictated == ["click"]
+    assert sent == []
+    assert processor.text_parser.dictation_fallback_this_parse is True
+    assert _notices(c) == []
+
+
+def test_a_failed_pointer_click_fires_pointer_click_failed():
+    c = _make_controller(grid_open=False)
+    c._mouse_response = _failed_mouse_response("sendinput_error")
+    functions, _sent, dictated, _processor = _make_actions(c)
+    _run(c, functions.grid_click_command("double click"))
+    (notice,) = _notices(c)
+    assert notice["reason"] == "pointer_click_failed"
+    assert dictated == []
+
+
+def test_a_pointer_click_waits_its_turn_behind_the_grid_lock():
+    """The pointer click shares the grid's serialization and fence.
+
+    It is recorded as pending pointer work (so a later grid open waits
+    for it), and it cannot be sent while another pointer action holds
+    the grid mouse-action lock.
+    """
+    from main import LogicController
+
+    c = _make_controller(grid_open=False)
+    c._track_pending_pointer_task = (
+        LogicController._track_pending_pointer_task.__get__(c)
+    )
+
+    async def _scenario():
+        lock = asyncio.Lock()
+        c._grid_mouse_action_lock = lock
+        c._pending_grid_mouse_actions = set()
+        await lock.acquire()
+        consumed = await c.handle_pointer_click(
+            ClickGesture.INVOKE, "tr-lock", spoken="click",
+        )
+        assert consumed is True
+        assert len(c._pending_grid_mouse_actions) == 1
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert _mouse_calls(c) == []
+        lock.release()
+        await asyncio.gather(*c._tasks)
+        assert [a for a, _p in _mouse_calls(c)] == ["click_at_pointer"]
+
+    asyncio.run(_scenario())
+
+
+def test_the_pointer_click_does_not_run_while_the_grid_is_open():
+    """An open grid still takes the bare click words, as before."""
+    c = _make_controller(grid_open=True)
+    functions, _sent, dictated, _processor = _make_actions(c)
+    _run(c, functions.grid_click_command("click"))
+    assert [a for a, _p in _mouse_calls(c)] == ["click_point"]
+    assert dictated == []
+
+
+def test_bare_click_without_the_pointer_seam_dictates():
+    """Partial wiring (a Logic stub with no handle_pointer_click) types."""
     lc = _FakeLc(consumed=False)
     functions, sent, dictated, processor = _make_actions(lc)
     asyncio.run(functions.grid_click_command("click"))
     assert dictated == ["click"]
     assert sent == []
     assert processor.text_parser.dictation_fallback_this_parse is True
+
+
+def test_other_grid_words_never_click_at_the_pointer():
+    """Only the click words gained the pointer click; mark still types."""
+    c = _make_controller(grid_open=False)
+    functions, _sent, dictated, _processor = _make_actions(c)
+    for spoken, call in (
+        ("mark", "mark"), ("drag", "drag"), ("move here", "move_here"),
+    ):
+        _run(c, functions.grid_action_command(call, spoken))
+    _run(c, functions.grid_number_command("five", "five"))
+    assert _mouse_calls(c) == []
+    assert dictated == ["mark", "drag", "move here", "five"]
+
+
+def test_bare_triple_click_parses_gesture():
+    lc = _FakeLc(consumed=True)
+    functions, _sent, dictated, _processor = _make_actions(lc)
+    asyncio.run(functions.grid_click_command("triple click"))
+    command, kwargs = lc.calls[0]
+    assert command == "click"
+    assert kwargs.get("gesture") == ClickGesture.TRIPLE_CLICK
+    assert dictated == []
 
 
 def test_bare_right_click_parses_gesture():
@@ -1119,6 +1270,9 @@ def _first_function(entry) -> str:
         ("click", "grid_click_command"),
         ("right click", "grid_click_command"),
         ("double click", "grid_click_command"),
+        # wh-voice-access-parity.2.5: the only new spoken form.
+        ("triple click", "grid_click_command"),
+        ("triple-click.", "grid_click_command"),
         ("mark", "grid_action_command"),
         ("drag", "grid_action_command"),
         ("move here", "grid_action_command"),
@@ -1234,6 +1388,41 @@ def test_explicit_grid_commands_still_execute_whole(catalog):
     assert decision.payload == "show grid lines on the chart"
 
 
+def test_triple_click_is_whole_utterance_only(catalog):
+    """wh-voice-access-parity.2.5: only the bare words click.
+
+    "triple click" executes as a whole utterance; a sentence that starts
+    with it dictates, and "triple click Save" is not a spoken form (R3 of
+    RULING 22:16). "literal click" still types the word.
+    """
+    from speech.domain import Action
+    from speech.router import SpeechRouter
+
+    entry = _first_match(catalog, "triple click")
+    assert entry["whole_utterance_only"] is True
+
+    router = SpeechRouter(catalog, hotword="x-ray")
+    decision = router._resolve_finalization(
+        "triple click".split(), hotword_active=False,
+    )
+    assert decision.action is Action.EXECUTE
+    assert decision.payload == "triple click"
+
+    decision = router._resolve_finalization(
+        "triple click selects the whole line".split(), hotword_active=False,
+    )
+    assert decision.action is Action.DICTATE
+
+    entry = _first_match(catalog, "triple click save")
+    assert entry is None or _first_function(entry) not in (
+        "grid_click_command", "click_element_command",
+    )
+
+    entry = _first_match(catalog, "literal click")
+    assert entry["doc_id"] == "literal-bypass"
+    assert _first_function(entry) == "insert_text"
+
+
 def test_ten_is_not_a_grid_number(catalog):
     entry = _first_match(catalog, "ten")
     assert entry is None or _first_function(entry) != "grid_number_command"
@@ -1275,7 +1464,15 @@ def test_wording_grid_failures_are_distinct():
     move = _wording("grid_move_failed")
     drag = _wording("grid_drag_failed")
     release = _wording("grid_button_release_failed")
-    assert len({click, move, drag, release}) == 4
+    pointer = _wording("pointer_click_failed")
+    assert len({click, move, drag, release, pointer}) == 5
+
+
+def test_wording_pointer_click_failed():
+    # R5 of RULING 22:16 (wh-voice-access-parity.2.5).
+    assert _wording("pointer_click_failed") == (
+        "Wheelhouse couldn't click at the pointer."
+    )
 
 
 def _quoted_recovery_command(text: str) -> str:

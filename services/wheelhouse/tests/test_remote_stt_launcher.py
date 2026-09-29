@@ -1092,7 +1092,9 @@ class TestStaleProviderOnRestart:
 
     When WheelHouse restarts with a new WebSocket port, an old STT process
     from the previous session may still be running. start_provider() must
-    detect this port mismatch and terminate the old process.
+    detect this port mismatch and terminate the old process when its PID
+    file still names a live provider. A program that later received the
+    same process id is not stopped (wh-stale-provider-pid-reuse).
     """
 
     @pytest.fixture
@@ -1142,6 +1144,9 @@ launcher = "launcher.py"
              patch("stt.remote_stt_launcher.psutil.Process") as mock_proc_class, \
              patch("subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
+            # The provider started before its PID file was written, so the
+            # PID file names it (wh-stale-provider-pid-reuse).
+            mock_proc.create_time.return_value = 0.0
             mock_proc_class.return_value = mock_proc
             mock_popen.return_value = MagicMock(pid=99999)
 
@@ -1152,6 +1157,57 @@ launcher = "launcher.py"
             mock_proc.terminate.assert_called_once()
             # New process should have been started
             mock_popen.assert_called_once()
+
+    def test_port_mismatch_spares_a_program_that_reused_the_pid(
+        self, services_dir, app_data_dir, caplog
+    ):
+        """A PID file left by an unclean exit can name a program that Windows
+        gave the same id later. That program started after the file was
+        written, so start_provider() does not stop it, logs no line that
+        claims a stop, and starts a new provider
+        (wh-stale-provider-pid-reuse).
+        """
+        import logging
+        import os
+
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        written = 1_000_000.0
+        pid_file = app_data_dir / "google_stt.pid"
+        pid_file.write_text("12345")
+        os.utime(pid_file, (written, written))
+        port_file = app_data_dir / "google_stt.port"
+        port_file.write_text("5500")
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir,
+            app_data_dir=app_data_dir,
+            ws_port=5501,
+        )
+
+        with patch("stt.remote_stt_launcher.psutil.pid_exists", return_value=True), \
+             patch("stt.remote_stt_launcher.psutil.Process") as mock_proc_class, \
+             patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.create_time.return_value = written + 3600.0
+            mock_proc_class.return_value = mock_proc
+            mock_popen.return_value = MagicMock(pid=99999)
+
+            with caplog.at_level(logging.INFO, logger="stt.remote_stt_launcher"):
+                result = launcher.start_provider("google_stt")
+
+            assert result is True
+            mock_proc.terminate.assert_not_called()
+            mock_proc.kill.assert_not_called()
+            mock_popen.assert_called_once()
+            # The old port file is gone; the new launch wrote its own port.
+            assert port_file.read_text() == "5501"
+            # No log line claims a stop that did not happen.
+            claims = [
+                r.getMessage() for r in caplog.records
+                if "terminat" in r.getMessage().lower()
+            ]
+            assert claims == []
 
     def test_reuses_provider_when_port_matches(self, services_dir, app_data_dir):
         """start_provider() reuses existing process when port matches.
@@ -1201,6 +1257,9 @@ launcher = "launcher.py"
              patch("stt.remote_stt_launcher.psutil.Process") as mock_proc_class, \
              patch("subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
+            # The provider started before its PID file was written, so the
+            # PID file names it (wh-stale-provider-pid-reuse).
+            mock_proc.create_time.return_value = 0.0
             mock_proc_class.return_value = mock_proc
             mock_popen.return_value = MagicMock(pid=99999)
 

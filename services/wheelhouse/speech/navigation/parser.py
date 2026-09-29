@@ -5,7 +5,13 @@ from typing import Optional
 from ..number_word_parser import parse_number_word
 from .models import NavigationCommand
 
-MAX_COUNT = 50
+# Every count is sent as hotkey_action repeats, which pause 100 ms apart,
+# so this is the same cap as speech/actions.py HOTKEY_REPEAT_CAP: 29
+# pauses stay under the 5.0 s wait for the Input process's answer
+# (Boss e8 ruling 2026-09-26 12:38, wh-voice-access-parity.1.15.6.1).
+# tests/test_navigation_parser.py ties the two values; this module does
+# not import speech.actions, to avoid an import cycle.
+MAX_COUNT = 30
 
 _UNITS = {
     "character": "character", "characters": "character",
@@ -153,19 +159,20 @@ class NavigationParser:
 
     @staticmethod
     def _parse_count(text: str) -> Optional[int]:
-        """Convert spoken number or digit string to int (1-50). None if not a number.
+        """Convert spoken number or digit string to int (1-MAX_COUNT). None if not a number.
 
         The reading is parse_number_word, the one word-to-integer
         implementation in this service (wh-number-words-one-parser).
         This method used to carry its own one..ten table, so "go right
         fifteen characters" was unparseable and the whole utterance was
-        dictated. MAX_COUNT is unchanged: a larger count still clamps to
-        50 rather than being refused, exactly as the table version did.
+        dictated. A larger count still clamps to MAX_COUNT rather than
+        being refused, exactly as the table version did. MAX_COUNT was
+        50 until wh-voice-access-parity.1.15.6.1 lowered it to 30.
 
         A digit count whose VALUE is above 999 no longer reads as a
-        count. It used to clamp to 50 through int(), which accepted a
-        digit run of any length: "go right 1000 characters" and "go right
-        1000000 characters" were both counts worth 50. Now the parser
+        count. It used to clamp to MAX_COUNT through int(), which accepted
+        a digit run of any length: "go right 1000 characters" and "go
+        right 1000000 characters" were both counts worth 50. Now the parser
         refuses a value above 999 and the segment falls through to
         dictation.
 

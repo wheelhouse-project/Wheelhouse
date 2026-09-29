@@ -23,6 +23,19 @@ import unicodedata
 import re
 from typing import Optional
 
+# Punctuation-only insertions that take a leading space by the same rule as
+# a word, so "x equals sign y" types "x = y" (wh-voice-access-parity.1.15.5,
+# 2026-09-26). David chose "=" first, then "+ < > |" (Question 7, option 1).
+# "*", "-" and every other symbol keep no leading space.
+SPACED_PUNCTUATION = frozenset({"=", "+", "<", ">", "|"})
+
+# A spaced symbol gets no leading space when the text before the cursor ends
+# with one of these characters, so symbols dictated one after another build
+# an operator: "<=", "||", "!=", "-=", ":=" (Boss e8 rulings 11:47 and 11:49).
+# crewcut: "-" is also a hyphen, so "well-" then "=" types "well-="; accepted
+# as rare. Remove "-" here if a user reports it.
+OPERATOR_CHARACTERS = frozenset("=+<>|!*-%^&:~?")
+
 
 class TextPerfector:
     """Applies intelligent spacing and capitalization to dictated text.
@@ -102,7 +115,12 @@ class TextPerfector:
         """Determine if we need a space prefix before the insertion.
 
         Rules:
-        1. No space if insertion is punctuation-only
+        1. No space if insertion is punctuation-only, except an insertion
+           in SPACED_PUNCTUATION ("=", "+", "<", ">", "|"), which follows
+           rules 2-4 like a word, and also gets no space after a character
+           in OPERATOR_CHARACTERS ("a <" then "=" types "a <="). An
+           insertion that starts with whitespace (" = ") is not a spaced
+           symbol and gets no prefix
         2. No space if preceding text ends with whitespace or opening bracket
         3. No space if there's a selection (replacing selected text)
         4. Otherwise, add space
@@ -115,10 +133,20 @@ class TextPerfector:
         Returns:
             Either ' ' or '' (empty string)
         """
-        # Check if insertion is only punctuation
+        # Check if insertion is only punctuation. An insertion that already
+        # starts with whitespace (a personal text pattern saved as " = ")
+        # brings its own space, so it stays punctuation-only and is typed
+        # as saved (wh-voice-access-parity.1.15.6.3).
+        is_spaced_symbol = (
+            insertion_string.strip() in SPACED_PUNCTUATION
+            and not insertion_string[:1].isspace()
+        )
         is_punctuation_only = all(
             c in string.punctuation
             for c in insertion_string.strip()
+        ) and not is_spaced_symbol
+        builds_operator = (
+            is_spaced_symbol and preceding_chars[-1:] in OPERATOR_CHARACTERS
         )
 
         # Check if preceding text ends with whitespace or opening bracket or slash or backslash.
@@ -136,7 +164,8 @@ class TextPerfector:
         )
 
         # Determine if prefix space is needed
-        if is_punctuation_only or ends_with_whitespace or has_selection:
+        if (is_punctuation_only or builds_operator or ends_with_whitespace
+                or has_selection):
             return ''
 
         return ' '

@@ -195,9 +195,13 @@ class TestTheRecoveredNameIsWritten:
     ):
         """The same rewrite, over a file the load did not migrate.
 
-        This is what the person has today: the built-in answers first and
-        their own action never runs. It is here so the test above cannot
-        pass for a reason that has nothing to do with the written name.
+        The override loses the built-in's slot, so the rewritten built-in
+        comes back and runs beside it. Since QUESTIONS-2026-09-28.md item
+        12, option three (wh-user-rule-precedence), the orphaned override
+        sits in front of it; before that, the built-in answered first and
+        the person's own action never ran. It is here so the test above
+        cannot pass for a reason that has nothing to do with the written
+        name.
         """
         _catalog(
             tmp_path, BUILTIN + OTHER_BUILTIN, LEGACY_OVERRIDE, migrate=False,
@@ -213,9 +217,11 @@ class TestTheRecoveredNameIsWritten:
             str(tmp_path / "patterns.toml"),
             str(tmp_path / "user_patterns.toml"),
         )
+        # The orphaned override leads: QUESTIONS-2026-09-28.md item 12,
+        # option three (wh-user-rule-precedence).
         assert _actions_of(after.get_matching_patterns("maximize")) == [
-            [{"function": "hk", "params": ["win", "up"]}],
             [{"function": "hk", "params": ["ctrl", "alt", "m"]}],
+            [{"function": "hk", "params": ["win", "up"]}],
         ]
 
 

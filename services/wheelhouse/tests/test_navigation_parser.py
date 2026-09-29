@@ -188,12 +188,50 @@ class TestSpokenCountsAboveTen:
         )]
 
     def test_a_count_above_the_maximum_still_clamps(self):
-        """MAX_COUNT is unchanged: 90 clamps to 50 rather than being refused."""
+        """90 clamps to MAX_COUNT (30) rather than being refused."""
         cmds = NavigationParser.parse("go right ninety characters")
         assert cmds == [NavigationCommand(
-            verb="go", kind="relative", direction="right", count=50,
+            verb="go", kind="relative", direction="right", count=30,
             unit="character",
         )]
+
+    def test_max_count_is_the_hotkey_repeat_cap(self):
+        """Every cursor count is sent as hotkey_action repeats, which pause
+        100 ms apart, so navigation takes the same cap as
+        ActionFunctions.hotkey: 29 pauses stay under the 5.0 s wait
+        (Boss e8 ruling 12:38, wh-voice-access-parity.1.15.6.1). A test
+        ties the two, because parser.py importing speech.actions risks an
+        import cycle."""
+        from speech.actions import HOTKEY_REPEAT_CAP
+        from speech.navigation.parser import MAX_COUNT
+        assert MAX_COUNT == HOTKEY_REPEAT_CAP
+
+    def test_the_help_document_states_max_count(self):
+        """The Navigation narrative of the help document states the clamp;
+        it said 50 after MAX_COUNT became 30
+        (wh-voice-access-parity.1.15.6.2)."""
+        from pathlib import Path
+        from speech.navigation.parser import MAX_COUNT
+        section = (Path(__file__).resolve().parents[1] / "knowledge"
+                   / "helpdoc" / "sections" / "070-voice-commands.md")
+        if not section.is_file():
+            pytest.skip("development-only help-document sources are absent from this checkout")
+        text = section.read_text(encoding="utf-8")
+        assert f"Counts above {MAX_COUNT} move {MAX_COUNT}." in text
+
+    @pytest.mark.parametrize("spoken, expected", [
+        ("thirty", 30), ("31", 30), ("fifty", 30),
+    ], ids=["thirty", "31", "fifty"])
+    def test_a_large_count_sends_at_most_30_repeats(self, spoken, expected):
+        """"go right fifty words" sent 50 repeats, and 49 pauses took 4.9 s
+        of the 5.0 s wait (wh-voice-access-parity.1.15.6.1)."""
+        from speech.navigation.executor import NavigationExecutor
+        cmds = NavigationParser.parse(f"go right {spoken} words")
+        assert cmds is not None
+        actions = NavigationExecutor.to_actions(cmds)
+        assert actions == [{"action": "hotkey_action",
+                            "params": {"keys": ["ctrl", "right"],
+                                       "repeat": expected}}]
 
     def test_the_speech_homophones_are_still_counts(self):
         """The old table carried to/too/for; the aliases option replaces it."""
@@ -234,7 +272,7 @@ class TestSpokenCountsAboveTen:
 
         clamped = NavigationParser.parse("go right 00051 characters")
         assert clamped is not None
-        assert clamped[0].count == 50, "MAX_COUNT still clamps the value"
+        assert clamped[0].count == 30, "MAX_COUNT still clamps the value"
 
         assert NavigationParser.parse("go right 01000 characters") is None, (
             "padding does not rescue a value above 999"

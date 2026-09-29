@@ -2905,7 +2905,15 @@ class _LegacyActionControl(FakeControl):
         super().__init__()
         self.legacy = _FakeLegacyPattern(default_action)
 
-    def GetCurrentPattern(self, _pattern_id: Any) -> _FakeRawLegacyPattern:
+    # UIA_LegacyIAccessiblePatternId. Any other pattern id answers None, as a
+    # real element answers NULL for a pattern it does not support -- so the
+    # Toggle and Select presses (wh-mcp-repo-mining.3) find no pattern here
+    # and the default-action path runs exactly as before.
+    LEGACY_PATTERN_ID = 10018
+
+    def GetCurrentPattern(self, pattern_id: Any) -> Optional[_FakeRawLegacyPattern]:
+        if pattern_id != self.LEGACY_PATTERN_ID:
+            return None
         return _FakeRawLegacyPattern(self.legacy)
 
 
@@ -3663,3 +3671,457 @@ def test_selection_state_helper_returns_none_for_a_non_treeitem():
 
     assert state is None
     assert selection.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Toggle and Select press paths (wh-mcp-repo-mining.3).
+#
+# A by-name click whose Invoke pattern is structurally unavailable now tries
+# TogglePattern.Toggle, then SelectionItemPattern.Select, BEFORE the MSAA
+# default action. A TreeItem never takes Select (Boss ruling R1, 2026-09-27:
+# Select on an Explorer navigation-pane tree item highlights without
+# navigating, wh-explorer-navpane-click). Badge picks keep today's order
+# (ruling R2). Every seam call is logged in order, so "pressed once" is a
+# count over the whole log, not over one seam.
+# ---------------------------------------------------------------------------
+
+import dataclasses  # noqa: E402 -- grouped with this suite
+
+from ui.element_types import ClickGesture  # noqa: E402
+from ui.uia_walker import (  # noqa: E402
+    UIA_BUTTON,
+    UIA_CHECKBOX,
+    UIA_LISTITEM,
+    UIA_RADIOBUTTON,
+    UIA_TREEITEM,
+    SelectionItemPatternUnavailable,
+    TogglePatternUnavailable,
+)
+
+
+class _PressLog:
+    """Scripted press seams that record every call in one ordered list.
+
+    Each seam behaves as told: ``"ok"`` returns (a press that worked),
+    ``"unavailable"`` raises the seam's structural exception BEFORE any press
+    (logged as ``<seam>-probe``, meaning nothing was pressed), and an
+    exception instance is raised AFTER the press call (logged as the plain
+    seam name, because a call was made).
+    """
+
+    def __init__(
+        self,
+        *,
+        invoke: Any = "unavailable",
+        toggle: Any = "unavailable",
+        select: Any = "unavailable",
+        dda: Any = "ok",
+        coordinate: tuple = (True, 2),
+    ) -> None:
+        self.calls: list[str] = []
+        self._invoke = invoke
+        self._toggle = toggle
+        self._select = select
+        self._dda = dda
+        self._coordinate = coordinate
+
+    def _behave(self, seam: str, how: Any, unavailable: type) -> None:
+        if isinstance(how, str) and how == "unavailable":
+            self.calls.append(f"{seam}-probe")
+            raise unavailable(f"no {seam} pattern")
+        self.calls.append(seam)
+        if isinstance(how, BaseException):
+            raise how
+
+    def invoke(self, _ref: Any) -> None:
+        self._behave("invoke", self._invoke, _IPU)
+
+    def toggle(self, _ref: Any) -> None:
+        self._behave("toggle", self._toggle, TogglePatternUnavailable)
+
+    def select(self, _ref: Any) -> None:
+        self._behave("select", self._select, SelectionItemPatternUnavailable)
+
+    def dda(self, _ref: Any) -> None:
+        self._behave("dda", self._dda, DoDefaultActionUnavailable)
+
+    def coordinate_click(self, _x: int, _y: int) -> tuple:
+        self.calls.append("coordinate")
+        return self._coordinate
+
+    def gesture_click(self, _x: int, _y: int, _button: str, count: int):
+        self.calls.append("gesture")
+        return (True, 2 * count)
+
+    def presses(self) -> list[str]:
+        """Every call that reached a press (structural probes excluded)."""
+        return [c for c in self.calls if not c.endswith("-probe")]
+
+
+def _press_executor(
+    log: _PressLog,
+    *,
+    window_at_point=None,
+    enable_coordinate_click_on_com_error: bool = False,
+) -> ClickExecutor:
+    if window_at_point is None:
+        window_at_point = lambda _x, _y: 1000
+    return ClickExecutor(
+        coordinate_click_fn=log.coordinate_click,
+        gesture_click_fn=log.gesture_click,
+        foreground_probe=probe_fn(matching_probe()),
+        on_screen_fn=always_on_screen,
+        com_error_predicate=is_fake_com_error,
+        invoke_fn=log.invoke,
+        toggle_fn=log.toggle,
+        select_fn=log.select,
+        do_default_action_fn=log.dda,
+        enable_coordinate_click_on_com_error=enable_coordinate_click_on_com_error,
+        window_at_point_fn=window_at_point,
+        point_hits_winner_fn=lambda _w, _x, _y: True,
+    )
+
+
+def _press_match(control_type_id: int, *, name: str = "Remember me") -> ElementMatch:
+    return dataclasses.replace(
+        make_match(FakeControl(), name=name, role="check box"),
+        invoke_supported=False,
+        control_type_id=control_type_id,
+    )
+
+
+def _press_query(
+    name: str = "remember me", gesture: ClickGesture = ClickGesture.INVOKE
+) -> ElementQuery:
+    return ElementQuery(
+        name=name, role=None, ordinal=None, spatial=None,
+        raw_utterance=f"click {name}", gesture=gesture,
+    )
+
+
+# A query whose name is only a substring of "Remember me": the match fails
+# the stronger coordinate eligibility gate (not exact, not starts-with, no
+# role in the query).
+_INELIGIBLE_QUERY_NAME = "me"
+
+
+@pytest.mark.parametrize(
+    "control_type_id",
+    [pytest.param(UIA_CHECKBOX, id="checkbox"),
+     pytest.param(UIA_BUTTON, id="toggle-button")],
+)
+def test_toggle_capable_target_without_invoke_is_pressed_through_toggle(
+    caplog, control_type_id
+):
+    # A1: Toggle runs, and nothing after it -- no default action, no
+    # coordinate click.
+    log = _PressLog(toggle="ok", select="ok")
+    ex = _press_executor(log)
+    with caplog.at_level(logging.DEBUG, logger="ui.click_executor"):
+        result = ex.click(_press_match(control_type_id), snap(), _press_query())
+    assert log.calls == ["invoke-probe", "toggle"]
+    assert result.outcome == "ok"
+    assert result.reason is None
+    assert result.clicked_via == "invoke"
+    assert "toggle_ok" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "control_type_id",
+    [pytest.param(UIA_LISTITEM, id="list-item"),
+     pytest.param(UIA_RADIOBUTTON, id="radio-button")],
+)
+def test_select_capable_target_without_invoke_is_pressed_through_select(
+    caplog, control_type_id
+):
+    # A2: no Toggle pattern, so Select runs -- and nothing after it.
+    log = _PressLog(select="ok")
+    ex = _press_executor(log)
+    with caplog.at_level(logging.DEBUG, logger="ui.click_executor"):
+        result = ex.click(_press_match(control_type_id), snap(), _press_query())
+    assert log.calls == ["invoke-probe", "toggle-probe", "select"]
+    assert result.outcome == "ok"
+    assert result.clicked_via == "invoke"
+    assert "select_ok" in caplog.text
+
+
+def test_tree_item_with_selection_item_and_no_invoke_never_calls_select():
+    # Boss ruling R1: Select on an Explorer navigation-pane tree item moves
+    # the highlight without navigating (wh-explorer-navpane-click), so a
+    # TreeItem keeps today's path -- the MSAA default action -- even though
+    # its SelectionItem pattern is available.
+    log = _PressLog(select="ok", dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(_press_match(UIA_TREEITEM), snap(), _press_query())
+    assert "select" not in log.calls
+    assert "select-probe" not in log.calls
+    assert log.presses() == ["dda"]
+    assert result.outcome == "ok"
+
+
+def test_tree_item_with_toggle_and_no_invoke_never_calls_toggle():
+    # BOSS RULING 01:46 on wh-mcp-repo-mining.3: every tree item keeps
+    # today's path (the MSAA default action, then the guarded coordinate
+    # click), so a TreeItem exposing a Toggle pattern (a checkbox tree) is
+    # never toggled either (wh-explorer-navpane-click).
+    log = _PressLog(toggle="ok", select="ok", dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(_press_match(UIA_TREEITEM), snap(), _press_query())
+    assert log.calls.count("toggle") == 0
+    assert "toggle-probe" not in log.calls
+    assert log.presses() == ["dda"]
+    assert result.outcome == "ok"
+
+
+def test_tree_item_without_invoke_reads_no_toggle_or_select_pattern():
+    # Latency: both TreeItem exclusions are decided from the walk's cached
+    # control type BEFORE either live GetCurrentPattern read, so a tree item
+    # with no Invoke (every File Explorer navigation-pane folder) costs no
+    # extra cross-process pattern read on its way to the default action.
+    log = _PressLog(dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(_press_match(UIA_TREEITEM), snap(), _press_query())
+    assert log.calls.count("toggle-probe") == 0
+    assert log.calls.count("select-probe") == 0
+    assert log.calls == ["invoke-probe", "dda"]
+    assert result.outcome == "ok"
+
+
+def test_select_unavailable_falls_through_to_the_default_action():
+    # A4: both new patterns structurally absent -> today's default action.
+    log = _PressLog(dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(_press_match(UIA_LISTITEM), snap(), _press_query())
+    assert log.calls == ["invoke-probe", "toggle-probe", "select-probe", "dda"]
+    assert result.outcome == "ok"
+
+
+def test_target_offering_toggle_and_selection_item_is_only_toggled():
+    # A4: an element exposing both patterns is pressed exactly once.
+    log = _PressLog(toggle="ok", select="ok")
+    ex = _press_executor(log)
+    result = ex.click(_press_match(UIA_LISTITEM), snap(), _press_query())
+    assert log.presses() == ["toggle"]
+    assert result.outcome == "ok"
+
+
+@pytest.mark.parametrize(
+    ("toggle", "select", "control_type_id", "reason", "presses"),
+    [
+        pytest.param(
+            FakeComError(NON_ALLOWLISTED_HRESULT), "ok", UIA_CHECKBOX,
+            "toggle_com_error", ["toggle"], id="toggle",
+        ),
+        pytest.param(
+            "unavailable", FakeComError(NON_ALLOWLISTED_HRESULT), UIA_LISTITEM,
+            "select_com_error", ["select"], id="select",
+        ),
+    ],
+)
+def test_press_com_error_after_the_call_fails_closed(
+    toggle, select, control_type_id, reason, presses
+):
+    # A4 honesty: the call was made and may have fired, so neither the next
+    # press path nor the default action nor a coordinate click may follow (a
+    # fired Toggle then the default action "Check" would revert the box).
+    log = _PressLog(toggle=toggle, select=select, dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(_press_match(control_type_id), snap(), _press_query())
+    assert log.presses() == presses
+    assert result.outcome == "execution_failed"
+    assert result.reason == reason
+    assert result.clicked_via is None
+
+
+def test_toggle_com_error_fails_closed_even_with_the_com_error_knob_on():
+    # The enable_coordinate_click_on_com_error knob opens a coordinate click
+    # only after a failed INVOKE. A Toggle that raised may have toggled.
+    log = _PressLog(toggle=FakeComError(NON_ALLOWLISTED_HRESULT))
+    ex = _press_executor(log, enable_coordinate_click_on_com_error=True)
+    result = ex.click(_press_match(UIA_CHECKBOX), snap(), _press_query())
+    assert log.presses() == ["toggle"]
+    assert result.reason == "toggle_com_error"
+
+
+def test_toggle_non_com_exception_with_an_allowlisted_hresult_fails_closed():
+    # Gate 0: only a real COM error may be read against the allowlist.
+    boom = RuntimeError("not a COM error")
+    boom.hresult = UIA_E_ELEMENTNOTAVAILABLE  # type: ignore[attr-defined]
+    log = _PressLog(toggle=boom)
+    ex = _press_executor(log)
+    result = ex.click(_press_match(UIA_CHECKBOX), snap(), _press_query())
+    assert log.presses() == ["toggle"]
+    assert result.reason == "toggle_com_error"
+
+
+@pytest.mark.parametrize(
+    ("toggle", "select", "control_type_id", "tag", "presses"),
+    [
+        pytest.param(
+            FakeComError(UIA_E_ELEMENTNOTAVAILABLE), "ok", UIA_CHECKBOX,
+            "toggle_no_side_effect_then_coord", ["toggle", "coordinate"],
+            id="toggle",
+        ),
+        pytest.param(
+            "unavailable", FakeComError(UIA_E_NOTSUPPORTED), UIA_LISTITEM,
+            "select_no_side_effect_then_coord", ["select", "coordinate"],
+            id="select",
+        ),
+    ],
+)
+def test_press_no_side_effect_hresult_takes_one_coordinate_click(
+    caplog, toggle, select, control_type_id, tag, presses
+):
+    # A4: an allowlisted no-side-effect HRESULT proves nothing fired, so the
+    # gated coordinate click runs exactly once -- and never the default
+    # action.
+    log = _PressLog(toggle=toggle, select=select, dda="ok")
+    ex = _press_executor(log)
+    with caplog.at_level(logging.INFO, logger="ui.click_executor"):
+        result = ex.click(_press_match(control_type_id), snap(), _press_query())
+    assert log.presses() == presses
+    assert result.outcome == "ok"
+    assert result.clicked_via == "coordinate"
+    assert tag in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("toggle", "select", "control_type_id", "reason"),
+    [
+        pytest.param(FakeComError(UIA_E_ELEMENTNOTAVAILABLE), "ok",
+                     UIA_CHECKBOX, "toggle_com_error", id="toggle"),
+        pytest.param("unavailable", FakeComError(UIA_E_NOTSUPPORTED),
+                     UIA_LISTITEM, "select_com_error", id="select"),
+    ],
+)
+def test_press_no_side_effect_hresult_on_an_ineligible_match_fails_closed(
+    toggle, select, control_type_id, reason
+):
+    log = _PressLog(toggle=toggle, select=select, dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(
+        _press_match(control_type_id), snap(),
+        _press_query(_INELIGIBLE_QUERY_NAME),
+    )
+    assert "coordinate" not in log.calls
+    assert "dda" not in log.calls
+    assert result.outcome == "execution_failed"
+    assert result.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("toggle", "select", "control_type_id", "reason"),
+    [
+        pytest.param(FakeComError(UIA_E_ELEMENTNOTAVAILABLE), "ok",
+                     UIA_CHECKBOX, "toggle_then_sendinput_failed",
+                     id="toggle"),
+        pytest.param("unavailable", FakeComError(UIA_E_NOTSUPPORTED),
+                     UIA_LISTITEM, "select_then_sendinput_failed",
+                     id="select"),
+    ],
+)
+def test_press_coordinate_retry_that_does_not_land_has_its_own_tag(
+    toggle, select, control_type_id, reason
+):
+    log = _PressLog(
+        toggle=toggle, select=select, dda="ok", coordinate=(False, 2)
+    )
+    ex = _press_executor(log)
+    result = ex.click(_press_match(control_type_id), snap(), _press_query())
+    assert log.presses().count("coordinate") == 1
+    assert "dda" not in log.calls
+    assert result.outcome == "execution_failed"
+    assert result.reason == reason
+
+
+@pytest.mark.parametrize(
+    "gesture",
+    [pytest.param(ClickGesture.RIGHT_CLICK, id="right"),
+     pytest.param(ClickGesture.DOUBLE_CLICK, id="double"),
+     pytest.param(ClickGesture.TRIPLE_CLICK, id="triple")],
+)
+def test_physical_gesture_on_a_toggle_capable_checkbox_never_toggles(gesture):
+    # A5: right, double, and triple click stay physical gestures.
+    log = _PressLog(toggle="ok", select="ok")
+    ex = _press_executor(log)
+    result = ex.click(
+        _press_match(UIA_CHECKBOX), snap(), _press_query(gesture=gesture)
+    )
+    assert log.calls == ["gesture"]
+    assert result.outcome == "ok"
+
+
+def test_invoke_capable_checkbox_is_invoked_only():
+    # A5: a target with Invoke behaves as today.
+    log = _PressLog(invoke="ok", toggle="ok", select="ok")
+    ex = _press_executor(log)
+    result = ex.click(_press_match(UIA_CHECKBOX), snap(), _press_query())
+    assert log.calls == ["invoke"]
+    assert result.outcome == "ok"
+
+
+def test_badge_pick_on_a_toggle_capable_target_clicks_the_coordinate_first():
+    # Boss ruling R2: a badge pick means "click at that spot", so the
+    # coordinate click still runs first (wh-electron-dda-noop), and Toggle is
+    # never tried.
+    log = _PressLog(toggle="ok", select="ok", dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(
+        _press_match(UIA_CHECKBOX), snap(), _press_query(), badge_pick=True
+    )
+    assert log.calls == ["invoke-probe", "coordinate"]
+    assert result.outcome == "ok"
+    assert result.clicked_via == "coordinate"
+
+
+def test_badge_pick_refused_before_input_goes_to_the_default_action_not_toggle():
+    # The badge path's no-input fallback is the default action, as today.
+    log = _PressLog(toggle="ok", select="ok", dda="ok")
+    ex = _press_executor(log, window_at_point=lambda _x, _y: 2222)
+    result = ex.click(
+        _press_match(UIA_CHECKBOX), snap(), _press_query(), badge_pick=True
+    )
+    assert log.presses() == ["dda"]
+    assert result.outcome == "ok"
+
+
+def test_shell_badge_pick_refused_before_input_goes_to_the_default_action_not_toggle():
+    # Boss ruling R2 on the shell-owned badge path (wh-tray-invoke-noop): the
+    # coordinate-first attempt is refused with no input, the Invoke path runs,
+    # Invoke is structurally unavailable -- and the pick, still a badge pick,
+    # goes straight to the default action with no Toggle or Select press.
+    log = _PressLog(toggle="ok", select="ok", dda="ok")
+    ex = _press_executor(log, window_at_point=lambda _x, _y: 2222)
+    match = dataclasses.replace(
+        _press_match(UIA_CHECKBOX), source_window_is_shell=True
+    )
+    result = ex.click(match, snap(), _press_query(), badge_pick=True)
+    assert log.calls.count("toggle") == 0
+    assert log.calls.count("select") == 0
+    assert log.calls == ["invoke-probe", "dda"]
+    assert result.outcome == "ok"
+
+
+def test_ineligible_badge_pick_goes_to_the_default_action_not_toggle():
+    log = _PressLog(toggle="ok", select="ok", dda="ok")
+    ex = _press_executor(log)
+    result = ex.click(
+        _press_match(UIA_CHECKBOX), snap(),
+        _press_query(_INELIGIBLE_QUERY_NAME), badge_pick=True,
+    )
+    assert log.presses() == ["dda"]
+    assert result.outcome == "ok"
+
+
+def test_constructor_default_toggle_and_select_fns_are_the_real_presses():
+    from ui.uia_walker import (
+        select_via_selection_item_pattern,
+        toggle_via_toggle_pattern,
+    )
+
+    ex = ClickExecutor(
+        foreground_probe=probe_fn(matching_probe()),
+        on_screen_fn=always_on_screen,
+    )
+    assert ex._toggle_fn is toggle_via_toggle_pattern
+    assert ex._select_fn is select_via_selection_item_pattern

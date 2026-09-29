@@ -272,6 +272,29 @@ def _win32_coordinate_click(x: int, y: int) -> tuple[bool, int, str | None]:
         return (False, 0, None)
 
 
+def _win32_pointer_position() -> "tuple[int, int] | None":
+    """Read the pointer position for the ``click_at_pointer`` handler's seam.
+
+    wh-voice-access-parity.2.5. ``GetCursorPos`` runs here, in the Input
+    process, because this is the process whose coordinate space the click
+    primitive uses: ``click_point`` moves to the point and verifies the
+    landing with ``GetCursorPos`` in this same process, so a position read
+    here is the position that primitive expects. Logic is DPI-unaware and
+    would read a DPI-virtualized position on a scaled monitor.
+
+    Returns ``(x, y)`` in screen pixels, or ``None`` when the read fails
+    (for example on a secure desktop), so the caller fails closed instead
+    of clicking at a guessed point. Never raises.
+    """
+    try:
+        x, y = win32gui.GetCursorPos()
+        return (int(x), int(y))
+    except Exception:  # noqa: BLE001 -- fail soft, never propagate
+        logger.error("_win32_pointer_position: GetCursorPos failed",
+                     exc_info=True)
+        return None
+
+
 def _win32_click_point(
     x, y, button: str, click_count: int,
 ) -> tuple[bool, str | None]:
@@ -499,6 +522,17 @@ HOTKEY_UNKNOWN_MESSAGE = (
     "Cannot run the {chord} shortcut: Wheelhouse does not know {keys}"
 )
 HOTKEY_REFUSED_MESSAGE = "The {chord} shortcut did not work"
+
+# The pause between the repeats of one hotkey_action
+# (wh-voice-access-parity.1.15.4). VS Code selected one word for "select
+# forward 3 words" when the three Ctrl+Shift+Right chords arrived back to
+# back. Probe 2 (2026-09-26 11:42, 5 trials per value) selected all three
+# words 5 of 5 times at 100 ms and 200 ms, 4 of 5 at 60 ms, and 0 or 1 of 5
+# at 0 and 30 ms. 100 ms is the lowest value that passed every trial;
+# nothing between 60 and 100 ms was measured, so there is no margin below
+# it. speech/actions.py HOTKEY_REPEAT_CAP keeps the total pause under the
+# Logic process's 5.0 s wait for the answer.
+HOTKEY_REPEAT_PAUSE_S = 0.1
 TYPING_REFUSED_MESSAGE = "Typing stopped after {sent} of {total} characters"
 
 # The wheel refusals that report themselves through the generic [ERROR]
@@ -773,6 +807,10 @@ class UIActionHandler:
         self._mouse_click_seam = _win32_click_point
         self._mouse_move_seam = _win32_move_pointer
         self._mouse_drag_seam = _win32_drag_pointer
+        # wh-voice-access-parity.2.5: the pointer read for click_at_pointer.
+        # A seam for the same reason as the three above: tests inject a
+        # fixed position and never depend on the real pointer.
+        self._pointer_position_seam = _win32_pointer_position
         # wh-voice-access-parity.2.3: the SendInput seam for the spoken scroll
         # commands. Same injection reason as the three pointer seams above,
         # though the wheel is not a grid action and is not gated by the
@@ -3035,8 +3073,10 @@ class UIActionHandler:
             self._used_simple_paste = True
 
         if not result.success:
+            # wh-voice-access-parity.1.14.1.1: input_proc logs this message
+            # and returns it in the error response, so the text is redacted.
             raise PasteFailedError(
-                f"raw_insert_text failed for text {text[:50]!r}"
+                f"raw_insert_text failed for text {redact_transcript(text[:50])}"
             )
 
     def type_text(self, text: str, **kwargs):
@@ -5926,11 +5966,15 @@ class UIActionHandler:
                 # Convert keys to SendKeys format (e.g., ['ctrl', 'c'] -> '{Ctrl}c')
                 sendkeys_str = self._convert_to_sendkeys_format(keys)
                 logger.debug(f"Flutter hotkey: {sendkeys_str} (repeat={repeat})")
-                for _ in range(repeat):
+                for i in range(repeat):
+                    if i:
+                        time.sleep(HOTKEY_REPEAT_PAUSE_S)
                     focused_control.SendKeys(sendkeys_str)
             else:
                 # Standard SendInput for non-Flutter apps
-                for _ in range(repeat):
+                for i in range(repeat):
+                    if i:
+                        time.sleep(HOTKEY_REPEAT_PAUSE_S)
                     ok, accepted, expected = verified_press_keys(
                         *keys, caller_notifies=True
                     )
@@ -6877,7 +6921,7 @@ class UIActionHandler:
                 multi-monitor desktop whose secondary monitor sits left of or
                 above the primary.
             button: ``"left"`` or ``"right"``.
-            click_count: 1 or 2 (a double click).
+            click_count: 1, 2 (a double click) or 3 (a triple click).
             trace_id: Logic-generated correlation id, echoed in the response.
 
         Emits one ``MouseActionResponse``. The argument validation lives in
@@ -6918,6 +6962,84 @@ class UIActionHandler:
         except Exception as exc:  # noqa: BLE001 -- never-raise handler
             logger.error(
                 "click_point: unexpected error (trace_id=%s): %s",
+                trace_id, exc, exc_info=True,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=False,
+                reason="unexpected_error",
+            )
+
+    def click_at_pointer(
+        self,
+        button: str = "left",
+        click_count: int = 1,
+        trace_id: str = "",
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Click wherever the pointer is now (wh-voice-access-parity.2.5).
+
+        The bare "click", "right click", "double click" and "triple click"
+        words send this when no mouse grid is open. The pointer position is
+        read HERE, in the Input process, through ``_pointer_position_seam``
+        (``GetCursorPos``), and the click goes through the same
+        ``_mouse_click_seam`` as ``click_point``, so the button and count
+        validation and the stuck-button handling are the primitive's.
+
+        Gate: the ``[click] enabled`` master switch only. Unlike the grid
+        handlers this does not read ``grid_enabled_effective``: a bad grid
+        key refuses the grid's geometry, and this action uses none.
+
+        Emits one ``MouseActionResponse``. An unreadable pointer fails
+        closed with ``pointer_unavailable``, sending no input.
+        """
+        action_name = "click_at_pointer"
+        try:
+            if not self._get_validated_click_config().enabled:
+                logger.info(
+                    "click_at_pointer: voice clicking disabled by config; "
+                    "short-circuiting (trace_id=%s)", trace_id,
+                )
+                self._emit_mouse_action_response(
+                    action_name=action_name, request_id=request_id,
+                    trace_id=trace_id, succeeded=False,
+                    reason="disabled_by_config",
+                )
+                return
+
+            position = self._pointer_position_seam()
+            if position is None:
+                logger.warning(
+                    "click_at_pointer: the pointer position could not be "
+                    "read; sending no input (trace_id=%s)", trace_id,
+                )
+                self._emit_mouse_action_response(
+                    action_name=action_name, request_id=request_id,
+                    trace_id=trace_id, succeeded=False,
+                    reason="pointer_unavailable",
+                )
+                return
+            x, y = position
+
+            # Same invalidation as click_point: a click can move focus, the
+            # caret, or the selection (wh-review-pattern-fixes.8).
+            self.buffer_manager.invalidate()
+            succeeded, reason = self._mouse_click_seam(
+                x, y, button, click_count,
+            )
+            logger.info(
+                "click_at_pointer: point=(%r,%r) button=%s count=%r ok=%s "
+                "reason=%s (trace_id=%s)",
+                x, y, button, click_count, succeeded, reason, trace_id,
+            )
+            self._emit_mouse_action_response(
+                action_name=action_name, request_id=request_id,
+                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 -- never-raise handler
+            logger.error(
+                "click_at_pointer: unexpected error (trace_id=%s): %s",
                 trace_id, exc, exc_info=True,
             )
             self._emit_mouse_action_response(

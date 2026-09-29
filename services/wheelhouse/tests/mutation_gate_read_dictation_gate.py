@@ -830,7 +830,7 @@ MUTATIONS = [
         "src": CE,
         "old": """_FOREGROUND_TEXT_RULE_FUNCTIONS = frozenset(
     {
-        "literal", "type_text", "insert_raw",
+        "literal", "type_text", "insert_raw", "insert_raw_no_spaces",
         "wrap_or_insert", "transform_selection",
         "fix_text_ai", "rewrite_text_ai",
     }
@@ -838,13 +838,29 @@ MUTATIONS = [
 """,
         "new": """_FOREGROUND_TEXT_RULE_FUNCTIONS = frozenset(
     {
-        "literal", "type_text", "insert_raw",
+        "literal", "type_text", "insert_raw", "insert_raw_no_spaces",
         "wrap_or_insert", "transform_selection",
     }
 )
 """,
         "expect": [
             "test_an_ai_transform_rule_is_refused_before_its_capture",
+        ],
+    },
+    {
+        # wh-voice-access-parity.1.14: insert_raw_no_spaces leaves the
+        # whole-rule classification; a leading hk step of a "no space"
+        # rule reaches Input during a read again.
+        "name": "no-spaces-insert-not-classified",
+        "src": CE,
+        "old": """        "literal", "type_text", "insert_raw", "insert_raw_no_spaces",
+        "wrap_or_insert", "transform_selection",
+        "fix_text_ai", "rewrite_text_ai",""",
+        "new": """        "literal", "type_text", "insert_raw",
+        "wrap_or_insert", "transform_selection",
+        "fix_text_ai", "rewrite_text_ai",""",
+        "expect": [
+            "test_no_spaces_insert_refuses_the_whole_rule_up_front",
         ],
     },
     {

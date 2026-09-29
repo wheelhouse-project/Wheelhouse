@@ -14,6 +14,7 @@ import json
 import logging
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
@@ -212,6 +213,12 @@ class PatternManagerDialog(QDialog):
     # of date.
     tree_changed = Signal(dict)
 
+    # wh-pattern-font-size: emitted with the new point size when the user's
+    # Ctrl+= / Ctrl+- / Ctrl+0 actually changes it, so the GUI can save it.
+    # apply_font_point_size never emits it: a size set from the saved
+    # settings, or restored after a failed save, is not a new user choice.
+    font_size_changed = Signal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Pattern Manager")
@@ -266,6 +273,13 @@ class PatternManagerDialog(QDialog):
         # The open editor dialog, while one is up: create/update/test-draft
         # results are forwarded to it (wh-pattern-editor-dialog).
         self._editor_dialog = None
+        # wh-pattern-manager-improve.2.1.1: True from _show_load_error until
+        # the next populate; the filter must leave the load-error text in
+        # the empty-state label alone. _user_file_error is True after a
+        # populate whose data carried "user_file_error": the user's own
+        # patterns are unknown, so the filter must not claim there are none.
+        self._load_failed = False
+        self._user_file_error = False
 
         self._build_ui()
         self._setup_font_size_shortcuts()
@@ -337,24 +351,41 @@ class PatternManagerDialog(QDialog):
         self._zoom_reset_shortcut.activated.connect(self._on_zoom_reset)
 
     def _on_zoom_in(self):
-        self._set_font_point_size(
+        self._user_set_font_point_size(
             self._current_font_point_size + _FONT_SIZE_STEP
         )
 
     def _on_zoom_out(self):
-        self._set_font_point_size(
+        self._user_set_font_point_size(
             self._current_font_point_size - _FONT_SIZE_STEP
         )
 
     def _on_zoom_reset(self):
-        self._set_font_point_size(self._default_font_point_size)
+        self._user_set_font_point_size(self._default_font_point_size)
 
-    def _set_font_point_size(self, point_size: int):
+    def _user_set_font_point_size(self, point_size: int):
+        if self._set_font_point_size(point_size):
+            self.font_size_changed.emit(self._current_font_point_size)
+
+    def apply_font_point_size(self, point_size: int | None):
+        """Set the font size without reporting it as a user choice.
+
+        ``None`` means this dialog's own default size. The value goes
+        through the same 7-24 clamp as the zoom shortcuts. Never emits
+        ``font_size_changed``.
+        """
+        if point_size is None:
+            point_size = self._default_font_point_size
+        self._set_font_point_size(point_size)
+
+    def _set_font_point_size(self, point_size: int) -> bool:
+        """Clamp and apply ``point_size``; return True if the size changed."""
         clamped = max(_FONT_SIZE_MIN, min(_FONT_SIZE_MAX, point_size))
         if clamped == self._current_font_point_size:
-            return
+            return False
         self._current_font_point_size = clamped
         self._apply_font_size()
+        return True
 
     def _apply_font_size(self):
         """Push ``_current_font_point_size`` out to every pane.
@@ -466,6 +497,7 @@ class PatternManagerDialog(QDialog):
         (shared by the watchdog and the pm_get_patterns_result error
         branch); populate() clears it when real data arrives."""
         self._load_timer.stop()
+        self._load_failed = True
         self._tree_empty_label.setStyleSheet(_ERROR_STYLE)
         self._tree_empty_label.setText(message)
         self._tree_empty_label.setVisible(True)
@@ -554,7 +586,8 @@ class PatternManagerDialog(QDialog):
         # panel. Hidden detail widgets stay in the chain; Tab skips them
         # while they are hidden.
         order = [
-            self._change_hw_btn, self._filter_input, self._tree,
+            self._change_hw_btn, self._filter_input, self._own_only_check,
+            self._tree,
             self._try_input, self._add_btn, self._help_btn,
             self._edit_btn, self._duplicate_btn, self._customize_btn,
             self._remove_custom_btn, self._explain_btn, self._explain_text,
@@ -572,23 +605,23 @@ class PatternManagerDialog(QDialog):
 
         # --- Wake word row ---
         hotword_row = QHBoxLayout()
-        hotword_row.addWidget(QLabel("Wake word:"))
+        hotword_row.addWidget(QLabel("Safety word:"))
         self._hotword_value = QLabel(self._hotword)
         self._hotword_value.setStyleSheet("font-weight: bold;")
         self._hotword_value.setToolTip(
-            "Say this word before commands marked [hotword]."
+            "Say this word before commands marked [safety word]."
         )
         hotword_row.addWidget(self._hotword_value)
         hotword_row.addStretch()
         change_hw_btn = QPushButton("Change...")
         self._change_hw_btn = change_hw_btn
         change_hw_btn.setMaximumWidth(_CHANGE_HOTWORD_BTN_BASE_MAX_WIDTH)
-        change_hw_btn.setAccessibleName("Change wake word")
+        change_hw_btn.setAccessibleName("Change safety word")
         change_hw_btn.setAccessibleDescription(
-            "Opens a prompt for a new wake word"
+            "Opens a prompt for a new safety word"
         )
         change_hw_btn.setToolTip(
-            "Pick a different wake word (a single spoken word)."
+            "Pick a different safety word (a single spoken word)."
         )
         change_hw_btn.clicked.connect(self._on_change_hotword_clicked)
         hotword_row.addWidget(change_hw_btn)
@@ -616,7 +649,27 @@ class PatternManagerDialog(QDialog):
         self._filter_input.textChanged.connect(self._on_filter_changed)
         # Enter jumps from the filter to its results (keyboard-first).
         self._filter_input.returnPressed.connect(self._tree_focus)
+
+        # "Only my patterns" (wh-pattern-manager-improve.2): limits the list to
+        # rows whose stored pattern has is_user_created True (edited built-ins,
+        # added and duplicated rules). Unticked at every open, never saved.
+        # The visible text carries the Alt+M mnemonic; the accessible name has
+        # no ampersand because a voice click ("<safety word> click only my
+        # patterns") matches the accessible name.
+        self._own_only_check = QCheckBox("Only &my patterns")
+        self._own_only_check.setAccessibleName("Only my patterns")
+        _own_only_help = (
+            "Shows only the patterns you added, duplicated, or customized"
+        )
+        self._own_only_check.setAccessibleDescription(_own_only_help)
+        self._own_only_check.setToolTip(_own_only_help)
+        self._own_only_check.toggled.connect(self._on_own_only_toggled)
+
+        # The checkbox gets its own row below the filter box. Its label grows
+        # with the font size; sharing one row starved the filter box to
+        # about 30 px at 18 pt (wh-pattern-manager-improve.2.1.2).
         layout.addWidget(self._filter_input)
+        layout.addWidget(self._own_only_check)
 
         # --- Tree widget ---
         self._tree = QTreeWidget()
@@ -697,9 +750,9 @@ class PatternManagerDialog(QDialog):
         help_btn.setMaximumWidth(_HELP_BTN_BASE_MAX_WIDTH)
         help_btn.setAccessibleName("Pattern help")
         help_btn.setAccessibleDescription(
-            "Opens the help page explaining patterns and the wake word"
+            "Opens the help page explaining patterns and the safety word"
         )
-        help_btn.setToolTip("How patterns and the wake word work.")
+        help_btn.setToolTip("How patterns and the safety word work.")
         help_btn.clicked.connect(self._on_help_clicked)
         btn_row.addWidget(help_btn)
 
@@ -762,7 +815,7 @@ class PatternManagerDialog(QDialog):
             "border-radius: 3px; font-size: 11px;"
         )
         self._hotword_badge.setToolTip(
-            "This pattern only responds after you say the wake word."
+            "This pattern only responds after you say the safety word."
         )
         self._user_badge = QLabel("User")
         self._user_badge.setStyleSheet(
@@ -801,7 +854,7 @@ class PatternManagerDialog(QDialog):
 
         # Hotword display
         hotword_row = QHBoxLayout()
-        hotword_row.addWidget(QLabel("Hotword:"))
+        hotword_row.addWidget(QLabel("Safety word:"))
         self._detail_hotword = QLabel()
         hotword_row.addWidget(self._detail_hotword, stretch=1)
         info_layout.addLayout(hotword_row)
@@ -1029,6 +1082,7 @@ class PatternManagerDialog(QDialog):
         # Real data arrived: the load watchdog and any load-error state
         # shown by it are stale (wh-pattern-editor-r0.2).
         self._load_timer.stop()
+        self._load_failed = False
         self._tree_empty_label.setStyleSheet(_MUTED_STYLE)
         self._tree_empty_label.setText("")
         self._tree_empty_label.setVisible(False)
@@ -1039,6 +1093,7 @@ class PatternManagerDialog(QDialog):
         # the user's own patterns back (wh-pattern-editor-r0.7 GUI side).
         # A populate without the key clears any earlier banner.
         user_file_error = data.get("user_file_error")
+        self._user_file_error = isinstance(user_file_error, dict)
         if isinstance(user_file_error, dict):
             path = user_file_error.get("path") or "your patterns file"
             reason = user_file_error.get("error") or "unknown error"
@@ -1085,9 +1140,9 @@ class PatternManagerDialog(QDialog):
                 label = trigger
                 tips = []
                 if pat.get("requires_hotword"):
-                    label += "  [hotword]"
+                    label += "  [safety word]"
                     tips.append(
-                        f"[hotword] -- say the wake word "
+                        f"[safety word] -- say the safety word "
                         f"('{self._hotword}') before this command."
                     )
                 if pat.get("overrides_builtin"):
@@ -1129,7 +1184,7 @@ class PatternManagerDialog(QDialog):
 
         # Re-apply any active filter
         filter_text = self._filter_input.text().strip()
-        if filter_text:
+        if filter_text or self._own_only_check.isChecked():
             self._on_filter_changed(filter_text)
 
         # The whole tree was rebuilt -- every add / edit / duplicate /
@@ -1275,8 +1330,13 @@ class PatternManagerDialog(QDialog):
         self._show_detail(pat)
 
     def _on_filter_changed(self, text: str):
-        """Filter tree items by trigger text (case-insensitive)."""
+        """Filter tree items by trigger text (case-insensitive).
+
+        A row shows only when it passes the text test AND (the "Only my
+        patterns" box is unticked OR the row's pattern is_user_created).
+        """
         search = text.strip().lower()
+        own_only = self._own_only_check.isChecked()
 
         any_match = False
         root = self._tree.invisibleRootItem()
@@ -1288,22 +1348,46 @@ class PatternManagerDialog(QDialog):
                 pat = child.data(0, Qt.ItemDataRole.UserRole)
                 trigger = (pat or {}).get("trigger_display", "").lower()
                 match = (not search) or (search in trigger)
+                if own_only and not (pat or {}).get("is_user_created"):
+                    match = False
                 child.setHidden(not match)
                 if match:
                     any_visible = True
             cat_item.setHidden(not any_visible)
             any_match = any_match or any_visible
 
-        # Empty state: say WHY the tree is blank (spec section 13).
-        show_empty = bool(search) and not any_match
-        self._tree_empty_label.setText(
-            f"No patterns match '{text.strip()}'" if show_empty else ""
-        )
-        self._tree_empty_label.setVisible(show_empty)
+        # Empty state: say WHY the tree is blank (spec section 13). While a
+        # load error is showing, the label belongs to that error (text,
+        # visibility, style): a blank tree then means "not loaded", not "no
+        # match" (wh-pattern-manager-improve.2.1.1).
+        if not self._load_failed:
+            show_empty = (bool(search) or own_only) and not any_match
+            if own_only and self._user_file_error:
+                # The user's patterns file could not be read, so "you have
+                # no patterns" would be false; the error banner explains.
+                show_empty = False
+            if not show_empty:
+                empty_text = ""
+            elif not own_only:
+                empty_text = f"No patterns match '{text.strip()}'"
+            elif search:
+                empty_text = f"None of your patterns match '{text.strip()}'"
+            else:
+                empty_text = "You have no patterns of your own yet"
+            self._tree_empty_label.setText(empty_text)
+            self._tree_empty_label.setVisible(show_empty)
 
         # The rows a walk would find just changed; tell Logic so the numbered
         # overlay re-walks (wh-overlay-rewalk-after-filter).
         self._emit_tree_changed("filter")
+
+    def _on_own_only_toggled(self, _checked: bool) -> None:
+        """The "Only my patterns" box changed: filter again.
+
+        Runs the same path as a typed filter, which reports the change to
+        Logic with reason "filter" so the numbered overlay refreshes.
+        """
+        self._on_filter_changed(self._filter_input.text())
 
     def _on_tree_item_expanded(self, _item) -> None:
         """A category opened: its child rows are walkable again.
@@ -1387,16 +1471,14 @@ class PatternManagerDialog(QDialog):
         # every replacement while the Explain panel in the same window
         # said otherwise (wh-pattern-editor-r4.2).
         kind = pattern_kind(pat)
-        type_label = (
-            "Trailing command" if kind == "trailing" else kind.capitalize()
-        )
+        type_label = kind.capitalize()
         self._type_badge.setText(type_label)
         self._detail_type.setText(type_label)
 
         # Hotword badge
         requires_hw = pat.get("requires_hotword", False)
         if requires_hw:
-            self._hotword_badge.setText(f"Hotword: {self._hotword}")
+            self._hotword_badge.setText(f"Safety word: {self._hotword}")
             self._hotword_badge.setVisible(True)
             self._detail_hotword.setText(
                 f"Required ({self._hotword})"
@@ -1547,7 +1629,7 @@ class PatternManagerDialog(QDialog):
         if match.get("requires_hotword"):
             note = f"say '{self._hotword}' first"
         else:
-            note = "no wake word needed"
+            note = "no safety word needed"
         self._set_try_result(f"Matches '{trigger}' ({note})", _OK_STYLE)
         item = self._find_tree_item(match.get("pattern_id"))
         if item is not None:
@@ -1746,8 +1828,8 @@ class PatternManagerDialog(QDialog):
         self._show_hotword_error(None)
         text, ok = QInputDialog.getText(
             self,
-            "Change Wake Word",
-            "New wake word (a single spoken word):",
+            "Change Safety Word",
+            "New safety word (a single spoken word):",
             text=self._hotword,
         )
         if not ok:
@@ -1756,7 +1838,7 @@ class PatternManagerDialog(QDialog):
         if not value:
             # Field-level error under the wake-word row, not a modal
             # (wh-pattern-editor-ux, spec section 13).
-            self._show_hotword_error("The wake word cannot be empty.")
+            self._show_hotword_error("The safety word cannot be empty.")
             return
         self.pattern_action.emit(
             {"action": "pm_set_hotword", "data": {"hotword": value}}

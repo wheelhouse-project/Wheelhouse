@@ -268,9 +268,10 @@ class TestUserMadePattern:
 
 
 # ---------------------------------------------------------------------------
-# The same rule on the two paths that do not go through the matcher:
-# trailing-position commands, and replacements found in a remainder by
-# SpeechProcessor._find_earliest_replacement.
+# The same rule on the path that does not go through the matcher:
+# replacements found in a remainder by
+# SpeechProcessor._find_earliest_replacement. (A second path, trailing-
+# position commands, was removed by wh-remove-trailing-submit.)
 # ---------------------------------------------------------------------------
 
 _HINT_ACTIONS = (
@@ -310,82 +311,6 @@ def _assert_ran(h, word):
     h.app.websocket_manager.send_command_to_stt.assert_awaited_with(
         "add_hint", hint=_SELECTED)
     assert word not in _typed(h)
-
-
-class TestUserMadeTrailingPattern:
-    """A user-made ``position = "trailing"`` pattern with the hint action."""
-
-    @pytest.fixture
-    async def trailing_harness(self, tmp_path):
-        h = await _user_harness(
-            tmp_path, "pattern = 'zapword'\nposition = 'trailing'\n")
-        assert "zapword" in h.catalog.trailing_commands
-        with patch("pyperclip.paste", return_value=_SELECTED):
-            yield h
-        await h.stop()
-
-    async def _say_alone(self, h):
-        await h.send_word("zapword", start_of_utterance=True)
-        await h.send_utterance_end_marker(h._utterance_counter)
-        await h.wait_for_timeout(300)
-
-    async def _say_after_words(self, h):
-        """The end-of-utterance split path: head dictates, last word held."""
-        await h.send_word("backspace", start_of_utterance=True)
-        utterance_id = h._utterance_counter
-        await h.send_word("hello", utterance_id=utterance_id)
-        await h.send_word("zapword", utterance_id=utterance_id)
-        await h.send_utterance_end_marker(utterance_id)
-        await h.wait_for_timeout(300)
-
-    @pytest.mark.asyncio
-    async def test_alone_refused_when_false(self, trailing_harness):
-        trailing_harness.processor.apply_hint_engine(False)
-        await self._say_alone(trailing_harness)
-        _assert_refused(trailing_harness, "zapword")
-
-    @pytest.mark.asyncio
-    async def test_after_words_refused_when_false(self, trailing_harness):
-        trailing_harness.processor.apply_hint_engine(False)
-        await self._say_after_words(trailing_harness)
-        _assert_refused(trailing_harness, "zapword")
-
-    @pytest.mark.asyncio
-    async def test_false_is_not_held_as_a_candidate(self, trailing_harness):
-        """Refused at hold time, not only at fire time: under an engine
-        that does not apply hints the word is ordinary dictation and is
-        never held back as a command candidate."""
-        h = trailing_harness
-        h.processor.apply_hint_engine(False)
-        await h.send_word("zapword", start_of_utterance=True)
-        assert h.processor._pending_trailing_word is None
-        await h.send_utterance_end_marker(h._utterance_counter)
-        await h.wait_for_timeout(300)
-        _assert_refused(h, "zapword")
-
-    @pytest.mark.asyncio
-    async def test_false_between_hold_and_fire_refuses(self, trailing_harness):
-        h = trailing_harness
-        await h.send_word("zapword", start_of_utterance=True)
-        assert h.processor._pending_trailing_word == "zapword"
-        h.processor.apply_hint_engine(False)
-        await h.send_utterance_end_marker(h._utterance_counter)
-        await h.wait_for_timeout(300)
-        _assert_refused(h, "zapword")
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", [None, True])
-    async def test_alone_runs_otherwise(self, trailing_harness, value):
-        trailing_harness.processor.apply_hint_engine(value)
-        await self._say_alone(trailing_harness)
-        _assert_ran(trailing_harness, "zapword")
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", [None, True])
-    async def test_after_words_runs_otherwise(self, trailing_harness, value):
-        trailing_harness.processor.apply_hint_engine(value)
-        await self._say_after_words(trailing_harness)
-        _assert_ran(trailing_harness, "zapword")
 
 
 class TestUserMadeReplacementInARemainder:

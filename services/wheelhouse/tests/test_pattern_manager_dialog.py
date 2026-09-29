@@ -472,19 +472,21 @@ class TestExplainPanel:
         )
         assert dialog._type_badge.text() == "Command"
 
-    def test_type_badge_trailing_position(self):
+    def test_type_badge_ignores_a_leftover_trailing_position(self):
+        """wh-remove-trailing-submit: the loader ignores position, so the
+        badge shows the kind the row really loads as."""
         dialog = _make_dialog()
         dialog._show_detail(
             {
                 "id": "trid",
                 "trigger_display": "submit",
-                "raw_pattern": "submit",
+                "raw_pattern": "^submit$",
                 "position": "trailing",
                 "raw_actions": [{"function": "press", "params": ["enter"]}],
             }
         )
-        assert dialog._type_badge.text() == "Trailing command"
-        assert dialog._detail_type.text() == "Trailing command"
+        assert dialog._type_badge.text() == "Command"
+        assert dialog._detail_type.text() == "Command"
 
     def test_detail_action_prefers_logic_description(self):
         dialog = _make_dialog()
@@ -609,7 +611,7 @@ class TestTryItBox:
                 },
             }
         )
-        assert "no wake word" in dialog._try_result_label.text().lower()
+        assert "no safety word" in dialog._try_result_label.text().lower()
 
     def test_match_with_unknown_id_still_reports(self):
         dialog = _make_dialog()
@@ -753,6 +755,57 @@ class TestBadgeTooltips:
         assert "built-in" not in dialog._user_badge.toolTip()
 
 
+class TestSafetyWordNaming:
+    """wh-safety-word-rename: the x-ray prefix is the "safety word" in the UI.
+
+    The wake word is "computer", which turns listening back on. The Pattern
+    Manager once called the x-ray prefix "Wake word:" and tagged protected
+    rows "[hotword]"; these tests fail if either name comes back.
+    """
+
+    @staticmethod
+    def _data_with_protected_pattern():
+        data = _sample_data()
+        data["categories"]["Commands - Window Management"]["patterns"].append(
+            {
+                "id": "uid-close",
+                "trigger_display": "close window",
+                "requires_hotword": True,
+                "is_user_created": False,
+                "overrides_builtin": False,
+                "raw_pattern": "^close window$",
+                "raw_actions": [],
+                "description": "Press Alt+F4",
+            }
+        )
+        return data
+
+    def test_protected_row_is_tagged_safety_word(self):
+        dialog = _make_dialog()
+        dialog.populate(self._data_with_protected_pattern())
+        labels = _all_child_labels(dialog)
+        assert "close window  [safety word]" in labels, labels
+        assert not any("hotword" in lbl.lower() for lbl in labels), labels
+        _select_pattern(dialog, "uid-close")
+        item = dialog._tree.currentItem()
+        assert item.toolTip(0).startswith(
+            "[safety word] -- say the safety word ('computer')"
+        ), item.toolTip(0)
+
+    def test_labels_name_the_safety_word(self):
+        from PySide6.QtWidgets import QLabel
+
+        dialog = _make_dialog()
+        dialog.populate(self._data_with_protected_pattern())
+        _select_pattern(dialog, "uid-close")
+        texts = [label.text() for label in dialog.findChildren(QLabel)]
+        # The row at the top of the window and the detail-panel row.
+        assert texts.count("Safety word:") == 2, texts
+        assert "Wake word:" not in texts, texts
+        assert "Hotword:" not in texts, texts
+        assert dialog._hotword_badge.text() == "Safety word: computer"
+
+
 # ---------------------------------------------------------------------------
 # UX quality pass (wh-pattern-editor-ux, spec section 13)
 # ---------------------------------------------------------------------------
@@ -868,14 +921,14 @@ class TestHotwordFieldError:
                 "action": "pm_set_hotword_result",
                 "data": {
                     "success": False,
-                    "error": "The wake word must be a single word",
+                    "error": "The safety word must be a single word",
                 },
             })
         warn.assert_not_called()
         assert not dialog._hotword_error_label.isHidden()
         assert (
             dialog._hotword_error_label.text()
-            == "The wake word must be a single word"
+            == "The safety word must be a single word"
         )
 
     def test_hotword_error_cleared_on_success(self):
@@ -1469,10 +1522,16 @@ def test_open_pattern_manager_wires_tree_changed_to_the_guarded_sender():
     holder.commands_to_logic_queue = MagicMock()
     holder._send_pm_command = MagicMock()
     holder._send_pattern_manager_tree_changed = MagicMock()
+    # wh-pattern-font-size: the open path also applies the saved font size
+    # and wires the size-changed signal to its save.
+    holder._restore_pattern_manager_font_size = MagicMock()
+    holder._send_pattern_manager_font_size = MagicMock()
 
+    # wh-voice-access-parity.1.15 F4: the open path also takes the Windows
+    # foreground; stubbed so the test never moves a real window.
     with patch(
         "pattern_manager_dialog.PatternManagerDialog", return_value=dialog
-    ):
+    ), patch("terminal_editor_window._steal_foreground"):
         GuiManager._open_pattern_manager.__get__(holder)()
 
     # A repopulate is one of the two tree changes the dialog reports.
@@ -1483,3 +1542,106 @@ def test_open_pattern_manager_wires_tree_changed_to_the_guarded_sender():
     assert sent["action"] == "pattern_manager_tree_changed"
     # The unguarded Pattern Manager command path must never carry this event.
     holder._send_pm_command.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# wh-voice-access-parity.1.15 F4: every trigger of _open_pattern_manager
+# ("show commands", "what can I say", the tray items) must restore a
+# minimized dialog and bring it to the front with keyboard focus. David's
+# check of 1.14: "It starts it but it does not restore it or bring it into
+# focus. It just appears in the task bar". No window is shown: the state and
+# activation calls are stubbed and recorded, and _steal_foreground (the
+# terminal editor's AttachThreadInput bypass) is patched.
+# ---------------------------------------------------------------------------
+
+
+def _open_with_state(state, steal=None):
+    """Run _open_pattern_manager on a stubbed dialog whose windowState() is
+    ``state``; return (dialog, recorded calls, the _steal_foreground mock)."""
+    from gui import GuiManager
+
+    calls = []
+    current = {"state": state}
+    dialog = _make_dialog()
+    dialog.windowState = lambda: current["state"]  # type: ignore[method-assign]
+
+    def _set_state(new_state):
+        calls.append(("setWindowState", new_state))
+        current["state"] = new_state
+
+    dialog.setWindowState = _set_state  # type: ignore[method-assign]
+    dialog.show = lambda: calls.append(("show",))  # type: ignore[method-assign]
+    dialog.raise_ = lambda: calls.append(("raise_",))  # type: ignore[method-assign]
+    dialog.activateWindow = (  # type: ignore[method-assign]
+        lambda: calls.append(("activateWindow",))
+    )
+    dialog.winId = lambda: 4242  # type: ignore[method-assign]
+
+    holder = type("_Holder", (), {})()
+    holder._pm_dialog = dialog
+    holder.commands_to_logic_queue = MagicMock()
+
+    steal_mock = steal if steal is not None else MagicMock(return_value=True)
+
+    def _record_steal(hwnd, *args, **kwargs):
+        calls.append(("_steal_foreground", hwnd))
+        return steal_mock(hwnd, *args, **kwargs)
+
+    with patch("terminal_editor_window._steal_foreground", _record_steal):
+        GuiManager._open_pattern_manager.__get__(holder)()
+    return dialog, calls, steal_mock
+
+
+def test_open_pattern_manager_restores_a_minimized_dialog():
+    _dialog, calls, _steal = _open_with_state(Qt.WindowState.WindowMinimized)
+
+    state_calls = [c for c in calls if c[0] == "setWindowState"]
+    assert len(state_calls) == 1, calls
+    new_state = state_calls[0][1]
+    assert not (new_state & Qt.WindowState.WindowMinimized), new_state
+    assert new_state & Qt.WindowState.WindowActive, new_state
+    # The restore comes before the dialog is shown and activated.
+    assert calls.index(state_calls[0]) < calls.index(("show",))
+
+
+def test_open_pattern_manager_keeps_a_maximized_dialog_maximized():
+    _dialog, calls, _steal = _open_with_state(
+        Qt.WindowState.WindowMaximized | Qt.WindowState.WindowMinimized
+    )
+
+    state_calls = [c for c in calls if c[0] == "setWindowState"]
+    assert len(state_calls) == 1, calls
+    new_state = state_calls[0][1]
+    assert new_state & Qt.WindowState.WindowMaximized, new_state
+    assert not (new_state & Qt.WindowState.WindowMinimized), new_state
+
+
+def test_open_pattern_manager_leaves_a_normal_dialog_state_alone():
+    _dialog, calls, _steal = _open_with_state(Qt.WindowState.WindowNoState)
+
+    assert [c for c in calls if c[0] == "setWindowState"] == [], calls
+
+
+def test_open_pattern_manager_takes_the_foreground_with_the_dialog_hwnd():
+    _dialog, calls, steal = _open_with_state(Qt.WindowState.WindowNoState)
+
+    steal.assert_called_once()
+    assert steal.call_args[0][0] == 4242
+    # show / raise_ / activateWindow still run, and the foreground call
+    # comes after them.
+    order = [c[0] for c in calls]
+    assert order[-4:] == [
+        "show", "raise_", "activateWindow", "_steal_foreground",
+    ], order
+
+
+def test_open_pattern_manager_survives_a_foreground_failure():
+    steal = MagicMock(side_effect=OSError("SetForegroundWindow refused"))
+
+    # Must not raise into the Qt slot or queue handler that called it.
+    _dialog, calls, _steal = _open_with_state(
+        Qt.WindowState.WindowNoState, steal=steal
+    )
+
+    steal.assert_called_once()
+    assert ("activateWindow",) in calls

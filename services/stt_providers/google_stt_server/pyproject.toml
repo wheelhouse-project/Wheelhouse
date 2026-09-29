@@ -19,7 +19,6 @@ dependencies = [
     # winsdk is NOT pinned here. The WinRT capture path is shared, so
     # wheelhouse-shared owns that pin for every provider
     # (wh-capture-winrt-required).
-    "pysilero-vad",
 ]
 
 [dependency-groups]

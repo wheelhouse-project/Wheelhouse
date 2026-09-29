@@ -170,6 +170,12 @@ class OverlayEvent:
         stash in ``pending_ambiguous_notice``; ``None`` for other kinds.
       reason: optional human-readable reason carried into a terminal
         recovery state; empty for normal events.
+      visible_window_left: for a failed ``build_response`` or a ``timeout``
+        in ``refresh_in_flight`` -- ``True`` when Logic found that the window
+        the visible numbers were read from is no longer the foreground window
+        (wh-overlay-failed-focus-read-keeps-numbers). The refresh then closes
+        instead of falling back to those numbers. Ignored for other kinds and
+        states.
     """
 
     kind: OverlayEventKind
@@ -181,6 +187,7 @@ class OverlayEvent:
     snapshot_valid: bool = False
     notice: Optional[ClickNoticeEvent] = None
     reason: str = ""
+    visible_window_left: bool = False
 
 
 # Sentinel for "this state has no timeout", mirroring editor_lifecycle's
@@ -793,6 +800,31 @@ class ClickOverlayStateMachine:
         self._enter_closed()
         return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
 
+    def _refresh_window_left_to_closed(self) -> ApplyResult:
+        """Close a failed refresh whose visible numbers belong to a gone window.
+
+        wh-overlay-failed-focus-read-keeps-numbers. Clear the screen, fire the
+        generic "numbers couldn't be drawn" notice, unpin every pinned
+        snapshot, and enter ``closed``. The notice matches a failed FIRST read:
+        ``_on_walk_in_flight`` closes a failed or timed-out walk through
+        ``_error_to_closed(emit_standalone_notice=True)`` (boss ruling
+        2026-09-24 18:54, confirmed by David).
+
+        Not ``_error_to_closed``: in an auto-open session
+        ``pending_ambiguous_notice`` survives into ``painted`` and
+        ``refresh_in_flight``, and ``_error_to_closed`` would fire that old
+        ambiguous-click notice for a click the user already resolved.
+        """
+
+        effects: list[Effect] = [
+            self._cancel_timer(),
+            self._dispatch_clear(),
+            self._fire_standalone_failure_notice(),
+        ]
+        effects.extend(self._unpin_all_pinned())
+        self._enter_closed()
+        return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
+
     def _enter_post_click_settling(self) -> ApplyResult:
         """painted -> post_click_settling: clear the badges, keep the session.
 
@@ -939,17 +971,36 @@ class ClickOverlayStateMachine:
         return ApplyResult(OverlayOutcome.ACCEPTED, tuple(effects))
 
     def _restart_walk(self, reason: BuildReason) -> ApplyResult:
-        """Restart/supersede: bump gen, unpin old, dispatch a new walk.
+        """Restart/supersede: clear, unpin old, bump gen, dispatch a new walk.
 
         Used by the ``walk_in_flight`` / ``paint_in_flight`` restart and
-        supersede cells. Cancels the stale timer, unpins the
-        previously-pinned snapshot before the new build (so a stale timer
-        cannot abort a valid new walk and no pin leaks), bumps the
-        generation, dispatches the new build, and arms a fresh
-        ``walk_in_flight`` timer. Stays in / moves to ``walk_in_flight``.
+        supersede cells. Cancels the stale timer, clears the abandoned paint
+        when one was dispatched, unpins the previously-pinned snapshot before
+        the new build (so a stale timer cannot abort a valid new walk and no
+        pin leaks), bumps the generation, dispatches the new build, and arms
+        a fresh ``walk_in_flight`` timer. Stays in / moves to
+        ``walk_in_flight``.
+
+        The clear (wh-overlay-failed-focus-read-keeps-numbers.1.1): out of
+        ``paint_in_flight`` a paint for the pinned snapshot is already on its
+        way to the GUI and may be on screen. Nothing else removes it: if the
+        new walk fails or times out, ``_error_to_closed`` finds no pin and
+        emits no clear, so the old numbers stayed up for the GUI lease. The
+        clear is gated on the pin through ``_clear_if_visible``, so a
+        ``walk_in_flight`` restart (nothing painted, no pin) emits none. Two
+        orders are load-bearing, the same ones ``_enter_post_click_settling``
+        keeps. The clear is stamped BEFORE ``_bump_generation``, with the
+        generation the GUI painted: a clear at the new generation would also
+        refuse the new walk's paint at the GUI gate, which refuses any pair
+        at or below the last cleared pair. And the clear goes BEFORE the
+        build, because the GUI turns the walk cue off on a clear and the
+        integration sends the cue with the build.
         """
 
         effects: list[Effect] = [self._cancel_timer()]
+        clear = self._clear_if_visible()
+        if clear is not None:
+            effects.append(clear)
         unpin = self._unpin_current()
         if unpin is not None:
             effects.append(unpin)
@@ -1380,6 +1431,8 @@ class ClickOverlayStateMachine:
                 # preserved and the next paint-ack unpins the correct snapshot.
                 return ApplyResult(OverlayOutcome.NO_OP)
             if not event.build_ok:
+                if self._visible_numbers_left_behind(event):
+                    return self._refresh_window_left_to_closed()
                 # A failed refresh build is non-destructive: keep the prior
                 # valid overlay. Honour auto_hide_in_flight.
                 return self._refresh_build_failed()
@@ -1440,6 +1493,8 @@ class ClickOverlayStateMachine:
         if kind is OverlayEventKind.CLICK_COMPLETE:
             return ApplyResult(OverlayOutcome.HELD)
         if kind is OverlayEventKind.TIMEOUT:
+            if self._visible_numbers_left_behind(event):
+                return self._refresh_window_left_to_closed()
             # Non-destructive timeout: keep prior badges -> painted, or
             # -> paused if auto_hide. Unpin only the failed new snapshot
             # (none is pinned mid-refresh under this machine's bookkeeping,
@@ -1784,6 +1839,26 @@ class ClickOverlayStateMachine:
         self.prior_pinned_snapshot_id = None
         self._prior_pin_deferred = False
         return effects
+
+    def _visible_numbers_left_behind(self, event: OverlayEvent) -> bool:
+        """Whether a failed refresh must close instead of falling back.
+
+        wh-overlay-failed-focus-read-keeps-numbers. ``_refresh_fall_back``
+        keeps the visible numbers on the premise that they are still usable.
+        That premise is false when the window they were read from is no longer
+        in front: a focus change started the refresh, and the old window may
+        already be closed. Logic reports that case on the failure event as
+        ``visible_window_left``, and the refresh then closes through
+        ``_refresh_window_left_to_closed`` -- clear the screen, fire the
+        generic failure notice, unpin every pinned snapshot -- so "click N"
+        can no longer resolve against the old list.
+
+        The auto-hide leg keeps its fall-back to ``paused``: the microphone
+        pause already cleared the screen, "click N" is held while paused, and
+        the resume identity check re-walks a window that is no longer in front.
+        """
+
+        return event.visible_window_left and not self.auto_hide_in_flight
 
     def _refresh_build_failed(self) -> ApplyResult:
         """refresh_in_flight build-response (failed): non-destructive.

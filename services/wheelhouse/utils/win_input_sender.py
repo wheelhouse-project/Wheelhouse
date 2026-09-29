@@ -1170,10 +1170,10 @@ _MOUSE_BUTTON_FLAGS: dict[str, tuple[int, int]] = {
     "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
 }
 
-# The grid's spoken gestures are a single click and a double click; a triple
-# click has no command, and an unbounded count would let one malformed IPC
-# message flood the input queue.
-_MAX_CLICK_COUNT = 2
+# The spoken gestures are a single, a double and a triple click (the triple
+# click arrived with wh-voice-access-parity.2.5); an unbounded count would let
+# one malformed IPC message flood the input queue.
+_MAX_CLICK_COUNT = 3
 
 # Drag shaping. Many applications ignore a drag whose pointer teleports --
 # they never see the intermediate movement that starts their drag operation --
@@ -1323,8 +1323,9 @@ def click_point(
             left of or above the primary has negative coordinates, and the
             virtual-desktop normalization handles the offset.
         button: ``"left"`` or ``"right"``.
-        click_count: 1 or 2. A count of 2 sends both down/up pairs in one
-            SendInput batch, which Windows reads as a double click.
+        click_count: 1, 2 or 3. Every down/up pair goes in one SendInput
+            batch, so Windows reads a count of 2 as a double click and a
+            count of 3 as a triple click.
 
     Returns ``(succeeded, reason)``. ``reason`` is ``None`` on success and
     otherwise one of ``"invalid_point"``, ``"invalid_button"``,
