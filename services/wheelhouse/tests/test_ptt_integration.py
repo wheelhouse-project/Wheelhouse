@@ -666,6 +666,13 @@ class TestMuteReportsAreMatchedToTheirHold:
         assert sm._ptt_hold_id == first + 1
 
 
+# handle.when() is loop.time() + delay in floating point. When the two clock
+# reads return the same t, (t + delay) - t can round above delay: public CI
+# run 36563180257 measured 30.000000000000227 for a 30-second cutoff. Every
+# upper bound below allows this much rounding (wh-797).
+CLOCK_ROUNDING = 1e-9
+
+
 class TestTheHoldTimerSettingsAreChecked:
     """A wrong number in the settings file must not leave a hold with no timers.
 
@@ -727,7 +734,7 @@ class TestTheHoldTimerSettingsAreChecked:
         sm.ptt_start()
 
         remaining = sm._ptt_mute_confirm_handle.when() - loop.time()
-        assert 0.5 < remaining <= 1.0
+        assert 0.5 < remaining <= 1.0 + CLOCK_ROUNDING
 
     def test_a_wait_long_enough_to_cover_a_hold_falls_back_to_the_default(
         self, sm_integrated, mock_config
@@ -747,7 +754,7 @@ class TestTheHoldTimerSettingsAreChecked:
         sm.ptt_start()
 
         remaining = sm._ptt_mute_confirm_handle.when() - loop.time()
-        assert 0.1 < remaining <= 0.5
+        assert 0.1 < remaining <= 0.5 + CLOCK_ROUNDING
 
     @pytest.mark.parametrize("bad", [float("inf"), float("nan")])
     def test_a_wait_time_that_is_not_a_finite_number_falls_back_to_the_default(
@@ -764,7 +771,7 @@ class TestTheHoldTimerSettingsAreChecked:
 
         remaining = sm._ptt_mute_confirm_handle.when() - loop.time()
         assert math.isfinite(remaining)
-        assert 0.1 < remaining <= 0.5
+        assert 0.1 < remaining <= 0.5 + CLOCK_ROUNDING
 
     @pytest.mark.parametrize("bad", [float("inf"), float("nan")])
     def test_a_safety_timeout_that_is_not_a_finite_number_falls_back_to_the_default(
@@ -778,7 +785,7 @@ class TestTheHoldTimerSettingsAreChecked:
 
         remaining = sm._ptt_safety_handle.when() - loop.time()
         assert math.isfinite(remaining)
-        assert 25 < remaining <= 30
+        assert 25 < remaining <= 30 + CLOCK_ROUNDING
 
     @pytest.mark.parametrize(
         "bad",
@@ -803,7 +810,7 @@ class TestTheHoldTimerSettingsAreChecked:
         sm.ptt_start()
 
         remaining = sm._ptt_mute_confirm_handle.when() - loop.time()
-        assert 0.1 < remaining <= 0.5
+        assert 0.1 < remaining <= 0.5 + CLOCK_ROUNDING
 
     @pytest.mark.parametrize(
         "bad",
@@ -819,7 +826,7 @@ class TestTheHoldTimerSettingsAreChecked:
         sm.ptt_start()
 
         remaining = sm._ptt_safety_handle.when() - loop.time()
-        assert 25 < remaining <= 30
+        assert 25 < remaining <= 30 + CLOCK_ROUNDING
 
     def test_a_hold_still_starts_when_a_setting_is_an_oversized_whole_number(
         self, sm_integrated, mock_config
