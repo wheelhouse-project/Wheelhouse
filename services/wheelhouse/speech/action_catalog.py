@@ -278,15 +278,17 @@ ACTION_CATALOG = (
         "label": "Switch to a window",
         "summary": (
             "Brings a window to the front, found by program name (a target "
-            "ending in .exe) or by window-title pattern; the reserved "
-            "target default_browser resolves to your default browser."
+            "ending in .exe) or by the spoken name matching whole words in "
+            "the window title; the reserved target default_browser resolves "
+            "to your default browser."
         ),
         "params": [
             {
                 "name": "target",
                 "summary": (
-                    "Program executable name (notepad.exe), a window-title "
-                    "pattern, or the reserved word default_browser."
+                    "Program executable name (notepad.exe), the words to "
+                    "find in a window title (whole words, plain text), or "
+                    "the reserved word default_browser."
                 ),
                 "kind": "exe_or_title",
             },
@@ -664,8 +666,8 @@ ACTION_CATALOG = (
         ],
         "example": (
             'Trigger "^(?:click|clicks|tap)\\s+(.+)$" with params ["g1"]: saying '
-            '"x-ray click submit button" clicks the button labeled Submit. '
-            "This one needs the safety word first."
+            '"click submit button" clicks the button labeled Submit. '
+            "This one needs no safety word."
         ),
         "audience": "advanced",
         "group": "Clicking",
@@ -681,7 +683,7 @@ ACTION_CATALOG = (
         "example": (
             'Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no '
             'params: saying '
-            "\"show numbers\" shows the badges; then \"x-ray click 4\" "
+            "\"show numbers\" shows the badges; then \"click 4\" "
             "clicks control number 4. \"apply numbers\" and \"show numbers "
             "here\" do the same."
         ),
@@ -1113,7 +1115,7 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^cancel fix$" with no params: saying "x-ray cancel '
+            'Trigger "^cancel fix$" with no params: saying "cancel '
             'fix" stops the running correction.'
         ),
         "audience": "advanced",
@@ -1244,10 +1246,10 @@ ACTION_CATALOG = (
         "name": "stop_listening",
         "label": "Stop listening",
         "summary": (
-            "Switches listening off, as clicking the floating button does "
-            "while it listens. In toggle mode, say the wake word to switch "
-            "it back on; in push-to-talk mode the wake word ends only the "
-            "idle pause, so hold the floating button again."
+            "Switches listening off, as clicking the floating button or the "
+            "tray icon does while it listens. In toggle mode, say the wake "
+            "word to switch it back on; in push-to-talk mode the wake word "
+            "ends only the idle pause, so hold the floating button again."
         ),
         "params": [],
         "example": (

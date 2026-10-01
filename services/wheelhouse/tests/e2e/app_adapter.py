@@ -313,6 +313,26 @@ class AppAdapter:
                 new=self._make_mock_hwnd_utils_win32gui(),
             ),
 
+            # wh-xray-close-app-fails.1.1: hotkey_action starts the Alt+F4
+            # close fallback for the real foreground window it reads through
+            # its own module-level win32gui. Unpatched, the fallback thread
+            # posts SC_CLOSE to the developer's real foreground window 0.5 s
+            # after a close-window test. Same dual import path as
+            # hwnd_utils above: ui_action_handler reaches the module through
+            # ``from . import close_fallback``, so each import path holds its
+            # own copy.
+            patch("services.wheelhouse.ui.close_fallback.start_close_fallback",
+                  new=MagicMock()),
+            patch("ui.close_fallback.start_close_fallback", new=MagicMock()),
+            # wh-xray-close-app-fails.1.2: hotkey_action tags the close
+            # target's window object (a window property) before the Alt+F4
+            # send. Unpatched it would set that property on the developer's
+            # real foreground window whenever a close test runs.
+            patch("services.wheelhouse.ui.ui_action_handler.tag_hwnd_provenance",
+                  new=MagicMock(return_value=1)),
+            patch("ui.ui_action_handler.tag_hwnd_provenance",
+                  new=MagicMock(return_value=1)),
+
             # subprocess.Popen so run_program() records instead of executing
             patch("services.wheelhouse.speech.actions.subprocess.Popen",
                   side_effect=lambda cmd, **kw: self.recording.run_programs.append(str(cmd))),

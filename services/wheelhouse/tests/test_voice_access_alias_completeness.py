@@ -56,8 +56,8 @@ _PATTERNS_PATH = Path(__file__).parent.parent / "speech" / "config" / "patterns.
 
 # (spoken form, doc_id of the row that must own it, hotword needed to fire)
 _SCOPED_ALIASES = [
-    ("click cancel", "click-element", True),
-    ("tap cancel", "click-element", True),
+    ("click cancel", "click-element", False),
+    ("tap cancel", "click-element", False),
     ("copy that", "copy", False),
     ("cut that", "cut", False),
     ("paste that", "paste", False),
@@ -226,14 +226,15 @@ class TestTheTableStillCoversTheScope:
         ):
             assert expected in forms, f"the scope form {expected!r} is missing"
 
-    def test_only_the_click_and_tap_forms_need_the_hotword(self):
+    def test_no_scoped_alias_needs_the_hotword(self):
         # Criterion 8 forbids ADDING requires_hotword to any entry. This pins
-        # the split as measured, so a change either way is visible.
+        # the split as measured, so a change either way is visible. The click
+        # and tap forms were the only gated ones (wh-voice-access-parity.
+        # 1.6.1.1, David 2026-08-17) until wh-safety-word-free-commands
+        # (David 2026-09-30) freed them.
         needing = [form for form, _, needs in _SCOPED_ALIASES if needs]
-        assert needing == ["click cancel", "tap cancel"], (
-            f"the hotword-gated aliases are now {needing}; only the click and "
-            f"tap target-selection forms were gated (wh-voice-access-parity."
-            f"1.6.1.1, David 2026-08-17)"
+        assert needing == [], (
+            f"the hotword-gated aliases are now {needing}; none is expected"
         )
 
 

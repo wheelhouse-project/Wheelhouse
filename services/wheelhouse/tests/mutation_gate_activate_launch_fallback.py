@@ -72,8 +72,12 @@ MUTATIONS = [
     {
         "name": "no-match-says-nothing",
         "file": INPUT_PROC,
+        # wh-safety-word-free-commands: the line is _fail(...) now, which
+        # shows the notice for a plain activate and answers the Logic
+        # process for an awaited one. Dropping it breaks the plain path
+        # these tests drive.
         "old": """            logger.warning(f"No window found matching: {target}")
-            _notice(f"No program matched {target}.")
+            _fail(f"No program matched {target}.")
 """,
         "new": """            logger.warning(f"No window found matching: {target}")
 """,
@@ -95,8 +99,8 @@ MUTATIONS = [
     {
         "name": "several-matches-lists-nothing",
         "file": INPUT_PROC,
-        "old": "        _notice(_several_matches_notice(programs))\n",
-        "new": "        pass\n",
+        "old": "            _fail(_several_matches_notice(programs))\n",
+        "new": "            pass\n",
         "expect": [
             "test_several_matches_list_the_names",
             "test_a_long_list_of_names_is_capped",
@@ -142,7 +146,7 @@ MUTATIONS = [
         # program, nothing came, and only the log knew.
         "name": "failed-launch-says-nothing",
         "file": INPUT_PROC,
-        "old": '        _notice(f"Could not start {program.name}.")\n',
+        "old": '        _fail(f"Could not start {program.name}.")\n',
         "new": "        pass\n",
         "expect": [
             "test_a_launch_failure_says_which_program_would_not_start",
@@ -429,15 +433,16 @@ MUTATIONS = [
         # launch-skips-buffer-invalidation above.
         "name": "the-buffer-is-invalidated-before-the-launch-too",
         "file": INPUT_PROC,
+        # wh-activate-windows-terminal.3 put the boss ruling R4 foreground
+        # read between the loop head and the try, so the pattern anchors
+        # on the loop head and the comment that opens that read.
         "old": """        for candidate in (program, *program.fallbacks):
-            try:
-                os.startfile(candidate.launch_target)
+            # Boss ruling R4: the window in front immediately before the
 """,
         "new": """        if buffer_manager is not None:
             buffer_manager.invalidate()
         for candidate in (program, *program.fallbacks):
-            try:
-                os.startfile(candidate.launch_target)
+            # Boss ruling R4: the window in front immediately before the
 """,
         "expect": ["test_a_launch_that_failed_keeps_the_buffer_valid"],
     },
@@ -453,15 +458,21 @@ MUTATIONS = [
         "file": INPUT_PROC,
         "old": """            launch_thread = _launch_off_command_loop(
                 target,
-                lambda: _start_named_program(
-                    target, logger, notify, find_programs, buffer_manager
+                _answer_when_done(
+                    lambda: _start_named_program(
+                        target, logger, notify, find_programs,
+                        buffer_manager, reply=reply,
+                    ),
+                    reply,
                 ),
                 logger,
                 _notice,
+                on_refused=None if reply is None else reply.refuse,
             )
 """,
         "new": """            _start_named_program(
-                target, logger, notify, find_programs, buffer_manager
+                target, logger, notify, find_programs,
+                buffer_manager, reply=reply,
             )
 """,
         "expect": [
@@ -478,18 +489,24 @@ MUTATIONS = [
         "file": INPUT_PROC,
         "old": """            launch_thread = _launch_off_command_loop(
                 target,
-                lambda: _launch_exe_target(target, logger, _notice),
+                _answer_when_done(
+                    lambda: _launch_exe_target(
+                        target, logger, _notice, reply=reply
+                    ),
+                    reply,
+                ),
                 logger,
                 _notice,
                 before_start=(
                     None if buffer_manager is None
                     else buffer_manager.invalidate
                 ),
+                on_refused=None if reply is None else reply.refuse,
             )
 """,
         "new": """            if buffer_manager is not None:
                 buffer_manager.invalidate()
-            _launch_exe_target(target, logger, _notice)
+            _launch_exe_target(target, logger, _notice, reply=reply)
 """,
         "expect": [
             "test_an_exe_launch_that_blocks_does_not_hold_the_handler",
@@ -522,7 +539,10 @@ MUTATIONS = [
             f"Not starting {name}: {len(running)} launches have not "
             f"returned yet ({still})"
         )
-        notice(_LAUNCH_BUSY_NOTICE)
+        if on_refused is not None:
+            on_refused(_LAUNCH_BUSY_NOTICE)
+        else:
+            notice(_LAUNCH_BUSY_NOTICE)
         return None
     if before_start is not None:
         before_start()
@@ -536,7 +556,10 @@ MUTATIONS = [
             f"Not starting {name}: {len(running)} launches have not "
             f"returned yet ({still})"
         )
-        notice(_LAUNCH_BUSY_NOTICE)
+        if on_refused is not None:
+            on_refused(_LAUNCH_BUSY_NOTICE)
+        else:
+            notice(_LAUNCH_BUSY_NOTICE)
         return None
 """,
         "expect": ["test_a_refused_launch_keeps_the_buffer_valid"],
@@ -704,7 +727,7 @@ MUTATIONS = [
 
         if not programs:
             logger.warning(f"No window found matching: {target}")
-            _notice(f"No program matched {target}.")
+            _fail(f"No program matched {target}.")
             return
 
         if len(programs) > 1:
@@ -712,7 +735,7 @@ MUTATIONS = [
                 f"No window found for {target}; "
                 f"{len(programs)} programs match, starting none"
             )
-            _notice(_several_matches_notice(programs))
+            _fail(_several_matches_notice(programs))
             return
 
         program = programs[0]
@@ -733,7 +756,7 @@ MUTATIONS = [
 
         if not programs:
             logger.warning(f"No window found matching: {target}")
-            _notice(f"No program matched {target}.")
+            _fail(f"No program matched {target}.")
             return
 
         if len(programs) > 1:
@@ -741,7 +764,7 @@ MUTATIONS = [
                 f"No window found for {target}; "
                 f"{len(programs)} programs match, starting none"
             )
-            _notice(_several_matches_notice(programs))
+            _fail(_several_matches_notice(programs))
             return
 
         program = programs[0]
@@ -760,7 +783,7 @@ MUTATIONS = [
 
 def _pytest(*extra):
     return subprocess.run(
-        ["uv", "run", "python", "-m", "pytest", *extra],
+        [sys.executable, "-m", "pytest", *extra],
         cwd=SERVICE,
         capture_output=True,
         text=True,

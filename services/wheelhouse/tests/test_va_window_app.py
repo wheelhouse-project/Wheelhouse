@@ -341,6 +341,10 @@ _NOT_IN_LIVE_FILE = (
     "hide-keyboard",
 )
 _PLACED_EXPECTED = [row for row in EXPECTED if row[0] not in _NOT_IN_LIVE_FILE]
+_LIVE_ACTIONS_OVERRIDE = {
+    "switch-to-app": [{"function": _ACTIVATE, "params": ["g1"], "awaits_done": True}],
+    "show-app": [{"function": _ACTIVATE, "params": ["g1"], "awaits_done": True}],
+}
 _LIVE_ORDER_PAIRS = [
     pair for pair in _INTERNAL_ORDER_PAIRS
     if not any(doc_id in pair for doc_id in _NOT_IN_LIVE_FILE)
@@ -494,9 +498,9 @@ def test_go_prefixed_forms_resolve_post_placement(live_blocks):
     spliced into the live file yet.
     """
     for utterance, want in (
-        ("go to desktop", "switch-to-app"),
+        ("go to desktop", "go-to-app"),
         ("go home", "cursor-navigate"),
-        ("go to notepad", "switch-to-app"),
+        ("go to notepad", "go-to-app"),
     ):
         got = _first_match_doc_id(live_blocks, utterance)
         assert got == want, (
@@ -555,6 +559,13 @@ def test_scope_forms_first_match_their_own_entries_in_live_file(live_blocks):
 )
 def test_live_patterns_toml_block_matches_and_acts(doc_id, expected_actions, samples, live_by_id):
     block = _require_doc_id(live_by_id, doc_id, _LIVE_PATTERNS_PATH)
+    # wh-safety-word-free-commands: the live activate step of these rows
+    # awaits the Input process's answer, and "go to" left switch-to-app for
+    # its own row (go-to-app, checked below). The staged fragment, which the
+    # fragment checks above cover, is unchanged.
+    expected_actions = _LIVE_ACTIONS_OVERRIDE.get(doc_id, expected_actions)
+    if doc_id == "switch-to-app":
+        samples = [s for s in samples if not s[0].startswith("go to")]
     assert block["actions"] == expected_actions
     rx = _compile(block)
     for utterance, expected_g1 in samples:
@@ -565,6 +576,23 @@ def test_live_patterns_toml_block_matches_and_acts(doc_id, expected_actions, sam
             assert m.group(1) == expected_g1
 
 
+def test_live_go_to_app_keeps_the_safety_word(live_by_id):
+    """wh-safety-word-free-commands: 'go to <app>' is its own row and keeps
+    requires_hotword; switch to, show, minimize and maximize do not."""
+    block = _require_doc_id(live_by_id, "go-to-app", _LIVE_PATTERNS_PATH)
+    assert block["actions"] == [
+        {"function": _ACTIVATE, "params": ["g1"], "awaits_done": True}
+    ]
+    assert block.get("requires_hotword") is True
+    m = _compile(block).match("go to notepad")
+    assert m is not None and m.group(1) == "notepad"
+    assert _compile(block).match("switch to notepad") is None
+    for freed in ("switch-to-app", "show-app", "minimize-app", "maximize-app"):
+        assert not _require_doc_id(live_by_id, freed, _LIVE_PATTERNS_PATH).get(
+            "requires_hotword"
+        ), freed
+
+
 def test_live_patterns_toml_places_go_prefixed_forms_above_cursor_navigate(live_position):
     cursor_navigate_pos = live_position.get("cursor-navigate")
     assert cursor_navigate_pos is not None, (
@@ -573,7 +601,7 @@ def test_live_patterns_toml_places_go_prefixed_forms_above_cursor_navigate(live_
     )
     # go-home and go-to-desktop are both absent from the live file, for the
     # two different reasons given above.
-    go_prefixed_doc_ids = ["switch-to-app"]
+    go_prefixed_doc_ids = ["switch-to-app", "go-to-app"]
     for doc_id in go_prefixed_doc_ids:
         pos = live_position.get(doc_id)
         assert pos is not None, (

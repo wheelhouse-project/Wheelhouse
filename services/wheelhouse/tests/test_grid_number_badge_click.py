@@ -99,7 +99,7 @@ class _FakeLogicController:
         self.grid_calls.append((command, kwargs))
         return self.grid_consumes
 
-    async def forward_click_element(self, query, trace_id):
+    async def forward_click_element(self, query, trace_id, **kwargs):
         self.clicks.append(query)
 
 
@@ -364,18 +364,23 @@ def test_a_multiword_payload_that_is_not_only_a_number_still_types():
     ],
 )
 def test_the_spoken_click_verb_forms_are_unchanged(spoken, number):
-    """The verb forms already worked, through the spoken-click hold.
+    """The verb forms still click the badge the user named.
 
-    They must keep taking that path: it resolves the number to DIGITS,
-    which the bare path deliberately does not, so a regression here would
-    show up as a spoken-word query name instead of a digit one.
+    They used to take the spoken-click hold, which resolved the number to
+    DIGITS before the click. Since wh-safety-word-free-commands the click
+    row runs without the safety word, so the words reach click_element
+    directly and the query carries the spoken number; the real
+    forward_click_element reads it with parse_number_word, which is what
+    this asserts.
     """
+    from speech.number_word_parser import parse_number_word
+
     processor, app, lc = _make_stack(OverlayState.PAINTED)
     _speak(processor, spoken)
 
     assert app.inserted_texts() == []
     assert len(lc.clicks) == 1
-    assert lc.clicks[0].name == str(number)
+    assert parse_number_word(lc.clicks[0].name, aliases=True) == number
 
 
 @pytest.mark.parametrize(("spoken", "name"), MULTIWORD_SHADOWED[:3])

@@ -137,7 +137,7 @@ UNCHANGED_FORMS = [
     ("go right two words", "nav-right-words"),
     ("go home then grab to end", "cursor-navigate"),
     ("go left 2 words then grab right", "cursor-navigate"),
-    ("go to notepad", "switch-to-app"),
+    ("go to notepad", "go-to-app"),
     ("go up", "nav-up-times"),
     ("go to the top", "nav-go-top"),
     # "go here" followed by more words is not the grid command.
@@ -181,7 +181,8 @@ async def nav_harness():
 class TestRouterWithTheWakeWord:
     """Word-by-word through the production router, as test_va_navigation_router.
 
-    switch-to-app ('^(?:switch to|go to)\\s+(.+)$', requires_hotword) sits
+    go-to-app ('^go to\\s+(.+)$', requires_hotword; it was one row with
+    switch-to-app until wh-safety-word-free-commands) sits
     below the selection entries, so under the wake word "go to the
     beginning of the selection" must navigate and not activate an app.
     """

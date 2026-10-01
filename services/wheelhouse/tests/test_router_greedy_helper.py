@@ -562,10 +562,13 @@ class TestPrefixProbeRespectsHotwordRequirement:
         )
 
     def test_no_hotword_activate_uses_standard_command_timer(self, router):
-        """Same shape against ^activates? (.+)$ at patterns.toml:143-144.
+        """Against ^activates? (.+)$ (activate-app).
 
-        wh-l4h.1.14: requires_hotword=true means a fresh non-hotword 'activate'
-        finalizes as dictation immediately rather than buffering.
+        wh-l4h.1.14 made a fresh non-hotword 'activate' finalize as dictation
+        at once, because activate-app needed the safety word.
+        wh-safety-word-free-commands removed that flag, so a fresh
+        'activate' now buffers as a command prefix, like any other word that
+        can start a no-hotword command.
         """
         event = WordEvent("activate", start_of_utterance=True, end_of_utterance=False)
         decision = router.decide(
@@ -577,7 +580,8 @@ class TestPrefixProbeRespectsHotwordRequirement:
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
             greedy_timeout_ms=GREEDY_TIMEOUT_MS,
         )
-        assert decision.action == Action.DICTATE
+        assert decision.action == Action.BUFFER
+        assert decision.target_mode == ProcessingMode.COMMAND_BUFFERING
 
     def test_hotword_buffering_find_uses_greedy_timer(self, router):
         """Counter-test: when the hotword IS active, "find test" buffering
@@ -660,14 +664,14 @@ class TestLiteralPrefixPrecompute:
 
 
 class TestOneWordLiteralPrefixWithWhitespaceTail:
-    """The greedy hold now needs the hotword, because the command does.
+    """The greedy hold applies with and without the safety word.
 
     David required the hotword for the click-element command on
-    2026-08-17 (wh-voice-access-parity.1.6.1.1), so the router's greedy
-    probe skips that pattern while the hotword is inactive. The hold this
-    section exists to protect is unchanged with the hotword active; with
-    the hotword inactive there is no command to hold for, and 'click'
-    takes the ordinary command timer.
+    2026-08-17 (wh-voice-access-parity.1.6.1.1), and the router's greedy
+    probe skipped that pattern while the hotword was inactive. David freed
+    the command from the safety word on 2026-09-30
+    (wh-safety-word-free-commands), so the probe no longer skips it and
+    'click' holds the greedy timer either way.
     """
 
     def test_click_alone_uses_greedy_timer_with_the_hotword(self, router):
@@ -689,7 +693,7 @@ class TestOneWordLiteralPrefixWithWhitespaceTail:
             f"({GREEDY_TIMEOUT_MS}), got {decision.timeout_ms}."
         )
 
-    def test_click_alone_takes_the_command_timer_without_the_hotword(
+    def test_click_alone_uses_greedy_timer_without_the_hotword(
         self, router
     ):
         event = WordEvent("click", start_of_utterance=True, end_of_utterance=False)
@@ -702,9 +706,10 @@ class TestOneWordLiteralPrefixWithWhitespaceTail:
             replacement_timeout_ms=REPLACEMENT_TIMEOUT_MS,
             greedy_timeout_ms=GREEDY_TIMEOUT_MS,
         )
-        assert decision.timeout_ms != GREEDY_TIMEOUT_MS, (
-            "without the hotword the click command cannot match, so 'click' "
-            "must not hold the greedy timer"
+        assert decision.timeout_ms == GREEDY_TIMEOUT_MS, (
+            "the click command no longer needs the safety word, so 'click' "
+            f"alone must hold the greedy timer ({GREEDY_TIMEOUT_MS}), got "
+            f"{decision.timeout_ms}"
         )
 
     def test_literal_prefix_matcher_handles_whitespace_escape_tail(self):

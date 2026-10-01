@@ -135,7 +135,7 @@ against Windows:
   insertion, selection transforms, per-utterance accumulation.
 - **Voice element clicking** — walks the focused window's UI Automation
   tree to find and click controls by name, plus a numbered overlay
-  ("show numbers" / "x-ray click 5") painted by the GUI process.
+  ("show numbers" / "click 5") painted by the GUI process.
 
 ## Key entry points
 

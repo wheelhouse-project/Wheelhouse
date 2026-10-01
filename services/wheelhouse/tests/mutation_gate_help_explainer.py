@@ -19,7 +19,7 @@ files:
      chosen AND the box is ticked. Cancel and the Escape key save nothing
      and open nothing, because HelpExplainerWindow emits assistant_chosen
      only from _on_assistant.
-  3. The blank ai.help.gem_url branch: the notice, and nothing else, with
+  3. The blank ai.help.assistant_url branch: the notice, and nothing else, with
      no window. The check itself is mutated, and separately the order of
      the two branches is MOVED so the window request comes first.
   4. The single-window guard in GuiManager._open_help_explainer.
@@ -61,6 +61,12 @@ save and added mutations for it: the comparison reads the value on disk
 failed replace leaves the live value alone and a second press still saves;
 the save runs under StateManager's _gui_settings_lock, created the same
 lazy way; and a state update follows the save.
+
+wh-assistant-name-cleanup added one more:
+
+ 13. The address in ai.help.assistant_url opens as written. Two mutations
+     bring back a substitution of the old Gem address and of a ChatGPT
+     address by the notebook address.
 
 Each mutation names the tests that must fail and the start of the assertion
 text each must fail with, as pytest prints it in the short test summary. A
@@ -166,15 +172,8 @@ BLANK_WHEN_EXPLAINED = "test_a_blank_address_gives_the_notice_when_explained_is_
 LOG_WINDOW = "test_asking_for_the_window_is_logged_with_its_source"
 LOG_BROWSER = "test_opening_the_browser_is_logged_with_its_source"
 LOG_NOTICE = "test_the_unconfigured_notice_is_logged_with_its_source"
-RETIRED_OPENS_GEM = "test_the_retired_address_opens_the_gem"
-RETIRED_WHITESPACE = "test_surrounding_whitespace_does_not_defeat_the_check"
-RETIRED_LOGGED = "test_the_substitution_is_logged_without_an_address"
-CUSTOM_UNCHANGED = "test_a_custom_address_opens_unchanged"
-OTHER_GPT_UNCHANGED = "test_another_chatgpt_address_opens_unchanged"
-OLD_GEM_OPENS_NOTEBOOK = "test_the_old_gem_address_opens_the_notebook"
-OLD_GEM_WHITESPACE = "test_surrounding_whitespace_does_not_defeat_the_gem_check"
-OLD_GEM_LOGGED = "test_the_gem_substitution_is_logged_without_an_address"
-OTHER_GEM_UNCHANGED = "test_another_gem_address_opens_unchanged"
+OLD_GEM_UNCHANGED = "test_the_old_gem_address_opens_unchanged"
+OLD_CHATGPT_UNCHANGED = "test_the_old_chatgpt_address_opens_unchanged"
 
 _NON_BOOL = "test_a_non_boolean_explained_field_takes_the_full_decision"
 # Only these four ids fail under the bool() form. The other four cases
@@ -337,8 +336,8 @@ TABLE_ARGS = (
 
 # The two branches whose ORDER the move mutation swaps.
 BLANK_BRANCH = (
-    '        gem_url = config.get("ai.help.gem_url", "")\n'
-    "        if not gem_url:\n"
+    '        assistant_url = config.get("ai.help.assistant_url", "")\n'
+    "        if not assistant_url:\n"
     "            # Blanking the setting is how a user turns online help off, so\n"
     "            # this is a plain statement of fact rather than an error. The\n"
     "            # explanation window stays shut: its one button would have\n"
@@ -352,7 +351,7 @@ BLANK_BRANCH = (
     "                explained,\n"
     "            )\n"
     "            self._send_gui_notification(\n"
-    '                "Online help is not configured. Set gem_url under [ai.help]."\n'
+    '                "Online help is not configured. Set assistant_url under [ai.help]."\n'
     "            )\n"
     "            return\n"
 )
@@ -588,14 +587,14 @@ MUTATIONS = [
         "catchers": {CARRIES_SOURCE: "AssertionError: assert 'menu' == 'window'"},
     },
     # ---------------------------------------------------------------
-    # Behaviour 3: the blank gem_url branch.
+    # Behaviour 3: the blank assistant_url branch.
     # ---------------------------------------------------------------
     {
         # A blank address no longer stops the run, so the window opens on
         # an address its one button could not use.
         "name": "the-blank-check-is-dropped",
         "file": MAIN,
-        "old": "        if not gem_url:",
+        "old": "        if not assistant_url:",
         "new": "        if False:",
         "catchers": {
             BLANK_SAYS_SO: (
@@ -1403,85 +1402,43 @@ MUTATIONS = [
         "catchers": {HANDS_OVER: NO_AWAIT},
     },
     # ---------------------------------------------------------------
-    # Behaviour 6: an installation made before 1.2.0 still names the
-    # retired ChatGPT assistant, and the Gem opens instead
-    # (wh-gem-replaces-gpt-assistant.2.3).
+    # Behaviour 13: the address in ai.help.assistant_url opens as written.
+    # No substitution of an old address exists (wh-assistant-name-cleanup);
+    # each mutation brings one back.
     # ---------------------------------------------------------------
     {
-        # The substitution never fires, so every installation that
-        # predates 1.2.0 opens the retired ChatGPT assistant. This is the
-        # defect exactly as Codex reported it.
-        "name": "the-retired-address-is-opened-as-written",
+        # The old Gem address is replaced by the notebook address again.
+        "name": "the-old-gem-address-is-replaced",
         "file": MAIN,
-        "old": "        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:",
-        "new": "        if False:",
+        "old": "            opened = await asyncio.to_thread(webbrowser.open, assistant_url)\n",
+        "new": (
+            "            opened = await asyncio.to_thread(\n"
+            "                webbrowser.open,\n"
+            "                _WHEELHOUSE_ASSISTANT_URL\n"
+            '                if assistant_url.strip() == "https://gemini.google.com/gem/'
+            '1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"\n'
+            "                else assistant_url,\n"
+            "            )\n"
+        ),
         "catchers": {
-            RETIRED_OPENS_GEM: "AssertionError: expected call not found",
-            RETIRED_WHITESPACE: "AssertionError: expected call not found",
-            RETIRED_LOGGED: "assert 0 == 1",
+            OLD_GEM_UNCHANGED: "AssertionError: expected call not found",
         },
     },
     {
-        # strip() is dropped, so a settings file with a stray space around
-        # the address keeps opening the retired assistant. A hand-edited
-        # file is the ordinary way that space gets there.
-        "name": "the-comparison-stops-stripping",
+        # The old ChatGPT address is replaced by the notebook address again.
+        "name": "the-old-chatgpt-address-is-replaced",
         "file": MAIN,
-        "old": "        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:",
-        "new": "        if gem_url == _RETIRED_CHATGPT_HELP_URL:",
+        "old": "            opened = await asyncio.to_thread(webbrowser.open, assistant_url)\n",
+        "new": (
+            "            opened = await asyncio.to_thread(\n"
+            "                webbrowser.open,\n"
+            "                _WHEELHOUSE_ASSISTANT_URL\n"
+            '                if assistant_url.strip().startswith("https://chatgpt.com/")\n'
+            "                else assistant_url,\n"
+            "            )\n"
+        ),
         "catchers": {
-            RETIRED_WHITESPACE: "AssertionError: expected call not found",
-        },
-    },
-    {
-        # The exact comparison becomes a prefix test, so any address on
-        # chatgpt.com is replaced -- including one the user chose on
-        # purpose, which the fix promised to leave alone.
-        "name": "the-comparison-stops-being-exact",
-        "file": MAIN,
-        "old": "        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:",
-        "new": '        if gem_url.strip().startswith("https://chatgpt.com/"):',
-        "catchers": {
-            OTHER_GPT_UNCHANGED: "AssertionError: expected call not found",
-        },
-    },
-    # ---------------------------------------------------------------
-    # Behaviour 6, second address: an installation made with 1.2.0 still
-    # names the Gemini Gem that Google ends on 2026-11-17, and the Gemini
-    # Notebook opens instead (wh-assistant-gemini-notebook).
-    # ---------------------------------------------------------------
-    {
-        # The substitution never fires, so every 1.2.0 installation keeps
-        # opening the Gem after Google stops running it.
-        "name": "the-old-gem-address-is-opened-as-written",
-        "file": MAIN,
-        "old": "        elif gem_url.strip() == _OLD_GEM_HELP_URL:",
-        "new": "        elif False:",
-        "catchers": {
-            OLD_GEM_OPENS_NOTEBOOK: "AssertionError: expected call not found",
-            OLD_GEM_WHITESPACE: "AssertionError: expected call not found",
-            OLD_GEM_LOGGED: "assert 0 == 1",
-        },
-    },
-    {
-        # strip() is dropped from the Gem comparison.
-        "name": "the-gem-comparison-stops-stripping",
-        "file": MAIN,
-        "old": "        elif gem_url.strip() == _OLD_GEM_HELP_URL:",
-        "new": "        elif gem_url == _OLD_GEM_HELP_URL:",
-        "catchers": {
-            OLD_GEM_WHITESPACE: "AssertionError: expected call not found",
-        },
-    },
-    {
-        # The exact comparison becomes a prefix test, so a Gem the user
-        # chose on purpose is replaced too.
-        "name": "the-gem-comparison-stops-being-exact",
-        "file": MAIN,
-        "old": "        elif gem_url.strip() == _OLD_GEM_HELP_URL:",
-        "new": '        elif gem_url.strip().startswith("https://gemini.google.com/gem/"):',
-        "catchers": {
-            OTHER_GEM_UNCHANGED: "AssertionError: expected call not found",
+            OLD_CHATGPT_UNCHANGED: "AssertionError: expected call not found",
         },
     },
 ]

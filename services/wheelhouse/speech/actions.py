@@ -93,6 +93,45 @@ class ActionFailed(Exception):
     """
 
 
+class StepFailed(ActionFailed):
+    """A step reached the Input process, which refused it with a reason.
+
+    wh-safety-word-free-commands: a window command that cannot do its job
+    (no window with that name, Windows will not bring the window forward)
+    used to fall into dictation with the Input process showing its own
+    notice, whether or not the user meant a command. The Input process now
+    answers an awaited activate with a refusal instead of showing a notice,
+    and ``TextParser`` turns the refusal into this exception.
+    ``SpeechProcessor._execute_command`` is the one place that decides what
+    the user sees: with the safety word, a notice carrying ``notice``;
+    without it, the words typed as dictation and no notice.
+
+    It is an ``ActionFailed``, so ``_execute_rule`` abandons the rule the
+    same way and returns False.
+    """
+
+    def __init__(self, notice: str, show=None):
+        super().__init__(notice)
+        self.notice = notice
+        # Optional zero-argument callable that shows the step's own notice
+        # (the click toast, for "click <name>"). When present, the speech
+        # processor calls it instead of the generic notification.
+        self.show = show
+
+
+class NothingToCancel(StepFailed):
+    """"cancel fix" found no AI job to cancel.
+
+    wh-safety-word-free-commands (S3): "cancel fix" runs without the safety
+    word, so a cancel with nothing to cancel must not swallow the words. It is
+    a ``StepFailed``, so ``SpeechProcessor._execute_command`` types the words
+    (no safety word) or shows the notice (safety word). It is a separate class
+    because the processor stays silent about it in one case: the cancel lane
+    already cancelled the job while the model ran, and the replay of that
+    same utterance finds the job gone.
+    """
+
+
 class _RunCaptureOutputCapExceeded(Exception):
     """Raised once stdout cannot fit in the configured stored-result cap."""
 
@@ -1608,8 +1647,8 @@ class ActionFunctions:
 
           1. Parse the spoken target (group g1) into an ``ElementQuery``.
              On unparseable input (empty / whitespace-only / collapses to
-             an empty name) return None so the phrase falls through to
-             dictation -- nothing crosses the process boundary.
+             an empty name) raise StepFailed with a notice -- nothing
+             crosses the process boundary.
           2. Generate a trace_id and push it onto the trace contextvar so
              every Logic / Input log line and the IPC envelope share one
              correlation id (matching the rejection-toast and soft-allow
@@ -1619,7 +1658,11 @@ class ActionFunctions:
              ``[click] response_timeout_ms`` timeout, and the timeout /
              malformed-response degrade paths.
 
-        Returns None on every path. The command engine treats a None
+        Returns None when the click is handled (clicked, or a notice was
+        shown). Raises StepFailed when nothing was clicked and the words
+        may be typed instead: no control with that name, clicking turned
+        off, or the search ran out of time (wh-safety-word-free-commands).
+        The command engine treats a None
         return from an async local function as "nothing to send" (the
         send_request happens INSIDE forward_click_element, with the click
         timeout, NOT via the generic awaits_done path which would wrongly
@@ -1633,7 +1676,11 @@ class ActionFunctions:
         query = ClickCommandParser.parse(target_text)
         if query is None:
             logger.info("click_element: unparseable target %r; ignoring", redact_transcript(target_text))
-            return None
+            # wh-safety-word-free-commands: "click" runs without the safety
+            # word, so nothing to click must not swallow the words. Raising
+            # makes the speech processor type them (no safety word) or show
+            # this notice (safety word).
+            raise StepFailed("Say the name or number of what to click.")
 
         # Generate the trace_id at parse time and push the contextvar. Reuse
         # an already-set trace_id when the pipeline established one for this
@@ -1653,8 +1700,54 @@ class ActionFunctions:
             "click_element: parsed query name=%r role=%r trace_id=%s",
             query.name, query.role, trace_id,
         )
-        await lc.forward_click_element(query, trace_id)
+        # wh-safety-word-free-commands: "click <name>" runs without the
+        # safety word, so a click that found nothing to click must not show
+        # its notice before the speech processor knows whether the user
+        # said the safety word. forward_click_element hands back the notice
+        # arguments for the three nothing-was-clicked outcomes; the raised
+        # StepFailed carries the text and a callable that shows the real
+        # click toast. Any other result is None and its notice, if any,
+        # was already shown.
+        deferred = await lc.forward_click_element(
+            query, trace_id, defer_failure_notice=True,
+        )
+        if isinstance(deferred, dict):
+            raise self._click_step_failed(lc, deferred)
         return None
+
+    @staticmethod
+    def _click_step_failed(lc, notice_kwargs: dict) -> "StepFailed":
+        """Build the StepFailed for a deferred click failure."""
+        from services.wheelhouse.click_notice_toast_wording import (
+            compose_click_notice_wording,
+        )
+        from services.wheelhouse.shared.click_notice import ClickNoticeEvent
+
+        kwargs = {
+            k: v for k, v in notice_kwargs.items() if k != "late_correction"
+        }
+        try:
+            text = compose_click_notice_wording(ClickNoticeEvent(
+                outcome=kwargs["outcome"],
+                reason=kwargs["reason"],
+                matched_name=kwargs["matched_name"],
+                matched_names=tuple(kwargs["matched_names"]),
+                spoken_name=kwargs["spoken_name"],
+                app_friendly_name="",
+                snapshot_id=kwargs["snapshot_id"],
+                trace_id=kwargs["trace_id"],
+            ))
+        except Exception:  # noqa: BLE001 -- a wording failure must not hide the failure
+            logger.warning("click_element: notice wording failed", exc_info=True)
+            text = "Wheelhouse couldn't complete the click."
+
+        def show() -> None:
+            if kwargs.get("reason") == "disabled_by_config":
+                # The once-per-session flag records a notice that was shown.
+                lc._click_disabled_notice_shown = True
+            lc._forward_click_notice(**kwargs)
+
+        return StepFailed(text, show=show)
 
     async def show_overlay_command(self):
         """Handle the 'show numbers' voice command (wh-n29v.17).
@@ -2074,6 +2167,19 @@ class ActionFunctions:
                 except Exception:
                     pass
 
+    def show_notice(self, message: str) -> None:
+        """Show a one-line notice through the GUI process's notification path.
+
+        Used by SpeechProcessor._execute_command to tell the user why a
+        command they addressed with the safety word could not run
+        (wh-safety-word-free-commands). Never raises.
+        """
+        self._send_gui_action({
+            "action": "show_notification",
+            "title": "Wheelhouse",
+            "message": message,
+        })
+
     # ---- AI Service actions ----
 
     def _get_ai_service(self):
@@ -2100,7 +2206,7 @@ class ActionFunctions:
 
         wh-cancel-fix-running-rewrite. The word-event loop is serial: it awaits
         one event's processing before it reads the next, and this action is
-        that processing. Without this the words of "x-ray cancel fix" sit in
+        that processing. Without this the words of "cancel fix" sit in
         word_queue for the whole model call and reach ``cancel_fix`` only after
         the replacement has been pasted, when ``ai.is_processing()`` is already
         False -- so the cancel sets no flag and shows no notice.
@@ -2648,11 +2754,17 @@ class ActionFunctions:
         return bool(result and result.get("success"))
 
     async def cancel_fix(self):
-        """Set cancellation flag. Checked between AI response and paste."""
+        """Set cancellation flag. Checked between AI response and paste.
+
+        Raises ``NothingToCancel`` when there is no AI service or no running
+        job, so the speech processor can type the words or show a notice
+        (wh-safety-word-free-commands).
+        """
         ai = self._get_ai_service()
-        if ai and ai.is_processing():
-            ai.cancel_requested = True
-            self._notify_ai_status("Cancelling.")
+        if not (ai and ai.is_processing()):
+            raise NothingToCancel("No AI job is running.")
+        ai.cancel_requested = True
+        self._notify_ai_status("Cancelling.")
         return None
 
     """ async def wheelhouse_help(self, question: str = ""):

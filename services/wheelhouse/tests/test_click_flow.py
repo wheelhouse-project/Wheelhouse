@@ -616,14 +616,19 @@ def _action_funcs():
     return ActionFunctions(handler), lc
 
 
-def test_action_unparseable_returns_none_and_does_not_delegate():
+def test_action_unparseable_fails_the_step_and_does_not_delegate():
+    import pytest
+
+    from speech.actions import StepFailed
     from utils.trace_context import set_trace
 
     set_trace("")  # clear any contextvar bleed from a prior test
     funcs, lc = _action_funcs()
-    # "the" collapses to an empty name -> ClickCommandParser.parse returns None.
-    result = asyncio.run(funcs.click_element("the"))
-    assert result is None
+    # "the" collapses to an empty name -> ClickCommandParser.parse returns
+    # None. The step fails (wh-safety-word-free-commands) so the speech
+    # processor can type the words when the safety word was not spoken.
+    with pytest.raises(StepFailed):
+        asyncio.run(funcs.click_element("the"))
     lc.forward_click_element.assert_not_called()
 
 
@@ -635,7 +640,7 @@ def test_action_parseable_generates_trace_and_delegates():
 
     captured = {}
 
-    async def _fwd(query, trace_id):
+    async def _fwd(query, trace_id, **kwargs):
         captured["query"] = query
         captured["trace_id"] = trace_id
 
@@ -657,7 +662,7 @@ def test_action_reuses_existing_pipeline_trace_id():
 
     captured = {}
 
-    async def _fwd(query, trace_id):
+    async def _fwd(query, trace_id, **kwargs):
         captured["trace_id"] = trace_id
 
     lc.forward_click_element = _fwd

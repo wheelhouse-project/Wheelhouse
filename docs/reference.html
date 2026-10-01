@@ -39,7 +39,7 @@
 <p>Action name: <code>cancel_fix</code>. The Pattern Manager lists it under Advanced actions, AI.</p>
 <p>Cancels an in-progress AI text correction before it pastes anything back.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^cancel fix$" with no params: saying "x-ray cancel fix" stops the running correction.</code></p>
+<p>Example: <code>Trigger "^cancel fix$" with no params: saying "cancel fix" stops the running correction.</code></p>
 <h4 id="fix-text-with-ai">Fix text with AI</h4>
 <p>Action name: <code>fix_text_ai</code>. The Pattern Manager lists it under Advanced actions, AI.</p>
 <p>Captures the selected text, or all the text in the focused field when nothing is selected, sends it to the configured AI for correction, and pastes the corrected version back.</p>
@@ -61,7 +61,7 @@
 <ul>
 <li><code>target</code> (group_ref) -- Capture group holding the spoken control name, usually g1.</li>
 </ul>
-<p>Example: <code>Trigger "^(?:click|clicks|tap)\s+(.+)$" with params ["g1"]: saying "x-ray click submit button" clicks the button labeled Submit. This one needs the safety word first.</code></p>
+<p>Example: <code>Trigger "^(?:click|clicks|tap)\s+(.+)$" with params ["g1"]: saying "click submit button" clicks the button labeled Submit. This one needs no safety word.</code></p>
 <h4 id="hide-numbered-click-overlay">Hide numbered click overlay</h4>
 <p>Action name: <code>hide_overlay_command</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
 <p>Removes the numbered badges painted by the show-numbers command.</p>
@@ -79,7 +79,7 @@
 <p>Action name: <code>show_overlay_command</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
 <p>Paints a number badge on every clickable control on screen so you can say "click" plus a number.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no params: saying "show numbers" shows the badges; then "x-ray click 4" clicks control number 4. "apply numbers" and "show numbers here" do the same.</code></p>
+<p>Example: <code>Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no params: saying "show numbers" shows the badges; then "click 4" clicks control number 4. "apply numbers" and "show numbers here" do the same.</code></p>
 <h3 id="clipboard">Clipboard</h3>
 <h4 id="capture-clipboard">Capture clipboard</h4>
 <p>Action name: <code>capture_clipboard</code>. The Pattern Manager's action list does not offer this action.</p>
@@ -226,10 +226,10 @@
 <p>Example: <code>Trigger "^look up (.+)$" with params [0.5, "C:\\Tools\\lookup.exe", "g1"] and result "answer", then use params ["answer"] in a following insert_text step.</code></p>
 <h4 id="switch-to-a-window">Switch to a window</h4>
 <p>Action name: <code>activate</code>. The Pattern Manager lists it under Basic actions.</p>
-<p>Brings a window to the front, found by program name (a target ending in .exe) or by window-title pattern; the reserved target default_browser resolves to your default browser.</p>
+<p>Brings a window to the front, found by program name (a target ending in .exe) or by the spoken name matching whole words in the window title; the reserved target default_browser resolves to your default browser.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
-<li><code>target</code> (exe_or_title) -- Program executable name (notepad.exe), a window-title pattern, or the reserved word default_browser.</li>
+<li><code>target</code> (exe_or_title) -- Program executable name (notepad.exe), the words to find in a window title (whole words, plain text), or the reserved word default_browser.</li>
 </ul>
 <p>Example: <code>Trigger "^notepad$" with params ["notepad.exe"]: saying "notepad", and nothing else in that utterance, focuses the Notepad window.</code></p>
 <h3 id="scrolling">Scrolling</h3>
@@ -367,7 +367,7 @@
 <p>Example: <code>Trigger "^push to talk mode$" with params ["push_to_talk"]: saying it switches the microphone to push-to-talk.</code></p>
 <h4 id="stop-listening">Stop listening</h4>
 <p>Action name: <code>stop_listening</code>. The Pattern Manager lists it under Advanced actions, Wheelhouse.</p>
-<p>Switches listening off, as clicking the floating button does while it listens. In toggle mode, say the wake word to switch it back on; in push-to-talk mode the wake word ends only the idle pause, so hold the floating button again.</p>
+<p>Switches listening off, as clicking the floating button or the tray icon does while it listens. In toggle mode, say the wake word to switch it back on; in push-to-talk mode the wake word ends only the idle pause, so hold the floating button again.</p>
 <p>Parameters: none.</p>
 <p>Example: <code>Trigger "^stop listening$": saying it by itself switches listening off.</code></p>
 <h4 id="teach-wheelhouse-your-voice">Teach WheelHouse your voice</h4>
@@ -587,7 +587,7 @@
 <p><strong>ptt_safety_timeout_seconds</strong> <em>(default: <code>30</code>)</em> -- In push-to-talk mode, automatically releases the microphone if a hold gets stuck. Raise it if you routinely dictate longer than 30 seconds in one hold.</p>
 <p><strong>notify_on_revision</strong> <em>(default: <code>false</code>)</em> -- Show a small notice when the speech engine revises its guess at what you said.</p>
 <h3 id="stt">[stt]</h3>
-<p><strong>last_provider</strong> <em>(default: <code>"parakeet_tdt"</code>)</em> -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the tray menu, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account), "distil_medium_en" (local, runs on an NVIDIA graphics card), or "google_stt" (Google Cloud; needs an account, sends audio to Google).</p>
+<p><strong>last_provider</strong> <em>(default: <code>"parakeet_tdt"</code>)</em> -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the menu on the floating button or the tray icon, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account), "distil_medium_en" (local, runs on an NVIDIA graphics card), or "google_stt" (Google Cloud; needs an account, sends audio to Google).</p>
 <h3 id="sttgoogle">[stt.google]</h3>
 <p><strong>credentials_file</strong> <em>(default: <code>""</code>)</em> -- Full path to the Google service-account key file (the JSON file downloaded during Google Cloud setup). Type the path here yourself, doubling each backslash, and restart Wheelhouse; when this is empty, the GOOGLE_APPLICATION_CREDENTIALS environment variable is used instead.</p>
 <h3 id="ai_1">[ai]</h3>
@@ -604,9 +604,9 @@
 <p><strong>binary_dir</strong> <em>(default: <code>""</code>)</em> -- The folder holding llama-server.exe, the program that runs the model. The installer writes this. Change it if you moved the llama.cpp build, or to use a build made for different graphics hardware.</p>
 <p><strong>context_size</strong> <em>(default: <code>8192</code>)</em> -- How much text the model can consider at once, counted in tokens. Raise it if you correct or rewrite long passages and the reply comes back cut short. A larger value uses more memory.</p>
 <p><strong>gpu_layers</strong> <em>(default: <code>99</code>)</em> -- How much of the model to place on the graphics card. Valid values: 99 places the whole model on the graphics card; 0 runs it entirely on the processor, which the installer chooses for a machine with enough system memory but no suitable graphics card. Values in between split it. Lower it if the server fails to start because the graphics card is out of memory.</p>
-<p><strong>startup_timeout_seconds</strong> <em>(default: <code>90</code>)</em> -- How long Wheelhouse waits for its model server to report itself ready before giving up and leaving the AI features off. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.</p>
+<p><strong>startup_timeout_seconds</strong> <em>(default: <code>90</code>)</em> -- How long Wheelhouse waits for the model server it starts to report itself ready before it stops that attempt. The AI features stay off until a later attempt succeeds: Wheelhouse checks the server every 60 seconds and when an AI command needs it, and the first check after the timeout starts the server again. After each failed start, the wait before the next start doubles, from 120 seconds to at most 600 seconds. After a start that succeeds, the next start waits at least 60 seconds. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.</p>
 <h3 id="aihelp">[ai.help]</h3>
-<p><strong>gem_url</strong> <em>(default: <code>"https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"</code>)</em> -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. If this still holds the address of the retired ChatGPT assistant that Wheelhouse used before version 1.2.0, the Wheelhouse Assistant opens instead. The same applies to the Gemini Gem address that version 1.2.0 shipped.</p>
+<p><strong>assistant_url</strong> <em>(default: <code>"https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"</code>)</em> -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. Release 1.2.1 and earlier named this setting gem_url; updating with the installer renames it to assistant_url and replaces an old assistant address with the current one.</p>
 <p><strong>explain_before_open</strong> <em>(default: <code>true</code>)</em> -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back. While it is false and the file help_explainer_notebook_shown.toml is missing from the data folder next to the settings file, the window appears at every Help with the box already ticked. Only the Assistant button writes that file, so after Cancel the window appears again at the next Help; select Assistant with the box still ticked to keep the window off.</p>
 <p><strong>max_response_tokens</strong> <em>(default: <code>800</code>)</em> -- Caps the length of an answer from the in-app help chat; because that chat is currently disabled, this setting has no effect today.</p>
 <h3 id="click">[click]</h3>
@@ -637,7 +637,7 @@
       <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
       <a href="#top">Back to top ↑</a>
     </nav>
-    <p class="fine-print">Documentation for Wheelhouse 1.2.1. Speech recognition runs on your computer by default; cloud options are optional.</p>
+    <p class="fine-print">Documentation for Wheelhouse 1.2.2. Speech recognition runs on your computer by default; cloud options are optional.</p>
   </footer>
 </body>
 </html>

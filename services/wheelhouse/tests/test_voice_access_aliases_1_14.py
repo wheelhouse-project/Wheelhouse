@@ -112,9 +112,9 @@ _NEW_FORMS = [
 # Acceptance 5: existing utterances and the rows they reach today (measured
 # on b08002ee before any pattern changed).
 _EXISTING_FORMS = [
-    ("show chrome", "show-app", True),
-    ("go to chrome", "switch-to-app", True),
-    ("switch to chrome", "switch-to-app", True),
+    ("show chrome", "show-app", False),
+    ("go to chrome", "go-to-app", True),
+    ("switch to chrome", "switch-to-app", False),
     ("go left 3 characters", "nav-left-characters", False),
     ("go right 3 characters", "nav-right-characters", False),
     ("go to top", "nav-go-top", False),

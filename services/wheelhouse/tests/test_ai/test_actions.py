@@ -434,23 +434,35 @@ class TestCancelFix:
         assert ai.cancel_requested is True
 
     @pytest.mark.asyncio
-    async def test_noop_when_not_processing(self):
-        """Does nothing when lock is not held."""
+    async def test_fails_when_not_processing(self):
+        """Fails with a notice text when the lock is not held.
+
+        wh-safety-word-free-commands (S3): "cancel fix" runs without the safety
+        word, so a cancel with nothing to cancel raises instead of returning
+        None. The speech processor then types the words or shows the notice.
+        """
+        from speech.actions import NothingToCancel
+
         ai = _make_ai_service()
         actions = _make_actions(ai_service=ai)
 
-        await actions.cancel_fix()
+        with pytest.raises(NothingToCancel) as excinfo:
+            await actions.cancel_fix()
 
+        assert excinfo.value.notice == "No AI job is running."
         assert ai.cancel_requested is False
 
     @pytest.mark.asyncio
-    async def test_noop_when_no_ai_service(self):
-        """Returns None silently when AIService not available."""
+    async def test_fails_when_no_ai_service(self):
+        """Fails with a notice text when AIService is not available."""
+        from speech.actions import NothingToCancel
+
         actions = _make_actions(ai_service=None)
 
-        result = await actions.cancel_fix()
+        with pytest.raises(NothingToCancel) as excinfo:
+            await actions.cancel_fix()
 
-        assert result is None
+        assert excinfo.value.notice == "No AI job is running."
 
 
 # =========================================================================

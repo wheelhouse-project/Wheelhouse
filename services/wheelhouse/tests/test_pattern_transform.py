@@ -4043,7 +4043,9 @@ class TestAHyphenAfterTheCaptureBelongsToTheCaller:
             for key, value in self._bodies(transformed).items():
                 totals[key] += value
 
-        assert len(entries) == 332, len(entries)
+        # 333: go-to-app was split from switch-to-app
+        # (wh-safety-word-free-commands).
+        assert len(entries) == 333, len(entries)
         # 122: the press pattern's "<number> times" repeat count added the
         # 122nd numeric capture (wh-voice-access-parity.2.12).
         assert totals == {

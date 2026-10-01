@@ -5,6 +5,9 @@ This module provides intelligent volume routing based on dual detection:
 2. If external, checks if Sonos is receiving TV audio (htastream URI)
 3. Routes to Sonos ONLY if internal audio not detected AND Sonos receiving TV audio
 
+When the Sonos plugin is disabled (plugins.sonos.enabled = false), the router
+chooses System Volume and skips the Sonos network search.
+
 Key Classes:
   - VolumeRouter: Central router that determines active volume backend
 
@@ -38,6 +41,7 @@ class VolumeRouter:
     Both checks must indicate external + Sonos TV audio for Sonos routing.
     
     Decision Matrix:
+    - Sonos plugin disabled (plugins.sonos.enabled = false) -> System Volume
     - Internal audio detected -> System Volume
     - External audio + Sonos receiving TV audio -> Sonos API
     - External audio + Sonos not receiving TV -> System Volume
@@ -98,7 +102,15 @@ class VolumeRouter:
         # Step 1: Get audio device name and check if internal
         self._audio_device_name = await self._get_audio_device_name()
         self._is_internal_audio = self._check_internal_audio(self._audio_device_name)
-        
+
+        # Same key and default as PluginRegistry.discover_plugins: when the
+        # Sonos plugin is not loaded, nothing would handle Sonos-routed volume.
+        if not config.get("plugins.sonos.enabled", True):
+            self._use_sonos = False
+            logger.info("VolumeRouter: Sonos plugin disabled -> using System Volume")
+            self._initialized = True
+            return
+
         if self._is_internal_audio:
             self._use_sonos = False
             logger.info(

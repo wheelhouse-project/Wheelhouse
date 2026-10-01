@@ -57,7 +57,7 @@ class ClickRecorder:
     def __init__(self):
         self.names: List[str] = []
 
-    async def forward_click_element(self, query, trace_id):
+    async def forward_click_element(self, query, trace_id, **kwargs):
         self.names.append(query.name)
 
 

@@ -172,9 +172,9 @@ def build_help_html() -> str:
     window, where you can also change it.</p>
     <p>Require the safety word for:</p>
     <ul>
-        <li>Destructive commands (close window, cut)</li>
-        <li>Triggers that could come up in normal speech (save,
-        desktop)</li>
+        <li>Destructive commands (close window, close tab)</li>
+        <li>Triggers that could come up in normal speech (find,
+        select followed by words)</li>
     </ul>
 
     <h3><a name="editor">What the editor can do</a></h3>

@@ -44,10 +44,12 @@ reappears once a goal is chosen -- it is a starting point, not a wizard.
 import math
 import re
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSignalBlocker
-from PySide6.QtGui import QValidator
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer, Signal, QSignalBlocker
+from PySide6.QtGui import QGuiApplication, QValidator
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
+    QScrollArea,
     QVBoxLayout,
     QHBoxLayout,
     QFormLayout,
@@ -254,7 +256,7 @@ _GROUP_REF_HELP = (
 _DEFAULT_PHRASES_LABEL = "What should you say? (one or more phrasings)"
 _DEFAULT_PHRASE_PLACEHOLDER = "e.g., save project"
 _DEFAULT_TEXT_LABEL = "Output text:"
-_DEFAULT_TEXT_PLACEHOLDER = "e.g., GPT"
+_DEFAULT_TEXT_PLACEHOLDER = "e.g., NASA"
 
 # The "What do you want to happen?" goal list, in spec order. Each entry:
 # ``key`` (stable id, stored as item data), ``title`` (list row), ``help``
@@ -498,6 +500,44 @@ class _KeyCaptureEdit(QKeySequenceEdit):
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         self.focus_lost.emit()
+
+
+class _WheelGuardedComboBox(QComboBox):
+    """QComboBox that leaves the mouse wheel to the dialog's scroll area.
+
+    Inside a scrolling editor, a wheel turn over a combo that has not been
+    chosen must scroll the dialog. Stock QComboBox changes its selection
+    instead, which silently rewrote a step's function or group while the
+    user only meant to scroll (wh-pattern-editor-steps-scroll). The wheel
+    changes the selection only after the user gave the combo keyboard
+    focus by clicking or tabbing to it.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class _EditorContent(QWidget):
+    """The editor page's scrolling content; reports layout changes.
+
+    ``layoutChanged`` fires when its layout was invalidated (a row added,
+    an error label shown, the mode switched), so the dialog can grow to
+    show the new content while there is screen room left.
+    """
+
+    layoutChanged = Signal()
+
+    def event(self, event):
+        if event.type() == QEvent.Type.LayoutRequest:
+            self.layoutChanged.emit()
+        return super().event(event)
 
 
 class _RecordButton(QPushButton):
@@ -884,7 +924,7 @@ class ActionStepRow(QWidget):
         layout.setContentsMargins(0, 4, 0, 4)
 
         header = QHBoxLayout()
-        self._function_combo = QComboBox()
+        self._function_combo = _WheelGuardedComboBox()
         self._populate_function_combo()
         self.up_btn = QPushButton("Move up")
         self.up_btn.setAccessibleDescription(
@@ -1530,11 +1570,11 @@ class ActionStepRow(QWidget):
         kind = spec.get("kind")
         help_text = spec.get("summary", "")
         if kind == "choice":
-            widget = QComboBox()
+            widget = _WheelGuardedComboBox()
             widget.addItems([str(c) for c in spec.get("choices", [])])
             widget.currentTextChanged.connect(lambda _t: self.changed.emit())
         elif kind == "group_ref":
-            widget = QComboBox()
+            widget = _WheelGuardedComboBox()
             widget.setEditable(True)
             widget.addItems(self._group_ref_items())
             widget.setEditText("")
@@ -2126,7 +2166,47 @@ class CreatePatternDialog(QDialog):
         outer.addWidget(self._root_stack)
         self._goal_page = self._build_goal_page()
         self._editor_page = QWidget()
-        layout = QVBoxLayout(self._editor_page)
+        page_layout = QVBoxLayout(self._editor_page)
+        # Everything above the Save / Cancel row scrolls, so a pattern with
+        # many steps never makes the dialog taller than the screen and the
+        # buttons never leave the window (wh-pattern-editor-steps-scroll).
+        self._editor_content = _EditorContent()
+        layout = QVBoxLayout(self._editor_content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._editor_scroll = QScrollArea()
+        self._editor_scroll.setWidgetResizable(True)
+        # The scroll area is not a control: a stock QScrollArea takes Tab
+        # focus, which opened the editor on an unnamed tab stop instead
+        # of its first field and added one to every Tab cycle.
+        self._editor_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._editor_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._editor_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._editor_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._editor_scroll.setWidget(self._editor_content)
+        page_layout.addWidget(self._editor_scroll, stretch=1)
+        # Grows the window when the content gets taller after show.
+        self._grow_timer = QTimer(self)
+        self._grow_timer.setSingleShot(True)
+        self._grow_timer.setInterval(0)
+        self._grow_timer.timeout.connect(self._grow_to_fit_content)
+        # Scrolls the try-it result line into view after its text changes.
+        self._reveal_try_timer = QTimer(self)
+        self._reveal_try_timer.setSingleShot(True)
+        self._reveal_try_timer.setInterval(0)
+        self._reveal_try_timer.timeout.connect(self._reveal_try_result)
+        # True once the first fit at show time is done; later size bounds
+        # use the monitor that holds the dialog.
+        self._first_fit_done = False
+        # Height the editor content needed at the last growth check (0 =
+        # none yet); a layout change grows the window by the difference.
+        self._content_height_seen = 0
+        self._editor_content.layoutChanged.connect(
+            self._on_editor_layout_changed
+        )
         self._root_stack.addWidget(self._goal_page)    # index 0
         self._root_stack.addWidget(self._editor_page)  # index 1
         self._root_stack.setCurrentWidget(self._editor_page)
@@ -2166,11 +2246,16 @@ class CreatePatternDialog(QDialog):
         layout.addWidget(self._try_result_label)
 
         # --- Save error (whole-operation failures show inline, not modal) ---
+        # The steps validation message and this one sit on the editor page
+        # under the scroll area, directly above the Save / Cancel row, so
+        # they are visible whatever the scroll position
+        # (wh-pattern-editor-steps-scroll.1.1).
         self._save_error_label = QLabel()
         self._save_error_label.setStyleSheet(_ERROR_STYLE)
         self._save_error_label.setWordWrap(True)
         self._save_error_label.setVisible(False)
-        layout.addWidget(self._save_error_label)
+        page_layout.addWidget(self._steps_error_label)
+        page_layout.addWidget(self._save_error_label)
 
         # --- Buttons ---
         btn_layout = QHBoxLayout()
@@ -2203,7 +2288,7 @@ class CreatePatternDialog(QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(self._save_btn)
         btn_layout.addWidget(self._cancel_btn)
-        layout.addLayout(btn_layout)
+        page_layout.addLayout(btn_layout)
 
         self._ui_ready = True
         self._fix_tab_order()
@@ -2290,7 +2375,7 @@ class CreatePatternDialog(QDialog):
         self._hotword_check.setToolTip(
             "When enabled, you must say the safety word before the phrase.\n"
             "Use for destructive commands (close window) or ambiguous "
-            "ones (save)."
+            "ones (find)."
         )
 
         self._try_label = QLabel("Try it:")
@@ -2715,7 +2800,8 @@ class CreatePatternDialog(QDialog):
         layout.addSpacing(10)
         layout.addWidget(steps_label)
         layout.addWidget(self._steps_editor)
-        layout.addWidget(self._steps_error_label)
+        # _steps_error_label is added to the editor page, below the scroll
+        # area, by _build_ui (wh-pattern-editor-steps-scroll.1.1).
         layout.addStretch()
         return self._advanced_pane
 
@@ -2830,6 +2916,124 @@ class CreatePatternDialog(QDialog):
             self._goal_page_pending = False
             self._root_stack.setCurrentWidget(self._goal_page)
             self._goal_list.setFocus()
+        self._fit_to_screen()
+
+    # ------------------------------------------------------------------ #
+    #  Screen bound (wh-pattern-editor-steps-scroll)
+    # ------------------------------------------------------------------ #
+
+    def _available_screen_rect(self):
+        """Available area of the monitor the dialog opens on, or None.
+
+        The first fit at show time uses the parent's screen when there is
+        a parent (the Pattern Manager opens this dialog with itself as
+        parent), else the dialog's own, else the primary screen. Every
+        later bound uses the monitor that holds the dialog's own window,
+        which the user may have dragged elsewhere
+        (wh-pattern-editor-steps-scroll.1.2). ``availableGeometry`` is in
+        Qt logical pixels already, so no DPI math belongs here (same
+        reasoning as ``pattern_manager_dialog._clamp_dialog_size``, which
+        is not imported: it clamps size only, and it would tie this module
+        to the manager).
+        """
+        parent = self.parentWidget()
+        screen = (
+            parent.screen()
+            if parent is not None and not self._first_fit_done
+            else None
+        )
+        screen = screen or self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return None
+        return screen.availableGeometry()
+
+    def _frame_extra(self) -> tuple[int, int]:
+        """Width and height the window frame adds; 0 when unknown."""
+        frame = self.frameGeometry()
+        inner = self.geometry()
+        return (
+            max(frame.width() - inner.width(), 0),
+            max(frame.height() - inner.height(), 0),
+        )
+
+    def _move_frame_inside(self, available: QRect):
+        """Move the window so its frame lies inside ``available``. When
+        the frame is larger than the area, the top-left corner wins."""
+        frame = self.frameGeometry()
+        x = min(frame.x(), available.x() + available.width() - frame.width())
+        y = min(frame.y(), available.y() + available.height() - frame.height())
+        x = max(x, available.x())
+        y = max(y, available.y())
+        if x != frame.x() or y != frame.y():
+            self.move(self.x() + x - frame.x(), self.y() + y - frame.y())
+
+    def _resize_within_screen(self, width: int, height: int):
+        """Resize to at most the available area (frame included), then
+        move the frame inside it."""
+        available = self._available_screen_rect()
+        if available is None:
+            return
+        frame_w, frame_h = self._frame_extra()
+        width = min(width, max(available.width() - frame_w, 1))
+        height = min(height, max(available.height() - frame_h, 1))
+        resized = (width, height) != (self.width(), self.height())
+        if resized:
+            self.resize(width, height)
+        # After the first fit, a growth that changes nothing leaves the
+        # window where the user put it (wh-pattern-editor-steps-scroll.1.2).
+        if resized or not self._first_fit_done:
+            self._move_frame_inside(available)
+
+    def _fit_to_screen(self):
+        """Give the dialog the size its content needs, bounded to the
+        available screen area, and move it inside that area. Runs at show
+        time. A window whose layout has height-for-width parts (wrapped
+        labels) opens at the layout's minimum width, and a scroll area
+        contributes almost no minimum, so the natural size is applied
+        here instead of being left to Qt."""
+        self._grow_to_fit_content(natural=True)
+        self._resize_within_screen(self.width(), self.height())
+        self._first_fit_done = True
+
+    def _editor_content_height(self) -> int:
+        """Height the editor content needs."""
+        return self._editor_content.sizeHint().height()
+
+    def _on_editor_layout_changed(self):
+        self._grow_timer.start()
+
+    def _grow_to_fit_content(self, natural: bool = False):
+        """Grow the dialog to show the editor content, never past the
+        screen bound and never shrinking.
+
+        ``natural`` sizes the window to the whole content (first show,
+        and the switch from the goal page to the editor). Otherwise the
+        window grows only by the height the content gained since the last
+        check, so a window the user made smaller stays as they left it
+        until the content actually grows. The scroll area keeps whatever
+        does not fit reachable (wh-pattern-editor-steps-scroll).
+        """
+        if not self.isVisible():
+            return
+        if self._root_stack.currentWidget() is not self._editor_page:
+            return
+        now = self._editor_content_height()
+        seen = self._content_height_seen
+        self._content_height_seen = now
+        viewport = self._editor_scroll.viewport()
+        if natural:
+            width = max(
+                self.width(),
+                self._editor_content.sizeHint().width()
+                + self.width() - viewport.width(),
+            )
+            height = max(self.height(), now + self.height() - viewport.height())
+        elif seen > 0 and now > seen:
+            width = self.width()
+            height = self.height() + now - seen
+        else:
+            return
+        self._resize_within_screen(width, height)
 
     def _on_goal_activated(self, item):
         key = item.data(Qt.ItemDataRole.UserRole)
@@ -2868,6 +3072,8 @@ class CreatePatternDialog(QDialog):
         self._on_type_changed()
         self._goal_page_pending = False
         self._root_stack.setCurrentWidget(self._editor_page)
+        # The window opened at the goal page's size; give it the editor's.
+        self._grow_to_fit_content(natural=True)
         if template.get("advanced"):
             # The toggle's slot switches the mode and syncs the panes.
             self._advanced_toggle.setChecked(True)
@@ -3022,6 +3228,12 @@ class CreatePatternDialog(QDialog):
         if self._advanced_toggle.isChecked() != advanced:
             self._advanced_toggle.setChecked(advanced)
         self._panes.setCurrentIndex(1 if advanced else 0)
+        # The steps message sits outside the panes but belongs to the
+        # advanced step list, and only the advanced branch of _validate
+        # sets or clears it (wh-pattern-editor-steps-scroll.1.1).
+        self._steps_error_label.setVisible(
+            advanced and bool(self._steps_error_label.text())
+        )
         # Re-apply the active pane's hotword-enablement rule (each pane's
         # type control owns the shared checkbox while its pane is current).
         if advanced:
@@ -3430,8 +3642,28 @@ class CreatePatternDialog(QDialog):
             )
 
     def _set_try_result(self, text: str, style: str):
+        changed = text != self._try_result_label.text()
         self._try_result_label.setStyleSheet(style)
         self._try_result_label.setText(text)
+        # The line sits at the bottom of the scrolled content; bring the
+        # whole line into view once the layout has given it its new size.
+        # Only for a new text while the user is in the try-it input: a
+        # result re-run by a step edit must not scroll the edited field
+        # out of view (wh-pattern-editor-steps-scroll.1.1, Boss ruling).
+        if changed and self.focusWidget() is self._try_input:
+            self._reveal_try_timer.start()
+
+    def _reveal_try_result(self):
+        """Scroll the try-it result line into view. The scroll area
+        resizes its content and updates its scroll range only when it
+        handles the layout request posted to its viewport, and that can
+        still be pending when this timer fires (measured: without this,
+        the line is scrolled to using its old position and a too-small
+        scroll range); handle it first."""
+        QGuiApplication.sendPostedEvents(
+            self._editor_scroll.viewport(), QEvent.Type.LayoutRequest
+        )
+        self._editor_scroll.ensureWidgetVisible(self._try_result_label)
 
     # ------------------------------------------------------------------ #
     #  Save paths and result handling

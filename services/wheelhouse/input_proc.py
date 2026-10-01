@@ -103,6 +103,44 @@ _LAUNCH_BUSY_NOTICE = (
 # nothing at all and the user would hear nothing after asking.
 _LAUNCH_SLOW_S = 8.0
 
+# After a Store program starts, how often and for how long the launch
+# thread looks for its new window so it can bring it to the front
+# (wh-activate-windows-terminal.3, David's check 3: Windows Terminal
+# started but stayed behind). The shell starts the program without giving
+# it the foreground, so Wheelhouse brings the window forward itself --
+# but only while the window that was in front at the start is still in
+# front (boss ruling R4, see _bring_started_store_window_forward).
+#
+# crewcut: a fixed poll of EnumWindows, every 0.2 s for at most 10 s. The
+# launch thread stays alive for the wait, so it holds one of the
+# _MAX_LAUNCHES_IN_FLIGHT slots until the window appears or the bound runs
+# out, and a program slower than 10 s to show a window stays behind. To
+# remove the limit, register a SetWinEventHook for EVENT_OBJECT_SHOW (or
+# EVENT_OBJECT_CREATE) and bring forward the first window of the app ID
+# when the event arrives, with the same R4 foreground check, no poll and
+# no bound.
+_STORE_WINDOW_POLL_S = 0.2
+_STORE_WINDOW_WAIT_S = 10.0
+# The clock and the sleep the poll uses; the tests replace both so the
+# wait takes no real time.
+_store_poll_clock = time.monotonic
+_store_poll_sleep = time.sleep
+
+
+def _foreground_window() -> int:
+    """The window in front now, as an int; 0 when Windows reports none.
+
+    Boss ruling R4 (wh-activate-windows-terminal.3): read once before a
+    Store program starts and once when its window appears, so the new
+    window is brought forward only when the user has not moved to another
+    window during the wait. A module-level function so the tests can
+    replace it.
+    """
+    try:
+        return int(win32gui.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
 # The launches started and not yet finished, as [name, thread] pairs.
 # Read and written only through _launches_in_flight and
 # _launch_off_command_loop, both of which hold _launch_threads_lock.
@@ -205,11 +243,34 @@ def _should_emit_keyboard_invalidation(normalized_key: str, is_internal_action: 
         return False
     return normalized_key not in ['ctrl', 'alt', 'shift', 'win']
 
+def _window_title_has_phrase(title: str, phrase: str) -> bool:
+    """True when ``phrase`` appears in ``title`` as whole words.
+
+    wh-safety-word-free-commands (S1b): "show <app>" runs without the
+    safety word, so any spoken words can reach the window lookup, and
+    "me" as a regular expression matched "Welcome". The phrase is plain
+    text (no regular-expression meaning), case-insensitive, with ending
+    punctuation (. , ! ? ; :) and surrounding space removed. It must
+    start and end at a word boundary in the title. The boundary is "not
+    next to a word character" (lookaround) rather than a backslash-b,
+    because a backslash-b fails after a symbol such as the "+" in
+    "Notepad++". A phrase that is empty after the removal matches
+    nothing.
+    """
+    phrase = (phrase or "").strip().rstrip(".,!?;:").strip()
+    if not phrase:
+        return False
+    return bool(
+        re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", title or "", re.IGNORECASE)
+    )
+
+
 def _find_window_by_target(target: str, logger):
     """Find a window by process name (*.exe) or title pattern.
     
     Args:
-        target: Either a process name (e.g., 'brave.exe') or title regex pattern
+        target: Either a process name (e.g., 'brave.exe') or the spoken words to
+            find in a window title (plain text, whole words)
         logger: Logger instance for debug messages
         
     Returns:
@@ -253,8 +314,8 @@ def _find_window_by_target(target: str, logger):
                 except Exception as e:
                     logger.debug(f"Process lookup failed for hwnd {hwnd}: {e}")
             else:
-                # Match by title (case-insensitive regex search)
-                if re.search(target, title, re.IGNORECASE):
+                # Match by title: the spoken phrase as whole words
+                if _window_title_has_phrase(title, target):
                     target_hwnd = hwnd
                     return False  # Stop enumeration
         except Exception as e:
@@ -272,47 +333,199 @@ def _find_window_by_target(target: str, logger):
     
     return target_hwnd
 
+
+def _app_model_kernel32():
+    """kernel32 with the argument types the app-model calls need.
+
+    A private WinDLL instance, not ctypes.windll.kernel32: argtypes set
+    on the shared object would change every other caller's calls. The
+    HANDLE types matter on 64-bit Windows, where the default int
+    conversion truncates a handle.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.GetApplicationUserModelId.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(ctypes.c_uint32),
+        wintypes.LPWSTR,
+    ]
+    kernel32.GetApplicationUserModelId.restype = wintypes.LONG
+    return kernel32
+
+
+def _process_app_id(pid: int):
+    """The Store app ID of a process, or None for a desktop process.
+
+    GetApplicationUserModelId answers 0 with the ID for a packaged
+    process and APPMODEL_ERROR_NO_APPLICATION (15703) for a desktop one.
+    The process handle is always closed.
+    """
+    import ctypes
+
+    kernel32 = _app_model_kernel32()
+    # PROCESS_QUERY_LIMITED_INFORMATION: enough for this call, and
+    # granted for processes a stricter access mask would be refused.
+    handle = kernel32.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        buffer = ctypes.create_unicode_buffer(256)
+        length = ctypes.c_uint32(len(buffer))
+        if kernel32.GetApplicationUserModelId(handle, ctypes.byref(length), buffer) != 0:
+            return None
+        return buffer.value or None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _window_app_id(hwnd: int):
+    """The app ID a window carries as a property, or None.
+
+    A UWP window is hosted by ApplicationFrameHost, so its process is the
+    host, and the app ID is on the window instead.
+    """
+    from win32com.propsys import propsys, pscon
+
+    store = propsys.SHGetPropertyStoreForWindow(hwnd, propsys.IID_IPropertyStore)
+    return store.GetValue(pscon.PKEY_AppUserModel_ID).GetValue() or None
+
+
+def _find_window_by_app_id(app_id: str, logger):
+    """Find a visible window that belongs to the Store app with this ID.
+
+    A window matches when its process reports the app ID, or when the
+    window itself carries it. IDs compare without regard to case (the
+    Settings window reports a lowercase one). Never raises: a window that
+    closes during the walk, or a process that refuses the query, only
+    costs that window.
+
+    Returns the window handle, or None.
+    """
+    wanted = (app_id or "").casefold()
+    if not wanted:
+        return None
+
+    found = None
+
+    def enum_callback(hwnd, _):
+        nonlocal found
+        try:
+            if not win32gui.IsWindowVisible(hwnd) or not win32gui.GetWindowText(hwnd):
+                return True
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            for read, key in ((_process_app_id, pid), (_window_app_id, hwnd)):
+                try:
+                    candidate = read(key)
+                except Exception as e:
+                    logger.debug(f"App ID lookup failed for hwnd {hwnd}: {e}")
+                    continue
+                if candidate and candidate.casefold() == wanted:
+                    found = hwnd
+                    return False
+        except Exception as e:
+            logger.debug(f"Error checking window {hwnd}: {e}")
+        return True
+
+    # The launch thread never initialised COM, and the window property
+    # store is a COM object.
+    initialised = False
+    try:
+        import pythoncom
+
+        pythoncom.CoInitialize()
+        initialised = True
+    except Exception as e:
+        logger.debug(f"COM initialisation failed: {e}")
+    try:
+        win32gui.EnumWindows(enum_callback, None)
+    except Exception as e:
+        # A window destroyed during the walk; also what a callback that
+        # returned False raises on some pywin32 builds.
+        logger.debug(f"EnumWindows error (window likely closed during enumeration): {e}")
+    finally:
+        if initialised:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception as e:
+                logger.debug(f"COM uninitialisation failed: {e}")
+    return found
+
+
 def _activate_window_impl(hwnd: int, logger) -> bool:
     """Activate a window, handling minimized windows and Windows focus restrictions.
-    
+
+    wh-activate-windows-terminal.3: the bring-forward is
+    utils.foreground.steal_foreground, which attaches this thread's input
+    queue to the CURRENT FOREGROUND window's thread before it calls
+    SetForegroundWindow, and detaches in a finally. This function used to
+    attach to the TARGET window's thread instead; the foreground lock
+    refuses that, so "activate terminal" logged success while the window
+    stayed behind.
+
     Args:
         hwnd: Window handle to activate
         logger: Logger instance for messages
-        
+
     Returns:
-        True if activation succeeded, False otherwise
+        True if Windows brought the window to the front, False otherwise
     """
     import win32gui
-    import win32process
     import win32con
-    
+    # Deferred like every project-local import in this file.
+    from utils.foreground import steal_foreground
+
     try:
         # First, check if the window is minimized and restore it
         if win32gui.IsIconic(hwnd):
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-        
-        # Try to force focus using thread attachment to bypass Windows restrictions
-        try:
-            import win32api
-            current_thread = win32api.GetCurrentThreadId()
-            target_thread, _ = win32process.GetWindowThreadProcessId(hwnd)
-            if current_thread != target_thread:
-                win32process.AttachThreadInput(current_thread, target_thread, True)
-                win32gui.SetForegroundWindow(hwnd)
-                win32gui.BringWindowToTop(hwnd)
-                win32process.AttachThreadInput(current_thread, target_thread, False)
-            else:
-                win32gui.SetForegroundWindow(hwnd)
-        except:
-            # If thread attach fails, try direct method
-            win32gui.SetForegroundWindow(hwnd)
-            win32gui.BringWindowToTop(hwnd)
-        
-        logger.info(f"Activated window: hwnd={hwnd}, title={win32gui.GetWindowText(hwnd)}")
-        return True
     except Exception as e:
         logger.warning(f"Failed to activate window {hwnd}: {e}")
         return False
+
+    if not steal_foreground(hwnd):
+        logger.warning(
+            f"Windows refused to bring window hwnd={hwnd} to the front"
+        )
+        return False
+
+    try:
+        title = win32gui.GetWindowText(hwnd)
+    except Exception as e:
+        title = f"<unreadable: {e}>"
+    logger.info(f"Activated window: hwnd={hwnd}, title={title}")
+    return True
+
+def _target_is_foreground(target: str, logger) -> bool:
+    """True when the window in front now is the one ``target`` names.
+
+    A target ending in ".exe" names a process; any other target is the
+    spoken words, matched as whole words in the window title. Any failure to read
+    the foreground window answers False.
+    """
+    import win32gui
+    import win32process
+
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if target.lower().endswith(".exe"):
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                return psutil.Process(pid).name().lower() == target.lower()
+            except Exception as e:
+                logger.debug(f"Verification process lookup failed: {e}")
+                return False
+        title = win32gui.GetWindowText(hwnd) or ""
+        return _window_title_has_phrase(title, target)
+    except Exception as e:
+        logger.debug(f"Verification loop iteration failed: {e}")
+        return False
+
 
 def _verify_window_activation(target: str, request_id, response_queue, action: str,
                                foreground_poll_ms: int, poll_interval_ms: int,
@@ -345,38 +558,17 @@ def _verify_window_activation(target: str, request_id, response_queue, action: s
         action_delay_ms: Fallback delay if verification fails
         logger: Logger instance
     """
-    import win32gui
-    import win32process
     import time
-    
-    is_process = target.lower().endswith(".exe")
+
     done = False
     start = time.time()
-    
+
     while (time.time() - start) * 1000 < foreground_poll_ms:
-        try:
-            hwnd = win32gui.GetForegroundWindow()
-            title = win32gui.GetWindowText(hwnd) or ""
-            
-            if is_process:
-                try:
-                    _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                    proc_name = psutil.Process(pid).name().lower()
-                    if proc_name == target.lower():
-                        response_queue.put({'request_id': request_id, 'status': 'ok',
-                                          'path': 'foreground_done', 'action': action})
-                        done = True
-                        break
-                except Exception as e:
-                    logger.debug(f"Verification process lookup failed: {e}")
-            else:
-                if re.search(target, title, re.IGNORECASE):
-                    response_queue.put({'request_id': request_id, 'status': 'ok',
-                                      'path': 'foreground_done', 'action': action})
-                    done = True
-                    break
-        except Exception as e:
-            logger.debug(f"Verification loop iteration failed: {e}")
+        if _target_is_foreground(target, logger):
+            response_queue.put({'request_id': request_id, 'status': 'ok',
+                              'path': 'foreground_done', 'action': action})
+            done = True
+            break
         time.sleep(poll_interval_ms / 1000.0)
     
     if not done:
@@ -384,6 +576,131 @@ def _verify_window_activation(target: str, request_id, response_queue, action: s
         time.sleep(action_delay_ms / 1000.0)
         response_queue.put({'request_id': request_id, 'status': 'ok', 
                           'path': 'heuristic_done', 'action': action})
+
+class _ActivateReply:
+    """The one answer an awaited activate owes the Logic process.
+
+    wh-safety-word-free-commands. A request that carries a request id is
+    awaited: the Logic process sends no further step until it is answered,
+    waits a bounded time, and decides from the answer what the user sees.
+    Exactly one answer leaves this object, whichever thread produces it
+    (the command loop, the launch thread, or the foreground verification
+    thread). Replies:
+
+    * ``refuse(message)``: an error marked ``refusal`` carrying the text an
+      Input notice would have shown. The Input notice is NOT shown; the
+      Logic process shows it or types the words, depending on the safety
+      word.
+    * ``stop(message)``: the same, plus ``outcome`` "stopped": the rule
+      must send no further step and show nothing.
+    * ``put(response)``: any other reply; ``_verify_window_activation``
+      answers ok through it.
+
+    It has ``put`` so it can stand in for the response queue.
+    """
+
+    def __init__(self, request_id, response_queue, action, target,
+                 foreground_poll_ms, poll_interval_ms, action_delay_ms,
+                 logger):
+        self.request_id = request_id
+        self.action = action
+        self.target = target
+        self._queue = response_queue
+        self._foreground_poll_ms = foreground_poll_ms
+        self._poll_interval_ms = poll_interval_ms
+        self._action_delay_ms = action_delay_ms
+        self._logger = logger
+        self._lock = threading.Lock()
+        self._answered = False
+        self._verifying = False
+
+    def put(self, response) -> bool:
+        """Send ``response`` unless an answer already left. True if sent."""
+        with self._lock:
+            if self._answered:
+                self._logger.debug(
+                    f"A second answer for request {self.request_id} was "
+                    f"dropped: {response}"
+                )
+                return False
+            self._answered = True
+        self._queue.put(response)
+        return True
+
+    def refuse(self, message, outcome=None) -> bool:
+        reply = {
+            'request_id': self.request_id, 'error': True, 'refusal': True,
+            'message': message, 'action': self.action,
+        }
+        if outcome:
+            reply['outcome'] = outcome
+        return self.put(reply)
+
+    def stop(self, message) -> bool:
+        return self.refuse(message, outcome='stopped')
+
+    def verify_running(self) -> None:
+        """Answer for an already-running window just brought forward.
+
+        Blocks for the verification limit plus the settle delay, so it
+        belongs on the launch thread. The answer is ok either way, as the
+        found-window path has always been.
+        """
+        _verify_window_activation(
+            self.target, self.request_id, self, self.action,
+            self._foreground_poll_ms, self._poll_interval_ms,
+            self._action_delay_ms, self._logger,
+        )
+
+    def started(self) -> None:
+        """A program was started: answer once its window is in front.
+
+        Runs the foreground check on its own thread, so the launch thread
+        can go on to wait for a Store program's window (up to
+        _STORE_WINDOW_WAIT_S) without holding the answer. A window that is
+        not in front by the verification limit stops the rule.
+        """
+        with self._lock:
+            self._verifying = True
+        threading.Thread(
+            target=self._verify_started, name="input-activate-verify",
+            daemon=True,
+        ).start()
+
+    def _verify_started(self) -> None:
+        try:
+            start = time.monotonic()
+            while (time.monotonic() - start) * 1000 < self._foreground_poll_ms:
+                if _target_is_foreground(self.target, self._logger):
+                    self.put({
+                        'request_id': self.request_id, 'status': 'ok',
+                        'path': 'foreground_done', 'action': self.action,
+                    })
+                    return
+                time.sleep(self._poll_interval_ms / 1000.0)
+            self._logger.info(
+                f"Started {self.target}, but its window was not in front "
+                f"after {self._foreground_poll_ms} ms; stopping the rule"
+            )
+            self.stop(f"{self.target} did not come to the front")
+        except Exception as e:
+            self._logger.error(
+                f"Verifying the started window failed: {_safe_error_text(e)}",
+                exc_info=True,
+            )
+            self.stop(f"{self.target} did not come to the front")
+
+    def ensure_answered(self) -> None:
+        """Answer with a refusal if nothing answered and nothing will.
+
+        Called when a launch thread ends, so a launch that raised cannot
+        leave the Logic process waiting for its full timeout.
+        """
+        with self._lock:
+            owed = not self._answered and not self._verifying
+        if owed:
+            self.refuse(f"Could not activate {self.target}.")
+
 
 def _safe_type_name(value: object) -> str:
     """Name a value's class without letting the lookup raise.
@@ -473,7 +790,8 @@ def _launches_in_flight():
         return list(_launch_threads)
 
 
-def _launch_off_command_loop(name, work, logger, notice, before_start=None):
+def _launch_off_command_loop(name, work, logger, notice, before_start=None,
+                             on_refused=None):
     """Run one launch on its own thread, so the command loop stays free.
 
     wh-launch-off-command-loop, David's item 18 of
@@ -496,6 +814,10 @@ def _launch_off_command_loop(name, work, logger, notice, before_start=None):
     buffer invalidation: a launch the limit refuses never changes which
     window has focus, so it must not cost the next buffer query a full
     UIA re-sync (boss ruling 2026-09-04 on wh-launch-off-command-loop).
+
+    ``on_refused`` is called with the notice text instead of showing the
+    notice, when the limit refuses the launch. An awaited activate passes
+    its refusal here (wh-safety-word-free-commands).
     """
     running = _launches_in_flight()
     if len(running) >= _MAX_LAUNCHES_IN_FLIGHT:
@@ -504,7 +826,10 @@ def _launch_off_command_loop(name, work, logger, notice, before_start=None):
             f"Not starting {name}: {len(running)} launches have not "
             f"returned yet ({still})"
         )
-        notice(_LAUNCH_BUSY_NOTICE)
+        if on_refused is not None:
+            on_refused(_LAUNCH_BUSY_NOTICE)
+        else:
+            notice(_LAUNCH_BUSY_NOTICE)
         return None
     if before_start is not None:
         before_start()
@@ -573,7 +898,7 @@ def _slow_launch_timer(name, notice):
     return timer
 
 
-def _launch_exe_target(target, logger, notice) -> None:
+def _launch_exe_target(target, logger, notice, reply=None) -> None:
     """Start a bare executable name off the command loop.
 
     ShellExecute resolves the bare name via System32, PATH, and the App
@@ -587,6 +912,10 @@ def _launch_exe_target(target, logger, notice) -> None:
     the executable name itself. The spoken-name path can say something
     better because its lookup settled on an installed program; this one
     has only the words the user said.
+
+    With ``reply`` (an awaited activate, wh-safety-word-free-commands) a
+    failure is answered as a refusal instead of shown, and a start hands
+    the wait for the window to the reply.
     """
     timer = _slow_launch_timer(target, notice)
     timer.start()
@@ -594,13 +923,65 @@ def _launch_exe_target(target, logger, notice) -> None:
         os.startfile(target)
     except OSError as e:
         logger.warning(f"Could not launch {target}: {e}")
-        notice(f"Could not start {target}.")
+        if reply is not None:
+            reply.refuse(f"Could not start {target}.")
+        else:
+            notice(f"Could not start {target}.")
+    else:
+        if reply is not None:
+            reply.started()
     finally:
         timer.cancel()
 
 
+def _bring_started_store_window_forward(name, app_id, foreground_at_start,
+                                        logger) -> None:
+    """Wait for a just-started Store program's window, then bring it forward.
+
+    wh-activate-windows-terminal.3, acceptance item 4. Runs on the launch
+    thread, after os.startfile returned. The bound and the interval are
+    _STORE_WINDOW_WAIT_S and _STORE_WINDOW_POLL_S (see the crewcut there).
+    A window that never appears is logged and nothing more: the user was
+    already told "Starting <name>", and no new notice is added.
+
+    Boss ruling R4: ``foreground_at_start`` is the window that was in
+    front just before os.startfile. When the new window appears, it is
+    brought forward only if that same window is still in front. A voice
+    user can say another command during the wait, for example "activate
+    brave", and the started program must not then take the focus from the
+    window the user chose. If the new window is already in front, Windows
+    gave it the focus itself, and nothing more is done. Each skip logs
+    one info line and shows no notice.
+    """
+    deadline = _store_poll_clock() + _STORE_WINDOW_WAIT_S
+    while True:
+        hwnd = _find_window_by_app_id(app_id, logger)
+        if hwnd:
+            foreground_now = _foreground_window()
+            if foreground_now == hwnd:
+                logger.info(
+                    f"Started {name}; its window came to the front by itself"
+                )
+            elif foreground_now != foreground_at_start:
+                logger.info(
+                    f"Started {name}, but did not bring its window to the "
+                    f"front: the user moved to another window while it "
+                    f"started"
+                )
+            else:
+                _activate_window_impl(hwnd, logger)
+            return
+        if _store_poll_clock() >= deadline:
+            logger.info(
+                f"Started {name}, but no window appeared within "
+                f"{_STORE_WINDOW_WAIT_S:g} s to bring to the front"
+            )
+            return
+        _store_poll_sleep(_STORE_WINDOW_POLL_S)
+
+
 def _start_named_program(target, logger, notify, find_programs,
-                         buffer_manager) -> None:
+                         buffer_manager, reply=None) -> None:
     """Start the installed program a spoken name refers to.
 
     wh-activate-launch-fallback, David's items 32 and 43. A spoken name
@@ -609,8 +990,20 @@ def _start_named_program(target, logger, notify, find_programs,
     looked up among the installed programs: exactly one match starts,
     several start nothing and are listed so the user can say the full
     name, and none says so instead of failing in silence.
+
+    With ``reply`` (an awaited activate, wh-safety-word-free-commands) each
+    failure is answered to the Logic process as a refusal carrying the
+    notice text, and no notice is shown for it: the Logic process shows the
+    text or types the words, depending on the safety word. Progress notices
+    ("Starting <name>", "taking a long time") are still shown.
     """
     _notice = _notice_sender(notify, logger)
+
+    def _fail(message):
+        if reply is not None:
+            reply.refuse(message)
+        else:
+            _notice(message)
 
     # One timer for the whole spoken command, started BEFORE the lookup
     # rather than after it (wh-launch-off-command-loop.2.1, filed by
@@ -640,7 +1033,7 @@ def _start_named_program(target, logger, notify, find_programs,
 
         if not programs:
             logger.warning(f"No window found matching: {target}")
-            _notice(f"No program matched {target}.")
+            _fail(f"No program matched {target}.")
             return
 
         if len(programs) > 1:
@@ -648,7 +1041,7 @@ def _start_named_program(target, logger, notify, find_programs,
                 f"No window found for {target}; "
                 f"{len(programs)} programs match, starting none"
             )
-            _notice(_several_matches_notice(programs))
+            _fail(_several_matches_notice(programs))
             return
 
         program = programs[0]
@@ -657,6 +1050,43 @@ def _start_named_program(target, logger, notify, find_programs,
         # said are the only name there is.
         name.name = program.name
         logger.info(f"No window found for {target}; starting {program.name}")
+        # wh-activate-windows-terminal: a Store program that is already
+        # running is brought forward, never started. The title search
+        # above cannot see it (Windows Terminal's window title is the
+        # active tab's title, "PowerShell", not the program's name), and
+        # starting a running Store app such as Windows Terminal opens
+        # another window. The app ID is the one the installed-program
+        # lookup found, never anything the user said.
+        store_candidates = [
+            c for c in (program, *program.fallbacks) if c.app_id
+        ]
+        for store_candidate in store_candidates:
+            running_hwnd = _find_window_by_app_id(store_candidate.app_id, logger)
+            if running_hwnd:
+                slow.cancel()
+                if buffer_manager is not None:
+                    buffer_manager.invalidate()
+                # wh-activate-windows-terminal.3: the log says what really
+                # happened. A refusal still starts no second copy, because
+                # a second copy of Windows Terminal is a second window.
+                if _activate_window_impl(running_hwnd, logger):
+                    logger.info(
+                        f"{program.name} is already running; "
+                        f"brought its window forward instead of starting it"
+                    )
+                    if reply is not None:
+                        reply.verify_running()
+                else:
+                    logger.warning(
+                        f"{program.name} is already running, but Windows "
+                        f"refused to bring its window to the front"
+                    )
+                    if reply is not None:
+                        reply.refuse(
+                            f"Windows refused to bring {program.name} "
+                            f"to the front"
+                        )
+                return
         # The winner first, then the entries that yielded to it, in
         # source order (wh-activate-launch-fallback.1.6, ruled by the
         # boss 2026-09-04 and overridable by David). The name was
@@ -670,6 +1100,12 @@ def _start_named_program(target, logger, notify, find_programs,
         # broken shortcut and still return success; nothing here can see
         # that, so nothing here pretends to.
         for candidate in (program, *program.fallbacks):
+            # Boss ruling R4: the window in front immediately before the
+            # start, so the bring-forward below can tell whether the user
+            # moved to another window while the program started.
+            foreground_at_start = (
+                _foreground_window() if candidate.app_id else None
+            )
             try:
                 os.startfile(candidate.launch_target)
             except OSError as e:
@@ -701,14 +1137,50 @@ def _start_named_program(target, logger, notify, find_programs,
             if buffer_manager is not None:
                 buffer_manager.invalidate()
             _notice(f"Starting {program.name}")
+            # wh-safety-word-free-commands: the answer to an awaited
+            # activate is decided by the window being in front within the
+            # verification limit, on its own thread, so the wait below
+            # does not hold it.
+            if reply is not None:
+                reply.started()
+            # wh-activate-windows-terminal.3: the shell starts a Store
+            # program without giving it the foreground, so its new window
+            # opened behind the current one (David's check 3). Only the
+            # candidate that actually started is waited for; an ordinary
+            # program is left exactly as before.
+            if candidate.app_id:
+                _bring_started_store_window_forward(
+                    program.name, candidate.app_id, foreground_at_start,
+                    logger,
+                )
             return
         # The user asked for a program and it did not come. Failing in
         # silence here is the defect class of wh-keyboard-refusal-notice,
         # so say which program would not start -- once, under the name
         # the lookup settled on, however many candidates were behind it.
-        _notice(f"Could not start {program.name}.")
+        _fail(f"Could not start {program.name}.")
     finally:
         slow.cancel()
+
+
+def _answer_when_done(work, reply):
+    """Wrap a launch so an awaited activate is always answered.
+
+    The launch thread can end without an answer when the work raises
+    (the wrapper in _launch_off_command_loop only logs it), which would
+    leave the Logic process waiting out its whole timeout. With no reply
+    (a plain activate) the work is returned unchanged.
+    """
+    if reply is None:
+        return work
+
+    def run():
+        try:
+            work()
+        finally:
+            reply.ensure_answered()
+
+    return run
 
 
 def _handle_activate_window(params: dict, request_id, response_queue, action: str,
@@ -758,9 +1230,22 @@ def _handle_activate_window(params: dict, request_id, response_queue, action: st
     (wh-launch-off-command-loop). The command loop ignores this: waiting
     for the launch is the whole thing this change removes. It exists so
     that a test can wait for the launch it asked for.
+
+    Reply contract when request_id is present (wh-safety-word-free-commands):
+    exactly one reply per request. A refusal is {'error': True, 'refusal':
+    True, 'message': ...}; it adds 'outcome': 'stopped' when a program was
+    started but its window did not come forward by the verification limit,
+    which tells the Logic process to stop the rule so that no key follows.
+    Success is {'status': 'ok', ...}. Without a request_id nothing is sent
+    and failures keep their on-screen notices.
     """
     _notice = _notice_sender(notify, logger)
     launch_thread = None
+    reply = None
+    # True when the found window was brought forward and the answer is
+    # the foreground verification on this thread (wh-safety-word-free-
+    # commands: every other awaited outcome answers through ``reply``).
+    verify_found_window = False
     is_internal_action.set()
     try:
         # wh-overlay-slow-uia-stale-badges.14.40: params VALUES are
@@ -771,6 +1256,17 @@ def _handle_activate_window(params: dict, request_id, response_queue, action: st
         target = params.get("target") or ""
         is_process = target.lower().endswith(".exe")
         logger.info(f"Activating window: target={target} ({'process' if is_process else 'title'})")
+        # wh-safety-word-free-commands: an awaited activate owes the
+        # Logic process exactly one answer, and its failures are answered
+        # instead of shown as notices (the Logic process shows the text
+        # or types the words, depending on the safety word). A plain
+        # activate keeps every notice and sends nothing.
+        if request_id:
+            reply = _ActivateReply(
+                request_id, response_queue, action, target,
+                foreground_poll_ms, poll_interval_ms,
+                action_delay_ms.get(action, 500), logger,
+            )
 
         # Find the target window
         target_hwnd = _find_window_by_target(target, logger)
@@ -782,8 +1278,21 @@ def _handle_activate_window(params: dict, request_id, response_queue, action: st
             # hotkey_action block comment in ui_action_handler).
             if buffer_manager is not None:
                 buffer_manager.invalidate()
-            # Activate the window
-            _activate_window_impl(target_hwnd, logger)
+            # wh-activate-windows-terminal.3.2.1: when Windows refuses,
+            # an awaited activate (close-app, minimize-app, maximize-app)
+            # answers with an error, so the rule stops before its hotkey
+            # reaches the window in front. The verification below would
+            # otherwise time out and report success. A plain activate has
+            # no request_id and keeps its old outcome: the log line only.
+            if not _activate_window_impl(target_hwnd, logger):
+                if reply is not None:
+                    # A refusal, not a failure: the Logic process shows the
+                    # text or types the words (wh-safety-word-free-commands).
+                    reply.refuse(
+                        f"Windows refused to bring {target} to the front"
+                    )
+                return launch_thread
+            verify_found_window = True
         elif is_process:
             # Launch fallback (wh-activate-launch-fallback): the app has no
             # window, so start it. os.startfile -> ShellExecute resolves the
@@ -804,13 +1313,19 @@ def _handle_activate_window(params: dict, request_id, response_queue, action: st
             # so it must not cost the buffer a re-sync.
             launch_thread = _launch_off_command_loop(
                 target,
-                lambda: _launch_exe_target(target, logger, _notice),
+                _answer_when_done(
+                    lambda: _launch_exe_target(
+                        target, logger, _notice, reply=reply
+                    ),
+                    reply,
+                ),
                 logger,
                 _notice,
                 before_start=(
                     None if buffer_manager is None
                     else buffer_manager.invalidate
                 ),
+                on_refused=None if reply is None else reply.refuse,
             )
         else:
             # The spoken words are not an executable, so there is nothing
@@ -826,26 +1341,36 @@ def _handle_activate_window(params: dict, request_id, response_queue, action: st
             # the lookup carries the same exposure as the launch.
             launch_thread = _launch_off_command_loop(
                 target,
-                lambda: _start_named_program(
-                    target, logger, notify, find_programs, buffer_manager
+                _answer_when_done(
+                    lambda: _start_named_program(
+                        target, logger, notify, find_programs,
+                        buffer_manager, reply=reply,
+                    ),
+                    reply,
                 ),
                 logger,
                 _notice,
+                on_refused=None if reply is None else reply.refuse,
             )
 
-        # Verification polling (if request_id present)
-        if request_id:
-            _verify_window_activation(target, request_id, response_queue, action,
-                                     foreground_poll_ms, poll_interval_ms, 
+        # Verification polling of a found window (if request_id present).
+        # A launch answers from its own thread instead: see _ActivateReply.
+        if reply is not None and verify_found_window:
+            _verify_window_activation(target, request_id, reply, action,
+                                     foreground_poll_ms, poll_interval_ms,
                                      action_delay_ms.get(action, 500), logger)  # 500ms default for unknown actions
-    
+
     except Exception as e:
         # .14.54: the render is guarded -- see _safe_error_text.
         err = _safe_error_text(e)
         logger.error(f"Error in activate_window: {err}", exc_info=True)
         if request_id:
-            response_queue.put({'request_id': request_id, 'error': True,
-                              'message': err, 'action': action})
+            error_reply = {'request_id': request_id, 'error': True,
+                           'message': err, 'action': action}
+            if reply is not None:
+                reply.put(error_reply)
+            else:
+                response_queue.put(error_reply)
     finally:
         is_internal_action.clear()
     return launch_thread

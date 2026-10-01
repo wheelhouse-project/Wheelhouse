@@ -232,7 +232,8 @@ class TestGoToDesktopIsEliminated:
 
     The accepted consequence is recorded here rather than left to be
     rediscovered: with the fixed entry removed, "go to desktop" falls into
-    switch-to-app's '^(?:switch to|go to)\\s+(.+)$' capture and asks the
+    go-to-app's '^go to\\s+(.+)$' capture (switch-to-app's own row was
+    split from it by wh-safety-word-free-commands) and asks the
     input process to activate a window called "desktop". David chose that
     over keeping the entry. This test fails if anyone restores a fixed
     entry for the phrase, and it fails if the capture stops claiming it.
@@ -250,7 +251,7 @@ class TestGoToDesktopIsEliminated:
             if out.action == "activate_window"
         ]
         assert targets == ["desktop"], (
-            "'go to desktop' did not reach switch-to-app with the captured "
+            "'go to desktop' did not reach go-to-app with the captured "
             f"value 'desktop'; activate_window targets were {targets!r}"
         )
 

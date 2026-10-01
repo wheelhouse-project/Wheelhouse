@@ -792,9 +792,10 @@ class TestClickElementAction:
         lc = MagicMock()
         captured = {}
 
-        async def _fwd(query, trace_id):
+        async def _fwd(query, trace_id, **kwargs):
             captured["query"] = query
             captured["trace_id"] = trace_id
+            captured["kwargs"] = kwargs
 
         lc.forward_click_element = _fwd
         handler.logic_controller = lc
@@ -813,10 +814,14 @@ class TestClickElementAction:
         assert captured["query"].role == "Button"
         assert captured["trace_id"]  # a trace_id was generated/propagated
 
-    def test_unparseable_returns_none_and_does_not_delegate(self, click_funcs):
-        # Whitespace-only collapses to no name -> benign None, no delegation.
-        result = asyncio.run(click_funcs.click_element("   "))
-        assert result is None
+    def test_unparseable_fails_the_step_and_does_not_delegate(self, click_funcs):
+        # Whitespace-only collapses to no name -> no delegation. The step
+        # fails (wh-safety-word-free-commands) so the speech processor types
+        # the words when the safety word was not spoken.
+        from speech.actions import StepFailed
+
+        with pytest.raises(StepFailed):
+            asyncio.run(click_funcs.click_element("   "))
         assert "query" not in click_funcs._captured
 
     def test_action_does_not_call_app_directly(self, click_funcs):
@@ -945,22 +950,20 @@ class TestClickPatternHotwordGating:
         assert catalog.pattern_count > 0  # sanity: real file loaded
         return PatternMatcher(catalog)
 
-    def test_click_without_hotword_is_refused(self, matcher):
-        # 2026-08-17: the click pattern is hotword-gated again, so a
-        # command-mode buffer starting with 'click' no longer reaches
-        # click_element while the hotword is inactive. "click here to
-        # continue" is ordinary dictated text.
+    def test_click_without_hotword_matches_click_element(self, matcher):
+        # wh-safety-word-free-commands (David 2026-09-30): the click pattern
+        # no longer needs the safety word. "click here to continue" reaches
+        # click_element; when no control has that name the speech processor
+        # types the words (tests/test_safety_word_free_click.py).
         result = matcher.match_complete(
             "click here to continue",
             pattern_type="command",
             hotword_active=False,
             first_word="click",
         )
-        if result is not None and result.matched:
-            funcs = [a.get("function") for a in (result.actions or [])]
-            assert "click_element" not in funcs, (
-                "the click command must not match without the hotword"
-            )
+        assert result is not None and result.matched
+        funcs = [a.get("function") for a in (result.actions or [])]
+        assert "click_element" in funcs
 
     def test_click_with_hotword_matches_click_element(self, matcher):
         # Hotword active: the click pattern matches and routes to click_element.

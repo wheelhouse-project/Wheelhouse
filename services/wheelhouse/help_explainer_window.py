@@ -30,13 +30,10 @@ appears; two copies do not pay for the base class, and the extraction
 would have to re-prove the rejection window's own tests.
 
 The body wording is David's, approved word for word on 2026-09-19
-(bead wh-assistant-button-explainer, comment of 2026-09-20 00:56). Two
-later changes edited it. On 2026-09-22 the assistant moved from ChatGPT to
-a Google Gemini Gem (wh-gem-replaces-gpt-assistant), which rewrote the
-assistant's name, the account sentence, and the sign-up sentence. On
-2026-09-27 it moved from the Gem to a Gemini Notebook
-(wh-assistant-gemini-notebook), whose sign-in page takes only a Google
-Account: everything between the first sentence and the last paragraph is
+(bead wh-assistant-button-explainer, comment of 2026-09-20 00:56). A
+later change edited it. On 2026-09-27 the assistant moved to a Gemini
+Notebook (wh-assistant-gemini-notebook), whose sign-in page takes only a
+Google Account: everything between the first sentence and the last paragraph is
 now David's approved Google Account text, word for word (bead comment of
 2026-09-27 20:48), split into paragraphs at sentence ends. Do not reword
 any of it further without his approval; a test asserts every string.

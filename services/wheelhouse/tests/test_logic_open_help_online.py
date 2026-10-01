@@ -6,7 +6,7 @@ command "help" reaches the same method, so both ways in behave the same
 (criterion W4 of wh-assistant-button-explainer).
 
 The decision, in order: no settings at all, nothing happens and the log says
-why; a blank ai.help.gem_url, the existing notice and nothing else; the
+why; a blank ai.help.assistant_url, the existing notice and nothing else; the
 setting ai.help.explain_before_open still true, the GUI process is asked for
 the explanation window; otherwise the browser opens.
 
@@ -110,11 +110,11 @@ def _controller():
     return controller
 
 
-def _settings(controller, gem_url="https://example.test/help", explain=False):
+def _settings(controller, assistant_url="https://example.test/help", explain=False):
     """Give the controller settings that answer each key separately."""
     config = MagicMock()
     values = {
-        "ai.help.gem_url": gem_url,
+        "ai.help.assistant_url": assistant_url,
         "ai.help.explain_before_open": explain,
     }
     config.get = MagicMock(side_effect=lambda key, default=None: values.get(key, default))
@@ -192,7 +192,7 @@ class TestTheExplanationWindow:
         config = MagicMock()
         config.get = MagicMock(
             side_effect=lambda key, default=None: (
-                "https://example.test/help" if key == "ai.help.gem_url" else default
+                "https://example.test/help" if key == "ai.help.assistant_url" else default
             )
         )
         # An async save like the real one, so a mutant that saves while
@@ -228,7 +228,7 @@ class TestOpeningTheHelpPage:
         with patch("webbrowser.open") as browser:
             await controller.start_help_online()
 
-        config.get.assert_any_call("ai.help.gem_url", "")
+        config.get.assert_any_call("ai.help.assistant_url", "")
         browser.assert_called_once_with("https://example.test/help")
         assert _queued(controller) == []
 
@@ -242,7 +242,7 @@ class TestOpeningTheHelpPage:
         open (criterion W6).
         """
         controller = _controller()
-        _settings(controller, gem_url="", explain=True)
+        _settings(controller, assistant_url="", explain=True)
 
         with patch("webbrowser.open") as browser:
             await controller.start_help_online()
@@ -252,7 +252,7 @@ class TestOpeningTheHelpPage:
         assert len(queued) == 1
         assert queued[0]["action"] == "show_notification"
         assert queued[0]["message"] == (
-            "Online help is not configured. Set gem_url under [ai.help]."
+            "Online help is not configured. Set assistant_url under [ai.help]."
         )
 
     @pytest.mark.asyncio
@@ -260,7 +260,7 @@ class TestOpeningTheHelpPage:
         """Startup can fail before the settings are read.
 
         Not the same as a blank address, and it must not be reported the same
-        way: telling the user to set gem_url would send them to fix a setting
+        way: telling the user to set assistant_url would send them to fix a setting
         that is not the problem. This one goes to the log.
         """
         controller = _controller()
@@ -332,14 +332,14 @@ class TestTheNoticeSurvivesTheExplainedPath:
     """Boss ruling condition 2 on wh-assistant-button-explainer.
 
     The explanation window is modeless, so the settings can change while it
-    is open. A user who blanks ai.help.gem_url and then chooses Assistant
+    is open. A user who blanks ai.help.assistant_url and then chooses Assistant
     must get the same notice as anyone else, not an empty browser tab.
     """
 
     @pytest.mark.asyncio
     async def test_a_blank_address_gives_the_notice_when_explained_is_true(self):
         controller = _controller()
-        _settings(controller, gem_url="", explain=False)
+        _settings(controller, assistant_url="", explain=False)
 
         with patch("webbrowser.open") as browser:
             await controller.start_help_online(explained=True)
@@ -349,7 +349,7 @@ class TestTheNoticeSurvivesTheExplainedPath:
         assert len(queued) == 1
         assert queued[0]["action"] == "show_notification"
         assert queued[0]["message"] == (
-            "Online help is not configured. Set gem_url under [ai.help]."
+            "Online help is not configured. Set assistant_url under [ai.help]."
         )
 
 
@@ -394,7 +394,7 @@ class TestTheLogNamesThePathTaken:
     @pytest.mark.asyncio
     async def test_the_unconfigured_notice_is_logged_with_its_source(self, caplog):
         controller = _controller()
-        _settings(controller, gem_url="", explain=True)
+        _settings(controller, assistant_url="", explain=True)
 
         with caplog.at_level(logging.INFO):
             with patch("webbrowser.open"):
@@ -475,7 +475,7 @@ class TestABrowserThatReportsFailureByReturningFalse:
     async def test_the_warning_does_not_hold_the_address(self, caplog):
         """The address is a user setting and does not belong in the log."""
         controller = _controller()
-        _settings(controller, gem_url="https://example.test/private-help")
+        _settings(controller, assistant_url="https://example.test/private-help")
 
         with caplog.at_level(logging.WARNING):
             with patch("webbrowser.open", return_value=False):
@@ -506,114 +506,67 @@ class TestABrowserThatReportsFailureByReturningFalse:
         assert _queued(controller) == []
 
 
-class TestTheRetiredChatGPTAddressOpensTheGemInstead:
-    """wh-gem-replaces-gpt-assistant.2.3, the Codex finding.
+_OLD_GEM_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+_RETIRED_CHATGPT_URL = (
+    "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
+)
+_NOTEBOOK_URL = (
+    "https://notebook.google.com/notebook/"
+    "da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
+)
 
-    Releases before 1.2.0 shipped the ChatGPT custom GPT address as the
-    gem_url default. The installer preserves the user's settings file across
-    an update, and start_help_online reads ai.help.gem_url with an empty
-    default, so every installation that exists today keeps opening a custom
-    GPT that OpenAI stops running on 2026-12-11. Nothing else on this branch
-    reaches those users.
 
-    The fix reads only the exact retired address. A user who chose their own
-    address, and a user who blanked the setting, are both left alone.
+class TestTheConfiguredAddressOpensUnchanged:
+    """wh-assistant-name-cleanup, acceptance criterion 2.
+
+    start_help_online opens the address in ai.help.assistant_url exactly as
+    written. It once replaced two old addresses with the notebook address;
+    that substitution is gone. The two old addresses above are written out
+    in full, not read from main, so each test fails if the substitution
+    comes back.
     """
 
     @pytest.mark.asyncio
-    async def test_the_retired_address_opens_the_gem(self):
-        import main
-
-        controller = _controller()
-        _settings(controller, gem_url=main._RETIRED_CHATGPT_HELP_URL, explain=False)
-
-        with patch("webbrowser.open") as browser:
-            await controller.start_help_online()
-
-        browser.assert_called_once_with(main._WHEELHOUSE_GEM_URL)
-        assert _queued(controller) == []
-
-    @pytest.mark.asyncio
-    async def test_surrounding_whitespace_does_not_defeat_the_check(self):
-        """A hand-edited settings file can carry a stray space."""
-        import main
-
+    async def test_a_custom_address_opens_unchanged(self):
         controller = _controller()
         _settings(
             controller,
-            gem_url="  " + main._RETIRED_CHATGPT_HELP_URL + "  ",
+            assistant_url="https://example.test/my-own-help",
             explain=False,
         )
-
-        with patch("webbrowser.open") as browser:
-            await controller.start_help_online()
-
-        browser.assert_called_once_with(main._WHEELHOUSE_GEM_URL)
-
-    @pytest.mark.asyncio
-    async def test_a_custom_address_opens_unchanged(self):
-        """Only the one retired address is replaced, never anything else."""
-        controller = _controller()
-        _settings(controller, gem_url="https://example.test/my-own-help", explain=False)
 
         with patch("webbrowser.open") as browser:
             await controller.start_help_online()
 
         browser.assert_called_once_with("https://example.test/my-own-help")
+        assert _queued(controller) == []
 
     @pytest.mark.asyncio
-    async def test_another_chatgpt_address_opens_unchanged(self):
-        """A different ChatGPT address is a choice, not the shipped default."""
+    async def test_the_old_gem_address_opens_unchanged(self):
         controller = _controller()
-        _settings(
-            controller,
-            gem_url="https://chatgpt.com/g/g-0000000000000000000000000000-other",
-            explain=False,
-        )
+        _settings(controller, assistant_url=_OLD_GEM_URL, explain=False)
 
         with patch("webbrowser.open") as browser:
             await controller.start_help_online()
 
-        browser.assert_called_once_with(
-            "https://chatgpt.com/g/g-0000000000000000000000000000-other"
-        )
+        browser.assert_called_once_with(_OLD_GEM_URL)
+        assert _queued(controller) == []
 
     @pytest.mark.asyncio
-    async def test_a_blank_address_still_shows_the_notice(self):
-        """Blanking the setting is still how a user turns online help off.
-
-        The substitution must not resurrect help for someone who switched it
-        off, so this pins the blank path against the new code.
-        """
+    async def test_the_old_chatgpt_address_opens_unchanged(self):
         controller = _controller()
-        _settings(controller, gem_url="", explain=True)
+        _settings(controller, assistant_url=_RETIRED_CHATGPT_URL, explain=False)
 
         with patch("webbrowser.open") as browser:
             await controller.start_help_online()
 
-        browser.assert_not_called()
-        queued = _queued(controller)
-        assert len(queued) == 1
-        # The action is checked before the message so a mutation that queues
-        # the explanation window here fails on a named assertion rather than
-        # a KeyError, which the mutation gate reports as an error, not a
-        # catch.
-        assert queued[0]["action"] == "show_notification"
-        assert queued[0]["message"] == (
-            "Online help is not configured. Set gem_url under [ai.help]."
-        )
+        browser.assert_called_once_with(_RETIRED_CHATGPT_URL)
+        assert _queued(controller) == []
 
     @pytest.mark.asyncio
-    async def test_the_substitution_is_logged_without_an_address(self, caplog):
-        """The same redaction rule as every other line here.
-
-        wh-assistant-button-explainer.1.1: the address is a user setting and
-        does not belong in the log.
-        """
-        import main
-
+    async def test_no_line_in_the_log_mentions_a_substitution(self, caplog):
         controller = _controller()
-        _settings(controller, gem_url=main._RETIRED_CHATGPT_HELP_URL, explain=False)
+        _settings(controller, assistant_url=_OLD_GEM_URL, explain=False)
 
         with caplog.at_level(logging.INFO):
             with patch("webbrowser.open"):
@@ -622,41 +575,13 @@ class TestTheRetiredChatGPTAddressOpensTheGemInstead:
         messages = [
             r.getMessage() for r in caplog.records if r.levelno == logging.INFO
         ]
-        substitutions = [m for m in messages if "retired" in m.lower()]
-        assert len(substitutions) == 1
-        assert "chatgpt.com" not in substitutions[0]
-        assert "gemini.google.com" not in substitutions[0]
+        assert [m for m in messages if "instead" in m.lower()] == []
 
-    @pytest.mark.asyncio
-    async def test_the_explanation_window_still_comes_first(self, caplog):
-        """The substitution happens at the browser, not before the window.
+    def test_the_assistant_constant_equals_the_shipped_default(self):
+        """The constant and the shipped default cannot drift apart.
 
-        A user who has not turned the window off must still see it, and the
-        log must not claim a substitution that has not happened yet.
-        """
-        import main
-
-        controller = _controller()
-        _settings(controller, gem_url=main._RETIRED_CHATGPT_HELP_URL, explain=True)
-
-        with caplog.at_level(logging.INFO):
-            with patch("webbrowser.open") as browser:
-                await controller.start_help_online()
-
-        browser.assert_not_called()
-        assert _queued(controller) == [{"action": "open_help_explainer"}]
-        messages = [
-            r.getMessage() for r in caplog.records if r.levelno == logging.INFO
-        ]
-        assert [m for m in messages if "retired" in m.lower()] == []
-
-    def test_the_gem_constant_equals_the_shipped_default(self):
-        """The two copies of the Gem address cannot drift apart.
-
-        One lives in services/wheelhouse/config.toml.example as the shipped
-        gem_url default; the other is the constant this fallback opens. A
-        change to either alone would silently send updated users somewhere
-        the fresh installs never go.
+        One copy lives in services/wheelhouse/config.toml.example as the
+        shipped assistant_url default; the other is the constant in main.
         """
         import pathlib
         import tomllib
@@ -667,108 +592,15 @@ class TestTheRetiredChatGPTAddressOpensTheGemInstead:
             pathlib.Path(main.__file__).resolve().parent / "config.toml.example"
         )
         shipped = tomllib.loads(example.read_text(encoding="utf-8"))
-        assert shipped["ai"]["help"]["gem_url"] == main._WHEELHOUSE_GEM_URL
-
-
-# The two addresses below are written out, not read from main, on purpose:
-# before wh-assistant-gemini-notebook, main._WHEELHOUSE_GEM_URL WAS the old
-# Gem address, so a test that compared against the constant would pass
-# without the substitution.
-_OLD_GEM_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
-_NOTEBOOK_URL = (
-    "https://notebook.google.com/notebook/"
-    "da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
-)
-
-
-class TestTheOldGemAddressOpensTheNotebookInstead:
-    """wh-assistant-gemini-notebook, acceptance criterion 3.
-
-    Release 1.2.0 shipped the Gemini Gem address as the gem_url default, and
-    Google ends Gems on 2026-11-17. The installer preserves the user's
-    settings file across an update, so an installation made with 1.2.0 still
-    holds the Gem address. start_help_online must open the Gemini Notebook
-    chat view instead, in the same way it already replaces the retired
-    ChatGPT address. An address the user chose is still opened as written;
-    TestTheRetiredChatGPTAddressOpensTheGemInstead.
-    test_a_custom_address_opens_unchanged covers an ordinary custom address.
-    """
+        assert (
+            shipped["ai"]["help"]["assistant_url"] == main._WHEELHOUSE_ASSISTANT_URL
+        )
 
     def test_the_shipped_address_is_the_notebook_chat_view(self):
-        """The constant every substitution opens is the notebook's chat view."""
+        """The constant is written out here too, as a check on both copies."""
         import main
 
-        assert main._WHEELHOUSE_GEM_URL == _NOTEBOOK_URL
-
-    @pytest.mark.asyncio
-    async def test_the_old_gem_address_opens_the_notebook(self):
-        controller = _controller()
-        _settings(controller, gem_url=_OLD_GEM_URL, explain=False)
-
-        with patch("webbrowser.open") as browser:
-            await controller.start_help_online()
-
-        browser.assert_called_once_with(_NOTEBOOK_URL)
-        assert _queued(controller) == []
-
-    @pytest.mark.asyncio
-    async def test_surrounding_whitespace_does_not_defeat_the_gem_check(self):
-        """A hand-edited settings file can carry a stray space."""
-        controller = _controller()
-        _settings(controller, gem_url="  " + _OLD_GEM_URL + "  ", explain=False)
-
-        with patch("webbrowser.open") as browser:
-            await controller.start_help_online()
-
-        browser.assert_called_once_with(_NOTEBOOK_URL)
-
-    @pytest.mark.asyncio
-    async def test_the_retired_chatgpt_address_still_opens_the_notebook(self):
-        """The earlier substitution now leads to the notebook too."""
-        import main
-
-        controller = _controller()
-        _settings(controller, gem_url=main._RETIRED_CHATGPT_HELP_URL, explain=False)
-
-        with patch("webbrowser.open") as browser:
-            await controller.start_help_online()
-
-        browser.assert_called_once_with(_NOTEBOOK_URL)
-
-    @pytest.mark.asyncio
-    async def test_another_gem_address_opens_unchanged(self):
-        """A different Gem is a choice the user made, not the shipped default."""
-        controller = _controller()
-        _settings(
-            controller,
-            gem_url="https://gemini.google.com/gem/0000000000000000000000000000000",
-            explain=False,
-        )
-
-        with patch("webbrowser.open") as browser:
-            await controller.start_help_online()
-
-        browser.assert_called_once_with(
-            "https://gemini.google.com/gem/0000000000000000000000000000000"
-        )
-
-    @pytest.mark.asyncio
-    async def test_the_gem_substitution_is_logged_without_an_address(self, caplog):
-        """The same redaction rule as every other line in start_help_online."""
-        controller = _controller()
-        _settings(controller, gem_url=_OLD_GEM_URL, explain=False)
-
-        with caplog.at_level(logging.INFO):
-            with patch("webbrowser.open"):
-                await controller.start_help_online()
-
-        messages = [
-            r.getMessage() for r in caplog.records if r.levelno == logging.INFO
-        ]
-        substitutions = [m for m in messages if "old wheelhouse gem" in m.lower()]
-        assert len(substitutions) == 1
-        assert "gemini.google.com" not in substitutions[0]
-        assert "notebook.google.com" not in substitutions[0]
+        assert main._WHEELHOUSE_ASSISTANT_URL == _NOTEBOOK_URL
 
 
 class TestTheWindowOnceMoreAfterTheNotebookMove:
@@ -918,7 +750,7 @@ class TestTheAssistantButtonRecordsTheChoice:
         choice the user made in the window is still recorded."""
         marker.unlink()
         controller = _controller()
-        _settings(controller, gem_url="", explain=True)
+        _settings(controller, assistant_url="", explain=True)
 
         await self._press_assistant(controller, True)
 
@@ -963,7 +795,7 @@ class TestTheAssistantButtonRecordsTheChoice:
         config = MagicMock()
         config.get = MagicMock(
             side_effect=lambda key, default=None: (
-                "https://example.test/help" if key == "ai.help.gem_url" else default
+                "https://example.test/help" if key == "ai.help.assistant_url" else default
             )
         )
         config.get_persisted = MagicMock(side_effect=config.get.side_effect)
@@ -1186,7 +1018,7 @@ class TestARetryAfterAFailedSaveKeepsTheChoice:
         path = tmp_path / "settings.toml"
         path.write_text(
             "[ai.help]\n"
-            'gem_url = "https://example.test/help"\n'
+            'assistant_url = "https://example.test/help"\n'
             f"explain_before_open = {'true' if explain else 'false'}\n"
         )
         return path

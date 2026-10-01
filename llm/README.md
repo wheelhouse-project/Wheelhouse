@@ -39,7 +39,7 @@ The step-by-step setup guides live on the Wheelhouse site, one section per
 service:
 
 - [ChatGPT — use a Project](https://wheelhouse-project.org/help.html#llm-chatgpt)
-- [Google Gemini — create a Gem](https://wheelhouse-project.org/help.html#llm-gemini)
+- [Google Gemini — use a Notebook](https://wheelhouse-project.org/help.html#llm-gemini)
 - [Claude — use a Project](https://wheelhouse-project.org/help.html#llm-claude)
 - [Perplexity — use a Project](https://wheelhouse-project.org/help.html#llm-perplexity)
 
@@ -49,7 +49,7 @@ documents file uploads inside a project only for its paid plans.
 ## For builders: the official assistant's instructions
 
 This folder also ships
-[`gem-instructions.txt`](./gem-instructions.txt), the instruction text
+[`notebook-instructions.txt`](./notebook-instructions.txt), the instruction text
 behind the official Wheelhouse Assistant. It is longer and stricter than
 the rules embedded in the help document. It tells the assistant to answer
 Wheelhouse questions only from the three documents, to answer general
@@ -58,10 +58,10 @@ with the document it read and the release that document describes, and
 never to invent a voice command, a configuration key, or a default value.
 
 Paste it into any assistant that accepts an instruction text, then attach
-the three documents above. Only one phrase is Gemini's own: the file calls
-the attached documents your "Knowledge section", which is what Gemini calls
-them. Every rule in the file works the same on any assistant that can read
-attached files.
+the three documents above. Only one phrase is Gemini Notebook's own: the
+file calls the attached documents the "sources" in your notebook, which is
+what Gemini Notebook calls them. Every rule in the file works the same on
+any assistant that can read attached files.
 
 The official assistant reads one Google Doc holding all three documents
 joined together. The project rewrites that Google Doc when it publishes a

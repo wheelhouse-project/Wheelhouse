@@ -30,13 +30,13 @@ Four mutations of speech/action_catalog.py:
                         of the sweeps' scope, since they judge only examples
                         whose trigger the shipped file carries -- which is the
                         exact blindness the named test exists to cover.
-  click-drops-hotword   Publish "click submit button" again with the trigger
+  find-drops-hotword    Publish "find hello" without the hotword, trigger
                         left correct. The revert above cannot prove this half,
                         because it removes the entry from the sweep entirely.
   select-drops-hotword  The same on the second entry the guard found, so the
                         sweep is shown to judge every entry rather than one.
-  click-body-misspelt   Keep the hotword and break the rest: "x-ray klick
-                        submit button". The hotword rule still passes, so only
+  fix-body-misspelt     Keep the hotword and break the rest: "x-ray fxi".
+                        The hotword rule still passes, so only
                         the fires-once-the-hotword-is-removed test can see it.
                         This is the input-level check the mutation-gate skill
                         asks for.
@@ -95,10 +95,14 @@ MUTATIONS = [
         "expect": [_QUOTES_SHIPPED, _IN_SCOPE],
     },
     {
-        "name": "click-drops-hotword",
-        "old": """            '"x-ray click submit button" clicks the button labeled Submit. '
+        # wh-safety-word-free-commands freed click_element, so its example
+        # no longer carries the hotword and the sweeps no longer judge it
+        # as a hotword command. The same mutation moved to "find", which
+        # keeps requires_hotword = true.
+        "name": "find-drops-hotword",
+        "old": """            'with params ["g1"]: saying "x-ray find hello" opens Find and '
 """,
-        "new": """            '"click submit button" clicks the button labeled Submit. '
+        "new": """            'with params ["g1"]: saying "find hello" opens Find and '
 """,
         "expect": [_SHOWS_HOTWORD],
     },
@@ -114,10 +118,12 @@ MUTATIONS = [
         # Input-level: the hotword is still there, so the hotword rule passes.
         # Only the test that strips the hotword and matches the remainder
         # against the shipped pattern can see this one.
-        "name": "click-body-misspelt",
-        "old": """            '"x-ray click submit button" clicks the button labeled Submit. '
+        # Retargeted from the click entry to "fix", for the reason given
+        # on find-drops-hotword.
+        "name": "fix-body-misspelt",
+        "old": """            'Trigger "^fix" with no params: saying "x-ray fix" corrects '
 """,
-        "new": """            '"x-ray klick submit button" clicks the button labeled Submit. '
+        "new": """            'Trigger "^fix" with no params: saying "x-ray fxi" corrects '
 """,
         "expect": [_STILL_FIRES],
     },
@@ -126,7 +132,7 @@ MUTATIONS = [
 
 def _pytest(*extra):
     return subprocess.run(
-        ["uv", "run", "python", "-m", "pytest", *extra],
+        [sys.executable, "-m", "pytest", *extra],
         cwd=SERVICE,
         capture_output=True,
         text=True,

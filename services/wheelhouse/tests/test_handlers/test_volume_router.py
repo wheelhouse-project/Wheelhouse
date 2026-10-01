@@ -316,3 +316,123 @@ class TestAdversarial:
             # Empty = assumed internal = system volume
             assert volume_router.use_sonos is False
             assert volume_router._initialized is True
+
+
+# ===========================================================================
+# Initialize - Sonos plugin enabled setting (wh-volume-router-sonos-enabled)
+# ===========================================================================
+
+class _DictConfig:
+    """Config stand-in whose get() returns the default for an absent key,
+    as ConfigService.get does."""
+
+    def __init__(self, values):
+        self._values = values
+
+    def get(self, key, default=None):
+        return self._values.get(key, default)
+
+
+_SONOS_ON_CONFIGS = [
+    pytest.param({}, id="key-absent"),
+    pytest.param({"plugins.sonos.enabled": True}, id="enabled-true"),
+]
+
+
+class TestInitializeSonosPluginSetting:
+    """The router reads plugins.sonos.enabled with the plugin registry's
+    default (True when the key is absent)."""
+
+    @pytest.mark.asyncio
+    # Explicit ids with no space: the mutation gate reads a failed case's name
+    # from pytest's short summary, and a space in an id cuts that name short.
+    @pytest.mark.parametrize(
+        "device",
+        [
+            pytest.param("HDMI Audio Device", id="external"),
+            pytest.param("Realtek High Definition Audio", id="internal"),
+        ],
+    )
+    async def test_sonos_plugin_off_routes_to_system_without_search(self, volume_router, device):
+        """Plugin off: System Volume, and the Sonos network search never runs."""
+        config = _DictConfig({"plugins.sonos.enabled": False})
+        with patch.object(volume_router, "_get_audio_device_name", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = device
+            with patch.object(
+                volume_router, "_discover_sonos_with_tv_check", new_callable=AsyncMock
+            ) as mock_sonos:
+                mock_sonos.return_value = ("192.168.1.100", "Living Room", True)
+
+                await volume_router.initialize(config, Mock())
+
+                assert volume_router.use_sonos is False
+                assert volume_router.use_system_volume is True
+                assert volume_router.sonos_ip is None
+                assert volume_router._initialized is True
+                mock_sonos.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sonos_plugin_off_never_calls_soco_discover(self, volume_router):
+        """Plugin off: soco.discovery.discover is not called on any interface."""
+        soco_discovery = pytest.importorskip("soco.discovery")
+        config = _DictConfig({"plugins.sonos.enabled": False})
+        with patch.object(volume_router, "_get_audio_device_name", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = "HDMI Audio Device"
+            with patch.object(volume_router, "_get_all_local_ips", return_value=["10.0.0.5"]):
+                with patch.object(soco_discovery, "discover", return_value=None) as mock_discover:
+                    await volume_router.initialize(config, Mock())
+
+                    mock_discover.assert_not_called()
+                    assert volume_router.use_system_volume is True
+
+    @pytest.mark.asyncio
+    async def test_reads_registry_key_and_default(self, volume_router):
+        """The router asks for the same key and default as discover_plugins."""
+        config = Mock()
+        config.get.return_value = False
+        with patch.object(volume_router, "_get_audio_device_name", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = "HDMI Audio Device"
+            with patch.object(
+                volume_router, "_discover_sonos_with_tv_check", new_callable=AsyncMock
+            ) as mock_sonos:
+                # A real discovery result, so code that wrongly reaches the
+                # search runs on to the assertions below instead of failing
+                # early on unpacking the mock's default return value.
+                mock_sonos.return_value = ("192.168.1.100", "Living Room", True)
+
+                await volume_router.initialize(config, Mock())
+
+                config.get.assert_any_call("plugins.sonos.enabled", True)
+                mock_sonos.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("values", _SONOS_ON_CONFIGS)
+    @pytest.mark.parametrize(
+        "device, discovery, expect_sonos, expect_search",
+        [
+            pytest.param("Realtek High Definition Audio", None, False, False, id="internal"),
+            pytest.param("HDMI Audio Device", ("192.168.1.100", "Living Room", True), True, True,
+                         id="external-sonos-tv"),
+            pytest.param("HDMI Audio Device", ("192.168.1.100", "Living Room", False), False, True,
+                         id="external-sonos-not-tv"),
+            pytest.param("HDMI Audio Device", (None, None, False), False, True,
+                         id="external-no-sonos"),
+        ],
+    )
+    async def test_sonos_plugin_on_routing_unchanged(
+        self, volume_router, values, device, discovery, expect_sonos, expect_search
+    ):
+        """Plugin on (explicit or by default): the dev 199223f2 decision matrix holds."""
+        config = _DictConfig(values)
+        with patch.object(volume_router, "_get_audio_device_name", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = device
+            with patch.object(
+                volume_router, "_discover_sonos_with_tv_check", new_callable=AsyncMock
+            ) as mock_sonos:
+                mock_sonos.return_value = discovery
+
+                await volume_router.initialize(config, Mock())
+
+                assert volume_router.use_sonos is expect_sonos
+                assert volume_router.use_system_volume is (not expect_sonos)
+                assert mock_sonos.await_count == (1 if expect_search else 0)

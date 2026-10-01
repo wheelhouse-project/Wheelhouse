@@ -189,7 +189,7 @@ actions = [
 
 # The optional verb/noun halves on the next three entries exist because
 # the end-of-file per-app captures (show-app, minimize-app, maximize-app)
-# otherwise claim the natural phrasings as app names under the hotword:
+# otherwise claim the natural phrasings as app names:
 # "show desktop" became activate("desktop") and the utterance was
 # consumed (review finding wh-voice-access-parity.3.3).
 [[pattern]]
@@ -402,12 +402,15 @@ actions = [
 # COMMANDS - Window Activation
 # =============================================================================
 
+# wh-safety-word-free-commands: activate <app> runs without the safety word.
+# The step is awaited so the Input process can refuse it (no window, nothing
+# to start, Windows will not bring the window forward); a refusal types the
+# words when the safety word was NOT spoken and shows a notice when it was.
 [[pattern]]
 pattern = '''^activates? (.+)$'''
 doc_id = "activate-app"
-requires_hotword = true
 actions = [
-    { function = "activate", params = ["g1"] }
+    { function = "activate", params = ["g1"], awaits_done = true }
 ]
 
 # "default_browser" is a reserved target: the activate action resolves it to
@@ -1391,9 +1394,11 @@ actions = [
 # requires_hotword follows the click-element decision of 2026-07-05
 # (commit bc91e701). A bare capture after a common English word turns
 # every dictated sentence that opens with "select" into a command. The
-# same argument settled it for "click <name>", so the same answer applies
-# here. Remove this line if daily use shows the hotword costs more than
-# the false commands it prevents.
+# same argument settled it for "click <name>" at the time. David freed
+# "click <name>" on 2026-09-30 (wh-safety-word-free-commands) and kept
+# this flag on "select <words>" in the same decision. Remove this line if
+# daily use shows the hotword costs more than the false commands it
+# prevents.
 [[pattern]]
 pattern = '''^select (.+)$'''
 doc_id = "select-phrase"
@@ -1597,8 +1602,8 @@ actions = [
 # -----------------------------------------------------------------------
 
 # The optional article on the bare trio, the "go to home" entry, and the
-# start-of / top-of / bottom-of forms below exist because switch-to-app
-# (hotword-gated, further down) captures any "go to <tail>" wording this
+# start-of / top-of / bottom-of forms below exist because go-to-app (further
+# down, needs the safety word) captures any "go to <tail>" wording this
 # fixed set misses: "go to the top" activated an app literally named
 # "the top" (review finding wh-voice-access-parity.3.2).
 
@@ -1751,8 +1756,9 @@ actions = [
 # the existing cursor-navigate entry has any concept of "selection" as a
 # landmark, so the parser cannot handle it.
 # "go" works in place of "move" (wh-go-synonym-for-move). The go-to form
-# relies on these two entries sitting ABOVE switch-to-app, whose
-# hotword-gated "go to <tail>" capture would otherwise ask for an app named
+# relies on these two entries sitting ABOVE go-to-app, whose
+# "go to <tail>" capture (needs the safety word) would otherwise
+# ask for an app named
 # "the beginning of the selection".
 # -----------------------------------------------------------------------
 
@@ -1814,16 +1820,21 @@ actions = [
 # four broad captures now live at the very END of the file -- see the
 # per-app tail section there (corrective move 2026-08-24). ---
 # -----------------------------------------------------------------------
-# requires_hotword = true on every per-app block (see the requires_hotword
-# note above -- matches the activate-app shape model).
+# requires_hotword = true on go-to-app and close-app only. activate-app,
+# switch-to-app, show-app, minimize-app and maximize-app run without the
+# safety word since wh-safety-word-free-commands; when one of them cannot
+# do its job the words are typed, and the safety word turns that into a
+# notice instead.
 # -----------------------------------------------------------------------
 
-# "switch to X" / "go to X" -- one doc_id, two accepted wordings for the
-# same activate action (support.microsoft.com Voice Access command list,
-# fetched 2026-08-24, groups them as alternate phrasings of one command;
-# same DIRECTION-MERGE-style reasoning as wh-voice-access-parity.1.2's
-# previous/last merge). ORDERING HAZARD #1 still applies to this block's
-# go-to half: every fixed "go to <landmark>" entry must precede it.
+# "switch to X" / "go to X" -- two accepted wordings for the same activate
+# action (support.microsoft.com Voice Access command list, fetched
+# 2026-08-24, groups them as alternate phrasings of one command; same
+# DIRECTION-MERGE-style reasoning as wh-voice-access-parity.1.2's
+# previous/last merge). They were one doc_id until
+# wh-safety-word-free-commands split them into switch-to-app and
+# go-to-app. ORDERING HAZARD #1 still applies to the go-to row: every
+# fixed "go to <landmark>" entry must precede it.
 # ORDERING HAZARD #2 NO LONGER NAMES go-to-desktop. David eliminated that
 # entry on 2026-08-24 (wh-voice-access-parity.3.3) because "go home" is
 # now the one show-desktop command. The accepted consequence is that
@@ -1832,12 +1843,25 @@ actions = [
 # services/wheelhouse/tests/test_va_navigation_router.py. The staged
 # "go home" block (wh-voice-access-parity.1.7) must be placed ABOVE this
 # capture when it is spliced.
+# wh-safety-word-free-commands: the two wordings are now two rows.
+# "switch to X" runs without the safety word; "go to X" keeps it, because
+# "go to" is also how ordinary sentences and the cursor-movement commands
+# begin. Without the safety word "go to X" falls through to cursor-navigate
+# below, exactly as it did before. Both rows stay above cursor-navigate and
+# below every fixed "go to <landmark>" entry.
 [[pattern]]
-pattern = '''^(?:switch to|go to)\s+(.+)$'''
+pattern = '''^switch to\s+(.+)$'''
 doc_id = "switch-to-app"
+actions = [
+    { function = "activate", params = ["g1"], awaits_done = true }
+]
+
+[[pattern]]
+pattern = '''^go to\s+(.+)$'''
+doc_id = "go-to-app"
 requires_hotword = true
 actions = [
-    { function = "activate", params = ["g1"] }
+    { function = "activate", params = ["g1"], awaits_done = true }
 ]
 
 # Composable cursor movement: "go right two words", "go home", etc.
@@ -2611,8 +2635,8 @@ actions = [
     { function = "insert_raw_no_spaces", params = ["g1"] }
 ]
 
-# Add selected text to STT hints list - "x-ray boost"
-# Select text, speak "x-ray boost", and the text will be added to the STT server's hints
+# Add selected text to STT hints list - "boost" (no safety word)
+# Select text, speak "boost", and the text will be added to the STT server's hints
 [[pattern]]
 pattern = '''^boost$'''
 doc_id = "boost"
@@ -2708,7 +2732,9 @@ actions = [
 [[pattern]]
 pattern = '''^cancel fix$'''
 doc_id = "cancel-fix"
-requires_hotword = true
+# Without the safety word, "cancel fix" runs only as the whole utterance;
+# "cancel fix hello world" is dictation, not a cancel that drops the rest.
+whole_utterance_only = true
 actions = [
     { function = "cancel_fix" }
 ]
@@ -2739,7 +2765,7 @@ actions = [
 # them in one expression the Pattern Manager explainer can no longer list
 # the wordings and shows the raw expression instead. Must stay ABOVE
 # show-app (^show\s+(.+)$, end of file), which otherwise captures "show
-# commands" with the hotword. The alternation stays flat: the Pattern
+# commands" as an app name. The alternation stays flat: the Pattern
 # Manager's trigger display drops a nested "(?:all )?" group inside an
 # alternative and showed "commands|show command list".
 [[pattern]]
@@ -2796,21 +2822,24 @@ actions = [
     { function = "stop_listening" }
 ]
 
-# Voice element clicking (wh-vjwdl). Hotword-required: "click" and "tap" are
-# common dictation words, and the capture group is greedy, so every utterance
-# that starts with either word would otherwise be parsed as a click command.
+# Voice element clicking (wh-vjwdl). Runs WITHOUT the safety word
+# (wh-safety-word-free-commands, David 2026-09-30): "click" and "tap" are
+# common dictation words and the capture group is greedy, so the safety
+# comes from the failure path instead of the flag. When no control matches
+# the spoken name (or clicking is turned off, or the control walk ran out of
+# time), nothing was clicked, and the speech processor types the whole
+# utterance as dictation with no notice. With the safety word the same
+# failure shows the click notice and types nothing. An ambiguous match and a
+# timeout keep their own notices and never type (the click may still run).
 # MUST stay AFTER the exact "click to talk mode" entry above so
 # first-match-wins lets that specific command win.
 # The forward-to-Input execution lands in slice wh-tab7j; this slice only
 # parses g1 into an ElementQuery.
 #
-# The comment above claimed the hotword requirement from the day the entry
-# was written, but the entry never set the flag. DeepSeek found it while
-# reviewing the Voice Access word "tap", which made the gap reach a second
-# common word: "tap water is safe to drink" asked for a control named
-# "water is safe to drink". David chose the hotword on 2026-08-17
-# (wh-voice-access-parity.1.6.1.1). The cost is that "click the file menu"
-# now needs the hotword spoken first.
+# History: the entry carried requires_hotword = true from 2026-08-17
+# (wh-voice-access-parity.1.6.1.1), after "tap water is safe to drink"
+# asked for a control named "water is safe to drink". The flag is gone
+# because that sentence now reaches dictation when no control has the name.
 #
 # "clicks" is a second spoken form of "click" (wh-clicks-spoken-click,
 # David 2026-09-27): Parakeet revised "x-ray click show recently used
@@ -2820,7 +2849,6 @@ actions = [
 [[pattern]]
 pattern = '''^(?:click|clicks|tap)\s+(.+)$'''
 doc_id = "click-element"
-requires_hotword = true
 actions = [
     { function = "click_element", params = ["g1"], awaits_done = true }
 ]
@@ -3680,11 +3708,12 @@ actions = [
 # replacements. Last position is the defensive general rule, not just a
 # fix for those seven: a broad capture belongs below every fixed phrase
 # it could shadow, the same reason cursor-navigate sits below the
-# go-to landmark blocks. switch-to-app alone cannot move here -- its
-# "go to X" wording must stay ABOVE cursor-navigate's ^go (.+) -- and it
-# has no fixed-phrase collisions below its position, so it keeps the
-# original spot. requires_hotword = true on all four (free-text capture,
-# activate-app shape model).
+# go-to landmark blocks. switch-to-app and go-to-app cannot move here --
+# go-to-app's "go to X" wording must stay ABOVE cursor-navigate's
+# ^go (.+) -- and neither has fixed-phrase collisions below its position,
+# so both keep the original spot. requires_hotword = true on close-app only (destructive:
+# it sends Alt+F4); show-app, minimize-app and maximize-app run without the
+# safety word since wh-safety-word-free-commands.
 
 # "show X" -- kept as its own doc_id rather than merged into switch-to-app.
 # Microsoft's own command list groups "show X" with "open X"/"start X"
@@ -3697,9 +3726,8 @@ actions = [
 [[pattern]]
 pattern = '''^show\s+(.+)$'''
 doc_id = "show-app"
-requires_hotword = true
 actions = [
-    { function = "activate", params = ["g1"] }
+    { function = "activate", params = ["g1"], awaits_done = true }
 ]
 
 # "close X" / "exit X" / "quit X" -- one doc_id, three synonyms of the same
@@ -3721,7 +3749,6 @@ actions = [
 [[pattern]]
 pattern = '''^minimize\s+(.+)$'''
 doc_id = "minimize-app"
-requires_hotword = true
 actions = [
     { function = "activate", params = ["g1"], awaits_done = true },
     { function = "hk", params = ["win", "down"], awaits_done = true }
@@ -3732,7 +3759,6 @@ actions = [
 [[pattern]]
 pattern = '''^maximize\s+(.+)$'''
 doc_id = "maximize-app"
-requires_hotword = true
 actions = [
     { function = "activate", params = ["g1"], awaits_done = true },
     { function = "hk", params = ["win", "up"], awaits_done = true }

@@ -512,7 +512,7 @@ ORIGINAL_FILE = (
     'LOG_LEVEL = "INFO"\n'
     "\n"
     "[ai.help]\n"
-    'gem_url = ""\n'
+    'assistant_url = ""\n'
     "\n"
     "[speech]\n"
     'model = "default"\n'
@@ -542,21 +542,21 @@ class TestSaveMergesHandEdits:
     ):
         """Criterion 2(a): the case recorded on the bead.
 
-        Loaded with an empty ai.help.gem_url, the URL written by hand, then
+        Loaded with an empty ai.help.assistant_url, the URL written by hand, then
         an unrelated key saved. The URL must still be there.
         """
         svc = ConfigService(config_path=str(merge_file))
-        assert svc.get("ai.help.gem_url") == ""
+        assert svc.get("ai.help.assistant_url") == ""
 
         _hand_edit(
             merge_file,
-            ORIGINAL_FILE.replace('gem_url = ""', f'gem_url = "{HAND_EDITED_URL}"'),
+            ORIGINAL_FILE.replace('assistant_url = ""', f'assistant_url = "{HAND_EDITED_URL}"'),
         )
         svc.set("speech.model", "from_the_program")
         assert await svc.save() is True
 
         reloaded = ConfigService(config_path=str(merge_file))
-        assert reloaded.get("ai.help.gem_url") == HAND_EDITED_URL
+        assert reloaded.get("ai.help.assistant_url") == HAND_EDITED_URL
         assert reloaded.get("speech.model") == "from_the_program"
 
     @pytest.mark.asyncio
@@ -770,7 +770,7 @@ class TestSaveMergesHandEdits:
         svc = ConfigService(config_path=str(merge_file))
         _hand_edit(
             merge_file,
-            ORIGINAL_FILE.replace('gem_url = ""', f'gem_url = "{HAND_EDITED_URL}"'),
+            ORIGINAL_FILE.replace('assistant_url = ""', f'assistant_url = "{HAND_EDITED_URL}"'),
         )
         svc.set("speech.model", "first")
         assert await svc.save() is True
@@ -779,7 +779,7 @@ class TestSaveMergesHandEdits:
         assert await svc.save() is True
 
         reloaded = ConfigService(config_path=str(merge_file))
-        assert reloaded.get("ai.help.gem_url") == HAND_EDITED_URL
+        assert reloaded.get("ai.help.assistant_url") == HAND_EDITED_URL
         assert reloaded.get("speech.model") == "second"
 
     @pytest.mark.asyncio
@@ -799,20 +799,20 @@ class TestSaveMergesHandEdits:
 
         svc = ConfigService(config_path=str(merge_file))
         _hand_edit(
-            merge_file, ORIGINAL_FILE.replace('gem_url = ""', f'gem_url = "{first_url}"')
+            merge_file, ORIGINAL_FILE.replace('assistant_url = ""', f'assistant_url = "{first_url}"')
         )
         svc.set("speech.model", "first")
         assert await svc.save() is True
 
         _hand_edit(
             merge_file,
-            ORIGINAL_FILE.replace('gem_url = ""', f'gem_url = "{second_url}"'),
+            ORIGINAL_FILE.replace('assistant_url = ""', f'assistant_url = "{second_url}"'),
         )
         svc.set("speech.model", "second")
         assert await svc.save() is True
 
         reloaded = ConfigService(config_path=str(merge_file))
-        assert reloaded.get("ai.help.gem_url") == second_url
+        assert reloaded.get("ai.help.assistant_url") == second_url
         assert reloaded.get("speech.model") == "second"
 
 
@@ -827,7 +827,7 @@ class TestSaveReportsWhatItKept:
         svc = ConfigService(config_path=str(merge_file))
         _hand_edit(
             merge_file,
-            ORIGINAL_FILE.replace('gem_url = ""', f'gem_url = "{HAND_EDITED_URL}"'),
+            ORIGINAL_FILE.replace('assistant_url = ""', f'assistant_url = "{HAND_EDITED_URL}"'),
         )
         svc.set("speech.model", "from_the_program")
 
@@ -842,7 +842,7 @@ class TestSaveReportsWhatItKept:
         assert len(kept_lines) == 1, (
             f"expected exactly one line naming the kept key, got {kept_lines}"
         )
-        assert "ai.help.gem_url" in kept_lines[0]
+        assert "ai.help.assistant_url" in kept_lines[0]
         assert HAND_EDITED_URL not in kept_lines[0], (
             "the settings file can hold private values, so the line names "
             f"keys only: {kept_lines[0]!r}"
@@ -885,7 +885,7 @@ class TestSaveDoesNotUndoAChangeMadeWhileItWrote:
         svc = ConfigService(config_path=str(merge_file))
         _hand_edit(
             merge_file,
-            ORIGINAL_FILE.replace('gem_url = ""', f'gem_url = "{HAND_EDITED_URL}"'),
+            ORIGINAL_FILE.replace('assistant_url = ""', f'assistant_url = "{HAND_EDITED_URL}"'),
         )
 
         real_to_thread = asyncio.to_thread
@@ -904,11 +904,11 @@ class TestSaveDoesNotUndoAChangeMadeWhileItWrote:
         await started.wait()
 
         # The user picks a different assistant while the write is in flight.
-        svc.set("ai.help.gem_url", "set_while_the_write_ran")
+        svc.set("ai.help.assistant_url", "set_while_the_write_ran")
         release.set()
         assert await saving is True
 
-        assert svc.get("ai.help.gem_url") == "set_while_the_write_ran", (
+        assert svc.get("ai.help.assistant_url") == "set_while_the_write_ran", (
             "the write-back overwrote a change made after the save started"
         )
 
@@ -916,7 +916,7 @@ class TestSaveDoesNotUndoAChangeMadeWhileItWrote:
         monkeypatch.setattr(asyncio, "to_thread", real_to_thread)
         assert await svc.save() is True
         reloaded = ConfigService(config_path=str(merge_file))
-        assert reloaded.get("ai.help.gem_url") == "set_while_the_write_ran"
+        assert reloaded.get("ai.help.assistant_url") == "set_while_the_write_ran"
 
     @pytest.mark.asyncio
     async def test_the_kept_value_reaches_memory_in_place(self, merge_file):
@@ -934,7 +934,7 @@ class TestSaveDoesNotUndoAChangeMadeWhileItWrote:
 
         _hand_edit(
             merge_file,
-            ORIGINAL_FILE.replace('gem_url = ""', f'gem_url = "{HAND_EDITED_URL}"'),
+            ORIGINAL_FILE.replace('assistant_url = ""', f'assistant_url = "{HAND_EDITED_URL}"'),
         )
         svc.set("speech.model", "from_the_program")
         assert await svc.save() is True
@@ -943,7 +943,7 @@ class TestSaveDoesNotUndoAChangeMadeWhileItWrote:
         assert held_help is svc.get_config()["ai"]["help"], (
             "a nested table was replaced"
         )
-        assert held_help["gem_url"] == HAND_EDITED_URL
+        assert held_help["assistant_url"] == HAND_EDITED_URL
 
     @pytest.mark.asyncio
     async def test_an_unset_made_during_the_write_survives(
@@ -1382,7 +1382,7 @@ class TestSaveReportsWhatItDropped:
             merge_file,
             ORIGINAL_FILE.replace(
                 f'LOG_LEVEL = "INFO"\n', ""
-            ).replace('gem_url = ""', f'gem_url = "{HAND_EDITED_URL}"'),
+            ).replace('assistant_url = ""', f'assistant_url = "{HAND_EDITED_URL}"'),
         )
         svc.set("speech.model", "from_the_program")
 
@@ -1396,7 +1396,7 @@ class TestSaveReportsWhatItDropped:
         ]
         assert len(dropped_lines) == 1
         assert "LOG_LEVEL" in dropped_lines[0]
-        assert "ai.help.gem_url" in dropped_lines[0], (
+        assert "ai.help.assistant_url" in dropped_lines[0], (
             "this save must report a kept key too, or it does not cover the "
             "line that carries both halves"
         )
@@ -1803,7 +1803,7 @@ class TestAHandEditMadeWhileTheWriteRanSurvives:
         calls = self._edit_while_the_write_runs(
             monkeypatch,
             merge_file,
-            ORIGINAL_FILE.replace('gem_url = ""', 'gem_url = "by_hand"'),
+            ORIGINAL_FILE.replace('assistant_url = ""', 'assistant_url = "by_hand"'),
             once=False,
         )
 

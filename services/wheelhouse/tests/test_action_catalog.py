@@ -539,10 +539,16 @@ class TestPublishedExamplesHonourTheHotword:
             for name, _entry, shipped in _examples_over_shipped_triggers()
             if shipped.get("requires_hotword")
         ]
-        assert "click_element" in hotword_entries, (
-            "click_element is the entry this finding is about; if its trigger "
-            "stopped matching a shipped pattern the sweeps would go blind to "
-            f"it. In scope right now: {sorted(hotword_entries)}"
+        # wh-safety-word-free-commands: click_element runs without the safety
+        # word now, so it leaves the hotword set. It must still be judged by
+        # the sweeps as a shipped trigger: if its trigger stopped matching a
+        # shipped pattern they would go blind to it.
+        judged = [
+            name for name, _entry, _shipped in _examples_over_shipped_triggers()
+        ]
+        assert "click_element" in judged
+        assert "click_element" not in hotword_entries, (
+            "click_element no longer requires the safety word"
         )
         assert len(hotword_entries) >= 3, (
             "fewer hotword commands are documented than the three measured "

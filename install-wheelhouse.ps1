@@ -103,7 +103,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.2.1"
+$AppVersion = "1.2.2"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -2552,6 +2552,127 @@ function Write-UserConfig {
     Write-Status "Configuration written (speech engine: $Provider)."
 }
 
+function Get-RetiredAssistantUrls {
+    # The addresses earlier releases shipped as the [ai.help] default and that
+    # no longer answer. This list is the only copy (acceptance item 3 of
+    # wh-assistant-address-upgrade). When the assistant moves again, add the
+    # old default here in the same release that changes config.toml.example;
+    # test_the_retired_list_holds_both_old_addresses_and_not_the_default fails
+    # if the current default is added by mistake.
+    @(
+        # Every release before 1.2.0: a ChatGPT custom GPT that OpenAI stops
+        # running on 2026-12-11.
+        "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse",
+        # Release 1.2.0: a Gemini Gem that Google stops running on 2026-11-17.
+        "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
+    )
+}
+
+function Update-AssistantAddress {
+    param([string]$ConfigPath, [string]$ExamplePath)
+    # On an update only. Two changes inside [ai.help] of a preserved config:
+    #   1. Release 1.2.2 renamed gem_url to assistant_url. A gem_url line is
+    #      renamed in place; when assistant_url is already there, the gem_url
+    #      line is removed and assistant_url keeps its value.
+    #   2. An assistant_url value on the retired list becomes the value that
+    #      config.toml.example ships. Any other value stays, so a user's own
+    #      choice is never replaced.
+    # The app opens the setting as written (start_help_online), so this is the
+    # one place that moves an upgrader to the current assistant.
+    # Each line keeps its own terminator, so a file with mixed CRLF and LF lines
+    # keeps them, and a file that needs no change is not written at all.
+    # Comparisons are case-sensitive: TOML keys are, and so is a URL path.
+    # crewcut: only a bare or quoted key on its own line inside an [ai.help]
+    # header is seen; a dotted key such as help.gem_url under [ai], or an inline
+    # table, is left alone. Neither form was ever shipped. Parse the file with
+    # a TOML library to cover them.
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { return }
+    $headerPattern = '^\s*\[\s*ai\s*\.\s*help\s*\]\s*(#.*)?$'
+    $gemPattern = '^(\s*)(?:gem_url|"gem_url"|''gem_url'')(\s*=)'
+    $assistantPattern = '^\s*(?:assistant_url|"assistant_url"|''assistant_url'')\s*='
+    # A one-line basic string without escapes, or a literal string, then an
+    # optional comment. A value written any other way cannot equal a retired
+    # address as written, so it stays.
+    $valuePattern = '^(?<lead>\s*(?:assistant_url|"assistant_url"|''assistant_url'')\s*=\s*)(?<value>"(?<basic>[^"\\]*)"|''(?<literal>[^'']*)'')(?<tail>\s*(#.*)?)$'
+
+    # Split after each \n, so each piece is one line with its own terminator.
+    $raw = [System.IO.File]::ReadAllText($ConfigPath)
+    $pieces = [regex]::Split($raw, '(?<=\n)')
+    $lines = foreach ($piece in $pieces) {
+        $m = [regex]::Match($piece, '^(?<text>.*?)(?<end>\r?\n)?\z', 'Singleline')
+        [pscustomobject]@{ Text = $m.Groups['text'].Value; End = $m.Groups['end'].Value }
+    }
+
+    $hasAssistant = $false
+    $inHelp = $false
+    foreach ($line in $lines) {
+        if ($line.Text -cmatch $headerPattern) { $inHelp = $true; continue }
+        if ($line.Text -cmatch '^\s*\[') { $inHelp = $false; continue }
+        if ($inHelp -and $line.Text -cmatch $assistantPattern) { $hasAssistant = $true }
+    }
+
+    $retired = @(Get-RetiredAssistantUrls)
+    $shippedValue = $null
+    $out = New-Object System.Collections.Generic.List[string]
+    $renamed = $false
+    $replaced = $false
+    $inHelp = $false
+    foreach ($line in $lines) {
+        $text = $line.Text
+        if ($text -cmatch $headerPattern) {
+            $inHelp = $true
+        } elseif ($text -cmatch '^\s*\[') {
+            $inHelp = $false
+        } elseif ($inHelp) {
+            if ($text -cmatch $gemPattern) {
+                if ($hasAssistant) {
+                    $renamed = $true
+                    continue
+                }
+                $text = [regex]::Replace($text, $gemPattern, '${1}assistant_url$2')
+                $renamed = $true
+            }
+            $m = [regex]::Match($text, $valuePattern)
+            if ($m.Success) {
+                $current = if ($m.Groups['basic'].Success) { $m.Groups['basic'].Value } else { $m.Groups['literal'].Value }
+                if ($retired -ccontains $current) {
+                    if ($null -eq $shippedValue) { $shippedValue = Get-ShippedAssistantValue -ExamplePath $ExamplePath }
+                    if ($shippedValue) {
+                        $text = $m.Groups['lead'].Value + $shippedValue + $m.Groups['tail'].Value
+                        $replaced = $true
+                    } else {
+                        Write-Warn "Could not read the assistant address from config.toml.example; the old address is kept."
+                    }
+                }
+            }
+        }
+        $out.Add($text + $line.End)
+    }
+
+    if (-not ($renamed -or $replaced)) { return }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($ConfigPath, ($out -join ''), $encoding)
+    if ($renamed) { Write-Status "Assistant setting gem_url renamed to assistant_url." }
+    if ($replaced) { Write-Status "Assistant address updated to the current Wheelhouse Assistant." }
+}
+
+function Get-ShippedAssistantValue {
+    param([string]$ExamplePath)
+    # The assistant_url value text of [ai.help] in config.toml.example, with its
+    # quotes, exactly as the example writes it. Returns an empty string when the
+    # example has no such line, so the caller keeps the old address.
+    if (-not (Test-Path -LiteralPath $ExamplePath)) { return "" }
+    $inHelp = $false
+    foreach ($text in [System.IO.File]::ReadAllLines($ExamplePath)) {
+        if ($text -cmatch '^\s*\[\s*ai\s*\.\s*help\s*\]\s*(#.*)?$') { $inHelp = $true; continue }
+        if ($text -cmatch '^\s*\[') { $inHelp = $false; continue }
+        if ($inHelp -and $text -cmatch '^\s*assistant_url\s*=\s*(?<value>"[^"\\]*")\s*(#.*)?$') {
+            return $Matches['value']
+        }
+    }
+    return ""
+}
+
 function Set-TomlSectionValues {
     param(
         [string]$ConfigPath,
@@ -3337,6 +3458,16 @@ function Invoke-MainInstall {
     # install. So $configPreexisted true == re-run/update, false == first install.
     $configPreexisted = Test-Path -LiteralPath (Join-Path $AppDir "services\wheelhouse\config.toml")
     Write-UserConfig -Provider $provider
+    # Update only: a fresh config is a copy of config.toml.example and already
+    # holds the current key and address. Guarded like the AI block below: the
+    # help address is secondary, so a failure here only warns.
+    if ($configPreexisted) {
+        try {
+            Update-AssistantAddress -ConfigPath (Join-Path $AppDir "services\wheelhouse\config.toml") -ExamplePath (Join-Path $AppDir "services\wheelhouse\config.toml.example")
+        } catch {
+            Write-Warn "Could not update the assistant address in config.toml: $($_.Exception.Message)"
+        }
+    }
 
     # AI helper: write [ai.server] from the -AiMode choice. Four intents:
     #   cloud -- pin Google's Gemini Flash Lite and route the key to the

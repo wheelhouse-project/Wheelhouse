@@ -61,11 +61,13 @@ from .continuous_scroll import (
     ContinuousScroller,
     send_notice,
 )
+from . import close_fallback
 from . import settle_detector
 from .hwnd_utils import (
     normalize_hwnd_for_foreground_compare,
     read_hwnd_provenance,
     resolve_same_process_browser_names,
+    tag_hwnd_provenance,
     top_level_hwnd_from_control,
 )
 
@@ -5956,6 +5958,24 @@ class UIActionHandler:
                 self.terminal_editor.submit()
                 return
 
+            # wh-xray-close-app-fails: some windows ignore Alt+F4. The
+            # window in front at send time is the target of the close (for
+            # close-app, the window the activate step just verified); a
+            # single Alt+F4 starts the SC_CLOSE fallback after the send.
+            # The target's window object is marked BEFORE the send, so the
+            # fallback can tell it from a new window that Windows gives the
+            # same numeric handle after the old one closes
+            # (wh-xray-close-app-fails.1.2). A marker of 0 means the tag
+            # failed; the fallback still starts and refuses by itself.
+            close_target = None
+            close_marker = 0
+            if close_fallback.is_close_chord(keys) and repeat == 1:
+                close_target = normalize_hwnd_for_foreground_compare(
+                    win32gui.GetForegroundWindow()
+                )
+                if close_target:
+                    close_marker = tag_hwnd_provenance(close_target)
+
             # Capture Context for Flutter detection
             context = capture_context()
             _stop_command_on_failed_focus_read(context, "hotkey_action")
@@ -5997,6 +6017,10 @@ class UIActionHandler:
                             keys, accepted, expected,
                         )
                         break
+            if close_target and refusal is None:
+                close_fallback.start_close_fallback(
+                    close_target, close_marker
+                )
         except Exception as e:
             # WARNING, not ERROR: see press_key_action.
             logger.warning(

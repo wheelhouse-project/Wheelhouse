@@ -1381,11 +1381,17 @@ def test_explicit_grid_commands_still_execute_whole(catalog):
         assert decision.payload == utterance
 
     # ...and the leak the flag closes: the command name starts a sentence.
+    # The grid command does not fire on the prefix. Since
+    # wh-safety-word-free-commands the sentence reaches show-app
+    # (^show (.+)$, no safety word) as one whole execution; the grid command
+    # is still not run, and no word is severed. The processor types the
+    # sentence when the activate step finds no program.
     decision = router._resolve_finalization(
         "show grid lines on the chart".split(), hotword_active=False
     )
-    assert decision.action is Action.DICTATE
+    assert decision.action is Action.EXECUTE
     assert decision.payload == "show grid lines on the chart"
+    assert decision.remainder is None
 
 
 def test_triple_click_is_whole_utterance_only(catalog):

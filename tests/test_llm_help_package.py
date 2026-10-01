@@ -14,7 +14,7 @@ design (docs/plans/2026-07-17-help-doc-source-of-truth-design.md) retired the
 generated companion `llm/assistant-instructions.txt` and its extractor,
 superseding decisions 8 and 9 of the 2026-07-15 packaging design.
 
-The llm/ folder now ships ONE assistant file: `gem-instructions.txt`, the
+The llm/ folder now ships ONE assistant file: `notebook-instructions.txt`, the
 instruction text behind the official Wheelhouse Assistant, which moved from a
 ChatGPT custom GPT to a Google Gemini Gem on 2026-09-22 because OpenAI stops
 running custom GPTs on 2026-12-11 (wh-gem-replaces-gpt-assistant). The Gem's
@@ -38,7 +38,7 @@ _HELP_DOC = (
 _PUBLIC_DIR = _REPO_ROOT / "scripts" / "release" / "public"
 _LLM_DIR = _PUBLIC_DIR / "llm"
 _LLM_README = _LLM_DIR / "README.md"
-_GEM_INSTRUCTIONS = _LLM_DIR / "gem-instructions.txt"
+_NOTEBOOK_INSTRUCTIONS = _LLM_DIR / "notebook-instructions.txt"
 # The website page that carries the "Using the documentation with an AI
 # assistant" section, its llm-* anchors, and the canonical help-doc link.
 # It was index.html until the six-page site (wh-site-redesign-adopt) moved
@@ -56,7 +56,7 @@ _HEADING = "## Instructions for AI Assistant"
 # that survives a chat assistant's renderer: it renders as plain text, and no
 # renderer turns it into a link. Every other form was tried on the live
 # ChatGPT GPT and failed -- see
-# test_gem_instructions_never_give_the_support_address_as_bare_text. The
+# test_notebook_instructions_never_give_the_support_address_as_bare_text. The
 # finding is about renderers in general, not about ChatGPT, so it carries to
 # the Gem unchanged.
 _SUPPORT_ADDRESS = "help@wheelhouse-project.org"
@@ -76,6 +76,26 @@ _ASSISTANT_URL = (
 # literal here could be mistaken for a live reference to the dead GPT. The
 # runtime value is unchanged.
 _RETIRED_GPT_URL_FRAGMENT = "chatgpt.com/g/g-6a5ab9206" "8d0819198db2a83135b9540"
+
+# The installer keeps the retired addresses in one function so that an
+# update can replace them in the user's config.toml
+# (wh-assistant-address-upgrade). That list never reaches the user as a
+# link or a description, so the shipped-file scans remove exactly that
+# function body and still fail on the addresses anywhere else.
+_INSTALLER = _PUBLIC_DIR / "install-wheelhouse.ps1"
+
+
+def _without_retired_list(path: Path, content: str) -> str:
+    """Return the text with Get-RetiredAssistantUrls removed from the installer."""
+    if path != _INSTALLER:
+        return content
+    start = content.find("function Get-RetiredAssistantUrls")
+    if start < 0:
+        return content
+    end = content.find("\n}", start)
+    if end < 0:
+        return content
+    return content[:start] + content[end + 2:]
 
 # The three GPT Action operation names. The Gem has no Actions, so naming one
 # in its instructions would tell the assistant to call something that does not
@@ -280,15 +300,15 @@ def test_help_document_gives_the_support_address_only_in_a_code_span():
 # The official assistant's one file.
 
 
-def test_gem_instructions_file_exists():
+def test_notebook_instructions_file_exists():
     # Was test_gpt_files_exist, which also required gpt-action-openapi.json.
     # DELETED with that file: a Gem has no Actions, so there is no Action
     # schema to ship or to validate.
-    assert _GEM_INSTRUCTIONS.is_file(), f"missing {_GEM_INSTRUCTIONS}"
+    assert _NOTEBOOK_INSTRUCTIONS.is_file(), f"missing {_NOTEBOOK_INSTRUCTIONS}"
 
 
-def test_gem_instructions_contract():
-    text = _GEM_INSTRUCTIONS.read_text(encoding="utf-8")
+def test_notebook_instructions_contract():
+    text = _NOTEBOOK_INSTRUCTIONS.read_text(encoding="utf-8")
     # Pin each directive as a whole sentence on whitespace-normalized text,
     # not a lone token: a token check stays green when the sentence around it
     # weakens the rule (the grounding rule softened, refusal clause deleted,
@@ -549,12 +569,12 @@ def test_gem_instructions_contract():
         " guessing a plausible form." in norm
     ), "the say-it-is-not-there half of the do-not-invent rule is gone"
 
-    # The paste target is the Gem builder's instructions field: keep it plain
-    # ASCII so nothing mangles in transit.
-    assert text.isascii(), "gem-instructions.txt must be plain ASCII"
+    # The paste target is the notebook's Configure Chat custom-instructions
+    # field: keep it plain ASCII so nothing mangles in transit.
+    assert text.isascii(), "notebook-instructions.txt must be plain ASCII"
 
 
-def test_gem_instructions_name_no_gpt_action():
+def test_notebook_instructions_name_no_gpt_action():
     """The Gem has no Actions, so it must not be told to call one.
 
     The GPT's three Action operations were the only way it reached a
@@ -562,15 +582,15 @@ def test_gem_instructions_name_no_gpt_action():
     assistant to call a tool that does not exist, which is a failure it
     cannot recover from and cannot report usefully.
     """
-    text = _GEM_INSTRUCTIONS.read_text(encoding="utf-8")
+    text = _NOTEBOOK_INSTRUCTIONS.read_text(encoding="utf-8")
     named = [op for op in _RETIRED_ACTION_OPERATIONS if op in text]
     assert not named, (
-        f"gem-instructions.txt names retired GPT Action operations: {named}."
+        f"notebook-instructions.txt names retired GPT Action operations: {named}."
         " A Gem reads attached documents; it has no Actions to call."
     )
 
 
-def test_gem_instructions_never_give_the_support_address_as_bare_text():
+def test_notebook_instructions_never_give_the_support_address_as_bare_text():
     # Four observations on the live ChatGPT GPT, in order. The first three
     # are from 2026-08-02, the fourth from 2026-08-03:
     #   1. A bare address renders as a link to a blank browser page.
@@ -585,7 +605,7 @@ def test_gem_instructions_never_give_the_support_address_as_bare_text():
     # no renderer turns it into a link. That is a property of markdown
     # rendering, not of ChatGPT, so it still holds on the Gem, and the Gem
     # instructions still carry the rule.
-    text = _GEM_INSTRUCTIONS.read_text(encoding="utf-8")
+    text = _NOTEBOOK_INSTRUCTIONS.read_text(encoding="utf-8")
     assert _ADDRESS_CODE_SPAN in text, (
         "the code-span form of the support address is missing; it is the only"
         " form that reliably renders as plain text"
@@ -598,13 +618,13 @@ def test_gem_instructions_never_give_the_support_address_as_bare_text():
     # known sentence keeps the check independent of where the line wraps.
     assert text.count("mailto:") == 1, (
         f'"mailto:" appears {text.count("mailto:")} times in'
-        " gem-instructions.txt; it belongs only in the sentence forbidding"
+        " notebook-instructions.txt; it belongs only in the sentence forbidding"
         " it. Clicking a mailto link in a chat answer opens a browser tab"
         " with no content -- verified twice on the live assistant, with two"
         " different link forms"
     )
     assert "](mailto:" not in text, (
-        "gem-instructions.txt builds a markdown link with a mailto:"
+        "notebook-instructions.txt builds a markdown link with a mailto:"
         " destination again; that is the exact form that was verified dead"
     )
     # Every literal occurrence of the address must sit inside a code span.
@@ -612,7 +632,7 @@ def test_gem_instructions_never_give_the_support_address_as_bare_text():
     # including the refusal script the assistant is told to say word for word,
     # which is where the first broken link came from.
     assert _SUPPORT_ADDRESS not in text.replace(_ADDRESS_CODE_SPAN, ""), (
-        f"gem-instructions.txt still gives {_SUPPORT_ADDRESS} as a bare"
+        f"notebook-instructions.txt still gives {_SUPPORT_ADDRESS} as a bare"
         " address somewhere outside a code span; a chat renderer turns a bare"
         " address into a link that opens a blank page"
     )
@@ -639,7 +659,7 @@ def test_gem_instructions_never_give_the_support_address_as_bare_text():
     ), "the refusal script no longer gives the address as a code span"
 
 
-def test_gem_instructions_do_not_lead_a_help_answer_with_an_email_draft():
+def test_notebook_instructions_do_not_lead_a_help_answer_with_an_email_draft():
     # Observed on the live ChatGPT GPT 2026-08-03, answering "How can I get
     # help?": the assistant wrote a subject line and a message body, ChatGPT
     # turned that layout into an email draft card, and the card became the
@@ -649,7 +669,7 @@ def test_gem_instructions_do_not_lead_a_help_answer_with_an_email_draft():
     # form the address takes: the draft is written only when the user asks for
     # it. The order rule survives the move to the Gem on its own merits --
     # email is the slowest of the four ways to get help whatever renders it.
-    norm = " ".join(_GEM_INSTRUCTIONS.read_text(encoding="utf-8").split())
+    norm = " ".join(_NOTEBOOK_INSTRUCTIONS.read_text(encoding="utf-8").split())
     assert (
         "WHEN ASKED HOW TO GET HELP or how to report a problem, give the"
         " several ways to get help and let email be one of them, never the"
@@ -689,14 +709,14 @@ def test_gem_instructions_do_not_lead_a_help_answer_with_an_email_draft():
 # button, so there is no empty field to warn about. The half of that test
 # that still has a subject -- the answer must name the address the message
 # goes to -- moved into
-# test_gem_instructions_pin_the_drafted_message_content below.
+# test_notebook_instructions_pin_the_drafted_message_content below.
 
 
-def test_gem_instructions_pin_the_drafted_message_content():
+def test_notebook_instructions_pin_the_drafted_message_content():
     # What the assistant actually writes into the message. Each rule here is
     # one a mutation can delete on its own, so each gets its own assertion
     # rather than one assertion over the whole block.
-    norm = " ".join(_GEM_INSTRUCTIONS.read_text(encoding="utf-8").split())
+    norm = " ".join(_NOTEBOOK_INSTRUCTIONS.read_text(encoding="utf-8").split())
     assert (
         "WHEN THE USER WANTS TO SEND A MESSAGE, write the text for them to"
         " copy." in norm
@@ -740,7 +760,7 @@ def test_gem_instructions_pin_the_drafted_message_content():
     ), "the rule keeping secrets out of the drafted message is missing"
 
 
-def test_gem_instructions_claim_no_mail_powers():
+def test_notebook_instructions_claim_no_mail_powers():
     # The assistant has no mailbox and no way to send. Claiming either is a
     # promise the user acts on and that nothing keeps.
     #
@@ -751,7 +771,7 @@ def test_gem_instructions_claim_no_mail_powers():
     # "nothing will be sent" claim false. Gemini shows no such card and sends
     # nothing, so the file now states the opposite -- it cannot send -- and
     # that statement is true.
-    norm = " ".join(_GEM_INSTRUCTIONS.read_text(encoding="utf-8").split())
+    norm = " ".join(_NOTEBOOK_INSTRUCTIONS.read_text(encoding="utf-8").split())
     assert (
         "Never claim you can read or search the user's mailbox, and never"
         " claim you can send mail for them." in norm
@@ -766,7 +786,7 @@ def test_gem_instructions_claim_no_mail_powers():
 # and returning text/plain. The Gem stores its three documents as attached
 # files instead of fetching them, so there is no schema, no server, no
 # operation and no response contract left to check. The json import went with
-# it. test_gem_instructions_name_no_gpt_action above guards the one thing
+# it. test_notebook_instructions_name_no_gpt_action above guards the one thing
 # that survives: the operation names must not appear in the instruction text.
 
 
@@ -794,7 +814,7 @@ _PLACEHOLDERS = ("<OR" "G>", "[support channel", "to be updated", "TODO")
 
 def test_help_kit_required_files_exist():
     assert _LLM_README.is_file(), f"missing {_LLM_README}"
-    assert _GEM_INSTRUCTIONS.is_file(), f"missing {_GEM_INSTRUCTIONS}"
+    assert _NOTEBOOK_INSTRUCTIONS.is_file(), f"missing {_NOTEBOOK_INSTRUCTIONS}"
     assert _HELP_DOC.is_file(), f"missing {_HELP_DOC}"
     assert _HELP_PAGE.is_file(), f"missing {_HELP_PAGE}"
 
@@ -810,7 +830,7 @@ def test_landing_page_has_all_provider_anchors():
 
 
 def test_help_kit_files_have_no_placeholders():
-    for path in (_LLM_README, _GEM_INSTRUCTIONS, _HELP_PAGE):
+    for path in (_LLM_README, _NOTEBOOK_INSTRUCTIONS, _HELP_PAGE):
         content = path.read_text(encoding="utf-8")
         offenders = [p for p in _PLACEHOLDERS if p in content]
         assert not offenders, f"{path.name} contains placeholders: {offenders}"
@@ -834,6 +854,7 @@ def test_no_shipped_public_file_links_the_retired_gpt():
             content = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, ValueError):
             continue
+        content = _without_retired_list(path, content)
         if _RETIRED_GPT_URL_FRAGMENT in content:
             offenders.append(str(path.relative_to(_PUBLIC_DIR)))
     assert not offenders, (
@@ -1026,7 +1047,7 @@ def test_no_shipped_public_file_describes_the_gem():
             raw = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, ValueError):
             continue
-        content = " ".join(raw.split())
+        content = " ".join(_without_retired_list(path, raw).split())
         if _OLD_GEM_ID in content:
             offenders.append(f"{path.relative_to(_PUBLIC_DIR)}: the Gem address")
         if "apple account" in content.lower():
@@ -1060,8 +1081,8 @@ def test_llm_readme_canonical_links_resolve():
         "llm/README.md no longer links the canonical help doc at its "
         "public-repo path (llm/.. -> services/wheelhouse/knowledge/)"
     )
-    assert "(./gem-instructions.txt)" in content, (
-        "llm/README.md no longer links gem-instructions.txt, the one "
+    assert "(./notebook-instructions.txt)" in content, (
+        "llm/README.md no longer links notebook-instructions.txt, the one "
         "assistant file the folder ships"
     )
     # DELETED with the two GPT files: the "(./gpt-instructions.txt)" and
@@ -1071,7 +1092,7 @@ def test_llm_readme_canonical_links_resolve():
     # equivalent is _REPO_ROOT / services/... The instruction file lives in
     # the same folder in both layouts.
     assert (_REPO_ROOT / "services/wheelhouse/knowledge/wheelhouse_help.md").is_file()
-    assert _GEM_INSTRUCTIONS.is_file()
+    assert _NOTEBOOK_INSTRUCTIONS.is_file()
     # Every help-page anchor the README links must exist on the page.
     html = _HELP_PAGE.read_text(encoding="utf-8")
     for url in _SITE_ANCHOR_URLS:
@@ -1087,7 +1108,7 @@ def test_llm_readme_documents_the_reference_document():
 
     DELETED with the Action schema: the assertion that the builder section
     names getCommandReference, the GPT's second Action. There are no Actions
-    to document; test_gem_instructions_name_no_gpt_action guards against the
+    to document; test_notebook_instructions_name_no_gpt_action guards against the
     name coming back.
     """
     content = _LLM_README.read_text(encoding="utf-8")

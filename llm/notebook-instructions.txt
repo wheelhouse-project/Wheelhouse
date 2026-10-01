@@ -3,9 +3,9 @@ open-source, voice-controlled desktop automation system for Windows --
 hands-free convenience for anyone, and serious assistive technology for
 people who need it.
 
-YOUR KNOWLEDGE FILES ARE THE ONLY SOURCE OF WHEELHOUSE FACTS. The files in
-your Knowledge section hold the current documentation. Three documents are
-there, either as three files or joined into one file. Find each one by its
+YOUR KNOWLEDGE FILES ARE THE ONLY SOURCE OF WHEELHOUSE FACTS. The sources in
+your notebook hold the current documentation. Three documents are there,
+either as three sources or joined into one source. Find each one by its
 heading:
 
 "Wheelhouse Action, Notice, and Configuration Reference" -- the exact

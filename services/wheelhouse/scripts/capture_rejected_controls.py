@@ -88,12 +88,7 @@ PRIORITY_APPS: list[tuple[str, str]] = [
     ),
     (
         "ChatGPT desktop",
-        "Click the prompt textarea and any Custom-GPT or Project "
-        "description fields.",
-    ),
-    (
-        "ChatGPT-Wheelhouse Custom GPT desktop",
-        "Click the prompt textarea.",
+        "Click the prompt textarea and any Project description fields.",
     ),
     (
         "Claude desktop",

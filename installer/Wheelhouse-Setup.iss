@@ -677,7 +677,7 @@ begin
   if CurPageID = wpFinished then begin
     standing :=
       'You''re all set. To see everything you can say and how it works:' + #13#10 + #13#10 +
-      '  - Say "x-ray pattern manager," then click the "? Help" button, or' + #13#10 +
+      '  - Say "pattern manager," then click the "? Help" button, or' + #13#10 +
       '  - Right-click the Wheelhouse icon near the clock (it shows as a red dot when' + #13#10 +
       '    listening; if you don''t see it, click the small up-arrow), and click' + #13#10 +
       '    "Pattern Manager."' + #13#10 + #13#10 +

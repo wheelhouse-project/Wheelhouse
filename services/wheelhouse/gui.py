@@ -4863,7 +4863,7 @@ class GuiManager(QObject):
             help_action.setEnabled(is_ready)
             help_action.setToolTip(
                 'Open the Wheelhouse Assistant in the browser. The spoken'
-                ' command "x-ray help" opens the same page.'
+                ' command "help" opens the same page.'
             )
             help_action.triggered.connect(self.request_help_online)
             menu.addAction(help_action)
@@ -4913,7 +4913,7 @@ class GuiManager(QObject):
     def request_help_online(self):
         """Ask the Logic process to open the Wheelhouse help page.
 
-        The address is the ai.help gem_url setting, and settings live in the
+        The address is the ai.help assistant_url setting, and settings live in the
         Logic process -- the GUI process has no copy of it. This is the same
         setting, read the same way, as the spoken command "wheelhouse help
         online", so changing it in one place changes both.

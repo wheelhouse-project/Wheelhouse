@@ -5,6 +5,26 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-10-01
+
+### Changed
+
+- "click", "clicks" and "tap" no longer need the safety word. Say "click cancel" or "click 5". If no control matches, Wheelhouse types your words as ordinary text. If you say the safety word first, the "No match" notice appears and nothing is typed.
+- "activate", "switch to", "show", "minimize" and "maximize" with a program name no longer need the safety word. If the command cannot do its job, Wheelhouse types your words. If you say the safety word first, a notice appears instead. "go to [program]", "close", "exit" and "quit" still need the safety word.
+- "cancel fix" no longer needs the safety word. If no AI request is running, Wheelhouse types the words. If you say the safety word first, the notice "No AI job is running." appears.
+- A spoken program name now matches only whole words in a window title. For example, "show me" no longer brings forward a window called "Welcome".
+- The setting `gem_url` under `[ai.help]` is now called `assistant_url`. When you update, the installer renames `gem_url` to `assistant_url` in your settings file and keeps your address. If that address is an old Wheelhouse Assistant address, the installer replaces it with the current one. Wheelhouse now opens the address in `assistant_url` as written.
+
+### Fixed
+
+- "x-ray close", "x-ray exit" and "x-ray quit" with a program name, and "x-ray close window", now close a window that ignores Alt+F4. Before, such a window, for example Notepad, could stay open. If the same window is still in front half a second after Alt+F4, Wheelhouse sends it the Windows close command.
+- "activate" now finds and starts programs installed from the Microsoft Store, such as Windows Terminal. If the program is already running, Wheelhouse brings its window forward instead of starting a second copy.
+- "activate" now brings the window to the front. Before, Windows could refuse the request.
+- If you move to another window while a Microsoft Store program starts, Wheelhouse leaves your window in front.
+- The pattern editor no longer runs past the bottom of the screen. Its steps scroll, and the Save and Cancel buttons stay visible. The editor stays on the monitor of the window that opened it.
+- The mouse wheel no longer changes a step in the pattern editor unless that step has the focus.
+- Volume commands now change the PC volume when the Sonos plugin is turned off. Before, they could do nothing.
+
 ## [1.2.1] - 2026-09-29
 
 ### Added

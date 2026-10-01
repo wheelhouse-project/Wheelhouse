@@ -30,7 +30,7 @@ Cancels an in-progress AI text correction before it pastes anything back.
 
 Parameters: none.
 
-Example: `Trigger "^cancel fix$" with no params: saying "x-ray cancel fix" stops the running correction.`
+Example: `Trigger "^cancel fix$" with no params: saying "cancel fix" stops the running correction.`
 
 #### Fix text with AI
 
@@ -66,7 +66,7 @@ Parameters, in the order a pattern passes them:
 
 - `target` (group_ref) -- Capture group holding the spoken control name, usually g1.
 
-Example: `Trigger "^(?:click|clicks|tap)\s+(.+)$" with params ["g1"]: saying "x-ray click submit button" clicks the button labeled Submit. This one needs the safety word first.`
+Example: `Trigger "^(?:click|clicks|tap)\s+(.+)$" with params ["g1"]: saying "click submit button" clicks the button labeled Submit. This one needs no safety word.`
 
 #### Hide numbered click overlay
 
@@ -98,7 +98,7 @@ Paints a number badge on every clickable control on screen so you can say "click
 
 Parameters: none.
 
-Example: `Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no params: saying "show numbers" shows the badges; then "x-ray click 4" clicks control number 4. "apply numbers" and "show numbers here" do the same.`
+Example: `Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no params: saying "show numbers" shows the badges; then "click 4" clicks control number 4. "apply numbers" and "show numbers here" do the same.`
 
 ### Clipboard
 
@@ -333,11 +333,11 @@ Example: `Trigger "^look up (.+)$" with params [0.5, "C:\\Tools\\lookup.exe", "g
 
 Action name: `activate`. The Pattern Manager lists it under Basic actions.
 
-Brings a window to the front, found by program name (a target ending in .exe) or by window-title pattern; the reserved target default_browser resolves to your default browser.
+Brings a window to the front, found by program name (a target ending in .exe) or by the spoken name matching whole words in the window title; the reserved target default_browser resolves to your default browser.
 
 Parameters, in the order a pattern passes them:
 
-- `target` (exe_or_title) -- Program executable name (notepad.exe), a window-title pattern, or the reserved word default_browser.
+- `target` (exe_or_title) -- Program executable name (notepad.exe), the words to find in a window title (whole words, plain text), or the reserved word default_browser.
 
 Example: `Trigger "^notepad$" with params ["notepad.exe"]: saying "notepad", and nothing else in that utterance, focuses the Notepad window.`
 
@@ -552,7 +552,7 @@ Example: `Trigger "^push to talk mode$" with params ["push_to_talk"]: saying it 
 
 Action name: `stop_listening`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
 
-Switches listening off, as clicking the floating button does while it listens. In toggle mode, say the wake word to switch it back on; in push-to-talk mode the wake word ends only the idle pause, so hold the floating button again.
+Switches listening off, as clicking the floating button or the tray icon does while it listens. In toggle mode, say the wake word to switch it back on; in push-to-talk mode the wake word ends only the idle pause, so hold the floating button again.
 
 Parameters: none.
 
@@ -773,7 +773,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ### [stt]
 
-**last_provider** *(default: `"parakeet_tdt"`)* -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the tray menu, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account), "distil_medium_en" (local, runs on an NVIDIA graphics card), or "google_stt" (Google Cloud; needs an account, sends audio to Google).
+**last_provider** *(default: `"parakeet_tdt"`)* -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the menu on the floating button or the tray icon, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account), "distil_medium_en" (local, runs on an NVIDIA graphics card), or "google_stt" (Google Cloud; needs an account, sends audio to Google).
 
 ### [stt.google]
 
@@ -807,11 +807,11 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 **gpu_layers** *(default: `99`)* -- How much of the model to place on the graphics card. Valid values: 99 places the whole model on the graphics card; 0 runs it entirely on the processor, which the installer chooses for a machine with enough system memory but no suitable graphics card. Values in between split it. Lower it if the server fails to start because the graphics card is out of memory.
 
-**startup_timeout_seconds** *(default: `90`)* -- How long Wheelhouse waits for its model server to report itself ready before giving up and leaving the AI features off. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.
+**startup_timeout_seconds** *(default: `90`)* -- How long Wheelhouse waits for the model server it starts to report itself ready before it stops that attempt. The AI features stay off until a later attempt succeeds: Wheelhouse checks the server every 60 seconds and when an AI command needs it, and the first check after the timeout starts the server again. After each failed start, the wait before the next start doubles, from 120 seconds to at most 600 seconds. After a start that succeeds, the next start waits at least 60 seconds. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.
 
 ### [ai.help]
 
-**gem_url** *(default: `"https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"`)* -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. If this still holds the address of the retired ChatGPT assistant that Wheelhouse used before version 1.2.0, the Wheelhouse Assistant opens instead. The same applies to the Gemini Gem address that version 1.2.0 shipped.
+**assistant_url** *(default: `"https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"`)* -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. Release 1.2.1 and earlier named this setting gem_url; updating with the installer renames it to assistant_url and replaces an old assistant address with the current one.
 
 **explain_before_open** *(default: `true`)* -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back. While it is false and the file help_explainer_notebook_shown.toml is missing from the data folder next to the settings file, the window appears at every Help with the box already ticked. Only the Assistant button writes that file, so after Cancel the window appears again at the next Help; select Assistant with the box still ticked to keep the window off.
 
@@ -859,4 +859,4 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ---
 
-Generated: 2026-09-29 for the v1.2.1 release
+Generated: 2026-10-01 for the v1.2.2 release

@@ -9,8 +9,9 @@ must fail for it:
   - clicks-optional-s: the row is spelled '^(?:clicks?|tap)\\s+(.+)$'. It
     matches the same words, so only the Pattern Manager display test and
     the exact-text test can see it.
-  - hotword-dropped: the row stops requiring the hotword, so "clicks" with
-    no hotword clicks instead of typing (acceptance A2).
+  - hotword-restored: the row requires the safety word again, so "clicks"
+    with no safety word types instead of clicking (changed from
+    hotword-dropped by wh-safety-word-free-commands, which freed the row).
   - grid-click-gains-clicks: the bare grid click row also accepts
     "clicks", the over-broad fix acceptance A3 rules out.
 
@@ -53,7 +54,7 @@ PATTERNS = "speech/config/patterns.toml"
 AFTER_HOTWORD = "test_verb_after_hotword_clicks_the_named_control"
 SAME_QUERY = "test_clicks_query_equals_the_click_query"
 REVISION = "test_revision_from_click_to_clicks_replays_as_a_click"
-NO_HOTWORD = "test_verb_without_hotword_types_the_words"
+NO_HOTWORD = "test_verb_without_hotword_clicks_the_named_control"
 FIRST_MATCH = "test_first_matching_row_is_unchanged_except_for_clicks"
 BARE_CLICKS = "test_bare_clicks_matches_no_row"
 DISPLAY = "test_pattern_manager_shows_click_clicks_and_tap"
@@ -71,7 +72,6 @@ def add(name, old, new, *expect):
 ROW = (
     "pattern = '''^(?:click|clicks|tap)\\s+(.+)$'''\n"
     "doc_id = \"click-element\"\n"
-    "requires_hotword = true\n"
 )
 
 add(
@@ -89,9 +89,9 @@ add(
 )
 
 add(
-    "hotword-dropped",
+    "hotword-restored",
     ROW,
-    ROW.replace("requires_hotword = true", "requires_hotword = false"),
+    ROW + "requires_hotword = true\n",
     NO_HOTWORD, ROW_TEXT,
 )
 

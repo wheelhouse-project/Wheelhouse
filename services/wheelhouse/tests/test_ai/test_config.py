@@ -92,12 +92,15 @@ class TestAIConfigParsing:
     def test_ai_help_max_response_tokens(self, config_data):
         assert config_data["ai"]["help"]["max_response_tokens"] == 800
 
-    def test_ai_help_gem_url(self, config_data):
+    def test_ai_help_assistant_url(self, config_data):
         # The live config.toml is a per-machine user artifact: empty (help
         # online disabled) and any custom URL are both valid, so this test
-        # checks shape only. The shipped default is pinned against
-        # config.toml.example in TestAIConfigExampleTemplate below.
-        assert isinstance(config_data["ai"]["help"]["gem_url"], str)
+        # checks shape only, and tolerates a file that still names the
+        # setting by its old name gem_url (wh-assistant-name-cleanup): the
+        # app ignores that key, and its owner renames it by hand. The
+        # shipped default is pinned against config.toml.example in
+        # TestAIConfigExampleTemplate below.
+        assert isinstance(config_data["ai"]["help"].get("assistant_url", ""), str)
 
 
 class TestAIConfigExampleTemplate:
@@ -130,7 +133,7 @@ class TestAIConfigExampleTemplate:
                 f"dead template key {key} must be removed (gemini_client.py deleted)"
             )
 
-    def test_gem_url_defaults_to_official_assistant(self, example_data):
+    def test_assistant_url_defaults_to_official_assistant(self, example_data):
         # Shipped default: "wheelhouse help online" opens the official
         # Wheelhouse Assistant. Public CI copies config.toml.example to
         # config.toml before testing, so this pins what new installs get.
@@ -138,7 +141,7 @@ class TestAIConfigExampleTemplate:
         # 2026-09-22, because OpenAI stops running custom GPTs on 2026-12-11,
         # and from the Gem to the Gemini Notebook chat view on 2026-09-27,
         # because Google ends Gems on 2026-11-17 (wh-assistant-gemini-notebook).
-        assert example_data["ai"]["help"]["gem_url"] == (
+        assert example_data["ai"]["help"]["assistant_url"] == (
             "https://notebook.google.com/notebook/"
             "da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
         )

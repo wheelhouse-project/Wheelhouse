@@ -76,6 +76,7 @@ the Speech Processing flow that dequeues and evaluates WordEvents from step 1 (S
 :produces_for: Command and Dictation Routing
 """
 import asyncio
+import collections
 import math
 import time
 import enum
@@ -86,6 +87,7 @@ from typing import Optional
 
 from utils.redact import redact_transcript
 
+from .actions import ActionFailed, NothingToCancel
 from .word_event import WordEvent
 from .pattern_catalog import (
     PatternCatalog,
@@ -213,8 +215,9 @@ class _CancelCommandRecognizer:
     """Decides when the deferred words have just spelled the cancel command.
 
     This is deliberately NOT the truth table. The lane defers every event and
-    acts on exactly one thing, so it needs to recognise one thing: the hotword
-    followed by words that match a cancel pattern. Everything else -- greedy
+    acts on exactly one thing, so it needs to recognise one thing: words that
+    match a cancel pattern, either after the hotword or, without it, as a
+    whole utterance (wh-safety-word-free-commands). Everything else -- greedy
     timers, replacement prefixes, remainders -- is left to the
     real routing, which sees these same events again when the lane closes and
     _processing_loop replays them.
@@ -252,26 +255,34 @@ class _CancelCommandRecognizer:
         self._matcher = matcher
         self._words: list[str] = []
         self._hotword_seen = False
+        # wh-safety-word-free-commands (S3): True while the words of an
+        # utterance that did NOT open with the hotword are being collected.
+        # Such an utterance can be a cancel only as a WHOLE, so it is judged
+        # at its end and never word by word.
+        self._bare_started = False
 
     def reset(self) -> None:
         self._words.clear()
         self._hotword_seen = False
+        self._bare_started = False
 
-    def _is_a_cancel(self, words: list[str]) -> bool:
-        """True when these words, after the hotword, are a cancel command.
+    def _is_a_cancel(self, words: list[str], *, authorized: bool = True) -> bool:
+        """True when these words are a cancel command.
 
-        ``authorized_command=True`` is the caller's statement that the hotword
-        gate has already been passed, which is what this class checks before
-        it collects a single word. Without it the shipped cancel pattern --
-        ``requires_hotword = true`` -- would be refused here, as it is refused
-        for a remainder that never had a hotword.
+        ``authorized=True`` is the caller's statement that the hotword gate
+        has already been passed, which is what this class checks before it
+        collects a word after the hotword. It stops a pattern that still
+        carries ``requires_hotword = true`` (a user's own cancel pattern)
+        from being refused for words that did follow the hotword. The bare
+        path passes False, so such a pattern cannot fire without the
+        hotword.
         """
         if not words:
             return False
         text = " ".join(words)
         return any(
             self._matcher.match_single_pattern(
-                text, pattern, authorized_command=True
+                text, pattern, authorized_command=authorized
             ) is not None
             for pattern in self._patterns
         )
@@ -280,10 +291,11 @@ class _CancelCommandRecognizer:
         """True when a corrected final transcript is the cancel command.
 
         The correction replaces the whole utterance, so it is read as one:
-        the first word must be the hotword, and the rest must be the command.
-        That is what the replay of the same text would decide, because
-        ``_handle_retraction`` replays it with ``start_of_utterance`` on the
-        first word.
+        the first word is the hotword and the rest is the command, or the
+        whole text is a command that needs no hotword
+        (wh-safety-word-free-commands). That is what the replay of the same
+        text would decide, because ``_handle_retraction`` replays it with
+        ``start_of_utterance`` on the first word.
 
         crewcut: the replay clears ``start_of_utterance`` on the first word
         when earlier held words were restored in front of the correction, and
@@ -298,7 +310,9 @@ class _CancelCommandRecognizer:
         if not words:
             return False
         if not _word_matches_hotword(words[0].strip().lower(), hotword):
-            return False
+            return self._is_a_cancel(
+                [word.strip().lower() for word in words], authorized=False
+            )
         return self._is_a_cancel([word.strip().lower() for word in words[1:]])
 
     def observe(self, word_event: WordEvent, *, hotword: str) -> bool:
@@ -315,9 +329,17 @@ class _CancelCommandRecognizer:
             self.reset()
             return self._corrected_final_is_a_cancel(corrected, hotword=hotword)
 
+        if word_event.is_utterance_end_marker:
+            # A bare utterance whose last word carried no end flag is judged
+            # here, at the end of the utterance.
+            matched = self._bare_started and self._is_a_cancel(
+                self._words, authorized=False
+            )
+            self.reset()
+            return matched
+
         if (
-            word_event.is_utterance_end_marker
-            or word_event.is_timeout_finalize_marker
+            word_event.is_timeout_finalize_marker
             or word_event.is_lifecycle_reset_marker
         ):
             self.reset()
@@ -330,18 +352,38 @@ class _CancelCommandRecognizer:
         if not word:
             return False
 
+        if self._bare_started:
+            # wh-safety-word-free-commands (S3): the utterance opened without
+            # the hotword. It is a cancel only when ALL its words are, and
+            # only at its end, so "cancel fix the typo" cancels nothing.
+            self._words.append(word)
+            if not word_event.end_of_utterance:
+                return False
+            matched = self._is_a_cancel(self._words, authorized=False)
+            self.reset()
+            return matched
+
         if not self._hotword_seen:
             # The hotword arms a command only at the start of an utterance,
             # which is the router's gate as well. Words before it cannot
             # begin a hotword-gated command, so they are not collected at
             # all -- and a hotword in the middle of one arms nothing, which
             # is what leaves "type x-ray cancel fix" as text.
-            if word_event.start_of_utterance and _word_matches_hotword(
-                word, hotword
-            ):
+            if not word_event.start_of_utterance:
+                return False
+            if _word_matches_hotword(word, hotword):
                 self._hotword_seen = True
                 self._words.clear()
-            return False
+                return False
+            # No hotword: collect the utterance and judge it at its end.
+            self._bare_started = True
+            self._words.clear()
+            self._words.append(word)
+            if not word_event.end_of_utterance:
+                return False
+            matched = self._is_a_cancel(self._words, authorized=False)
+            self.reset()
+            return matched
 
         self._words.append(word)
         matched = self._is_a_cancel(self._words)
@@ -522,6 +564,18 @@ class SpeechProcessor:
         # order the queue would have given it.
         self._deferred_word_events: list[WordEvent] = []
         self._ai_cancel_lane_task: Optional[asyncio.Task] = None
+        # wh-safety-word-free-commands (S3): ids of utterances whose "cancel
+        # fix" the lane already ran while the model answered. The deferred
+        # words are replayed when the lane closes, and the replayed command
+        # finds the job gone; it must stay silent for that utterance.
+        # An id is removed when the replay consumes it, and every other id
+        # is forgotten when a word of a different utterance is processed
+        # (_forget_lane_cancels_except), so an id the replay never consumed
+        # cannot silence a later utterance that reuses it after the STT
+        # server restarts its counter. The bound is a second limit only.
+        self._lane_cancelled_utterances: collections.deque = collections.deque(
+            maxlen=8
+        )
         # True only between the start and the end of one process_word_event
         # call in _processing_loop. The lane may open only while this is
         # true: outside that window the main loop is itself reading
@@ -1452,7 +1506,13 @@ class SpeechProcessor:
                         "AI-CANCEL recognized during a model call "
                         "elapsed_ms=%.1f", elapsed_ms(),
                     )
-                    await self._run_cancel_action()
+                    if (
+                        await self._run_cancel_action()
+                        and word_event.utterance_id is not None
+                    ):
+                        self._lane_cancelled_utterances.append(
+                            word_event.utterance_id
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1463,8 +1523,25 @@ class SpeechProcessor:
                 exc_info=True,
             )
 
-    async def _run_cancel_action(self) -> None:
+    def _forget_lane_cancels_except(self, utterance_id) -> None:
+        """Keep only the lane-cancel records for ``utterance_id``."""
+        kept = [
+            recorded
+            for recorded in self._lane_cancelled_utterances
+            if recorded == utterance_id
+        ]
+        self._lane_cancelled_utterances.clear()
+        self._lane_cancelled_utterances.extend(kept)
+
+    async def _run_cancel_action(self) -> bool:
         """Call the cancel action the recognised pattern names.
+
+        Returns True when the action ran and cancelled a job, False when
+        there was nothing to cancel or no action to call. An
+        ``ActionFailed`` (the action's "no running job" answer) is logged
+        below ERROR and swallowed: every ERROR log raises a Windows popup,
+        and the lane is not where the user is told about a failed command
+        (wh-safety-word-free-commands).
 
         The action is looked up in the same registry the pattern engine uses,
         by the name in ``_CANCEL_ACTION_NAME``. It is called directly rather
@@ -1483,8 +1560,13 @@ class SpeechProcessor:
                 "Cancel-only lane: no '%s' action is registered; the running "
                 "AI call cannot be cancelled.", _CANCEL_ACTION_NAME,
             )
-            return
-        await action()
+            return False
+        try:
+            await action()
+        except ActionFailed as exc:
+            logger.info("Cancel-only lane: nothing to cancel (%s)", exc)
+            return False
+        return True
 
     # ========================================================================
     # MAIN DECISION LOGIC - TRUTH TABLE
@@ -2044,6 +2126,13 @@ class SpeechProcessor:
         # utterance id so the DICTATE branch can label editor IPCs
         # without having to thread the WordEvent through Decision.
         if word_event.utterance_id is not None:
+            if word_event.utterance_id != self._current_utterance_id:
+                # wh-safety-word-free-commands: a different utterance has
+                # started, so an id the cancel lane recorded for an earlier
+                # one can no longer be replayed. Forget it, or a reused id
+                # (the STT server restarts its counter) would silence a
+                # genuine failure.
+                self._forget_lane_cancels_except(word_event.utterance_id)
             self._current_utterance_id = word_event.utterance_id
 
         # wh-click-number-dictation: remember whether the word being
@@ -2546,9 +2635,10 @@ class SpeechProcessor:
     # crewcut: these verbs mirror click_element's trigger
     # "^(?:click|clicks|tap)" in action_catalog.py; a user-customized
     # trigger is not consulted. Read them from the catalog entry once the
-    # catalog exposes its verbs. "clicks" is left out: without the hotword
-    # the router types a leading "clicks" at once, so this hold never sees
-    # it (wh-clicks-spoken-click).
+    # catalog exposes its verbs. "clicks" is left out: the click pattern
+    # now runs without the safety word (wh-safety-word-free-commands), so a
+    # "clicks ..." buffer goes straight to click_element and this fallback
+    # hold never sees it (wh-clicks-spoken-click).
     _SPOKEN_CLICK_VERBS = ("click", "tap")
 
     @staticmethod
@@ -2647,13 +2737,16 @@ class SpeechProcessor:
         """Hold a finalized "click N" buffer as a badge click if it qualifies.
 
         wh-number-badge-problems.2: the shipped recogniser keeps the word
-        "click", so "click 74" opens command buffering; click_element
-        needs the hotword, so router._cannot_match defers the buffer as
-        impossible and the end marker finalizes it as dictation (David's
-        evidence log of 2026-09-02, lines 21777-21806). While badges show,
-        that buffer is the badge click David ruled for on 2026-08-27
+        "click", so "click 74" opens command buffering. When click_element
+        needed the safety word, router._cannot_match deferred the buffer as
+        impossible and the end marker finalized it as dictation (David's
+        evidence log of 2026-09-02, lines 21777-21806); this hold turned
+        that buffer into the badge click David ruled for on 2026-08-27
         (C7), exactly like the bare number whose verb the recogniser
-        dropped. Qualifies only when the text is the whole utterance,
+        dropped. Since wh-safety-word-free-commands click_element runs
+        without the safety word, so "click 74" reaches the overlay route
+        directly and this hold is only a fallback for a buffer that still
+        finalizes as dictation. Qualifies only when the text is the whole utterance,
         opens with "click" or "tap", the rest -- optionally after one
         "number"/"numbers" filler, and ignoring terminal punctuation on
         the last token (_spoken_number_text) -- parses as a number
@@ -3986,8 +4079,78 @@ class SpeechProcessor:
                 f"(type={self.text_parser.last_executed_pattern_type})"
             )
         else:
+            # wh-safety-word-free-commands: THE one place the safety word
+            # decides what a failed window command does. The rule failed
+            # because the Input process refused a step with a reason (no
+            # window with that name, Windows would not bring it forward).
+            # With the safety word the user asked for a command, so they
+            # get a notice and nothing is typed. Without it the user may
+            # simply have been speaking, so the whole utterance is typed
+            # and no notice appears. A failure with no recorded reason
+            # (an unrecognized key name, no pattern) keeps today's
+            # dictation. command_text never carries the safety word: the
+            # router strips it.
+            failure = getattr(self.text_parser, "last_step_failure", None)
+            notice = getattr(failure, "notice", None)
+            if (
+                isinstance(failure, NothingToCancel)
+                and self._current_utterance_id in self._lane_cancelled_utterances
+            ):
+                # wh-safety-word-free-commands (S3): the cancel lane already
+                # cancelled the job while the model answered, and this is the
+                # replay of that same utterance. The job is gone, so the
+                # command has nothing to cancel. The user asked for the
+                # cancel and got it: no notice, nothing typed.
+                self._lane_cancelled_utterances.remove(
+                    self._current_utterance_id
+                )
+                logger.info(
+                    "Replayed cancel fix after the lane cancelled the job; "
+                    "staying silent."
+                )
+                return
+            if hotword_authorized and isinstance(notice, str) and notice:
+                logger.info(
+                    "Command failed after the safety word, showing a "
+                    "notice: '%s'", redact_transcript(command_text),
+                )
+                show = getattr(failure, "show", None)
+                if callable(show):
+                    # A step with its own notice (the click toast) shows it.
+                    try:
+                        show()
+                    except Exception as exc:
+                        logger.warning(
+                            "Failure notice could not be shown: %s", exc,
+                        )
+                else:
+                    self._show_failure_notice(notice)
+                return
+            if isinstance(notice, str) and notice:
+                # A recorded step failure and no safety word: the words are
+                # ordinary dictation. _process_remainder is the path normal
+                # dictation uses for spoken replacements ("comma" types
+                # ","). It runs replacements only and dictates everything
+                # else, so a command word inside the utterance is typed
+                # and never run.
+                logger.info(
+                    "Command failed without the safety word, typing it as "
+                    "dictation: '%s'", redact_transcript(command_text),
+                )
+                await self._process_remainder(command_text)
+                return
             logger.info(f"No command matched, sending to dictation: '{redact_transcript(command_text)}'")
             await self._send_to_dictation(command_text)
+
+    def _show_failure_notice(self, notice: str) -> None:
+        """Show ``notice`` through the Logic process's GUI notification path.
+
+        Never raises: a notice that cannot be shown is logged and dropped.
+        """
+        try:
+            self.text_parser.action_functions.show_notice(notice)
+        except Exception as exc:
+            logger.warning("Failure notice could not be shown: %s", exc)
 
     async def _process_remainder(
         self,

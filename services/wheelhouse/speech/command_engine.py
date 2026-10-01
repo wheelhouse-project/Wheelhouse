@@ -45,12 +45,23 @@ from utils.redact import redact_transcript
 import asyncio
 from typing import Optional, Any, Dict, List
 from urllib.parse import quote_plus
-from .actions import ActionFailed, ActionFunctions, words_to_int
+from .actions import ActionFailed, ActionFunctions, StepFailed, words_to_int
 from .pattern_matcher import PatternMatcher
 
 logger = logging.getLogger(__name__)
 
 _UI_STEP_NAMES = {"hk", "press", "type_text", "insert_text", "activate", "wrap_or_insert", "transform_selection"}
+
+# wh-safety-word-free-commands: how long an awaited ``activate`` step waits
+# for the Input process, in seconds. The default request wait (5 s) is
+# shorter than the launch branch of a window command, which scans installed
+# programs, starts a program (a start can pass 8 s) and polls for its window.
+# A wait that ends first stopped the rule with no key and no typing, and
+# lost the words of an utterance that never needed the safety word.
+# crewcut: a lookup or launch slower than this still stops the rule
+# silently (nothing typed, no notice, no key). Removing the limit means the
+# Input process reporting progress, or a cache for the program scan.
+ACTIVATE_TIMEOUT_S = 15.0
 
 # wh-overlay-slow-uia-stale-badges.7.1.1: step payloads that type text
 # into the foreground window. They cross Input's ONE command loop
@@ -189,6 +200,15 @@ class TextParser:
         # STT later revises the words. Reset at the top of every
         # parse_and_execute call, like last_executed_pattern_type.
         self.dictation_fallback_this_parse: bool = False
+        # wh-safety-word-free-commands: set when the rule the last
+        # parse_and_execute call matched was abandoned because the Input
+        # process refused one of its awaited steps with a reason (a
+        # StepFailed carrying the notice text). Read by
+        # SpeechProcessor._execute_command, which alone decides with the
+        # safety word whether the user sees that text as a notice or the
+        # words are typed. Reset at the top of every parse_and_execute
+        # call, like last_executed_pattern_type.
+        self.last_step_failure: Optional[StepFailed] = None
         # wh-g2-refactor.18: the focus-redirect hook used by
         # replacement-insert routing was removed with the focus-redirect
         # path. Replacement inserts now dispatch through the standard
@@ -520,10 +540,21 @@ class TextParser:
                         # (wh-overlay-slow-uia-stale-badges.14.25): a
                         # supplied falsy non-mapping travels unchanged
                         # so the input-side gate is the one validator.
+                        # wh-safety-word-free-commands: only the activate
+                        # step gets the longer wait and the quiet timeout
+                        # log; every other awaited step keeps the default.
+                        request_kwargs: Dict[str, Any] = (
+                            {
+                                "timeout_s": ACTIVATE_TIMEOUT_S,
+                                "quiet_timeout": True,
+                            }
+                            if func_name == "activate" else {}
+                        )
                         try:
                             await self.speech_handler.app.send_request(
                                 result['action'],
                                 result['params'] if 'params' in result else {},
+                                **request_kwargs,
                             )
                         except Exception as exc:
                             # wh-overlay-slow-uia-stale-badges.7.1.7:
@@ -549,6 +580,42 @@ class TextParser:
                                 and isinstance(exc, IpcDeliveryError)
                             ):
                                 closed_event.set()
+                            # wh-safety-word-free-commands: an Input
+                            # refusal is data, not an error. The reply
+                            # rides on the exception as ``reply``
+                            # (app.InputRefused); it is read by
+                            # attribute because the production app module
+                            # is imported as a package and a class check
+                            # would miss a second module object.
+                            reply = getattr(exc, 'reply', None)
+                            if (
+                                isinstance(reply, dict)
+                                and reply.get('refusal')
+                            ):
+                                if reply.get('outcome') == 'stopped':
+                                    # The rule must stop here and stay
+                                    # silent: nothing typed, no notice,
+                                    # no later step (an Alt+F4, Win+Down
+                                    # or Win+Up would reach whatever
+                                    # window is in front).
+                                    logger.info(
+                                        "Rule stopped by the Input "
+                                        "process: %s", exc,
+                                    )
+                                    return True
+                                raise StepFailed(str(exc)) from exc
+                            if (
+                                func_name == "activate"
+                                and isinstance(exc, asyncio.TimeoutError)
+                            ):
+                                # No answer within the wait: the window
+                                # state is unknown, so no later step may
+                                # send a key. Nothing is typed.
+                                logger.info(
+                                    "Rule stopped: the activate step "
+                                    "was not answered in time"
+                                )
+                                return True
                             raise
                         # .3.1.6: the send returned without raising, so
                         # the text is on its way to the same span a
@@ -639,6 +706,8 @@ class TextParser:
             # here, which needs an undo path the action functions do not
             # have yet.
             logger.info("Rule abandoned: %s", e)
+            if isinstance(e, StepFailed):
+                self.last_step_failure = e
             return False
         except Exception as e:
             logger.error("Rule execution error: %s", e, exc_info=True)
@@ -692,6 +761,7 @@ class TextParser:
         # command as retractable dictation (wh-mouse-grid.1.27).
         self.last_executed_pattern_type = None
         self.dictation_fallback_this_parse = False
+        self.last_step_failure = None
 
         for pattern_data in self.patterns:
             # Use PatternMatcher for fullmatch vs search decision

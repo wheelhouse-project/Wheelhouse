@@ -7,7 +7,8 @@ files' (wheelhouse.log, UTT-48 and UTT-52, 2026-09-27). The replay after
 the revision found no command that starts with "clicks", so Wheelhouse
 typed the words. David chose (QUESTIONS-2026-09-27.md item 4) to accept
 "clicks" as a second spoken form of "click" in the click-element row
-only. The hotword requirement stays.
+only. The hotword requirement was dropped on 2026-09-30
+(wh-safety-word-free-commands).
 
 The stack tests use the REAL catalog, router, parser and actions (the
 helpers from tests/test_grid_number_badge_click.py); only the logic
@@ -91,14 +92,15 @@ def test_revision_from_click_to_clicks_replays_as_a_click():
     assert _click_names(lc) == [TARGET]
 
 
-@pytest.mark.parametrize("verb", ["click", "clicks"])
-def test_verb_without_hotword_types_the_words(verb):
-    # A2: without the hotword "clicks" types, the same as "click" does.
+@pytest.mark.parametrize("verb", ["click", "clicks", "tap"])
+def test_verb_without_hotword_clicks_the_named_control(verb):
+    # A2, changed by wh-safety-word-free-commands: the click row no longer
+    # needs the safety word, so "clicks" and "click" both run it unspoken.
     processor, app, lc = _make_stack(OverlayState.CLOSED)
     _speak(processor, f"{verb} {TARGET}")
 
-    assert lc.clicks == []
-    assert " ".join(app.inserted_texts()).split() == f"{verb} {TARGET}".split()
+    assert app.inserted_texts() == []
+    assert _click_names(lc) == [TARGET]
 
 
 # A3: the first shipped row that matches each utterance. Only the
@@ -169,5 +171,6 @@ def test_click_element_row_is_the_new_text():
     ]
     assert len(rows) == 1
     assert rows[0]["pattern"] == r"^(?:click|clicks|tap)\s+(.+)$"
-    assert rows[0].get("requires_hotword") is True
+    # wh-safety-word-free-commands: the row runs without the safety word.
+    assert not rows[0].get("requires_hotword")
     assert re.fullmatch(rows[0]["pattern"], "clicks x")

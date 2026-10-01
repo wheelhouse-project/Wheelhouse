@@ -63,8 +63,12 @@ class MockApp:
             trace_id=get_trace_id(),
         ))
 
-    async def send_request(self, action: str, params: dict):
-        """Capture request-response commands (awaited)."""
+    async def send_request(self, action: str, params: dict, **kwargs):
+        """Capture request-response commands (awaited).
+
+        ``kwargs`` takes the ``timeout_s`` and ``quiet_timeout`` the awaited
+        activate step passes (wh-safety-word-free-commands).
+        """
         self.outputs.append(CapturedOutput(
             action=action,
             params=params,

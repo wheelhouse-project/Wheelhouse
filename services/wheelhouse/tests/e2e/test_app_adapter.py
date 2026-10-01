@@ -693,6 +693,86 @@ class TestVerifiedKeyBoundaryIsolation:
         assert recording.backspace_sends == [3]
 
 
+class TestCloseFallbackIsolation:
+    """wh-xray-close-app-fails.1.1: Alt+F4 must not start the real fallback.
+
+    ``hotkey_action`` reads the real foreground window through its own
+    module-level ``win32gui`` and, for a single Alt+F4, calls
+    ``close_fallback.start_close_fallback``. That starts a thread that may
+    post ``WM_SYSCOMMAND`` / ``SC_CLOSE`` to the window in front on the
+    developer's machine. The module is reachable under two import paths, so
+    AppAdapter must replace the function on both.
+
+    The test never lets the real function run, red or green: it installs a
+    recording stand-in on both modules BEFORE the adapter is built, so the
+    unfixed adapter leaves the stand-in in place and the test records one
+    escape instead of closing a window.
+    """
+
+    PATHS = ("services.wheelhouse.ui.close_fallback", "ui.close_fallback")
+
+    @pytest.mark.asyncio
+    async def test_alt_f4_never_reaches_the_real_close_fallback(self):
+        import importlib
+
+        import win32gui
+
+        escaped = []
+        modules = {path: importlib.import_module(path) for path in self.PATHS}
+        saved = {
+            path: module.start_close_fallback for path, module in modules.items()
+        }
+
+        def make_tripwire(path):
+            def tripwire(hwnd, marker):
+                escaped.append((path, hwnd))
+                return MagicMock()
+            return tripwire
+
+        for path, module in modules.items():
+            module.start_close_fallback = make_tripwire(path)
+        # Pin the foreground read so close_target is non-zero on a machine
+        # with no window in front; the read itself is a harmless host read.
+        foreground = patch.object(win32gui, "GetForegroundWindow", return_value=4242)
+        foreground.start()
+        recording = Recording()
+        adapter = AppAdapter(recording)
+        try:
+            await adapter.send_command({
+                "action": "hotkey_action",
+                "params": {"keys": ["alt", "f4"], "repeat": 1},
+            })
+            assert ("alt", "f4") in recording.get_keystroke_keys()
+            assert escaped == [], (
+                "Alt+F4 started the real close fallback, which posts SC_CLOSE "
+                f"to the developer's foreground window: {escaped}"
+            )
+            # Replaced while live: neither path still holds the stand-in.
+            still_real = [
+                path for path, module in modules.items()
+                if getattr(module.start_close_fallback, "__name__", "")
+                == "tripwire"
+            ]
+            assert still_real == [], (
+                f"AppAdapter left these modules unpatched: {still_real}"
+            )
+        finally:
+            adapter.stop_patches()
+            foreground.stop()
+            restored = {
+                path: module.start_close_fallback
+                for path, module in modules.items()
+            }
+            for path, module in modules.items():
+                module.start_close_fallback = saved[path]
+        # stop_patches restores both paths to what they held before the
+        # adapter was built, which here is the stand-in.
+        assert all(
+            getattr(restored[path], "__name__", "") == "tripwire"
+            for path in self.PATHS
+        ), f"stop_patches did not restore both modules: {restored}"
+
+
 class TestMouseAndNotificationBoundaryIsolation:
     """wh-review-pattern-fixes.42: no e2e dispatch may move the real mouse.
 

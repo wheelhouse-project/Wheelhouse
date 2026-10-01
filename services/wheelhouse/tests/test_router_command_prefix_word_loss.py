@@ -72,7 +72,6 @@ class TestCommandInsideSentenceDictates:
             "push to talk mode is confusing",
             "snap window to the left and keep typing",
             "delete next three words of the sentence",
-            "show all windows on my second screen",
         ],
     )
     def test_leading_command_phrase_dictates_every_word(self, router, phrase):
@@ -84,6 +83,27 @@ class TestCommandInsideSentenceDictates:
             f"payload={decision.payload!r} remainder={decision.remainder!r}"
         )
         assert decision.payload == phrase
+
+    def test_show_sentence_executes_whole_and_is_typed_when_no_window_matches(
+        self, router
+    ):
+        """wh-safety-word-free-commands: show-app lost its safety word.
+
+        "show all windows on my second screen" used to dictate at the router
+        because show-app needed the safety word. It now matches show-app
+        (^show (.+)$) and finalizes as one EXECUTE of the WHOLE utterance,
+        so no word is severed. When the activate step then finds no window
+        or program, SpeechProcessor._execute_command types the whole
+        utterance as dictation (covered end to end by
+        tests/test_safety_word_free_window_commands.py).
+        """
+        phrase = "show all windows on my second screen"
+        decision = router._resolve_finalization(
+            phrase.split(), hotword_active=False
+        )
+        assert decision.action is Action.EXECUTE
+        assert decision.payload == phrase
+        assert decision.remainder is None
 
     def test_escape_inside_a_sentence_no_longer_fires(self, router):
         """"escape characters need quotes" -- criterion 1, third phrase.
@@ -590,19 +610,30 @@ _SEVEN_ENTRIES_MID_SENTENCE = [
     # doc_id select-paragraph: ^select (?:this )?paragraph$
     "select paragraph three of the contract",
     "select this paragraph and rewrite it",
-    # doc_id show-numbers: ^(?:show|apply) numbers$ -- codex reported the
-    # first of these two as a live mid-sentence execution.
-    "show numbers in the report",
+    # doc_id show-numbers: ^(?:show|apply) numbers$ -- codex reported
+    # "show numbers in the report" as a live mid-sentence execution. That
+    # phrase now belongs to _SHOW_SENTENCES_EXECUTED_WHOLE: show-app lost its
+    # safety word (wh-safety-word-free-commands).
     "apply numbers to the invoice rows",
     # doc_id hide-numbers: ^(?:hide|dismiss) numbers$
     "hide numbers on the chart",
     "dismiss numbers from the summary",
-    # doc_id show-grid: ^(?:show|apply) grid$
-    "show grid lines on the chart",
+    # doc_id show-grid: ^(?:show|apply) grid$ ("show grid lines on the
+    # chart" moved to _SHOW_SENTENCES_EXECUTED_WHOLE, same reason).
     "apply grid spacing to the layout",
     # doc_id hide-grid: ^(?:hide|dismiss) grid$
     "hide grid lines before printing",
     "dismiss grid overlays for now",
+]
+
+# wh-safety-word-free-commands: show-app (^show (.+)$) needs no safety word,
+# so these two sentences finalize as ONE execution of the whole utterance,
+# not as dictation at the router. No word is lost (the payload is the whole
+# sentence). When the activate step finds no program, the processor types the
+# whole sentence; tests/test_safety_word_free_window_commands.py covers that.
+_SHOW_SENTENCES_EXECUTED_WHOLE = [
+    "show numbers in the report",
+    "show grid lines on the chart",
 ]
 
 _SEVEN_ENTRIES_WHOLE_UTTERANCE = [
@@ -649,6 +680,17 @@ class TestVoiceAccessAliasEntriesKeepBothDirections:
             f"payload={decision.payload!r} remainder={decision.remainder!r}"
         )
         assert decision.payload == phrase
+
+    @pytest.mark.parametrize("phrase", _SHOW_SENTENCES_EXECUTED_WHOLE)
+    def test_a_show_sentence_executes_whole_with_no_word_severed(
+        self, router, phrase
+    ):
+        decision = router._resolve_finalization(
+            phrase.split(), hotword_active=False
+        )
+        assert decision.action is Action.EXECUTE
+        assert decision.payload == phrase
+        assert decision.remainder is None
 
     @pytest.mark.parametrize("phrase", _SEVEN_ENTRIES_WHOLE_UTTERANCE)
     def test_the_phrase_alone_still_executes(self, router, phrase):

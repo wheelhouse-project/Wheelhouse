@@ -15,7 +15,7 @@ WheelHouse listens to your voice and converts it into actions -- keyboard shortc
 
 - **Commands at utterance start:** Say "delete five" at the start of a phrase and it deletes five characters. Say "I want to delete five items" and the word "delete" is typed as text -- position determines intent.
 - **Text replacements anywhere:** Say "hello comma world" at any point and you get "hello, world" -- replacement patterns work mid-sentence.
-- **Safety gate:** Dangerous commands require a hotword prefix ("x-ray save") to prevent accidental execution during dictation.
+- **Safety gate:** Dangerous commands require a hotword prefix ("x-ray close window") to prevent accidental execution during dictation.
 - **No lost words:** Every word either executes as a command or appears as text. Buffering timeouts ensure nothing gets stuck.
 
 ### 1.1 Pipeline at a Glance
@@ -337,25 +337,25 @@ When a buffer must be resolved (timeout, utterance end, or impossible pattern), 
 The hotword (default: "x-ray", configured via `COMMAND_HOTWORD` in `patterns.toml`) is a safety gate for commands marked with `requires_hotword = true`. It prevents accidental execution of dangerous commands during dictation.
 
 ```
-"x-ray save"
+"x-ray close window"
     |
     "x-ray" detected at utterance start
     -> TRANSITION to HOTWORD_BUFFERING
     -> hotword_active = True
     -> hotword NOT buffered (cleared from buffer)
     |
-    "save" arrives
-    -> Buffered as ["save"]
-    -> Pattern "^save$" matches with requires_hotword=True
+    "close window" arrives
+    -> Buffered as ["close", "window"]
+    -> Pattern "^close window$" matches with requires_hotword=True
     -> hotword_active=True satisfies requirement
     -> EXECUTE
 
-"save" (without hotword)
+"close window" (without hotword)
     -> FRESH_COMMAND case
-    -> Pattern "^save$" matches...
+    -> Pattern "^close window$" matches...
     -> BUT requires_hotword=True and hotword_active=False
     -> Pattern rejected
-    -> Finalized as dictation: types "save"
+    -> Finalized as dictation: types "close window"
 ```
 
 The hotword only works at the start of a fresh utterance. "I said x-ray" mid-utterance treats "x-ray" as dictation text.
@@ -439,9 +439,9 @@ actions = [{ function = "press", params = ["del", "g1"] }]
 
 # Command with hotword requirement
 [[pattern]]
-pattern = '''^save$'''
+pattern = '''^close window$'''
 requires_hotword = true
-actions = [{ function = "hk", params = ["ctrl", "s"] }]
+actions = [{ function = "hk", params = ["alt", "f4"] }]
 
 # Replacement: can match mid-utterance
 [[pattern]]

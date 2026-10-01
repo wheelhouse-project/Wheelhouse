@@ -187,6 +187,25 @@ class IpcSerializationError(IpcDeliveryError, ValueError):
     """
 
 
+class InputRefused(RuntimeError):
+    """The Input process answered a request with a deliberate refusal.
+
+    wh-safety-word-free-commands: an activate that finds no window and
+    starts nothing, or that Windows will not bring forward, is an ordinary
+    outcome the Logic process turns into a notice or into dictation. The
+    Input process marks such a reply ``refusal`` and this exception carries
+    the whole reply in ``reply`` (the ``outcome`` key says whether the rule
+    must stop silently). It is a RuntimeError so a caller that catches
+    RuntimeError still sees it, but ``send_request`` does not log it at
+    ERROR: every ERROR record shows a Windows error popup. Any other error
+    reply stays a plain RuntimeError.
+    """
+
+    def __init__(self, message, reply):
+        super().__init__(message)
+        self.reply = reply
+
+
 class IpcEventError(Exception):
     """command_ready_event could not be read; the Input process is likely dead."""
 
@@ -449,7 +468,11 @@ class WheelHouseApp:
                         """
                         if not future.done():
                             if response.get('error'):
-                                future.set_exception(RuntimeError(response.get('message', 'UI process error')))
+                                message = response.get('message', 'UI process error')
+                                if response.get('refusal'):
+                                    future.set_exception(InputRefused(message, response))
+                                else:
+                                    future.set_exception(RuntimeError(message))
                             else:
                                 # IPC_COMPLETE carries the requester's trace
                                 # (wh-overlay-slow-uia-stale-badges.14.23):
@@ -1165,6 +1188,7 @@ class WheelHouseApp:
         params: Optional[Dict[str, Any]] = None,
         timeout_s: Optional[float] = None,
         on_late_response: Optional[Callable[[Dict[str, Any]], None]] = None,
+        quiet_timeout: bool = False,
     ) -> Dict[str, Any]:
         """:flow: UI Action Execution
         :step: 2b
@@ -1199,6 +1223,13 @@ class WheelHouseApp:
         the send instant; after it the entry expires and the unknown-id
         warning returns. The callback runs on the event loop; keep it
         non-blocking.
+
+        ``quiet_timeout`` (wh-safety-word-free-commands): when True, a wait
+        that times out is logged at WARNING instead of ERROR. Every ERROR
+        record shows a Windows error popup (main.py), and a window command
+        whose lookup or launch is slow is not a defect. The TimeoutError is
+        still raised; the caller decides what the user sees. Only the
+        awaited ``activate`` step sets it.
         """
         request_id = str(uuid.uuid4())
         effective_timeout = timeout_s if timeout_s is not None else self.response_timeout_s
@@ -1406,9 +1437,21 @@ class WheelHouseApp:
                 entry = self._late_response_callbacks.get(request_id)
                 if entry is not None:
                     entry.armed = True
-            logger.error(
+            logger.log(
+                logging.WARNING if quiet_timeout else logging.ERROR,
                 f"Request '{queued['action']}' (id: {request_id}) "
                 f"timed out after {effective_timeout}s."
+            )
+            raise
+        except InputRefused as refusal:
+            # wh-safety-word-free-commands: the Input process refused on
+            # purpose. The caller decides what the user sees; this is not
+            # an error record, which would show a Windows popup.
+            if on_late_response is not None:
+                self._pop_late_response(request_id)
+            logger.info(
+                "Request '%s' (request_id=%s) refused by the Input process: %s",
+                queued["action"], request_id, refusal,
             )
             raise
         except Exception as e:

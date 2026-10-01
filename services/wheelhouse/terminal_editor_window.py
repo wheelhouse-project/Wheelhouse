@@ -33,6 +33,10 @@ from PySide6.QtGui import QFont, QColor, QPalette, QTextCursor
 from services.wheelhouse.shared.ledger import CreditLedger, RetractResult
 from ui.text_perfector import TextPerfector
 from utils.gui_terminal_paste import PasteOutcome, paste_into_terminal
+# wh-activate-windows-terminal.3: moved to utils.foreground so the Input
+# process can use it without PySide6. The GUI process imports this name
+# from here, and tests patch terminal_editor_window._steal_foreground.
+from utils.foreground import steal_foreground as _steal_foreground
 
 log = logging.getLogger(__name__)
 
@@ -150,91 +154,6 @@ def _set_dark_title_bar(hwnd: int, dark: bool) -> None:
         )
     except Exception as e:
         log.debug("Could not set dark title bar: %s", e)
-
-
-def _default_win32_ops() -> dict:
-    """Return a fresh Win32 callable namespace for _steal_foreground.
-
-    Lazy-binds ctypes attributes and sets strict argtypes once per call
-    so a stray non-int cannot silently corrupt a call. Returns a plain
-    dict so tests can substitute a fake namespace via the ``win32_ops``
-    argument to ``_steal_foreground``.
-    """
-    from ctypes import wintypes
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    user32.GetForegroundWindow.restype = wintypes.HWND
-    user32.GetWindowThreadProcessId.argtypes = [
-        wintypes.HWND, ctypes.POINTER(wintypes.DWORD),
-    ]
-    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    user32.AttachThreadInput.argtypes = [
-        wintypes.DWORD, wintypes.DWORD, wintypes.BOOL,
-    ]
-    user32.AttachThreadInput.restype = wintypes.BOOL
-    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    user32.SetForegroundWindow.restype = wintypes.BOOL
-    user32.BringWindowToTop.argtypes = [wintypes.HWND]
-    user32.BringWindowToTop.restype = wintypes.BOOL
-    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-    return {
-        "GetForegroundWindow": user32.GetForegroundWindow,
-        "GetWindowThreadProcessId": lambda hwnd: int(
-            user32.GetWindowThreadProcessId(hwnd, None)
-        ),
-        "GetCurrentThreadId": kernel32.GetCurrentThreadId,
-        "AttachThreadInput": user32.AttachThreadInput,
-        "SetForegroundWindow": user32.SetForegroundWindow,
-        "BringWindowToTop": user32.BringWindowToTop,
-    }
-
-
-def _steal_foreground(win_hwnd: int, win32_ops: dict | None = None) -> bool:
-    """Bring ``win_hwnd`` to the foreground, bypassing the Windows lock.
-
-    wh-redirect-steal-foreground. The terminal-dictation editor opens
-    in response to a voice event that travels STT -> Logic -> Input ->
-    GUI. By the time the GUI process calls ``SetForegroundWindow`` for
-    the editor, Windows refuses the call: the GUI process has no
-    recent user-input attribution and is not the current foreground.
-    Without the bypass the editor stays behind the terminal until the
-    user clicks it, and the focus-redirect path drops every word it
-    tried to drain.
-
-    Standard Windows workaround: attach this thread's input queue to
-    the current foreground window's thread, then call
-    ``SetForegroundWindow``. The lock check treats the caller as if
-    it were the foreground thread and lets the call through. Detach
-    immediately afterwards so keyboard / mouse capture do not stay
-    shared. Returns True if ``SetForegroundWindow`` reported success.
-
-    The optional ``win32_ops`` parameter is a dependency-injection
-    seam for tests; production callers leave it None.
-    """
-    try:
-        ops = win32_ops if win32_ops is not None else _default_win32_ops()
-        fg_hwnd = int(ops["GetForegroundWindow"]())
-        current_thread = int(ops["GetCurrentThreadId"]())
-        if not fg_hwnd:
-            return bool(ops["SetForegroundWindow"](win_hwnd))
-        fg_thread = int(ops["GetWindowThreadProcessId"](fg_hwnd))
-        if not fg_thread or fg_thread == current_thread:
-            return bool(ops["SetForegroundWindow"](win_hwnd))
-        attached = bool(
-            ops["AttachThreadInput"](current_thread, fg_thread, True)
-        )
-        try:
-            ops["BringWindowToTop"](win_hwnd)
-            result = bool(ops["SetForegroundWindow"](win_hwnd))
-        finally:
-            if attached:
-                ops["AttachThreadInput"](
-                    current_thread, fg_thread, False,
-                )
-        return result
-    except Exception as exc:
-        log.debug("_steal_foreground failed: %s", exc)
-        return False
 
 
 class TerminalDictationEditorWindow(QDialog):

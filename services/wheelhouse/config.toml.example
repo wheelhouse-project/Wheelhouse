@@ -306,7 +306,7 @@ gpu_layers = 99
 startup_timeout_seconds = 90
 
 [ai.help]
-gem_url = "https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
+assistant_url = "https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
 max_response_tokens = 800
 # Show the window that explains the Wheelhouse Assistant before the browser
 # opens. The window's "Do not show this again" check box sets this to false.

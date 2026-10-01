@@ -25,7 +25,11 @@ from ai.providers.openai_compat import ChatResult, ChatStatus
 from ai.service import AIService
 from speech.command_engine import TextParser
 from speech.pattern_catalog import PatternCatalog
-from speech.speech_processor import SpeechProcessor
+from speech.speech_processor import (
+    SpeechProcessor,
+    _CancelCommandRecognizer,
+    _cancel_command_patterns,
+)
 from speech.word_event import WordEvent
 
 PATTERNS_PATH = (
@@ -377,7 +381,9 @@ class TestCancelAroundThePaste:
         )
 
     @pytest.mark.asyncio
-    async def test_a_cancel_after_the_paste_behaves_as_before(self, rig):
+    async def test_a_cancel_after_the_paste_says_there_is_nothing_to_cancel(
+        self, rig,
+    ):
         rig.provider.release.set()
         await rig.say("x-ray", "fix", utterance_id=1)
         await rig.wait_until(
@@ -398,9 +404,13 @@ class TestCancelAroundThePaste:
         )
         await asyncio.sleep(0.05)
 
-        # Nothing to cancel: the action returns without showing a notice,
-        # exactly as it did before this change.
-        assert rig.notices == notices_before
+        # Nothing to cancel. wh-safety-word-free-commands (S3): the action
+        # used to return silently; it now fails, and because the safety word
+        # was spoken the user is told so (and nothing is typed). Without the
+        # safety word the words would be typed instead; that case is in
+        # tests/test_safety_word_free_cancel_fix.py.
+        assert rig.notices == notices_before + ["No AI job is running."]
+        assert rig.typed_text == []
         assert rig.service.cancel_requested is False
         assert rig.actions_sent.count("replace_selected_text") == 1
 
@@ -503,35 +513,35 @@ class TestTheLaneOnlyOpensInsideAWordEventTurn:
         assert rig.processor._ai_cancel_lane_task is None
 
 
-class TestTheCancelStillNeedsTheHotword:
-    """The lane recognises a hotword-gated command, so it needs the hotword.
+class TestTheCancelNoLongerNeedsTheHotword:
+    """The lane recognises "cancel fix" whole, with or without the hotword.
 
-    ``cancel fix`` carries ``requires_hotword = true`` in
-    speech/config/patterns.toml. Dictating those two words during a model call
-    is ordinary text, and text must not cancel the call.
+    wh-safety-word-free-commands (S3): ``cancel fix`` no longer carries
+    ``requires_hotword = true`` in speech/config/patterns.toml. Saying exactly
+    those two words during a model call cancels the call. (This test used to
+    assert the opposite, when the row needed the hotword. A longer utterance
+    that only STARTS with those words still cancels nothing; that is covered
+    in tests/test_safety_word_free_cancel_fix.py.)
     """
 
     @pytest.mark.asyncio
-    async def test_the_trigger_words_alone_do_not_cancel(self, rig):
+    async def test_the_trigger_words_alone_cancel(self, rig):
         await rig.say("x-ray", "fix", utterance_id=1)
         await asyncio.wait_for(rig.provider.in_flight.wait(), timeout=_WAIT_S)
 
         await rig.say("cancel", "fix", utterance_id=2)
         await rig.wait_until(
-            lambda: rig.processor.word_queue.empty(),
-            "the lane to take the dictated words",
-        )
-        assert "Cancelling." not in rig.notices, (
-            "words dictated without the hotword cancelled the running call"
+            lambda: "Cancelling." in rig.notices,
+            'the cancel acknowledgement "Cancelling."',
         )
 
         rig.provider.release.set()
         await rig.wait_until(
-            lambda: "Done." in rig.notices,
-            "the rewrite to finish uncancelled",
+            lambda: "Cancelled." in rig.notices,
+            "the rewrite to report the cancelled outcome",
         )
-        assert rig.actions_sent.count("replace_selected_text") == 1
-        assert "Cancelled." not in rig.notices
+        assert "replace_selected_text" not in rig.actions_sent
+        assert "Done." not in rig.notices
 
 
 class TestAnEventQueuedAfterTheLaneClosesRunsLast:
@@ -857,3 +867,34 @@ class TestTheLaneRecognisesWhatTheRouterWouldRecognise:
         assert "replace_selected_text" not in rig.actions_sent, (
             "the corrected final said cancel and the paste still happened"
         )
+
+    @pytest.mark.asyncio
+    async def test_a_hotword_in_the_middle_of_an_utterance_arms_nothing(
+        self, rig,
+    ):
+        """The lane can open part-way through an utterance.
+
+        The words before it were already routed, so the first event the lane
+        sees may not carry ``start_of_utterance``. A hotword it meets there
+        arms nothing, exactly as the router arms a hotword only at the start
+        of an utterance, so "x-ray cancel fix" in the middle of a sentence is
+        text. (The escaped "type x-ray cancel fix" of the test above is
+        refused by the bare-utterance path, which opens on its first word;
+        this is the one place the start-of-utterance gate itself is read.)
+        """
+        recognizer = _CancelCommandRecognizer(
+            _cancel_command_patterns(rig.catalog), rig.text_parser.matcher
+        )
+        fired = [
+            recognizer.observe(
+                WordEvent(
+                    word,
+                    start_of_utterance=False,
+                    end_of_utterance=False,
+                    utterance_id=1,
+                ),
+                hotword="x-ray",
+            )
+            for word in ("x-ray", "cancel", "fix")
+        ]
+        assert fired == [False, False, False]

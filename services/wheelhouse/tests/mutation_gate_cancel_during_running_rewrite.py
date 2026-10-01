@@ -44,9 +44,10 @@ WHAT THE BEAD ADDED, and therefore what this gate defends:
                                   pattern is collected and no action is
                                   found
       the-recognizer-collects-words-before-the-hotword
-                                  "cancel fix" dictated as ordinary text
-                                  cancels the call; the shipped pattern
-                                  carries requires_hotword = true
+                                  the hotword is no longer taken out of
+                                  the words before they are matched, so
+                                  "x-ray cancel fix" no longer cancels
+                                  (the bare "cancel fix" still does)
 
   the deferred events, which must keep the order word_queue would give
       the-deferred-events-are-dropped
@@ -139,7 +140,7 @@ _ASK = "TestAskAiSharesTheFix"
 _PASTE = "TestCancelAroundThePaste"
 _ORDER = "TestEveryOtherEventKeepsItsOrder"
 _TURN = "TestTheLaneOnlyOpensInsideAWordEventTurn"
-_HOTWORD = "TestTheCancelStillNeedsTheHotword"
+_HOTWORD = "TestTheCancelNoLongerNeedsTheHotword"
 _LATE = "TestAnEventQueuedAfterTheLaneClosesRunsLast"
 _REPLAY = "TestTheRecognisedCancelReplaysAsACommand"
 _LEAK = "TestAFailedCallDoesNotLeakTheCancelFlag"
@@ -206,13 +207,15 @@ _EVERY_TRIGGER = [
 ]
 _ASK_AI = _ask("test_cancel_during_the_question_cancels_it")
 _BEFORE_PASTE = _paste("test_a_cancel_after_the_answer_still_stops_the_paste")
-_AFTER_PASTE = _paste("test_a_cancel_after_the_paste_behaves_as_before")
+_AFTER_PASTE = _paste(
+    "test_a_cancel_after_the_paste_says_there_is_nothing_to_cancel"
+)
 _ORDERING = _order(
     "test_words_spoken_during_the_call_are_typed_after_the_paste"
 )
 _NO_LANE_OUTSIDE = _turn("test_an_ai_call_outside_the_word_loop_opens_no_lane")
 _CLOSING_KEEPS = _turn("test_closing_the_lane_keeps_the_events_it_deferred")
-_NEEDS_HOTWORD = _hotword("test_the_trigger_words_alone_do_not_cancel")
+_NEEDS_HOTWORD = _hotword("test_the_trigger_words_alone_cancel")
 _LATE_EVENT = _late(
     "test_a_word_queued_at_the_close_is_typed_after_the_deferred_ones"
 )
@@ -224,6 +227,9 @@ _FLAG_LEAK = _leak(
 )
 _ESCAPED_TEXT = _like_router(
     "test_an_escaped_cancel_phrase_does_not_cancel"
+)
+_MID_HOTWORD = _like_router(
+    "test_a_hotword_in_the_middle_of_an_utterance_arms_nothing"
 )
 _PUNCTUATED = _like_router(
     "test_a_punctuated_cancel_still_cancels"
@@ -248,6 +254,7 @@ FEATURE_TESTS = {
     _REPLAYED_CANCEL,
     _FLAG_LEAK,
     _ESCAPED_TEXT,
+    _MID_HOTWORD,
     _PUNCTUATED,
     _CORRECTED_FINAL,
 }
@@ -262,6 +269,9 @@ NOT_MUTATED = {}
 # failing it on that wait.
 _EVERY_CANCEL_PATH = [
     _A1, *_EVERY_TRIGGER, _ASK_AI, _REPLAYED_CANCEL, _PUNCTUATED,
+    # wh-safety-word-free-commands: this test speaks the bare "cancel fix"
+    # and waits for the acknowledgement, so it travels the same path.
+    _NEEDS_HOTWORD,
 ]
 
 # The two tests that watch the deferred events themselves: the list the lane
@@ -406,8 +416,18 @@ MUTATIONS = [
         # watching the pipeline log would see the cancel arrive.
         "name": "the-cancel-action-is-not-called",
         "target": PROCESSOR,
-        "old": "                    await self._run_cancel_action()\n",
-        "new": "                    pass\n",
+        # wh-safety-word-free-commands: the call is the first operand of
+        # the condition that records a lane-cancelled utterance, so the
+        # mutation drops the call and keeps the condition a valid
+        # expression (a bare pass would not compile).
+        "old": (
+            "                        await self._run_cancel_action()\n"
+            "                        and word_event.utterance_id is not None\n"
+        ),
+        "new": (
+            "                        False\n"
+            "                        and word_event.utterance_id is not None\n"
+        ),
         # The corrected-final test is proof here too: measured, it fails
         # on its own wait for the cancel acknowledgement.
         "expect": [*_EVERY_CANCEL_PATH, _CORRECTED_FINAL],
@@ -435,16 +455,23 @@ MUTATIONS = [
         "name": "the-hotword-arms-anywhere-in-the-utterance",
         "target": PROCESSOR,
         "old": (
-            "            if word_event.start_of_utterance and _word_matches_hotword(\n"
-            "                word, hotword\n"
-            "            ):\n"
+            "            if not word_event.start_of_utterance:\n"
+            "                return False\n"
+            "            if _word_matches_hotword(word, hotword):\n"
         ),
         "new": (
-            "            if _word_matches_hotword(\n"
-            "                word, hotword\n"
-            "            ):\n"
+            "            if False:\n"
+            "                return False\n"
+            "            if _word_matches_hotword(word, hotword):\n"
         ),
-        "expect": [_ESCAPED_TEXT],
+        # wh-safety-word-free-commands: the escaped-text test no longer
+        # reaches this check. "type x-ray cancel fix" opens a bare
+        # utterance on its first word, and the bare branch collects the
+        # rest before this gate is read. The check is reached only by an
+        # event that is neither the start of an utterance nor part of a
+        # bare one -- the first event a lane sees when it opens part-way
+        # through an utterance -- which is what _MID_HOTWORD speaks.
+        "expect": [_MID_HOTWORD],
     },
     {
         # The lane matches the raw joined words again instead of going
@@ -458,7 +485,7 @@ MUTATIONS = [
         "old": (
             "        return any(\n"
             "            self._matcher.match_single_pattern(\n"
-            "                text, pattern, authorized_command=True\n"
+            "                text, pattern, authorized_command=authorized\n"
             "            ) is not None\n"
             "            for pattern in self._patterns\n"
             "        )\n"
@@ -510,7 +537,13 @@ MUTATIONS = [
         # retraction branch before this block, and
         # _corrected_final_is_a_cancel checks and removes the hotword
         # itself, so the mutation cannot reach that path.
-        "expect": [*_EVERY_CANCEL_PATH, _NEEDS_HOTWORD],
+        # wh-safety-word-free-commands: the bare "cancel fix" no longer
+        # needs the hotword, so it still cancels under this mutation (the
+        # block skipped here also opens the bare path, but the
+        # continuation reads the words with the hotword gate already
+        # passed). The test that speaks it is therefore not a catcher
+        # here; every test that speaks the hotword still is.
+        "expect": [t for t in _EVERY_CANCEL_PATH if t != _NEEDS_HOTWORD],
     },
 
     # -----------------------------------------------------------------
@@ -669,8 +702,11 @@ MUTATIONS = [
         # bug report described from the user's side.
         "name": "cancel-fix-ignores-a-running-call",
         "target": ACTIONS,
-        "old": "        if ai and ai.is_processing():\n",
-        "new": "        if False:\n",
+        # wh-safety-word-free-commands: the condition is inverted now
+        # (the failure is the branch taken), so ignoring a running call
+        # means always failing.
+        "old": "        if not (ai and ai.is_processing()):\n",
+        "new": "        if True:\n",
         # The corrected-final test is proof here too: measured, it fails
         # on its own wait for the cancel acknowledgement.
         "expect": [*_EVERY_CANCEL_PATH, _CORRECTED_FINAL],
@@ -681,8 +717,8 @@ MUTATIONS = [
         # reads it and cancels itself.
         "name": "cancel-fix-acts-when-nothing-is-running",
         "target": ACTIONS,
-        "old": "        if ai and ai.is_processing():\n",
-        "new": "        if ai:\n",
+        "old": "        if not (ai and ai.is_processing()):\n",
+        "new": "        if not ai:\n",
         "expect": [_AFTER_PASTE, _REPLAYED_CANCEL],
     },
     {
@@ -697,7 +733,7 @@ MUTATIONS = [
             "ChatStatus.CANCELLED:\n"
         ),
         "new": "                    if False:\n",
-        "expect": [_A1, *_EVERY_TRIGGER],
+        "expect": [_A1, *_EVERY_TRIGGER, _NEEDS_HOTWORD],
     },
     {
         # The cancel is honoured -- nothing is pasted -- and the user is
@@ -718,7 +754,7 @@ MUTATIONS = [
             "ChatStatus.CANCELLED:\n"
             '                        self._notify_ai_status("Done.")\n'
         ),
-        "expect": [_A1, *_EVERY_TRIGGER],
+        "expect": [_A1, *_EVERY_TRIGGER, _NEEDS_HOTWORD],
     },
     {
         # The last check before the paste is gone, so a cancel that

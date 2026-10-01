@@ -250,6 +250,35 @@ _OVERLAY_RENUMBER_GRACE_SECONDS = 3.0
 _OVERLAY_READ_SENTENCE_WAIT_MAX_S = 5.0
 
 
+def _click_response_notice_kwargs(
+    response,
+    *,
+    spoken_name: str,
+    fallback_snapshot_id=None,
+    trace_id: str,
+    late_correction: bool = False,
+) -> dict:
+    """The arguments ``_forward_click_notice`` takes for a non-ok response.
+
+    The one place the response-to-notice mapping lives. Both
+    ``_forward_click_response_notice`` (shows the notice) and
+    ``forward_click_element`` with ``defer_failure_notice=True`` (hands the
+    same arguments to the caller without showing anything,
+    wh-safety-word-free-commands) build their call from it, so the notice a
+    deferred failure shows later is identical to the one shown today.
+    """
+    return dict(
+        outcome=response.outcome,
+        reason=response.reason,
+        matched_name=response.matched_name,
+        matched_names=response.matched_names,
+        spoken_name=spoken_name,
+        snapshot_id=response.snapshot_id or fallback_snapshot_id,
+        trace_id=response.trace_id or trace_id,
+        late_correction=late_correction,
+    )
+
+
 def _forward_click_response_notice(
     controller,
     response,
@@ -276,14 +305,13 @@ def _forward_click_response_notice(
     marker.
     """
     controller._forward_click_notice(
-        outcome=response.outcome,
-        reason=response.reason,
-        matched_name=response.matched_name,
-        matched_names=response.matched_names,
-        spoken_name=spoken_name,
-        snapshot_id=response.snapshot_id or fallback_snapshot_id,
-        trace_id=response.trace_id or trace_id,
-        late_correction=late_correction,
+        **_click_response_notice_kwargs(
+            response,
+            spoken_name=spoken_name,
+            fallback_snapshot_id=fallback_snapshot_id,
+            trace_id=trace_id,
+            late_correction=late_correction,
+        )
     )
 
 
@@ -1395,35 +1423,15 @@ def _get_stt_lifecycle_lock(self):
     return lock
 
 
-# The Wheelhouse Assistant's address: the chat view of a Gemini Notebook. Used by
-# LogicController.start_help_online when the settings file still names the
-# retired ChatGPT assistant or the old Gemini Gem. This is the same address
-# config.toml.example ships as the gem_url default, and
-# test_the_gem_constant_equals_the_shipped_default keeps the two in step. The
-# name predates the move from the Gem to the notebook.
-_WHEELHOUSE_GEM_URL = (
+# The Wheelhouse Assistant's address: the chat view of a Gemini Notebook. This
+# is the same address config.toml.example ships as the assistant_url default,
+# and test_the_assistant_constant_equals_the_shipped_default keeps the two in
+# step. LogicController.start_help_online does not read this constant: it
+# opens the address in the [ai.help] assistant_url setting as written.
+_WHEELHOUSE_ASSISTANT_URL = (
     "https://notebook.google.com/notebook/"
     "da51a404-67ec-4804-9ebe-83605df3e9cf/preview"
 )
-
-# The address every release before 1.2.0 shipped as the gem_url default: a
-# ChatGPT custom GPT that OpenAI stops running on 2026-12-11. The installer
-# preserves the user's settings file across an update, so an installation made
-# before 1.2.0 still holds this value and would open a dead assistant while the
-# explanation window talks about Gemini (wh-gem-replaces-gpt-assistant.2.3).
-# Delete this constant and the substitution in start_help_online once no
-# supported installation predates 1.2.0.
-_RETIRED_CHATGPT_HELP_URL = (
-    "https://chatgpt.com/g/g-6a5ab92068d0819198db2a83135b9540-wheelhouse"
-)
-
-# The address release 1.2.0 shipped as the gem_url default: a Gemini Gem that
-# Google stops running on 2026-11-17, when Gems become Skills. The installer
-# preserves the user's settings file across an update, so an installation made
-# with 1.2.0 still holds this value and would open a dead assistant
-# (wh-assistant-gemini-notebook). Delete this constant and its substitution in
-# start_help_online once no supported installation was made with 1.2.0.
-_OLD_GEM_HELP_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"
 
 
 def default_help_explainer_marker_path() -> Path:
@@ -3042,7 +3050,9 @@ class LogicController:
                 exc,
             )
 
-    async def forward_click_element(self, query, trace_id: str) -> None:
+    async def forward_click_element(
+        self, query, trace_id: str, *, defer_failure_notice: bool = False,
+    ) -> Optional[dict]:
         """Logic-side awaiter for a voice 'click <target>' (wh-tab7j).
 
         Called by ``ActionFunctions.click_element`` after it parses the
@@ -3072,6 +3082,18 @@ class LogicController:
 
         The notice WORDING is owned by wh-g4oma; this method only populates
         and forwards the ClickNoticeEvent payload (carrying trace_id).
+
+        ``defer_failure_notice`` (wh-safety-word-free-commands): "click
+        <name>" runs without the safety word, so a click that did nothing
+        must let the caller type the words instead of showing a notice. When
+        True, exactly three outcomes are returned instead of shown, as the
+        keyword arguments ``_forward_click_notice`` would have received:
+        ``not_found`` on the by-name path, ``disabled_by_config``, and
+        ``execution_failed:walk_deadline_exceeded`` (nothing was clicked in
+        any of the three). Every other path behaves as with the default and
+        returns None. A timeout is NOT one of them: the click may still run
+        in the Input process, so it must never be typed, and its notice is
+        shown here as always (the late-reply correction assumes that).
         """
         from utils.trace_context import set_trace
 
@@ -3081,6 +3103,24 @@ class LogicController:
         spoken = getattr(query, "name", "") or ""
 
         if not self.click_config.enabled:
+            if defer_failure_notice:
+                # The caller decides whether the notice is shown (the
+                # safety word) and sets the once-per-session flag then.
+                logger.info(
+                    "click_element: voice clicking disabled by config "
+                    "(invalid_key=%s); returning the notice to the caller "
+                    "(trace_id=%s)",
+                    self.click_config.invalid_key, trace_id,
+                )
+                return dict(
+                    outcome="execution_failed",
+                    reason="disabled_by_config",
+                    matched_name=None,
+                    matched_names=(),
+                    spoken_name=spoken,
+                    snapshot_id=None,
+                    trace_id=trace_id,
+                )
             if not self._click_disabled_notice_shown:
                 self._click_disabled_notice_shown = True
                 logger.info(
@@ -3496,6 +3536,21 @@ class LogicController:
         # drift). The response.trace_id echoes the one we generated; the
         # helper prefers it so a log surface can correlate even if it
         # diverged.
+        if defer_failure_notice and (
+            response.outcome == "not_found"
+            or (
+                response.outcome == "execution_failed"
+                and response.reason == "walk_deadline_exceeded"
+            )
+        ):
+            # Nothing was clicked: hand the notice arguments to the caller,
+            # which shows them only when the safety word was spoken.
+            return _click_response_notice_kwargs(
+                response,
+                spoken_name=spoken,
+                fallback_snapshot_id=None,
+                trace_id=trace_id,
+            )
         _forward_click_response_notice(
             self,
             response,
@@ -3503,6 +3558,7 @@ class LogicController:
             fallback_snapshot_id=None,
             trace_id=trace_id,
         )
+        return None
 
     def _perform_auto_open_ambiguous(self, response, spoken: str,
                                      trace_id: str) -> bool:
@@ -10507,8 +10563,8 @@ class LogicController:
             if notice:
                 self._send_gui_notification(notice)
 
-        gem_url = config.get("ai.help.gem_url", "")
-        if not gem_url:
+        assistant_url = config.get("ai.help.assistant_url", "")
+        if not assistant_url:
             # Blanking the setting is how a user turns online help off, so
             # this is a plain statement of fact rather than an error. The
             # explanation window stays shut: its one button would have
@@ -10522,7 +10578,7 @@ class LogicController:
                 explained,
             )
             self._send_gui_notification(
-                "Online help is not configured. Set gem_url under [ai.help]."
+                "Online help is not configured. Set assistant_url under [ai.help]."
             )
             return
 
@@ -10550,53 +10606,6 @@ class LogicController:
                 self._request_help_explainer(start_ticked=once_more)
                 return
 
-        if gem_url.strip() == _RETIRED_CHATGPT_HELP_URL:
-            # An installation made before 1.2.0 still holds the ChatGPT
-            # custom GPT this used to ship, because the installer preserves
-            # the settings file across an update
-            # (wh-gem-replaces-gpt-assistant.2.3). Opening it would send the
-            # user to an assistant OpenAI stops running on 2026-12-11, right
-            # after a window that told them about Gemini. The comparison is
-            # exact after strip(), so an address the user chose is opened as
-            # written, and a blank setting has already turned help off above.
-            #
-            # crewcut: the settings file is not rewritten, so this
-            # substitution runs on every Help for the life of the
-            # installation. Writing the new address once could use the
-            # Logic-side staged save that _record_help_explainer_choice
-            # makes for ai.help.explain_before_open (config.save(values=...)).
-            # It is not done: every ConfigService.save rewrites the whole
-            # settings file and drops the user's comments, and this
-            # substitution already opens the right address without a save.
-            gem_url = _WHEELHOUSE_GEM_URL
-            # No address in the line: it is a user setting, and every other
-            # line in this method redacts it for the same reason
-            # (wh-assistant-button-explainer.1.1).
-            logger.info(
-                "Help: source=%s explained=%s, the configured address is the "
-                "retired ChatGPT assistant, opening the Wheelhouse Assistant "
-                "instead.",
-                source,
-                explained,
-            )
-        elif gem_url.strip() == _OLD_GEM_HELP_URL:
-            # An installation made with 1.2.0 still holds the Gemini Gem that
-            # release shipped, for the same reason as the ChatGPT address
-            # above: the installer preserves the settings file. Google ends
-            # Gems on 2026-11-17, so the notebook opens instead
-            # (wh-assistant-gemini-notebook). The comparison is exact after
-            # strip(), so a Gem the user chose is opened as written. The
-            # crewcut above applies here unchanged.
-            gem_url = _WHEELHOUSE_GEM_URL
-            # No address in the line, for the same reason as above.
-            logger.info(
-                "Help: source=%s explained=%s, the configured address is the "
-                "old Wheelhouse Gem, opening the Wheelhouse Assistant "
-                "instead.",
-                source,
-                explained,
-            )
-
         logger.info(
             "Help: source=%s explained=%s, opening the browser.",
             source,
@@ -10604,7 +10613,7 @@ class LogicController:
         )
         try:
             import webbrowser
-            opened = await asyncio.to_thread(webbrowser.open, gem_url)
+            opened = await asyncio.to_thread(webbrowser.open, assistant_url)
             if not opened:
                 # webbrowser.open reports the common failure by returning
                 # False rather than raising: on Windows it catches the

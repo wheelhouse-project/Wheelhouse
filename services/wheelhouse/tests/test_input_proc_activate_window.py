@@ -42,6 +42,30 @@ def _no_launches_left_over():
         thread.join(timeout=10)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_wait_for_a_started_store_window(monkeypatch):
+    """Keep the wait for a started Store program's window out of real time.
+
+    wh-activate-windows-terminal.3: after a Store program starts, the
+    launch thread polls for its window so it can bring it forward. A
+    test that starts a Store program and never shows it a window would
+    otherwise wait the whole real bound. A bound of zero checks once and
+    stops. The tests of the wait itself set their own bound and clock.
+    raising=False so the file still loads against code without the wait.
+    """
+    monkeypatch.setattr(
+        input_proc, "_STORE_WINDOW_WAIT_S", 0.0, raising=False
+    )
+    # Boss ruling R4: the started window is brought forward only if the
+    # foreground window is the same as when the launch started. The real
+    # foreground window belongs to whatever the machine running the test
+    # has in front, so every test reads one fixed window instead. The
+    # tests of the guard itself set their own answers.
+    monkeypatch.setattr(
+        input_proc, "_foreground_window", lambda: 0x5150, raising=False
+    )
+
+
 @pytest.fixture
 def startfile_calls(monkeypatch):
     """Record os.startfile calls without launching anything.
@@ -1219,3 +1243,902 @@ class TestLaunchWorkerFailureIsLogged:
         assert not launch_thread.is_alive()
         assert logger.error.call_count == 1
         assert "Starting outlook failed" in logger.error.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# wh-activate-windows-terminal: Microsoft Store programs
+# ---------------------------------------------------------------------------
+
+_TERMINAL_ID = "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+_TERMINAL_TARGET = "shell:AppsFolder\\" + _TERMINAL_ID
+
+
+def _store_program(name, app_id, fallbacks=()):
+    from utils.installed_programs import STORE_APPS, InstalledProgram
+
+    return InstalledProgram(
+        name=name,
+        launch_target="shell:AppsFolder\\" + app_id,
+        source=STORE_APPS,
+        app_id=app_id,
+        fallbacks=fallbacks,
+    )
+
+
+def _terminal_lookup(spoken):
+    """What the real lookup returns for Windows Terminal, through its seam."""
+    from utils.installed_programs import (
+        _store_programs_from_records,
+        find_installed_programs,
+    )
+
+    entries = _store_programs_from_records(
+        [(_TERMINAL_ID, "Terminal", "Windows Terminal", 1)]
+    )
+    return find_installed_programs(spoken, scan=lambda: list(entries))
+
+
+def _running_windows(monkeypatch, windows):
+    """Make _find_window_by_app_id answer from ``windows``: {app_id: hwnd}.
+
+    Returns the list of app IDs it was asked about, in order.
+    """
+    asked = []
+
+    def find(app_id, logger):
+        asked.append(app_id)
+        return windows.get(app_id)
+
+    monkeypatch.setattr(input_proc, "_find_window_by_app_id", find)
+    return asked
+
+
+class TestActivateWindowStoreProgram:
+    """wh-activate-windows-terminal.
+
+    Windows Terminal's window title is the active tab's title, so the title
+    search finds nothing, and starting it while it runs opens a second
+    window. A Store program the lookup found is brought forward when it
+    already has a window, and started only when it has none.
+    """
+
+    def test_a_running_store_program_is_brought_forward_not_started(
+        self, monkeypatch, startfile_calls
+    ):
+        notices = []
+        asked = _running_windows(monkeypatch, {_TERMINAL_ID: 777})
+        activated = _handle(
+            monkeypatch,
+            "terminal",
+            found_hwnd=None,
+            programs=_terminal_lookup("terminal"),
+            notices=notices,
+        )
+        assert activated == [777]
+        assert startfile_calls == []
+        assert notices == []
+        assert asked == [_TERMINAL_ID]
+
+    def test_the_package_name_of_a_running_store_program_brings_it_forward(
+        self, monkeypatch, startfile_calls
+    ):
+        # "windows terminal" matches the package-name entry, not the tile
+        # name "Terminal"; it must still find the running window.
+        notices = []
+        asked = _running_windows(monkeypatch, {_TERMINAL_ID: 777})
+        activated = _handle(
+            monkeypatch,
+            "windows terminal",
+            found_hwnd=None,
+            programs=_terminal_lookup("windows terminal"),
+            notices=notices,
+        )
+        assert activated == [777]
+        assert startfile_calls == []
+        assert notices == []
+        assert asked == [_TERMINAL_ID]
+
+    def test_bringing_a_running_program_forward_invalidates_the_buffer(
+        self, monkeypatch, startfile_calls
+    ):
+        buffer = _valid_buffer()
+        _running_windows(monkeypatch, {_TERMINAL_ID: 777})
+        _handle_with_buffer(
+            monkeypatch,
+            "terminal",
+            found_hwnd=None,
+            buffer=buffer,
+            programs=_terminal_lookup("terminal"),
+        )
+        assert startfile_calls == []
+        assert buffer.is_valid is False
+
+    def test_a_fallback_entry_with_a_running_window_is_brought_forward(
+        self, monkeypatch, startfile_calls
+    ):
+        winner = _program(
+            "Terminal",
+            "C:\\Start\\Terminal.lnk",
+            fallbacks=(_store_program("Terminal", _TERMINAL_ID),),
+        )
+        _running_windows(monkeypatch, {_TERMINAL_ID: 555})
+        activated = _handle(
+            monkeypatch, "terminal", found_hwnd=None, programs=[winner]
+        )
+        assert activated == [555]
+        assert startfile_calls == []
+
+    def test_a_store_program_with_no_window_is_started(
+        self, monkeypatch, startfile_calls
+    ):
+        notices = []
+        _running_windows(monkeypatch, {})
+        activated = _handle(
+            monkeypatch,
+            "terminal",
+            found_hwnd=None,
+            programs=_terminal_lookup("terminal"),
+            notices=notices,
+        )
+        assert activated == []
+        assert startfile_calls == [_TERMINAL_TARGET]
+        assert notices == ["Starting Terminal"]
+
+    def test_the_start_uses_the_found_entry_never_the_spoken_words(
+        self, monkeypatch, startfile_calls
+    ):
+        _running_windows(monkeypatch, {})
+        _handle(
+            monkeypatch,
+            "windows terminal",
+            found_hwnd=None,
+            programs=_terminal_lookup("windows terminal"),
+        )
+        assert startfile_calls == [_TERMINAL_TARGET]
+        assert "windows terminal" not in startfile_calls[0].casefold()
+
+    def test_a_program_with_no_app_id_never_searches_by_app_id(
+        self, monkeypatch, startfile_calls
+    ):
+        asked = _running_windows(monkeypatch, {})
+        _handle(
+            monkeypatch,
+            "outlook",
+            found_hwnd=None,
+            programs=[_program("Outlook", "C:\\Start\\Outlook.lnk")],
+        )
+        assert asked == []
+        assert startfile_calls == ["C:\\Start\\Outlook.lnk"]
+
+    def test_no_match_says_so_and_starts_nothing(self, monkeypatch, startfile_calls):
+        notices = []
+        asked = _running_windows(monkeypatch, {})
+        _handle(
+            monkeypatch,
+            "hyperion",
+            found_hwnd=None,
+            programs=_terminal_lookup("hyperion"),
+            notices=notices,
+        )
+        assert startfile_calls == []
+        assert asked == []
+        assert notices == ["No program matched hyperion."]
+
+    def test_several_store_matches_start_none_and_list_them(
+        self, monkeypatch, startfile_calls
+    ):
+        notices = []
+        asked = _running_windows(monkeypatch, {"Vendor.A_1!App": 9})
+        _handle(
+            monkeypatch,
+            "notes",
+            found_hwnd=None,
+            programs=[
+                _store_program("Notes", "Vendor.A_1!App"),
+                _store_program("Notes", "Vendor.B_2!App"),
+            ],
+            notices=notices,
+        )
+        assert startfile_calls == []
+        assert asked == []
+        assert len(notices) == 1
+        assert notices[0].startswith("More than one program matches.")
+        assert notices[0].count("Notes") == 2
+
+
+class TestFindWindowByAppId:
+    """_find_window_by_app_id, with the window and process readers stubbed."""
+
+    def _windows(self, monkeypatch, windows, process_ids, window_ids):
+        """windows: [(hwnd, visible, title, pid)]; the two dicts map to app IDs."""
+        def enum(callback, extra):
+            for hwnd, _visible, _title, _pid in windows:
+                if callback(hwnd, extra) is False:
+                    return
+
+        by_hwnd = {w[0]: w for w in windows}
+        monkeypatch.setattr(input_proc.win32gui, "EnumWindows", enum)
+        monkeypatch.setattr(
+            input_proc.win32gui, "IsWindowVisible", lambda h: by_hwnd[h][1]
+        )
+        monkeypatch.setattr(
+            input_proc.win32gui, "GetWindowText", lambda h: by_hwnd[h][2]
+        )
+        monkeypatch.setattr(
+            input_proc.win32process,
+            "GetWindowThreadProcessId",
+            lambda h: (0, by_hwnd[h][3]),
+        )
+        monkeypatch.setattr(input_proc, "_process_app_id", lambda pid: process_ids.get(pid))
+        monkeypatch.setattr(input_proc, "_window_app_id", lambda hwnd: window_ids.get(hwnd))
+
+    def test_a_process_with_that_app_id_matches_ignoring_case(self, monkeypatch):
+        self._windows(
+            monkeypatch,
+            [(1, True, "Other", 10), (2, True, "PowerShell", 20)],
+            process_ids={10: "Vendor.Other_1!App", 20: _TERMINAL_ID.upper()},
+            window_ids={},
+        )
+        assert input_proc._find_window_by_app_id(_TERMINAL_ID, MagicMock()) == 2
+
+    def test_a_window_property_with_that_app_id_matches(self, monkeypatch):
+        """A UWP window hosted by ApplicationFrameHost: the process is the host."""
+        self._windows(
+            monkeypatch,
+            [(1, True, "Settings", 10)],
+            process_ids={},
+            window_ids={1: "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"},
+        )
+        found = input_proc._find_window_by_app_id(
+            "Windows.ImmersiveControlPanel_cw5n1h2txyewy!Microsoft.Windows.ImmersiveControlPanel",
+            MagicMock(),
+        )
+        assert found == 1
+
+    def test_a_desktop_process_never_matches(self, monkeypatch):
+        self._windows(
+            monkeypatch,
+            [(1, True, "PowerShell", 10)],
+            process_ids={10: None},
+            window_ids={1: None},
+        )
+        assert input_proc._find_window_by_app_id(_TERMINAL_ID, MagicMock()) is None
+
+    def test_invisible_and_untitled_windows_are_skipped(self, monkeypatch):
+        self._windows(
+            monkeypatch,
+            [(1, False, "Hidden", 10), (2, True, "", 10)],
+            process_ids={10: _TERMINAL_ID},
+            window_ids={},
+        )
+        assert input_proc._find_window_by_app_id(_TERMINAL_ID, MagicMock()) is None
+
+    def test_an_enumeration_failure_is_swallowed(self, monkeypatch):
+        def boom(callback, extra):
+            raise OSError("window destroyed during enumeration")
+
+        monkeypatch.setattr(input_proc.win32gui, "EnumWindows", boom)
+        assert input_proc._find_window_by_app_id(_TERMINAL_ID, MagicMock()) is None
+
+    def test_a_reader_that_raises_skips_only_that_window(self, monkeypatch):
+        self._windows(
+            monkeypatch,
+            [(1, True, "Bad", 10), (2, True, "Good", 20)],
+            process_ids={20: _TERMINAL_ID},
+            window_ids={},
+        )
+
+        def process_id(pid):
+            if pid == 10:
+                raise OSError("access denied")
+            return _TERMINAL_ID
+
+        monkeypatch.setattr(input_proc, "_process_app_id", process_id)
+        assert input_proc._find_window_by_app_id(_TERMINAL_ID, MagicMock()) == 2
+
+
+class _FakeKernel32:
+    """A stand-in for kernel32 that reports one process's app ID or an error."""
+
+    def __init__(self, result, app_id="", opens=True):
+        self.result = result
+        self.app_id = app_id
+        self.opens = opens
+        self.closed = []
+        self.opened_with = None
+
+    def OpenProcess(self, access, inherit, pid):
+        self.opened_with = (access, inherit, pid)
+        return 4242 if self.opens else 0
+
+    def GetApplicationUserModelId(self, handle, length, buffer):
+        # The real call leaves the buffer alone on an error. This stand-in
+        # fills it whatever it returns, so a caller that ignores the return
+        # code reads an ID out of a failed call and a test can see it.
+        buffer.value = self.app_id
+        return self.result
+
+    def CloseHandle(self, handle):
+        self.closed.append(handle)
+        return 1
+
+
+class TestProcessAppId:
+    def test_a_packaged_process_reports_its_app_id(self, monkeypatch):
+        fake = _FakeKernel32(0, _TERMINAL_ID)
+        monkeypatch.setattr(input_proc, "_app_model_kernel32", lambda: fake)
+        assert input_proc._process_app_id(1234) == _TERMINAL_ID
+        assert fake.opened_with == (0x1000, False, 1234)
+        assert fake.closed == [4242]
+
+    def test_a_desktop_process_reports_none_and_is_closed(self, monkeypatch):
+        # APPMODEL_ERROR_NO_APPLICATION, with text left in the buffer
+        fake = _FakeKernel32(15703, _TERMINAL_ID)
+        monkeypatch.setattr(input_proc, "_app_model_kernel32", lambda: fake)
+        assert input_proc._process_app_id(1234) is None
+        assert fake.closed == [4242]
+
+    def test_a_packaged_process_with_an_empty_app_id_reports_none(self, monkeypatch):
+        fake = _FakeKernel32(0, "")
+        monkeypatch.setattr(input_proc, "_app_model_kernel32", lambda: fake)
+        assert input_proc._process_app_id(1234) is None
+        assert fake.closed == [4242]
+
+    def test_a_process_that_cannot_be_opened_reports_none(self, monkeypatch):
+        fake = _FakeKernel32(0, _TERMINAL_ID, opens=False)
+        monkeypatch.setattr(input_proc, "_app_model_kernel32", lambda: fake)
+        assert input_proc._process_app_id(1234) is None
+        assert fake.closed == []
+
+
+# ---------------------------------------------------------------------------
+# wh-activate-windows-terminal.3: a bring-forward that Windows accepts
+# ---------------------------------------------------------------------------
+#
+# David's attempts at 18:3x on 2026-09-29 logged "already running; brought
+# its window forward" while Windows Terminal stayed behind. The cause was
+# _activate_window_impl: it attached the calling thread to the TARGET
+# window's thread, and the foreground lock refuses that (pywintypes error
+# code 0). The fix brings the window forward through utils.foreground's
+# steal_foreground, which attaches to the CURRENT FOREGROUND window's
+# thread and detaches in a finally.
+
+_CURRENT_THREAD = 11
+_FOREGROUND_THREAD = 22
+_TARGET_THREAD = 33
+_FOREGROUND_HWND = 0x100
+_TARGET_HWND = 0x200
+
+
+class _ForegroundRefusal(Exception):
+    """What pywin32 raises when Windows refuses SetForegroundWindow."""
+
+
+def _fake_win32(monkeypatch, *, set_foreground_ok=True, raise_on_refusal=False):
+    """Fake every Win32 call a bring-forward can make, and record them.
+
+    Both the pywin32 calls (win32api / win32process / win32gui) and the
+    ctypes namespace utils.foreground uses are faked with one recorder,
+    so the test observes the same calls whichever route the code takes.
+    The foreground window belongs to _FOREGROUND_THREAD and the target
+    to _TARGET_THREAD. Returns the list of (name, args) calls.
+    """
+    import win32api
+
+    import utils.foreground
+
+    calls = []
+
+    def thread_of(hwnd):
+        return _FOREGROUND_THREAD if hwnd == _FOREGROUND_HWND else _TARGET_THREAD
+
+    def attach(current, other, flag):
+        calls.append(("AttachThreadInput", (current, other, flag)))
+        return 1
+
+    def set_foreground_ctypes(hwnd):
+        calls.append(("SetForegroundWindow", (hwnd,)))
+        if not set_foreground_ok and raise_on_refusal:
+            raise _ForegroundRefusal("refused")
+        return 1 if set_foreground_ok else 0
+
+    def set_foreground_pywin32(hwnd):
+        calls.append(("SetForegroundWindow", (hwnd,)))
+        if not set_foreground_ok:
+            # pywin32 raises on a refusal; it never returns 0.
+            raise _ForegroundRefusal("refused")
+        return None
+
+    def bring_to_top(hwnd):
+        calls.append(("BringWindowToTop", (hwnd,)))
+        return 1
+
+    ops = {
+        "GetForegroundWindow": lambda: _FOREGROUND_HWND,
+        "GetCurrentThreadId": lambda: _CURRENT_THREAD,
+        "GetWindowThreadProcessId": thread_of,
+        "AttachThreadInput": attach,
+        "SetForegroundWindow": set_foreground_ctypes,
+        "BringWindowToTop": bring_to_top,
+    }
+    monkeypatch.setattr(utils.foreground, "default_win32_ops", lambda: ops)
+
+    monkeypatch.setattr(win32api, "GetCurrentThreadId", lambda: _CURRENT_THREAD)
+    monkeypatch.setattr(
+        input_proc.win32process,
+        "GetWindowThreadProcessId",
+        lambda hwnd: (thread_of(hwnd), 1234),
+    )
+    monkeypatch.setattr(input_proc.win32process, "AttachThreadInput", attach)
+    monkeypatch.setattr(input_proc.win32gui, "IsIconic", lambda hwnd: False)
+    monkeypatch.setattr(input_proc.win32gui, "ShowWindow", lambda hwnd, cmd: None)
+    monkeypatch.setattr(
+        input_proc.win32gui, "SetForegroundWindow", set_foreground_pywin32
+    )
+    monkeypatch.setattr(input_proc.win32gui, "BringWindowToTop", bring_to_top)
+    monkeypatch.setattr(
+        input_proc.win32gui, "GetWindowText", lambda hwnd: "PowerShell"
+    )
+    return calls
+
+
+def _attach_calls(calls):
+    return [args for name, args in calls if name == "AttachThreadInput"]
+
+
+def _logged(mock_method):
+    return [str(c.args[0]) for c in mock_method.call_args_list]
+
+
+class TestActivateWindowForegroundLock:
+    """T1, T2: _activate_window_impl attaches to the foreground thread."""
+
+    def test_attaches_to_the_foreground_thread_never_the_target_thread(
+        self, monkeypatch
+    ):
+        calls = _fake_win32(monkeypatch)
+        logger = MagicMock()
+
+        assert input_proc._activate_window_impl(_TARGET_HWND, logger) is True
+
+        assert _attach_calls(calls) == [
+            (_CURRENT_THREAD, _FOREGROUND_THREAD, True),
+            (_CURRENT_THREAD, _FOREGROUND_THREAD, False),
+        ]
+        assert ("SetForegroundWindow", (_TARGET_HWND,)) in calls
+        assert any("Activated window" in m for m in _logged(logger.info))
+
+    @pytest.mark.parametrize("raise_on_refusal", [False, True])
+    def test_a_refusal_returns_false_warns_and_still_detaches(
+        self, monkeypatch, raise_on_refusal
+    ):
+        calls = _fake_win32(
+            monkeypatch,
+            set_foreground_ok=False,
+            raise_on_refusal=raise_on_refusal,
+        )
+        logger = MagicMock()
+
+        assert input_proc._activate_window_impl(_TARGET_HWND, logger) is False
+
+        assert _attach_calls(calls) == [
+            (_CURRENT_THREAD, _FOREGROUND_THREAD, True),
+            (_CURRENT_THREAD, _FOREGROUND_THREAD, False),
+        ]
+        warnings = _logged(logger.warning)
+        assert len(warnings) == 1
+        assert str(_TARGET_HWND) in warnings[0]
+        assert "refused" in warnings[0]
+        assert not any("Activated window" in m for m in _logged(logger.info))
+
+
+class TestStoreBranchReportsTheRealOutcome:
+    """T3: the Store branch acts on the bring-forward result."""
+
+    def _run(self, monkeypatch, activated_ok):
+        activated = []
+        monkeypatch.setattr(
+            input_proc,
+            "_activate_window_impl",
+            lambda hwnd, logger: activated.append(hwnd) or activated_ok,
+        )
+        _running_windows(monkeypatch, {_TERMINAL_ID: 777})
+        started = []
+        monkeypatch.setattr(
+            os, "startfile", lambda t: started.append(t), raising=False
+        )
+        logger = MagicMock()
+        notices = []
+        input_proc._start_named_program(
+            "terminal",
+            logger,
+            lambda title, message: notices.append(message),
+            _terminal_lookup,
+            None,
+        )
+        return activated, started, logger, notices
+
+    def test_a_refused_bring_forward_is_logged_as_a_refusal(self, monkeypatch):
+        activated, started, logger, notices = self._run(monkeypatch, False)
+
+        assert activated == [777]
+        assert started == []
+        assert notices == []
+        assert not any(
+            "brought its window forward" in m for m in _logged(logger.info)
+        )
+        assert any(
+            "Terminal is already running" in m and "refused" in m
+            for m in _logged(logger.warning)
+        )
+
+    def test_an_accepted_bring_forward_keeps_the_existing_line(self, monkeypatch):
+        activated, started, logger, notices = self._run(monkeypatch, True)
+
+        assert activated == [777]
+        assert started == []
+        assert notices == []
+        assert any(
+            "Terminal is already running; brought its window forward" in m
+            for m in _logged(logger.info)
+        )
+        assert not any("refused" in m for m in _logged(logger.warning))
+
+
+class TestNonStoreActivateUsesTheCorrectedMethod:
+    """T4, boss ruling R1: the command-loop activate path for a window the
+    title or process search found goes through steal_foreground too."""
+
+    def test_a_found_window_is_brought_forward_by_steal_foreground(
+        self, monkeypatch, startfile_calls
+    ):
+        import utils.foreground
+
+        _fake_win32(monkeypatch)
+        stolen = []
+        monkeypatch.setattr(
+            utils.foreground,
+            "steal_foreground",
+            lambda hwnd, win32_ops=None: stolen.append(hwnd) or True,
+        )
+        monkeypatch.setattr(
+            input_proc, "_find_window_by_target", lambda t, logger: 4242
+        )
+        input_proc._handle_activate_window(
+            {"target": "notepad.exe"},
+            None,
+            MagicMock(),
+            "activate_window",
+            threading.Event(),
+            50,
+            10,
+            {},
+            MagicMock(),
+            find_programs=lambda name: [],
+        )
+        assert stolen == [4242]
+        assert startfile_calls == []
+
+
+class _FakeClock:
+    """A clock that moves only when the poll sleeps."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _fake_poll_timing(monkeypatch):
+    """Poll every 1 s for at most 5 s, on a clock that moves only on sleep."""
+    clock = _FakeClock()
+    monkeypatch.setattr(input_proc, "_STORE_WINDOW_POLL_S", 1.0, raising=False)
+    monkeypatch.setattr(input_proc, "_STORE_WINDOW_WAIT_S", 5.0, raising=False)
+    monkeypatch.setattr(input_proc, "_store_poll_clock", clock, raising=False)
+    monkeypatch.setattr(input_proc, "_store_poll_sleep", clock.sleep, raising=False)
+    return clock
+
+
+def _app_id_answers(monkeypatch, answers):
+    """_find_window_by_app_id answers from ``answers`` in order, then None."""
+    asked = []
+    pending = list(answers)
+
+    def find(app_id, logger):
+        asked.append(app_id)
+        return pending.pop(0) if pending else None
+
+    monkeypatch.setattr(input_proc, "_find_window_by_app_id", find)
+    return asked
+
+
+def _record_activations(monkeypatch):
+    activated = []
+    monkeypatch.setattr(
+        input_proc,
+        "_activate_window_impl",
+        lambda hwnd, logger: activated.append(hwnd) or True,
+    )
+    return activated
+
+
+class TestAStartedStoreProgramIsBroughtForward:
+    """T5, acceptance item 4: the window of a Store program that was just
+    started is brought to the front once it appears."""
+
+    def _run(self, monkeypatch, answers, lookup=_terminal_lookup):
+        clock = _fake_poll_timing(monkeypatch)
+        asked = _app_id_answers(monkeypatch, answers)
+        activated = _record_activations(monkeypatch)
+        started = []
+        monkeypatch.setattr(
+            os, "startfile", lambda t: started.append(t), raising=False
+        )
+        logger = MagicMock()
+        notices = []
+        input_proc._start_named_program(
+            "terminal",
+            logger,
+            lambda title, message: notices.append(message),
+            lookup,
+            None,
+        )
+        return clock, asked, activated, started, logger, notices
+
+    def test_the_new_window_is_brought_forward_when_it_appears(self, monkeypatch):
+        # The first answer is the check before the start (nothing is
+        # running). Then two polls see nothing and the third sees the new
+        # window.
+        clock, asked, activated, started, logger, notices = self._run(
+            monkeypatch, [None, None, None, 888]
+        )
+        assert started == [_TERMINAL_TARGET]
+        assert notices == ["Starting Terminal"]
+        assert activated == [888]
+        assert asked == [_TERMINAL_ID] * 4
+        assert clock.slept == [1.0, 1.0]
+
+    def test_a_window_that_never_appears_stops_at_the_bound(self, monkeypatch):
+        clock, asked, activated, started, logger, notices = self._run(
+            monkeypatch, []
+        )
+        assert started == [_TERMINAL_TARGET]
+        assert activated == []
+        assert notices == ["Starting Terminal"]
+        # Polled more than once, and never past the 5-second bound.
+        assert len(asked) > 2
+        assert sum(clock.slept) <= 5.0
+        assert all(s == 1.0 for s in clock.slept)
+        assert any(
+            "Terminal" in m and "no window" in m for m in _logged(logger.info)
+        )
+
+    def test_a_fallback_that_started_is_the_one_polled(self, monkeypatch):
+        """The winner failed to start and the Store fallback started, so
+        the poll waits for the fallback's app ID."""
+        program = _program(
+            "Terminal",
+            "C:\\Start\\Terminal.lnk",
+            fallbacks=(_store_program("Terminal", _TERMINAL_ID),),
+        )
+        _fake_poll_timing(monkeypatch)
+        asked = _app_id_answers(monkeypatch, [None, 999])
+        activated = _record_activations(monkeypatch)
+        calls = _startfile_that_fails(monkeypatch, {"C:\\Start\\Terminal.lnk"})
+        input_proc._start_named_program(
+            "terminal", MagicMock(), None, lambda spoken: [program], None
+        )
+        assert calls == ["C:\\Start\\Terminal.lnk", _TERMINAL_TARGET]
+        assert activated == [999]
+        assert asked == [_TERMINAL_ID, _TERMINAL_ID]
+
+    def test_a_program_that_is_not_a_store_program_is_not_polled(
+        self, monkeypatch
+    ):
+        clock, asked, activated, started, logger, notices = self._run(
+            monkeypatch,
+            [],
+            lookup=lambda spoken: [_program("Outlook", "C:\\Start\\Outlook.lnk")],
+        )
+        assert started == ["C:\\Start\\Outlook.lnk"]
+        assert asked == []
+        assert activated == []
+        assert clock.slept == []
+
+
+_WINDOW_AT_START = 0x5150
+_OTHER_WINDOW = 0x6160
+_NEW_WINDOW = 888
+
+
+class TestAStartedWindowRespectsTheUsersNextChoice:
+    """Boss ruling R4 (18:59): the foreground window is read when the
+    launch starts, and the new window is brought forward only if the
+    foreground window is still that same window when the new window
+    appears. A voice user can say another command, for example "activate
+    brave", during the wait; Terminal must not then take the focus from
+    the window the user chose. If Windows already gave the new window the
+    focus, that counts as done."""
+
+    def _run(self, monkeypatch, foreground_answers):
+        events = []
+        pending = list(foreground_answers)
+
+        def foreground():
+            answer = pending.pop(0)
+            events.append(("foreground", answer))
+            return answer
+
+        monkeypatch.setattr(
+            input_proc, "_foreground_window", foreground, raising=False
+        )
+        _fake_poll_timing(monkeypatch)
+        # Nothing running before the start, then two polls: one miss and
+        # the new window.
+        _app_id_answers(monkeypatch, [None, None, _NEW_WINDOW])
+        activated = []
+
+        def activate(hwnd, logger):
+            events.append(("activate", hwnd))
+            activated.append(hwnd)
+            return True
+
+        monkeypatch.setattr(input_proc, "_activate_window_impl", activate)
+
+        def startfile(target):
+            events.append(("start", target))
+
+        monkeypatch.setattr(os, "startfile", startfile, raising=False)
+        logger = MagicMock()
+        notices = []
+        input_proc._start_named_program(
+            "terminal",
+            logger,
+            lambda title, message: notices.append(message),
+            _terminal_lookup,
+            None,
+        )
+        return events, activated, logger, notices
+
+    @staticmethod
+    def _started_lines(logger):
+        return [m for m in _logged(logger.info) if m.startswith("Started Terminal")]
+
+    def test_the_user_moved_to_another_window_so_it_is_not_brought_forward(
+        self, monkeypatch
+    ):
+        events, activated, logger, notices = self._run(
+            monkeypatch, [_WINDOW_AT_START, _OTHER_WINDOW]
+        )
+        assert activated == []
+        assert notices == ["Starting Terminal"]
+        lines = self._started_lines(logger)
+        assert len(lines) == 1, lines
+        assert "another window" in lines[0]
+        assert "by itself" not in lines[0]
+        # Read once before the start and once when the window appeared.
+        assert events == [
+            ("foreground", _WINDOW_AT_START),
+            ("start", _TERMINAL_TARGET),
+            ("foreground", _OTHER_WINDOW),
+        ]
+        assert not _logged(logger.warning)
+
+    def test_windows_already_brought_the_new_window_forward(self, monkeypatch):
+        events, activated, logger, notices = self._run(
+            monkeypatch, [_WINDOW_AT_START, _NEW_WINDOW]
+        )
+        assert activated == []
+        assert notices == ["Starting Terminal"]
+        lines = self._started_lines(logger)
+        assert len(lines) == 1, lines
+        assert "by itself" in lines[0]
+        assert "another window" not in lines[0]
+        assert events == [
+            ("foreground", _WINDOW_AT_START),
+            ("start", _TERMINAL_TARGET),
+            ("foreground", _NEW_WINDOW),
+        ]
+        assert not _logged(logger.warning)
+
+    def test_an_unchanged_foreground_brings_the_new_window_forward(
+        self, monkeypatch
+    ):
+        events, activated, logger, notices = self._run(
+            monkeypatch, [_WINDOW_AT_START, _WINDOW_AT_START]
+        )
+        assert activated == [_NEW_WINDOW]
+        assert notices == ["Starting Terminal"]
+        assert self._started_lines(logger) == []
+        assert events == [
+            ("foreground", _WINDOW_AT_START),
+            ("start", _TERMINAL_TARGET),
+            ("foreground", _WINDOW_AT_START),
+            ("activate", _NEW_WINDOW),
+        ]
+
+
+class TestARefusedActivationNeverReportsSuccess:
+    """wh-activate-windows-terminal.3.2.1, boss ruling 20:21 option 1: when
+    Windows refuses to bring a found window forward, an awaited activate
+    (close-app, minimize-app, maximize-app) gets an error response, so the
+    rule stops before its Alt+F4, Win+Down or Win+Up reaches the window in
+    front. A plain activate carries no request id and stays unchanged."""
+
+    def _drive(self, monkeypatch, *, request_id, brought_forward):
+        import queue
+
+        monkeypatch.setattr(
+            input_proc, "_find_window_by_target", lambda t, logger: 4242
+        )
+        monkeypatch.setattr(
+            input_proc,
+            "_activate_window_impl",
+            lambda hwnd, logger: brought_forward,
+        )
+        verified = []
+        monkeypatch.setattr(
+            input_proc,
+            "_verify_window_activation",
+            lambda *args, **kwargs: verified.append(args),
+        )
+        notices = []
+        responses = queue.Queue()
+        input_proc._handle_activate_window(
+            {"target": "notepad.exe"},
+            request_id,
+            responses,
+            "activate_window",
+            threading.Event(),
+            50,
+            10,
+            {},
+            MagicMock(),
+            notify=lambda title, message: notices.append(message),
+            find_programs=lambda name: [],
+        )
+        sent = []
+        while not responses.empty():
+            sent.append(responses.get_nowait())
+        return sent, verified, notices
+
+    def test_an_awaited_refusal_answers_with_an_error(self, monkeypatch):
+        sent, verified, _ = self._drive(
+            monkeypatch, request_id="r1", brought_forward=False
+        )
+        assert len(sent) == 1
+        assert sent[0]["request_id"] == "r1"
+        assert sent[0]["error"]
+        # wh-safety-word-free-commands: a refusal is marked, so the Logic
+        # process treats it as data and not as an application error.
+        assert sent[0]["refusal"] is True
+        assert sent[0]["action"] == "activate_window"
+        assert "status" not in sent[0]
+        assert verified == []
+
+    def test_an_awaited_refusal_shows_no_notice(self, monkeypatch):
+        _, _, notices = self._drive(
+            monkeypatch, request_id="r1", brought_forward=False
+        )
+        assert notices == []
+
+    def test_a_plain_refusal_sends_nothing(self, monkeypatch):
+        sent, verified, notices = self._drive(
+            monkeypatch, request_id=None, brought_forward=False
+        )
+        assert sent == []
+        assert verified == []
+        assert notices == []
+
+    def test_an_awaited_success_is_still_verified(self, monkeypatch):
+        sent, verified, _ = self._drive(
+            monkeypatch, request_id="r1", brought_forward=True
+        )
+        assert sent == []
+        assert len(verified) == 1
