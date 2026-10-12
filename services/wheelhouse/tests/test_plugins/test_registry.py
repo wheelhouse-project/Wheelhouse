@@ -1076,3 +1076,77 @@ class TestAdversarial:
 
         await registry.stop_all()
         assert all(p.state == PluginState.STOPPED for p in plugins)
+
+
+class TestTheRepeatedTvAudioCheckIsTiedToThePluginLifecycle:
+    """wh-sonos-tv-recheck: nothing else starts or stops the repeated check.
+
+    The order matters in both directions. A switch that arrives before the
+    plugins subscribe reaches nobody, because EventBus keeps no history, and
+    a switch that arrives while the plugins stop reaches a plugin that has
+    already released its audio device.
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_all_starts_the_check_after_the_plugins_run(self, registry):
+        order = []
+
+        class RecordingPlugin(StubPlugin):
+            async def start(self):
+                order.append("plugin")
+                await super().start()
+
+        p = RecordingPlugin("alpha")
+        p._state = PluginState.INITIALIZED
+        _populate(registry, p)
+
+        router = Mock()
+        router.start_tv_recheck = Mock(side_effect=lambda: order.append("check"))
+
+        with patch("services.wheelhouse.plugins.registry.get_volume_router", return_value=router):
+            await registry.start_all()
+
+        router.start_tv_recheck.assert_called_once_with()
+        assert order == ["plugin", "check"]
+
+    @pytest.mark.asyncio
+    async def test_stop_all_stops_the_check_before_the_plugins_stop(self, registry):
+        order = []
+
+        class RecordingPlugin(StubPlugin):
+            async def stop(self):
+                order.append("plugin")
+                await super().stop()
+
+        p = RecordingPlugin("alpha")
+        p._state = PluginState.RUNNING
+        _populate(registry, p)
+
+        router = Mock()
+
+        async def _stop():
+            order.append("check")
+
+        router.stop_tv_recheck = AsyncMock(side_effect=_stop)
+
+        with patch("services.wheelhouse.plugins.registry.get_volume_router", return_value=router):
+            await registry.stop_all()
+
+        router.stop_tv_recheck.assert_awaited_once_with()
+        assert order == ["check", "plugin"]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_in_the_check_does_not_stop_the_plugins(self, registry):
+        """The plugins are the product; the repeated check is one feature."""
+        p = StubPlugin("alpha")
+        p._state = PluginState.INITIALIZED
+        _populate(registry, p)
+
+        router = Mock()
+        router.start_tv_recheck = Mock(side_effect=RuntimeError("no loop"))
+
+        with patch("services.wheelhouse.plugins.registry.get_volume_router", return_value=router):
+            await registry.start_all()
+
+        assert p.start_called
+        assert p.state == PluginState.RUNNING

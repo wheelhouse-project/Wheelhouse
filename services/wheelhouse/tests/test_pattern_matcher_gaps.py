@@ -185,8 +185,8 @@ class TestCanContinueHotwordGate:
     def _hotword_only_word(self, catalog):
         """A first word whose every candidate command pattern requires hotword.
 
-        '^fix' (requires_hotword=true) is the only command pattern starting
-        with 'fix', so the buffer ['fix'] is hotword-only. 'save' was this fixture's word until 2026-08-20, when every single-word command traded requires_hotword for whole_utterance_only. '^fix' is the one single-word command that still requires the hotword, so it takes over the role unchanged.
+        '^fix(?:ed)?$' (requires_hotword=true) is the only command pattern
+        starting with 'fix', so the buffer ['fix'] is hotword-only. 'save' was this fixture's word until 2026-08-20, when every single-word command traded requires_hotword for whole_utterance_only. '^fix(?:ed)?$' is the one single-word command that still requires the hotword, so it takes over the role unchanged. The expression read '^fix' until wh-pattern-variants-numeric added the spoken word "fixed" to the same entry.
         """
         pats = catalog.get_matching_patterns("fix")
         assert pats, "fixture broken: no patterns for 'fix'"
@@ -1164,18 +1164,18 @@ class TestMatchSinglePatternHotwordGate:
     """
 
     def _hotword_required_pattern(self, catalog):
-        """Return the pattern dict for ^fix, which requires_hotword=True.
+        """Return the pattern dict for ^fix(?:ed)?$, which requires_hotword=True.
 
-        'save' was this fixture's word until 2026-08-20, when every single-word command traded requires_hotword for whole_utterance_only. '^fix' is the one single-word command that still requires the hotword, so it takes over the role unchanged.
+        'save' was this fixture's word until 2026-08-20, when every single-word command traded requires_hotword for whole_utterance_only. '^fix(?:ed)?$' is the one single-word command that still requires the hotword, so it takes over the role unchanged. The expression read '^fix' until wh-pattern-variants-numeric added the spoken word "fixed" to the same entry.
         """
         for p in catalog.get_all_patterns():
             compiled = p.get('compiled_pattern')
             if compiled is None:
                 continue
-            if compiled.pattern == r'^fix' and p.get('requires_hotword'):
+            if compiled.pattern == r'^fix(?:ed)?$' and p.get('requires_hotword'):
                 return p
         raise RuntimeError(
-            "Test fixture broken: no requires_hotword='^fix' pattern found"
+            "Test fixture broken: no requires_hotword='^fix(?:ed)?$' pattern found"
         )
 
     def _non_hotword_pattern(self, catalog):

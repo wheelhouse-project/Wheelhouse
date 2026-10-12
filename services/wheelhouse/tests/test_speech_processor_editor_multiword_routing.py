@@ -31,6 +31,7 @@ The contract these tests pin:
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -440,3 +441,160 @@ async def test_retraction_fires_even_when_mirror_is_zero():
         a for a in app.actions if a.get("action") == "retract"
     ]
     assert legacy_retracts == []
+
+
+# wh-itn-percent-digits.1.1: the editor arm never runs the replacement
+# patterns. The word-by-word replay (the legacy arm) reaches
+# ``router.decide`` through ``process_word_event`` and so turns the word
+# "percent" into "%"; the editor arm hands the corrected final to
+# ``retract_editor_text`` as one string and the ledger inserts it as given.
+# A final of "50 percent" therefore reached the editor document with its
+# word "percent" still a word.
+async def _correct_an_editor_utterance(
+    proc, lc, words: list[str], final: str, utterance_id: int,
+    earlier_words: list[str] | None = None,
+):
+    """Dictate ``words`` into the editor, correct them to ``final``.
+
+    ``earlier_words`` is the record the processor keeps after an earlier
+    utterance's words went into the editor. It is set AFTER the
+    dictation because the first word of an utterance clears it (the
+    stamped delivery path sets it in production).
+    """
+    await _dictate(proc, words, utterance_id=utterance_id)
+    if earlier_words:
+        proc._earlier_utterance_words_in_retract_span = list(earlier_words)
+        proc._earlier_utterance_words_surface = "editor"
+    await proc.process_word_event(
+        WordEvent(
+            word="",
+            start_of_utterance=False,
+            end_of_utterance=False,
+            utterance_id=utterance_id,
+            is_retraction_marker=True,
+            retraction_full_text=final,
+        )
+    )
+    assert lc.retract_editor_text.await_count == 1, (
+        "the correction never reached the editor arm, so the replay "
+        "text this test reads does not exist"
+    )
+    _, kwargs = lc.retract_editor_text.await_args
+    return kwargs
+
+
+@pytest.mark.asyncio
+async def test_a_corrected_percent_phrase_replays_as_the_symbol():
+    """The replay text carries "50%" and not "50 percent".
+
+    The retract-and-replay is one call into the editor's ledger, which
+    inserts the text exactly as given, so the replacement has to be
+    applied to the text before it is handed over.
+    """
+    proc, app, lc, policy = _build_processor(
+        first_open=True,
+        insert_return=lambda text, uid: len(text),
+    )
+
+    kwargs = await _correct_an_editor_utterance(
+        proc, lc, ["growth", "was", "fifty"],
+        "growth was 50 percent", utterance_id=71,
+    )
+
+    assert kwargs["replay_text"] == "growth was 50%", (
+        "the editor replay must carry the symbol the replacement "
+        "pattern writes, with no word 'percent' left and no space "
+        f"before the symbol. Replay text: {kwargs['replay_text']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_percent_pass_leaves_the_earlier_utterance_words_alone():
+    """The pass runs on the corrected final BEFORE the earlier words join.
+
+    The earlier utterance's SPOKEN words are put in front of the replay
+    by ``_restore_earlier_utterance_words``. If the pass ran over the
+    joined string it would rewrite the earlier word "percent" as well,
+    and the user would see "%" where the earlier utterance said the word.
+    """
+    proc, app, lc, policy = _build_processor(
+        first_open=True,
+        insert_return=lambda text, uid: len(text),
+    )
+
+    kwargs = await _correct_an_editor_utterance(
+        proc, lc, ["growth", "was", "fifty"],
+        "growth was 50 percent", utterance_id=72,
+        earlier_words=["ten", "percent"],
+    )
+
+    assert kwargs["replay_text"] == "ten percent growth was 50%", (
+        "the earlier utterance's words must come back exactly as "
+        "spoken, and only the corrected final may be rewritten. "
+        f"Replay text: {kwargs['replay_text']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_editor_correction_writes_one_restore_log_line(caplog):
+    """The arm calls the restore twice and must log it once.
+
+    The editor arm calls ``_restore_earlier_utterance_words`` on the
+    same input twice, once for the text it sends to the editor and once
+    for the record of the spoken words. A reader of a pipeline log
+    counts restores by these lines, so two lines would describe a
+    correction that never happened.
+    """
+    proc, app, lc, policy = _build_processor(
+        first_open=True,
+        insert_return=lambda text, uid: len(text),
+    )
+
+    with caplog.at_level(logging.INFO, logger="wheelhouse.pipeline"):
+        await _correct_an_editor_utterance(
+            proc, lc, ["growth", "was", "fifty"],
+            "growth was 50 percent", utterance_id=74,
+            earlier_words=["ten", "percent"],
+        )
+
+    lines = [
+        record.getMessage() for record in caplog.records
+        if "RETRACT restoring earlier-utterance words" in record.getMessage()
+    ]
+    assert len(lines) == 1, (
+        "one correction must write one restore line. Lines: "
+        f"{lines!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_utterance_record_keeps_the_spoken_form_after_the_pass():
+    """The editor text carries "%" and the word record keeps "percent".
+
+    ``_payload_is_the_whole_utterance`` compares ``_words_this_utterance``
+    token for token with a later spoken payload. The record is built
+    from the corrected final as spoken, so a payload spoken as the words
+    still matches while the editor holds the symbol.
+    """
+    proc, app, lc, policy = _build_processor(
+        first_open=True,
+        insert_return=lambda text, uid: len(text),
+    )
+
+    kwargs = await _correct_an_editor_utterance(
+        proc, lc, ["growth", "was", "fifty"],
+        "growth was 50 percent", utterance_id=73,
+    )
+
+    assert kwargs["replay_text"] == "growth was 50%", (
+        "the editor text must carry the symbol, or this test does not "
+        f"cover the pass. Replay text: {kwargs['replay_text']!r}"
+    )
+    assert proc._words_this_utterance == [
+        "growth", "was", "50", "percent",
+    ], (
+        "the record of this utterance's words must keep the spoken "
+        "word 'percent' and not the symbol the editor holds. Record: "
+        f"{proc._words_this_utterance!r}"
+    )
+    assert proc._payload_is_the_whole_utterance("growth was 50 percent")

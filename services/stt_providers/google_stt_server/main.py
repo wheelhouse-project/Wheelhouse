@@ -103,6 +103,7 @@ from shared_stt.ws_forwarder import WSForwarder, WebSocketLogHandler
 from shared_stt.mic_notice import MicOutageNotifier
 from shared_stt.startup_refusal import (
     REFUSAL_EXIT_CODE,
+    capture_failure_message,
     send_startup_failed_notice,
     wait_for_notice_connection,
 )
@@ -251,16 +252,19 @@ def restart_completion_notification(error):
 
 
 def capture_failure_notification(detail):
-    """The (title, message, kind) triple for a microphone that never
-    became ready. Same title and same kind as the credentials failure,
-    because WheelHouse routes on those and the two are the same event to
-    the user: the provider started and will not transcribe
-    (wh-provider-ready-handshake criterion 2)."""
-    return (
-        "Google STT",
-        "Failed to start - transcription will not work: " + detail,
-        "startup_failed",
-    )
+    """The (title, message, kind, cause) 4-tuple for a microphone that
+    never became ready. Same title and same kind as the credentials
+    failure, because WheelHouse routes on those and the two are the same
+    event to the user: the provider started and will not transcribe
+    (wh-provider-ready-handshake criterion 2).
+
+    The message and the cause come from capture_failure_message, which
+    the other two providers' handshake sites call too: a blocked
+    microphone is sent as its own sentence with the cause WheelHouse acts
+    on, and every other detail keeps the "Failed to start" prefix and an
+    empty cause (wh-blocked-mic-message)."""
+    message, cause = capture_failure_message(detail)
+    return ("Google STT", message, "startup_failed", cause)
 
 
 def capture_handshake(startup_error, mic):
@@ -294,7 +298,15 @@ def capture_handshake(startup_error, mic):
 
 def startup_notification_after_capture(startup_error, ready, mic,
                                        shutting_down):
-    """The startup notification triple, given capture's own answer.
+    """The startup notification 4-tuple (title, message, kind, cause),
+    given capture's own answer.
+
+    Every branch returns four items, so the one send site unpacks one
+    shape. The cause is "" on the credentials and ready branches and is
+    set only by capture_failure_notification, for a blocked microphone.
+    startup_notification and restart_completion_notification keep their
+    triples: neither can carry a cause, and the restart send site is a
+    different path that reads them directly.
 
     wh-provider-ready-handshake criterion 1. The preflight result alone
     says nothing about the microphone, so a device that never opened
@@ -327,11 +339,11 @@ def startup_notification_after_capture(startup_error, ready, mic,
     read and that send (wh-provider-ready-handshake.1.2).
     """
     if startup_error is not None:
-        return startup_notification(startup_error)
+        return (*startup_notification(startup_error), "")
     if shutting_down.is_set():
         return None
     if ready:
-        return startup_notification(None)
+        return (*startup_notification(None), "")
     detail = (
         getattr(mic, "setup_error", None)
         or "audio capture did not become ready in time"
@@ -426,14 +438,14 @@ def send_startup_notification(forwarder, startup_error, mic, shutting_down,
     """
     ready = capture_handshake(startup_error, mic)
     with notification_lock:
-        triple = startup_notification_after_capture(
+        notification = startup_notification_after_capture(
             startup_error, ready, mic, shutting_down)
-        if triple is None:
+        if notification is None:
             logger.info(
                 "[startup] Server is stopping - no startup notification "
                 "will be sent")
             return
-        title, message, kind = triple
+        title, message, kind, cause = notification
         logger.info(
             f"[startup] Sending startup notification to Wheelhouse: "
             f"{message}")
@@ -445,7 +457,8 @@ def send_startup_notification(forwarder, startup_error, mic, shutting_down,
         # nothing true to say about which path was taken.
         forwarder.send_notification(
             title, message, kind=kind,
-            capture_backend=CAPTURE_BACKEND_NAME if kind == "ready" else "")
+            capture_backend=CAPTURE_BACKEND_NAME if kind == "ready" else "",
+            cause=cause)
         # AFTER the send, never before (wh-capture-winrt-required A9).
         # The notice is the only thing that tells the user why, and an
         # event set first would be read by main()'s loop condition while

@@ -85,6 +85,12 @@ services/wheelhouse/data/user_patterns.toml.tmp
 services/wheelhouse/data/click_first_use_hint_shown.toml
 # Records that the user answered the Assistant explanation window once more.
 services/wheelhouse/data/help_explainer_notebook_shown.toml
+# Records the last update-check time, and the version and the time of the
+# last notice Wheelhouse showed.
+services/wheelhouse/data/update_check_state.toml
+# Records that the first-start welcome notice has already been shown, so it is
+# not shown again.
+services/wheelhouse/data/first_run_notice_shown.toml
 services/wheelhouse/data/llama-server.pid
 
 # Large Model Files

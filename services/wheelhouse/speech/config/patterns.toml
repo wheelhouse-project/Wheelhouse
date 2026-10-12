@@ -446,6 +446,15 @@ actions = [
     { function = "number_point", params = ["g1"] }
 ]
 
+# Numeric pattern: "numeric twenty three" -> "23", "numeric 5" -> "5"
+[[pattern]]
+pattern = '''^numeric (\d+)$'''
+doc_id = "numeric-digits"
+whole_utterance_only = true
+actions = [
+    { function = "number_digits", params = ["g1"] }
+]
+
 # delete word must come BEFORE delete N to avoid "word" being captured as invalid number
 [[pattern]]
 pattern = '''^(?:delete|erase) word$'''
@@ -2652,7 +2661,7 @@ actions = [
 # =============================================================================
 
 [[pattern]]
-pattern = '''^fix'''
+pattern = '''^fix(?:ed)?$'''
 doc_id = "fix-text"
 requires_hotword = true
 actions = [
@@ -2774,6 +2783,18 @@ doc_id = "show-commands"
 whole_utterance_only = true
 actions = [
     { function = "open_pattern_manager" }
+]
+
+# Settings window (wh-voice-settings-window): the check boxes, radio buttons
+# and buttons for the menu settings and a few more. A whole utterance only, so
+# the word inside dictation stays text. Distinct from windows-settings, which
+# needs the word Windows in front.
+[[pattern]]
+pattern = '''^settings?$'''
+doc_id = "settings-window"
+whole_utterance_only = true
+actions = [
+    { function = "open_settings_window" }
 ]
 
 # =============================================================================
@@ -3491,7 +3512,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''\bquestion mark\b'''
+pattern = '''\bquestion(?:ed)? mark\b'''
 doc_id = "punct-question-mark"
 actions = [
     { function = "text", params = ["?"] }

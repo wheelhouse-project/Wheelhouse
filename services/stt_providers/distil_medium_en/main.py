@@ -38,6 +38,7 @@ from shared_stt.mic_notice import MicOutageNotifier
 from shared_stt.redact import redact_transcript
 from shared_stt.startup_refusal import (
     REFUSAL_EXIT_CODE,
+    capture_failure_message,
     send_startup_failed_notice,
     wait_for_notice_connection,
 )
@@ -650,10 +651,16 @@ class DistilMediumServer:
                 or "audio capture did not become ready in time"
             )
             logger.error(f"Audio capture is not ready: {detail}")
+            # The helper decides the text and the cause together: the
+            # blocked-microphone sentence goes out alone with the cause
+            # WheelHouse acts on, and every other detail keeps the
+            # "Failed to start" prefix (wh-blocked-mic-message).
+            message, cause = capture_failure_message(detail)
             self.forwarder.send_notification(
                 self.DISPLAY_NAME,
-                f"Failed to start - transcription will not work: {detail}",
+                message,
                 kind="startup_failed",
+                cause=cause,
             )
             # The send only QUEUED that notice
             # (wh-capture-winrt-required.1.4). WSForwarder.stop() drains

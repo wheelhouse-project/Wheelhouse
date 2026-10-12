@@ -12,11 +12,12 @@ import queue
 import struct
 import threading
 import time
-from unittest.mock import Mock, patch, MagicMock, call
+from unittest.mock import ANY, Mock, patch, MagicMock, call
 from types import SimpleNamespace
 
 from shared_audio.capture.winrt_capture import WinRTAudioCapture
 from shared_audio.capture.base import AudioConfig
+from shared_stt.startup_refusal import CAPTURE_FAILURE_PREFIX
 from shared_audio.thread_priority import (
     AVRT_TASK_PRO_AUDIO,
     MmcssRegistration,
@@ -2501,17 +2502,39 @@ APPROVED_AUDIO_DEVICE_LOG_LINE = (
 )
 
 # What each provider puts in front of the refusal before it sends the
-# notice. Written out here because a shared test cannot import a
-# provider. The three sites are distil_medium_en/main.py:595,
-# google_stt_server/main.py:238 and
-# sherpa_offline_parakeet_stt_server/main.py:655, and all three use these
-# exact words.
-PROVIDER_NOTICE_PREFIX = "Failed to start - transcription will not work: "
+# notice. One copy of the words exists, and this is it: the three capture
+# handshake send sites all call capture_failure_message, which adds
+# CAPTURE_FAILURE_PREFIX (wh-blocked-mic-message). Before that change
+# each provider held the words itself, and this test held a fourth copy.
+PROVIDER_NOTICE_PREFIX = CAPTURE_FAILURE_PREFIX
 
 # plyer builds a Windows NOTIFYICONDATAW whose szInfo field is
 # WCHAR * 256, so ctypes refuses a longer notice
 # (plyer/platforms/win/libs/win_api_defs.py:62).
 WINDOWS_NOTICE_LIMIT = 256
+
+# What a user reads when Windows blocks the microphone. David approved
+# this exact wording on 2026-10-09 (QUESTIONS-2026-10-09.md item 8a,
+# "ANSWER: option one"), so treat a change to it as a user-visible
+# change (wh-blocked-mic-message).
+APPROVED_MICROPHONE_BLOCKED_REFUSAL = (
+    "WheelHouse cannot use your microphone. Windows is blocking it. "
+    "Open Settings > Privacy and security > Microphone, turn on "
+    "\"Let desktop apps access your microphone\", then start WheelHouse "
+    "again."
+)
+
+# The developer half of the same refusal, logged rather than shown. It
+# names the enum member so a log reader does not have to look up what 4
+# means.
+APPROVED_MICROPHONE_BLOCKED_LOG_LINE = (
+    "Microphone node creation returned ACCESS_DENIED (status=4)"
+)
+
+# The Windows setting the refusal must name, and the place it lives.
+# Acceptance item 1 of wh-blocked-mic-message names both word for word.
+BLOCKED_SETTING_NAME = "Let desktop apps access your microphone"
+BLOCKED_SETTING_PLACE = "Settings > Privacy and security > Microphone"
 
 
 class TestAMissingAudioOutputDeviceHasItsOwnRefusal:
@@ -2628,6 +2651,159 @@ class TestAMissingAudioOutputDeviceHasItsOwnRefusal:
         """
         mocks = mock_winrt_graph
         mocks['create_result'].status = 1
+
+        capture = WinRTAudioCapture()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            capture._setup_graph()
+
+        notice = PROVIDER_NOTICE_PREFIX + str(excinfo.value)
+        assert len(notice) <= WINDOWS_NOTICE_LIMIT
+
+
+class TestABlockedMicrophoneHasItsOwnRefusal:
+    """wh-blocked-mic-message: status=4 is ACCESS_DENIED for the node.
+
+    create_device_input_node_async returns AudioDeviceNodeCreationStatus,
+    whose members are SUCCESS 0, DEVICE_NOT_AVAILABLE 1,
+    FORMAT_NOT_SUPPORTED 2, UNKNOWN_FAILURE 3 and ACCESS_DENIED 4
+    (winsdk/windows/media/audio/__init__.py). Windows returns ACCESS_DENIED
+    when "Let desktop apps access your microphone" is off.
+
+    wh-blocked-mic-test measured it on Ikon on 2026-10-09 and recorded
+    status=4 with the setting off and status=0 with it on. The provider
+    carries setup_error into its startup-failed notice, so whatever text
+    this raise holds is what the user reads, and
+    "Microphone node failed: status=4" tells a user nothing they can act
+    on.
+
+    The other node statuses keep the developer text. DEVICE_NOT_AVAILABLE
+    means no microphone device, which is a different fix, and
+    FORMAT_NOT_SUPPORTED and UNKNOWN_FAILURE name no action a user could
+    take.
+    """
+
+    def test_a_blocked_microphone_raises_the_approved_words(
+            self, mock_winrt_available, mock_winrt_graph):
+        mocks = mock_winrt_graph
+        mocks['input_result'].status = 4
+
+        capture = WinRTAudioCapture()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            capture._setup_graph()
+
+        assert str(excinfo.value) == APPROVED_MICROPHONE_BLOCKED_REFUSAL
+
+    def test_the_refusal_names_the_setting_and_its_place(
+            self, mock_winrt_available, mock_winrt_graph):
+        """Acceptance item 1 names both strings word for word. An equality
+        test alone would keep passing if someone rewrote the constant and
+        the test together, so the two required strings are asserted on
+        their own.
+        """
+        mocks = mock_winrt_graph
+        mocks['input_result'].status = 4
+
+        capture = WinRTAudioCapture()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            capture._setup_graph()
+
+        message = str(excinfo.value)
+        assert BLOCKED_SETTING_NAME in message
+        assert BLOCKED_SETTING_PLACE in message
+
+    def test_a_rebuild_raises_the_same_words_without_the_error_line(
+            self, mock_winrt_available, mock_winrt_graph, caplog):
+        """The rebuild after a lost microphone retries every
+        REBUILD_RETRY_SECONDS, so it must not write the ERROR line each
+        time (wh-mic-loss-capture-recovery). The raised words stay the
+        approved ones: the rebuild's reminder line carries them.
+        """
+        from shared_audio.capture.winrt_capture import (
+            MICROPHONE_BLOCKED_LOG_LINE)
+        mocks = mock_winrt_graph
+        mocks['input_result'].status = 4
+        capture = WinRTAudioCapture()
+
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(RuntimeError) as rebuild:
+                capture._setup_graph(log_failure=False)
+
+        assert str(rebuild.value) == APPROVED_MICROPHONE_BLOCKED_REFUSAL
+        assert _lines(caplog, MICROPHONE_BLOCKED_LOG_LINE) == []
+
+    def test_the_developer_detail_is_logged_rather_than_shown(
+            self, mock_winrt_available, mock_winrt_graph, caplog):
+        """The enum name a log reader needs, kept out of the notice.
+
+        The notice has no room for it. See the length test below.
+        """
+        mocks = mock_winrt_graph
+        mocks['input_result'].status = 4
+
+        capture = WinRTAudioCapture()
+
+        with caplog.at_level(
+                logging.ERROR,
+                logger="shared_audio.capture.winrt_capture"):
+            with pytest.raises(RuntimeError):
+                capture._setup_graph()
+
+        assert APPROVED_MICROPHONE_BLOCKED_LOG_LINE in caplog.text
+
+    def test_the_refusal_does_not_carry_the_status_number(
+            self, mock_winrt_available, mock_winrt_graph):
+        """The message CHOICE, which is the half an equality test cannot
+        show on its own. "status=4" is the developer detail, and a user
+        who reads it learns nothing about the setting to change.
+        """
+        mocks = mock_winrt_graph
+        mocks['input_result'].status = 4
+
+        capture = WinRTAudioCapture()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            capture._setup_graph()
+
+        message = str(excinfo.value)
+        assert "status=" not in message
+        assert "ACCESS_DENIED" not in message
+
+    @pytest.mark.parametrize("status", [1, 2, 3])
+    def test_another_node_status_keeps_the_developer_message(
+            self, status, mock_winrt_available, mock_winrt_graph):
+        """status=1 is DEVICE_NOT_AVAILABLE (no microphone device), 2 is
+        FORMAT_NOT_SUPPORTED and 3 is UNKNOWN_FAILURE. None of them says
+        Windows blocked access, so none may borrow the words for it.
+        Acceptance item 2: every other microphone failure keeps its
+        present message.
+        """
+        mocks = mock_winrt_graph
+        mocks['input_result'].status = status
+
+        capture = WinRTAudioCapture()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            capture._setup_graph()
+
+        assert str(excinfo.value) == f"Microphone node failed: status={status}"
+
+    def test_the_assembled_notice_fits_the_windows_limit(
+            self, mock_winrt_available, mock_winrt_graph):
+        """The whole notice, prefix included, must fit in 256 characters.
+
+        plyer builds a Windows NOTIFYICONDATAW whose szInfo field is
+        WCHAR * 256. ctypes refuses a longer string, and plyer raises it
+        on its own thread (plyer/platforms/win/notification.py:17), so a
+        longer notice shows NOTHING at all rather than showing a cut one.
+        utils/notice_text.py:56 shortens at 255 instead, which cuts the
+        sentence that names the setting, so this test holds the real
+        limit either way.
+        """
+        mocks = mock_winrt_graph
+        mocks['input_result'].status = 4
 
         capture = WinRTAudioCapture()
 
@@ -3558,9 +3734,13 @@ class TestMicrophoneOutageCallback:
             finally:
                 capture.stop()
 
+        # 'opened' and 'closed' bracket the outage (wh-show-microphone-name);
+        # the dead graph's name is a Mock attribute, so ANY.
         assert callback.call_args_list == [
+            call('opened', ANY),
             call('lost', None),
             call('recovered', 'Microphone (4- Scarlett Solo USB)'),
+            call('closed', None),
         ]
 
     def test_the_loss_call_comes_before_the_microphone_returns(self):
@@ -3579,7 +3759,8 @@ class TestMicrophoneOutageCallback:
             finally:
                 capture.stop()
 
-        assert callback.call_args_list == [call('lost', None)]
+        assert callback.call_args_list == [
+            call('opened', ANY), call('lost', None), call('closed', None)]
 
     def test_reminders_never_call_the_callback(self, caplog):
         """Ruling D3: remind() writes a log line and nothing else, so a
@@ -3597,7 +3778,8 @@ class TestMicrophoneOutageCallback:
             finally:
                 capture.stop()
 
-        assert callback.call_args_list == [call('lost', None)]
+        assert callback.call_args_list == [
+            call('opened', ANY), call('lost', None), call('closed', None)]
 
     def test_a_raising_callback_is_logged_and_recovery_completes(
             self, caplog):
@@ -3622,9 +3804,9 @@ class TestMicrophoneOutageCallback:
 
         assert len(calls) == 2
         assert [c.args[0] for c in callback.call_args_list] == [
-            'lost', 'recovered']
+            'opened', 'lost', 'recovered', 'closed']
         failures = _lines(caplog, 'notice path broken')
-        assert len(failures) == 2
+        assert len(failures) == 4
         assert all(r.levelno == logging.WARNING for r in failures)
         # The failure line is not a second loss or recovery line.
         assert len(_lines(caplog, 'Microphone lost')) == 1
@@ -3643,3 +3825,334 @@ class TestMicrophoneOutageCallback:
                     lambda: _lines(caplog, 'Microphone recovered'), 5.0)
             finally:
                 capture.stop()
+
+
+# ---------------------------------------------------------------------------
+# wh-show-microphone-name Stage B: the capture reports which microphone it
+# opened ('opened', after the first graph is installed) and that it let go
+# of it ('closed', when it stops), through the same outage_callback.
+# ---------------------------------------------------------------------------
+
+
+def _lock_free_recorder(capture, record):
+    """A callback that records each call and whether the lifecycle lock was
+    free at that moment (it must be: the provider's callback runs under no
+    capture lock)."""
+    def callback(event, device):
+        free = capture._lifecycle_lock.acquire(blocking=False)
+        if free:
+            capture._lifecycle_lock.release()
+        record.append((event, device, free))
+    return callback
+
+
+_DEFAULT_LOOKUP = ('shared_audio.capture.winrt_capture.'
+                   '_default_capture_device_name')
+
+
+@contextlib.contextmanager
+def _fake_default_capture_lookup(device_id='default-id', name='Default Mic',
+                                 lookup_error=None):
+    """Stand in for the modules _default_capture_device_name imports.
+
+    Yields a namespace with the recorded fakes: the get-default-id mock, the
+    create_from_id_async mock and the run_winrt_sync mock.
+    """
+    import sys
+    role = SimpleNamespace(COMMUNICATIONS='ROLE_COMMUNICATIONS',
+                           DEFAULT='ROLE_DEFAULT', CONSOLE='ROLE_CONSOLE')
+    media_device = SimpleNamespace(
+        get_default_audio_capture_id=Mock(return_value=device_id))
+    device_information = SimpleNamespace(
+        create_from_id_async=Mock(return_value='the-operation'))
+    if lookup_error is None:
+        run_sync = Mock(return_value=SimpleNamespace(name=name))
+    else:
+        run_sync = Mock(side_effect=lookup_error)
+    fakes = {
+        'winsdk.windows.media.devices': SimpleNamespace(
+            AudioDeviceRole=role, MediaDevice=media_device),
+        'winsdk.windows.devices.enumeration': SimpleNamespace(
+            DeviceInformation=device_information),
+        'utils': SimpleNamespace(),
+        'utils.winrt_helpers': SimpleNamespace(run_winrt_sync=run_sync),
+    }
+    with patch.dict(sys.modules, fakes):
+        yield SimpleNamespace(
+            get_id=media_device.get_default_audio_capture_id,
+            create=device_information.create_from_id_async,
+            run_sync=run_sync)
+
+
+@pytest.mark.usefixtures('mock_winrt_available', '_mock_winsdk_modules')
+class TestDefaultCaptureDeviceName:
+    def test_it_reads_the_communications_role(self):
+        """The role matches the capture's own MediaCategory.COMMUNICATIONS."""
+        from shared_audio.capture.winrt_capture import (
+            _default_capture_device_name)
+        with _fake_default_capture_lookup() as fake:
+            assert _default_capture_device_name() == 'Default Mic'
+
+        fake.get_id.assert_called_once_with('ROLE_COMMUNICATIONS')
+
+    def test_it_resolves_the_id_with_a_short_timeout(self):
+        from shared_audio.capture import winrt_capture as mod
+        with _fake_default_capture_lookup(device_id='the-id') as fake:
+            mod._default_capture_device_name()
+
+        fake.create.assert_called_once_with('the-id')
+        fake.run_sync.assert_called_once_with(
+            'the-operation',
+            timeout=mod.DEVICE_NAME_LOOKUP_TIMEOUT_SECONDS)
+        assert mod.DEVICE_NAME_LOOKUP_TIMEOUT_SECONDS == 1.0
+
+    def test_an_empty_device_id_gives_none_and_looks_nothing_up(self):
+        from shared_audio.capture.winrt_capture import (
+            _default_capture_device_name)
+        with _fake_default_capture_lookup(device_id='') as fake:
+            assert _default_capture_device_name() is None
+
+        fake.create.assert_not_called()
+
+    def test_an_empty_name_gives_none(self):
+        from shared_audio.capture.winrt_capture import (
+            _default_capture_device_name)
+        with _fake_default_capture_lookup(name=''):
+            assert _default_capture_device_name() is None
+
+    def test_a_failing_lookup_gives_none_and_never_raises(self):
+        from shared_audio.capture.winrt_capture import (
+            _default_capture_device_name)
+        with _fake_default_capture_lookup(lookup_error=TimeoutError('slow')):
+            assert _default_capture_device_name() is None
+
+    def test_a_failing_default_id_read_gives_none_and_never_raises(self):
+        from shared_audio.capture.winrt_capture import (
+            _default_capture_device_name)
+        with _fake_default_capture_lookup() as fake:
+            fake.get_id.side_effect = OSError('no endpoint')
+            assert _default_capture_device_name() is None
+
+
+@pytest.mark.usefixtures('mock_winrt_available', '_mock_winsdk_modules')
+class TestMicrophoneNameReport:
+    def test_the_first_graph_reports_its_device_as_opened(self):
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with _rebuilding_capture(
+                capture, [_live_triple(capture, 'Mic A')]):
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(lambda: callback.call_count >= 1, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list[0] == call('opened', 'Mic A')
+
+    def test_a_node_with_no_device_and_a_failing_lookup_is_opened_with_none(
+            self):
+        """Acceptance 9: no node name and a failed lookup send an empty
+        name, so the approved no-microphone words still show."""
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        triple = _live_triple(capture)
+        # No .device at all, so reading .device.name raises.
+        triple[1].device = None
+        with _rebuilding_capture(capture, [triple]), \
+                patch(_DEFAULT_LOOKUP, return_value=None) as lookup:
+            capture.start()
+            try:
+                assert _wait_until(lambda: callback.call_count >= 1, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list[0] == call('opened', None)
+        lookup.assert_called()
+
+    def test_a_node_with_no_device_is_opened_with_the_default_name(self):
+        """Acceptance 7: AudioDeviceInputNode.device is None on the
+        measured machine, so the provider reads the name of the Windows
+        default capture device and sends that."""
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        triple = _live_triple(capture)
+        triple[1].device = None
+        with _rebuilding_capture(capture, [triple]), \
+                patch(_DEFAULT_LOOKUP, return_value='Default Mic'):
+            capture.start()
+            try:
+                assert _wait_until(lambda: callback.call_count >= 1, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list[0] == call('opened', 'Default Mic')
+
+    def test_a_node_with_an_empty_name_is_opened_with_the_default_name(self):
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with _rebuilding_capture(capture, [_live_triple(capture, '')]), \
+                patch(_DEFAULT_LOOKUP, return_value='Default Mic'):
+            capture.start()
+            try:
+                assert _wait_until(lambda: callback.call_count >= 1, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list[0] == call('opened', 'Default Mic')
+
+    def test_a_node_with_its_own_name_makes_no_lookup(self):
+        """Acceptance 8: the node's own name is sent and the default
+        capture device is never looked up."""
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with _rebuilding_capture(
+                capture, [_live_triple(capture, 'Mic A')]), \
+                patch(_DEFAULT_LOOKUP, return_value='Default Mic') as lookup:
+            capture.start()
+            try:
+                assert _wait_until(lambda: callback.call_count >= 1, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list[0] == call('opened', 'Mic A')
+        lookup.assert_not_called()
+
+    def test_the_recovery_notice_and_log_line_use_the_same_name(
+            self, caplog):
+        """Acceptance 10: the rebuild path (_device_name at the
+        outage.device assignment) gives the notice and the 'audio capture
+        rebuilt' log line the same name the menu line got."""
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        dying = _dead_triple()
+        dying[1].device = None
+        rebuilt = _live_triple(capture)
+        rebuilt[1].device = None
+        with caplog.at_level(logging.INFO), \
+                _rebuilding_capture(capture, [dying, rebuilt]), \
+                patch(_DEFAULT_LOOKUP, return_value='Default Mic'):
+            capture.start()
+            try:
+                assert _wait_until(
+                    lambda: _lines(caplog, 'Microphone recovered'), 5.0)
+                assert _wait_until(lambda: callback.call_count >= 3, 5.0)
+            finally:
+                capture.stop()
+
+        assert callback.call_args_list[:3] == [
+            call('opened', 'Default Mic'),
+            call('lost', None),
+            call('recovered', 'Default Mic')]
+        recovered = _lines(caplog, 'Microphone recovered')
+        assert "audio capture rebuilt on 'Default Mic'" in (
+            recovered[0].getMessage())
+
+    def test_opened_and_closed_run_outside_the_lifecycle_lock(self):
+        record = []
+        capture = WinRTAudioCapture()
+        capture.outage_callback = _lock_free_recorder(capture, record)
+        with _rebuilding_capture(
+                capture, [_live_triple(capture, 'Mic A')]):
+            capture.start()
+            try:
+                assert _wait_until(lambda: len(record) >= 1, 5.0)
+            finally:
+                capture.stop()
+
+        assert [(e, d, free) for e, d, free in record] == [
+            ('opened', 'Mic A', True), ('closed', None, True)]
+
+    def test_stopping_reports_closed_once(self):
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with _rebuilding_capture(
+                capture, [_live_triple(capture, 'Mic A')]):
+            capture.start()
+            assert capture.wait_ready(timeout=5.0) is True
+            capture.stop()
+            capture.stop()
+
+        assert callback.call_args_list == [
+            call('opened', 'Mic A'), call('closed', None)]
+
+    def test_a_capture_that_never_started_reports_nothing_on_stop(self):
+        callback = Mock()
+        capture = WinRTAudioCapture(outage_callback=callback)
+
+        capture.stop()
+
+        callback.assert_not_called()
+
+    def test_a_raising_callback_does_not_stop_the_stop(self, caplog):
+        callback = Mock(side_effect=RuntimeError('notice path broken'))
+        capture = WinRTAudioCapture(outage_callback=callback)
+        with caplog.at_level(logging.WARNING), \
+                _rebuilding_capture(
+                    capture, [_live_triple(capture, 'Mic A')]):
+            capture.start()
+            assert capture.wait_ready(timeout=5.0) is True
+            capture.stop()
+
+        assert capture._running is False
+        assert [c.args[0] for c in callback.call_args_list] == [
+            'opened', 'closed']
+        # The warning names the event and does not call it an outage: an
+        # opened microphone is not one, and a reader who sees "outage"
+        # looks for a loss that never happened (wh-show-microphone-name).
+        warnings = [r.getMessage() for r in _lines(caplog,
+                                                   'notice path broken')]
+        assert len(warnings) == 2, warnings
+        assert warnings[0].startswith(
+            'The opened report to the provider failed')
+        assert warnings[1].startswith(
+            'The closed report to the provider failed')
+        assert not any('outage' in line for line in warnings), warnings
+
+    def test_the_stop_and_restart_clears_the_name_then_sets_the_new_one(
+            self):
+        """Acceptance 6: the sequence google_stt_server/main.py runs at
+        lines 1989-1993 -- mic.stop(), a wait, mic.start() -- with the
+        provider's notifier attached. The forwarder is never disconnected,
+        so only these calls tell WheelHouse the name changed."""
+        from shared_stt.mic_notice import MicOutageNotifier
+
+        forwarder = Mock()
+        capture = WinRTAudioCapture(
+            outage_callback=MicOutageNotifier('Test', lambda: forwarder))
+        with _rebuilding_capture(capture, [
+                _live_triple(capture, 'Mic A'),
+                _live_triple(capture, 'Mic B')]):
+            capture.start()
+            assert capture.wait_ready(timeout=5.0) is True
+            capture.stop()
+            capture.start()
+            try:
+                assert capture.wait_ready(timeout=5.0) is True
+                assert _wait_until(
+                    lambda: forwarder.send_microphone.call_count >= 3, 5.0)
+            finally:
+                capture.stop()
+
+        assert forwarder.send_microphone.call_args_list == [
+            call('Mic A'), call(''), call('Mic B'), call('')]
+
+    def test_a_loss_and_recovery_move_the_name_through_the_notifier(self):
+        from shared_stt.mic_notice import MicOutageNotifier
+
+        forwarder = Mock()
+        capture = WinRTAudioCapture(
+            outage_callback=MicOutageNotifier('Test', lambda: forwarder))
+        dying = _dead_triple()
+        dying[1].device.name = 'Mic A'
+        with _rebuilding_capture(
+                capture, [dying, _live_triple(capture, 'Mic B')]):
+            capture.start()
+            try:
+                assert _wait_until(
+                    lambda: forwarder.send_microphone.call_count >= 3, 5.0)
+            finally:
+                capture.stop()
+
+        assert forwarder.send_microphone.call_args_list == [
+            call('Mic A'), call(''), call('Mic B'), call('')]

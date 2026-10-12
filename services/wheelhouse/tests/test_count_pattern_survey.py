@@ -59,7 +59,7 @@ SHIPPED_PATTERNS = Path(__file__).parent.parent / "speech" / "config" / "pattern
 #: The count of shipped patterns that carry a numeric capture. Pinned so that
 #: adding or removing a count command is a deliberate edit here, with the new
 #: command's probe proven by this module in the same commit.
-EXPECTED_COUNT_PATTERNS = 122
+EXPECTED_COUNT_PATTERNS = 123
 
 #: What the count sounds like, and the integer it must become. The last
 #: three probe the two ends of the widened body, which is where it can

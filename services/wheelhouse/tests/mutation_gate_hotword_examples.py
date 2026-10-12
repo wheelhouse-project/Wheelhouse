@@ -121,9 +121,9 @@ MUTATIONS = [
         # Retargeted from the click entry to "fix", for the reason given
         # on find-drops-hotword.
         "name": "fix-body-misspelt",
-        "old": """            'Trigger "^fix" with no params: saying "x-ray fix" corrects '
+        "old": """            'Trigger "^fix(?:ed)?$" with no params: saying "x-ray fix" or '
 """,
-        "new": """            'Trigger "^fix" with no params: saying "x-ray fxi" corrects '
+        "new": """            'Trigger "^fix(?:ed)?$" with no params: saying "x-ray fxi" or '
 """,
         "expect": [_STILL_FIRES],
     },

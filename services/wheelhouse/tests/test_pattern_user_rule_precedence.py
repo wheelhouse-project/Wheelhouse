@@ -681,10 +681,18 @@ class TestAMovedEditCopiesTheWholeUtteranceFlag:
         # no sample phrase, even where a built-in answers it (desktop).
         _data(r"^item (\d+) now$"),
         _data(r"^desktop (\d+)$"),
-        # The shipped '^fix' (fix-text, no flag) has no '$'. The runtime
-        # fullmatches a ^-anchored rule, so it does not answer this phrase
-        # and no built-in is taken; a search would find it and drop the
-        # carried flag.
+        # The shipped '^fix(?:ed)?$' (fix-text, no flag) now ends in '$',
+        # so neither a fullmatch nor a search finds it in this phrase, and
+        # no built-in is taken. Bead wh-pattern-variants-numeric added
+        # '(?:ed)?$' to the entry; before that the entry was '^fix', which
+        # had no '$', and only the runtime's fullmatch of a ^-anchored rule
+        # kept it from answering the phrase (a search would have found it
+        # and dropped the carried flag). No shipped ^-anchored expression
+        # is open at the end any more except '^go (.+)', which answers any
+        # text after 'go', so no phrase can show that fullmatch-versus-
+        # search distinction against a shipped entry. The case stays, with
+        # the id 'prefix-of-an-open-builtin' unchanged, as a check that a
+        # shared first word alone takes no built-in.
         _phrased(["fix zebra marmalade"]),
     ], ids=[
         "unmatched-phrase", "no-phrases", "stripped-capture",

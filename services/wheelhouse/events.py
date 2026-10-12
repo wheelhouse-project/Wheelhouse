@@ -145,6 +145,29 @@ class VolumeAdjustCommand:
     """
     delta: int
 
+
+@dataclass
+class VolumeTargetChangedEvent:
+    """
+    Event published when VolumeRouter changes the thumb wheel's volume target.
+
+    VolumeRouter decides between a Sonos speaker and the Windows system
+    volume. It made that decision only at startup until wh-sonos-tv-recheck,
+    so a speaker that started TV audio later never received the thumb wheel.
+    The router now checks again while Wheelhouse runs and publishes this
+    event on a change. SystemVolumePlugin uses it to set its own device to
+    50 percent when the target becomes a Sonos speaker, and SonosPlugin uses
+    it to start its playback watch when the speaker was absent at startup.
+
+    :param use_sonos: True when the Sonos speaker is now the target.
+    :param speaker_name: Name of the Sonos speaker, or None when unknown.
+    :param speaker_ip: IP address of the Sonos speaker, or None when unknown.
+    """
+    use_sonos: bool
+    speaker_name: Optional[str] = None
+    speaker_ip: Optional[str] = None
+
+
 # Source of BrightnessAdjustCommand.command_id: 1, 2, 3, ... for the life of the process.
 _brightness_command_ids = itertools.count(1)
 

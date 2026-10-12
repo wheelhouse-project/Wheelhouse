@@ -82,6 +82,7 @@ import time
 import enum
 import logging
 import re
+import string
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
@@ -103,9 +104,27 @@ from .click_parser import _NUMBER_FILLERS, _TRAILING_PUNCT
 from .pattern_matcher import _refused_for_hint_engine
 from .router import SpeechRouter, _word_matches_hotword
 from utils.trace_context import set_trace, elapsed_ms
+from ui.text_perfector import TextPerfector
 
 logger = logging.getLogger(__name__)
 pipeline_logger = logging.getLogger("wheelhouse.pipeline")
+
+# wh-itn-percent-digits.1.1: the replacement patterns the editor replay
+# applies to a corrected final (``_apply_allowed_text_replacements``).
+# The editor arm of ``_handle_retraction`` hands the corrected text to the
+# editor as one string, so the replacement patterns never see it. Only a
+# pattern named here is applied, and only when its one step is the text
+# action. A later change widens the set in this one place.
+_EDITOR_REPLAY_TEXT_DOC_IDS = ["punct-percent"]
+
+# The second defence of ``_apply_allowed_text_replacements``: every step of
+# its scan consumes input, so it ends on its own; this stops a pass that
+# somehow does not, and the rest of the text stays as it was.
+_TEXT_REPLACEMENT_PASS_MAX_STEPS = 256
+
+# Stateless and pure; decides whether a replacement attaches to the word
+# before it, the same rule the editor's own insert applies.
+_REPLAY_PERFECTOR = TextPerfector()
 
 # wh-overlay-slow-uia-stale-badges.7: the longest a screen read may
 # refuse dictation. The read-in-flight marker
@@ -815,6 +834,9 @@ class SpeechProcessor:
         # AFTER the reset, so it reads this snapshot instead of the
         # live list.
         self._previous_utterance_words: list[str] = []
+        # wh-itn-percent-digits.1.1: ``_replay_text_triggers`` keeps its
+        # read of the catalog here: (patterns object, doc_ids, triggers).
+        self._replay_text_triggers_cache: Optional[tuple] = None
 
         # wh-command-wait-open-utterance: the command wait holds a
         # COMMAND_BUFFERING buffer past its timer while the utterance is
@@ -3681,7 +3703,8 @@ class SpeechProcessor:
         self._earlier_utterance_words_surface = None
         return []
 
-    def _restore_earlier_utterance_words(self, replay_text: str) -> str:
+    def _restore_earlier_utterance_words(
+            self, replay_text: str, *, log: bool = True) -> str:
         """Put the earlier utterance's words back in front of the replay.
 
         The retract just removed the whole credited span, and part of
@@ -3726,24 +3749,32 @@ class SpeechProcessor:
         on screen untouched. The record survives either way: it still
         describes live Input text that a legacy correction of this
         same utterance has to restore.
+
+        ``log`` is True for the caller whose text reaches the editor.
+        The editor arm calls this twice on the same input, once for the
+        text it sends and once for the record of the spoken words, and
+        the record call passes ``log=False`` so one correction still
+        writes one line.
         """
         earlier = self._earlier_utterance_words_in_retract_span
         if not earlier:
             return replay_text
         surface = self._earlier_utterance_words_surface
         if surface is not None and surface != "editor":
-            pipeline_logger.info(
-                "RETRACT keeping earlier-utterance words off the editor "
-                "replay: they were delivered on surface=%s "
-                "elapsed_ms=%.1f",
-                surface, elapsed_ms(),
-            )
+            if log:
+                pipeline_logger.info(
+                    "RETRACT keeping earlier-utterance words off the "
+                    "editor replay: they were delivered on surface=%s "
+                    "elapsed_ms=%.1f",
+                    surface, elapsed_ms(),
+                )
             return replay_text
-        pipeline_logger.info(
-            "RETRACT restoring earlier-utterance words text=%r "
-            "elapsed_ms=%.1f",
-            redact_transcript(" ".join(earlier)), elapsed_ms(),
-        )
+        if log:
+            pipeline_logger.info(
+                "RETRACT restoring earlier-utterance words text=%r "
+                "elapsed_ms=%.1f",
+                redact_transcript(" ".join(earlier)), elapsed_ms(),
+            )
         return " ".join(earlier + replay_text.split())
 
     async def _redeliver_earlier_utterance_words(
@@ -4343,6 +4374,159 @@ class SpeechProcessor:
         _, _, _, match, pattern_data = candidates[0]
         return match, pattern_data
 
+    @staticmethod
+    def _allowed_replacement_text(pattern_data) -> Optional[str]:
+        """The literal text of a pattern the text-only pass may apply.
+
+        Both filters must hold: the pattern's doc_id is in
+        ``_EDITOR_REPLAY_TEXT_DOC_IDS`` and its one and only step is the
+        text action with one literal string. Anything else is ``None``.
+        The same one-step shape ``pattern_explainer`` tests for.
+
+        crewcut: group references in the text are not expanded; the
+        only listed pattern writes a literal. Widening the list to a
+        pattern with group references needs ``match.expand`` here.
+        """
+        if pattern_data.get('doc_id') not in _EDITOR_REPLAY_TEXT_DOC_IDS:
+            return None
+        steps = pattern_data.get('actions')
+        if not (
+            isinstance(steps, list)
+            and len(steps) == 1
+            and steps[0].get('function') == 'text'
+        ):
+            return None
+        params = steps[0].get('params')
+        if (
+            isinstance(params, list)
+            and len(params) == 1
+            and isinstance(params[0], str)
+        ):
+            return params[0]
+        return None
+
+    def _replay_text_triggers(self) -> tuple:
+        """The compiled match text of every pattern the pass may apply.
+
+        Read from the catalog once and reused until the catalog object
+        or the listed doc_ids change. A text that matches none of these
+        cannot be changed by ``_apply_allowed_text_replacements``.
+        """
+        patterns = self.text_parser.patterns
+        doc_ids = tuple(_EDITOR_REPLAY_TEXT_DOC_IDS)
+        cached = self._replay_text_triggers_cache
+        if cached is not None and cached[0] is patterns and cached[1] == doc_ids:
+            return cached[2]
+        triggers = tuple(
+            pattern_data['compiled_pattern']
+            for pattern_data in patterns
+            if pattern_data.get('pattern_type') == 'replacement'
+            and pattern_data.get('doc_id') in doc_ids
+        )
+        self._replay_text_triggers_cache = (patterns, doc_ids, triggers)
+        return triggers
+
+    def _apply_allowed_text_replacements(self, text: str) -> str:
+        """Return ``text`` with the allowed replacements written in.
+
+        wh-itn-percent-digits.1.1. The editor arm of
+        ``_handle_retraction`` inserts the corrected final as one string
+        and never reaches ``router.decide``, so "50 percent" stayed
+        "50 percent". This applies the replacements the word-by-word
+        replay would have applied, as TEXT ONLY: it runs no pattern
+        action. It finds each match with ``_find_earliest_replacement``,
+        which looks at replacement patterns and calls no action, then
+        writes the pattern's literal text when
+        ``_allowed_replacement_text`` allows it.
+
+        The scan continues AFTER the text it wrote and never restarts at
+        the beginning, so a replacement that contains its own trigger is
+        not rescanned. A match the filters refuse is passed over
+        unchanged, which keeps spoken order: an earlier unlisted
+        replacement is not skipped to reach a later listed one. Every
+        step consumes input, and ``_TEXT_REPLACEMENT_PASS_MAX_STEPS``
+        stops the loop if one ever does not.
+
+        A punctuation-only replacement attaches to the word before it
+        ("50 percent" becomes "50%"), by the spacing decision the
+        editor's insert makes for the same text one word at a time. A
+        replacement that is not punctuation is written where the match
+        stood, so the whitespace in front of it survives.
+        """
+        # wh-itn-percent-digits.1.1: this runs on every editor
+        # correction, and one scan step walks the whole pattern catalog
+        # with a regular expression search per entry. Only a pattern
+        # named in ``_EDITOR_REPLAY_TEXT_DOC_IDS`` can change the text, so
+        # a text none of those patterns matches is returned at once.
+        if not any(
+            trigger.search(text)
+            for trigger in self._replay_text_triggers()
+        ):
+            return text
+        written = ""
+        rest = text
+        for _ in range(_TEXT_REPLACEMENT_PASS_MAX_STEPS):
+            found = self._find_earliest_replacement(rest)
+            if found is None:
+                break
+            match, pattern_data = found
+            end = match.end()
+            if end <= 0:
+                # An empty match at the start consumes nothing; step over
+                # one character so the scan still moves.
+                if not rest:
+                    break
+                written += rest[:1]
+                rest = rest[1:]
+                continue
+            literal = self._allowed_replacement_text(pattern_data)
+            if literal is None:
+                written += rest[:end]
+                rest = rest[end:]
+                continue
+            before = written + rest[:match.start()]
+            stripped = literal.strip()
+            if stripped and all(
+                character in string.punctuation
+                for character in stripped
+            ):
+                # The editor's own insert (terminal_editor_window.py,
+                # ``insert_word``) calls ``perfected_string`` with these
+                # arguments; the written text is the text it returns, so
+                # the spacing and the text never come from two strings.
+                # The separator between words is not part of the
+                # document the editor would have held, hence the
+                # ``rstrip``: "50 percent" is "50" and then "%".
+                #
+                # The ``rstrip`` is right for punctuation and wrong for
+                # a word, which would lose whitespace the speaker
+                # produced. ``PatternCatalog._merge_entries`` lets a
+                # user entry replace a system entry whole, so a user can
+                # give ``punct-percent`` a word today. Such a
+                # replacement takes the branch below instead, which
+                # writes it where the match stood.
+                preceding = before.rstrip()
+                written = preceding + _REPLAY_PERFECTOR.perfected_string(
+                    literal,
+                    preceding_chars=preceding,
+                    has_selection=False,
+                    capitalize=False,
+                )
+            else:
+                written = before + literal
+            rest = rest[end:]
+        else:
+            # The loop ran to its bound without a break. That is a
+            # complete pass when the last step used up the last match,
+            # so warn only when a match is still left in ``rest``.
+            if self._find_earliest_replacement(rest) is not None:
+                logger.warning(
+                    "text replacement pass stopped at its %d-step bound; "
+                    "the rest of the text is unchanged",
+                    _TEXT_REPLACEMENT_PASS_MAX_STEPS,
+                )
+        return written + rest
+
     def _reset_to_idle(self):
         """Reset state to IDLE."""
         # Only cancel timeout if we're NOT inside the timeout handler itself
@@ -4465,6 +4649,14 @@ class SpeechProcessor:
             # Restore it into the replay for the same reason. This arm
             # has no e2e coverage: reaching it needs a wired
             # logic_controller, which the e2e harness does not build.
+            # wh-itn-percent-digits.1.1: the replay below is one string
+            # the editor inserts as given, and no replacement pattern
+            # runs on it. Apply the allowed ones to the corrected final
+            # FIRST: the restore prepends the earlier utterance's spoken
+            # words, and a pass over the joined string would rewrite them.
+            spoken_replay = self._restore_earlier_utterance_words(
+                final_text, log=False)
+            final_text = self._apply_allowed_text_replacements(final_text)
             editor_replay = self._restore_earlier_utterance_words(final_text)
             try:
                 retract_ok = await self.logic_controller.retract_editor_text(
@@ -4517,7 +4709,12 @@ class SpeechProcessor:
             # wh-editor-retract-ledger-authoritative design, healed by
             # the next STT update.
             if retract_ok:
-                self._words_this_utterance = editor_replay.split()
+                # wh-itn-percent-digits.1.1: the record keeps the SPOKEN
+                # form ("percent"), not the symbol the editor now holds.
+                # ``_payload_is_the_whole_utterance`` (read at
+                # ``spoken = ...`` there) compares it token for token
+                # with a later spoken payload, which has the word.
+                self._words_this_utterance = spoken_replay.split()
             # ``_used_editor_this_utterance`` stays True so a follow-up
             # retract on this utterance keeps using the editor path.
             # The GUI handler performs the replay inline, so the

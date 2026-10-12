@@ -642,3 +642,16 @@ def test_the_wrapper_waits_for_any_python_in_the_app_folder(tmp_path, local_app_
         sleeper.wait()
     assert not marker.exists()
     assert "Wheelhouse did not close" in result.stdout
+
+
+def test_the_update_console_does_not_tell_the_user_to_press_update_now_again():
+    """After a failed update the notice for that version can appear again 7
+    days after it last appeared (update_check.notice_is_due), and the notice
+    closes when Update now is pressed, so the user has no button to press
+    until the notice appears again. The console names the installer from the
+    website instead (wh-release-update-check.2)."""
+    wrapper = pm.build_launch_command(
+        SCRIPT, [111], installer_parameters=["-StartNow", "yes"]
+    )[5]
+    assert "then run the installer from the website." in wrapper
+    assert "Update now" not in wrapper

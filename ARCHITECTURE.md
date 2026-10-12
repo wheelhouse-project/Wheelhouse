@@ -141,7 +141,7 @@ against Windows:
 
 | Process | Entry point | Role |
 |---------|-------------|------|
-| Launcher | `services/wheelhouse/launcher.py` | Spawns processes, crash recovery |
+| Launcher | `services/wheelhouse/launcher.py` | Spawns processes, shuts all down if one stops |
 | Logic | `services/wheelhouse/main.py` | Command routing, EventBus, plugins |
 | Input | `services/wheelhouse/input_proc.py` | SendInput, clipboard, UI Automation |
 | GUI | `services/wheelhouse/gui.py` | System tray, notifications, overlays |

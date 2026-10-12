@@ -405,6 +405,7 @@ class TestSendStateUpdate:
             "ai_provider_display_names",
             "interim_results_enabled", "debug_mode",
             "speech_interaction_mode", "ptt_active", "ptt_request_id", "ptt_refusal_reason",
+            "microphone_name",
         }
         assert expected_keys == set(state.keys())
 
@@ -423,6 +424,38 @@ class TestSendStateUpdate:
         mock_gui_queue.put_nowait.side_effect = Exception("queue full")
         # Should not raise
         sm.send_state_update()
+
+
+# -----------------------------------------------------------------------
+# The open microphone's name (wh-show-microphone-name.3)
+# -----------------------------------------------------------------------
+
+class TestMicrophoneName:
+
+    def test_no_name_is_stored_at_first(self, sm, mock_gui_queue):
+        sm.send_state_update()
+        state = mock_gui_queue.put_nowait.call_args[0][0]
+        assert state["microphone_name"] == ""
+
+    def test_setting_the_name_sends_a_state_update_carrying_it(
+        self, sm, mock_gui_queue
+    ):
+        mock_gui_queue.put_nowait.reset_mock()
+        sm.set_microphone_name("Studio Mic")
+        mock_gui_queue.put_nowait.assert_called_once()
+        state = mock_gui_queue.put_nowait.call_args[0][0]
+        assert state["action"] == "state_update"
+        assert state["microphone_name"] == "Studio Mic"
+
+    def test_clearing_the_name_sends_a_state_update_without_it(
+        self, sm, mock_gui_queue
+    ):
+        sm.set_microphone_name("Studio Mic")
+        mock_gui_queue.put_nowait.reset_mock()
+        sm.set_microphone_name("")
+        mock_gui_queue.put_nowait.assert_called_once()
+        state = mock_gui_queue.put_nowait.call_args[0][0]
+        assert state["microphone_name"] == ""
 
 
 # -----------------------------------------------------------------------
@@ -505,6 +538,61 @@ class TestToggleButtonVisibility:
         mock_config._config["FLOATING_BUTTON_VISIBLE"] = False
         await sm.toggle_button_visibility()
         assert mock_config.get("FLOATING_BUTTON_VISIBLE") is True
+
+
+# -----------------------------------------------------------------------
+# INTERIM_RESULTS read at start (wh-voice-settings-window stage A, ruling R1)
+# -----------------------------------------------------------------------
+
+class TestInterimResultsReadAtStart:
+    """The top-level INTERIM_RESULTS key decides the start value; a config
+    without the key keeps today's value (true)."""
+
+    @staticmethod
+    def _make(mock_config, mock_event_bus, mock_gui_queue):
+        loop = asyncio.new_event_loop()
+        loop.create_task = Mock()
+        try:
+            return StateManager(
+                config_service=mock_config, event_bus=mock_event_bus,
+                loop=loop, state_to_gui_queue=mock_gui_queue,
+                websocket_manager=None,
+            )
+        finally:
+            loop.close()
+
+    def test_false_in_config_starts_with_interim_results_off(
+        self, mock_config, mock_event_bus, mock_gui_queue
+    ):
+        mock_config._config["INTERIM_RESULTS"] = False
+        mgr = self._make(mock_config, mock_event_bus, mock_gui_queue)
+        assert mgr.interim_results_enabled is False
+
+    def test_true_in_config_starts_with_interim_results_on(
+        self, mock_config, mock_event_bus, mock_gui_queue
+    ):
+        mock_config._config["INTERIM_RESULTS"] = True
+        mgr = self._make(mock_config, mock_event_bus, mock_gui_queue)
+        assert mgr.interim_results_enabled is True
+
+    def test_missing_key_keeps_interim_results_on(
+        self, mock_config, mock_event_bus, mock_gui_queue
+    ):
+        assert "INTERIM_RESULTS" not in mock_config._config
+        mgr = self._make(mock_config, mock_event_bus, mock_gui_queue)
+        assert mgr.interim_results_enabled is True
+
+    def test_non_bool_value_keeps_interim_results_on_and_warns(
+        self, mock_config, mock_event_bus, mock_gui_queue, caplog
+    ):
+        mock_config._config["INTERIM_RESULTS"] = "no"
+        with caplog.at_level(logging.WARNING):
+            mgr = self._make(mock_config, mock_event_bus, mock_gui_queue)
+        assert mgr.interim_results_enabled is True
+        assert any(
+            "INTERIM_RESULTS" in r.getMessage() and r.levelno == logging.WARNING
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
 
 
 # -----------------------------------------------------------------------

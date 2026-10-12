@@ -114,6 +114,19 @@ REBUILD_RETRY_SECONDS = 2.0
 # 2026-09-24.
 STILL_UNAVAILABLE_LOG_SECONDS = 60.0
 
+# How long the wait for the default capture device's name may take
+# (_default_capture_device_name). Measured on this machine, two sets of ten
+# runs: 16.1 ms minimum, 57.6 ms maximum, 21.4 ms mean; and 15.4 ms minimum,
+# 148.6 ms maximum, 29.6 ms mean. The spread of the slowest run across the
+# two sets is what 1.0 s allows for. The lookup runs on the capture thread
+# when a microphone opens or is rebuilt. This value bounds only the wait
+# inside run_winrt_sync for DeviceInformation.create_from_id_async; the
+# MediaDevice.get_default_audio_capture_id call and the name property read
+# sit outside that wait, so a stuck audio endpoint can still delay the
+# capture past one second. Neither caller of _device_name holds
+# _lifecycle_lock, so a slow lookup cannot deadlock the capture.
+DEVICE_NAME_LOOKUP_TIMEOUT_SECONDS = 1.0
+
 # The stall clock. Bound once at import rather than read as time.monotonic
 # at each call, because tests that drive _poll_frames inline replace this
 # module's `time` with a stub that has only sleep(); a lookup through it
@@ -207,13 +220,90 @@ class _Outage:
             f'audio capture rebuilt{device}')
 
 
+def _put_wheelhouse_utils_on_sys_path() -> None:
+    """Make WheelHouse's `utils` package importable from this provider.
+
+    The same two candidate directories, inserted the same way, as the import
+    block in _setup_graph.
+    """
+    import sys
+    import os
+    possible_paths = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'wheelhouse')),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', 'wheelhouse')),
+    ]
+    for path in possible_paths:
+        if os.path.exists(path) and path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def _default_capture_device_name() -> Optional[str]:
+    """The name of the Windows default capture device, or None.
+
+    AudioDeviceInputNode.device is None after a successful one-argument
+    create_device_input_node_async(MediaCategory.COMMUNICATIONS) call, measured
+    on this machine, so the node cannot say which microphone it opened.
+    This reads the name from Windows instead (wh-show-microphone-name,
+    David's choice of 2026-10-10). The microphone the capture opens does not
+    change: the lookup only reads a name.
+
+    The role read is AudioDeviceRole.COMMUNICATIONS. The capture opens its
+    input node with MediaCategory.COMMUNICATIONS and its output with
+    AudioRenderCategory.COMMUNICATIONS (see _setup_graph), so in the ordinary
+    case the communications default is the device the graph opened.
+
+    crewcut: Windows keeps one default for calls and another for everything
+    else. Where the user has set them to different microphones, the graph
+    opens the one that matches its category, but the name shown can still be
+    the other microphone. To remove the limit, open the input node with an
+    explicit DeviceInformation (create_device_input_node_async with a device)
+    and read the name from that device; that changes which microphone the
+    capture opens, so it needs its own decision.
+
+    Never raises: an empty id, an empty name or any failure logs one DEBUG
+    line and returns None, so a failed lookup shows the no-microphone words
+    and changes nothing else.
+    """
+    try:
+        # Imported here because this module must load in a venv with no
+        # winsdk (see the AUDIO_GRAPH_DEVICE_NOT_AVAILABLE comment below).
+        _put_wheelhouse_utils_on_sys_path()
+        from utils.winrt_helpers import run_winrt_sync
+        from winsdk.windows.devices.enumeration import DeviceInformation
+        from winsdk.windows.media.devices import AudioDeviceRole, MediaDevice
+
+        device_id = MediaDevice.get_default_audio_capture_id(
+            AudioDeviceRole.COMMUNICATIONS)
+        if not device_id:
+            logger.debug('No default capture device id; no microphone name')
+            return None
+        info = run_winrt_sync(
+            DeviceInformation.create_from_id_async(device_id),
+            timeout=DEVICE_NAME_LOOKUP_TIMEOUT_SECONDS)
+        name = str(info.name) if info.name else ''
+        if not name:
+            logger.debug('Default capture device has an empty name')
+            return None
+        return name
+    except Exception as error:  # noqa: BLE001 -- a name is not worth a crash
+        logger.debug(f'Default capture device name lookup failed: {error}')
+        return None
+
+
 def _device_name(mic_node) -> Optional[str]:
-    """The opened microphone's name, when the input node can say cheaply."""
+    """The opened microphone's name: the input node's own, else the default.
+
+    The node's own name is read first and, when it gives one, no lookup is
+    made. When it gives none, the name of the Windows default capture device
+    is read (_default_capture_device_name). None when both routes fail.
+    """
     try:
         name = mic_node.device.name
     except Exception:
-        return None
-    return str(name) if name else None
+        name = None
+    if name:
+        return str(name)
+    return _default_capture_device_name()
 
 # AudioGraphCreationStatus.DEVICE_NOT_AVAILABLE. The winsdk enum is
 # SUCCESS 0, DEVICE_NOT_AVAILABLE 1, FORMAT_NOT_SUPPORTED 2,
@@ -266,6 +356,54 @@ AUDIO_DEVICE_MISSING_MESSAGE = (
 # means (wh-capture-winrt-required A10).
 AUDIO_DEVICE_MISSING_LOG_LINE = (
     "AudioGraph creation returned DEVICE_NOT_AVAILABLE (status=1)"
+)
+
+# AudioDeviceNodeCreationStatus.ACCESS_DENIED, the status
+# create_device_input_node_async returns when Windows refuses the
+# microphone. That enum is a DIFFERENT one from the graph status above:
+# its members are SUCCESS 0, DEVICE_NOT_AVAILABLE 1,
+# FORMAT_NOT_SUPPORTED 2, UNKNOWN_FAILURE 3, ACCESS_DENIED 4
+# (winsdk/windows/media/audio/__init__.py). The number is written here
+# rather than imported for the reason given at
+# AUDIO_GRAPH_DEVICE_NOT_AVAILABLE above: this module must load in a venv
+# with no winsdk at all.
+AUDIO_INPUT_NODE_ACCESS_DENIED = 4
+
+# What a user reads when Windows blocks the microphone. David approved
+# this exact wording on 2026-10-09 (QUESTIONS-2026-10-09.md item 8a,
+# "ANSWER: option one"), so treat a change to it as a user-visible
+# change: the provider carries setup_error into its startup-failed
+# notice, and that notice is the tray message (wh-blocked-mic-message).
+#
+# HOW THE STATUS WAS MEASURED. wh-blocked-mic-test turned "Let desktop
+# apps access your microphone" off on Ikon on 2026-10-09 and started
+# WheelHouse. The log recorded "Microphone node failed: status=4". With
+# the setting on, the same program recorded status=0. Windows 11
+# Professional 26H2, build 26300.9550. Windows 10 was not measured:
+# David decided on 2026-10-09 to assume it behaves the same way.
+#
+# WHY THE OTHER NODE STATUSES KEEP THE DEVELOPER TEXT. status=1 means no
+# microphone device, which is a different fix and gets no privacy-setting
+# advice. status=2 and status=3 name no action a user could take, and
+# inventing one would send someone to a setting that is already correct.
+#
+# WHY THE DEVELOPER SENTENCE IS NOT IN HERE. It is logged instead, for
+# the same length reason written at AUDIO_DEVICE_MISSING_MESSAGE above:
+# the provider's prefix is 47 characters, utils/notice_text.py:56 cuts the
+# notice body at 255, so the text here may not exceed 208 characters. This
+# text is 193.
+MICROPHONE_BLOCKED_MESSAGE = (
+    "WheelHouse cannot use your microphone. Windows is blocking it. "
+    "Open Settings > Privacy and security > Microphone, turn on "
+    "\"Let desktop apps access your microphone\", then start WheelHouse "
+    "again."
+)
+
+# The developer half of the same refusal, logged rather than shown. It
+# names the enum member so a log reader does not have to look up what 4
+# means (wh-blocked-mic-message).
+MICROPHONE_BLOCKED_LOG_LINE = (
+    "Microphone node creation returned ACCESS_DENIED (status=4)"
 )
 
 # _cleanup_graph's default for `graph`, distinct from None. A capture thread
@@ -333,7 +471,11 @@ class WinRTAudioCapture:
                 first samples arrive after a rebuild; device is the opened
                 microphone's name, or None. The reminders call nothing. The
                 provider turns the two calls into on-screen notices
-                (wh-mic-loss-notice).
+                (wh-mic-loss-notice). It is also called as
+                outage_callback("opened", device) once the first graph is
+                installed, and as outage_callback("closed", None) when
+                stop() ends a running capture, so the provider can show
+                which microphone is open (wh-show-microphone-name).
         """
         self.config = config or AudioConfig()
         self.overflow_callback = overflow_callback
@@ -513,6 +655,21 @@ class WinRTAudioCapture:
         # deadlock until the timeout expired every single time.
         if capture_thread:
             capture_thread.join(timeout=2.0)
+
+        # After the join so the capture thread's own last report ('opened',
+        # 'recovered') comes before it, and outside the lock like every
+        # other report (ruling K1). A provider that stops and restarts the
+        # capture without disconnecting shows no stale name this way
+        # (wh-show-microphone-name).
+        # crewcut: a capture thread that outlives the 2.0 s join above could
+        # still report 'opened' or 'recovered' after this 'closed'. The
+        # 'opened' report reads the device name after _publish_cycle has
+        # already returned True, and that read now takes 15 to 150 ms when
+        # the node carries no name and the default-device lookup answers,
+        # against one property read before (wh-show-microphone-name). The
+        # window is about 100 ms wider than it was. To remove: have
+        # _report_outage skip a call whose cycle is no longer current.
+        self._report_outage('closed', None)
 
         logger.debug("WinRT audio stopped")
 
@@ -765,6 +922,11 @@ class WinRTAudioCapture:
                 logger.info(f"Capture thread priority elevated: {elevated}")
             owned[:] = self._setup_graph()
             if self._publish_cycle(cycle, *owned):
+                # Outside _lifecycle_lock, which _publish_cycle has released:
+                # _report_outage must run under no capture lock (ruling K1).
+                # Not reported from _publish_cycle for that reason
+                # (wh-show-microphone-name).
+                self._report_outage('opened', _device_name(owned[1]))
                 self._capture_until_stopped(cycle, stop_event, owned)
         except Exception as e:
             logger.error(f"WinRT capture error: {e}")
@@ -921,7 +1083,8 @@ class WinRTAudioCapture:
             owned[:] = rebuilt
 
     def _report_outage(self, event: str, device: Optional[str]) -> None:
-        """Tell the provider an outage began or ended (wh-mic-loss-notice).
+        """Tell the provider an outage began or ended (wh-mic-loss-notice),
+        or which microphone opened or closed (wh-show-microphone-name).
 
         Ruling K1: the callback runs inside this try, so a notice fault is
         one WARNING line and never stops the recovery, and both call sites
@@ -941,7 +1104,7 @@ class WinRTAudioCapture:
             # line: the log reader and the tests count those by their
             # opening words.
             logger.warning(
-                f'The {event} notice for the microphone outage failed: '
+                f'The {event} report to the provider failed: '
                 f'{type(e).__name__}: {e}')
 
     def _watch_for_loss(self, graph) -> _GraphLoss:
@@ -1135,6 +1298,17 @@ class WinRTAudioCapture:
                 graph.create_device_input_node_async(MediaCategory.COMMUNICATIONS),
                 timeout=5.0
             )
+            if input_result.status == AUDIO_INPUT_NODE_ACCESS_DENIED:
+                # Windows refused the microphone, which means the privacy
+                # setting is off. The enum name goes in the log, never in
+                # the notice: see MICROPHONE_BLOCKED_MESSAGE above for the
+                # length measurement. log_failure is False on a rebuild
+                # for the same reason as the graph branch above -- the
+                # rebuild retries every REBUILD_RETRY_SECONDS and its own
+                # reminder line carries the failure at most once a minute.
+                if log_failure:
+                    logger.error(MICROPHONE_BLOCKED_LOG_LINE)
+                raise RuntimeError(MICROPHONE_BLOCKED_MESSAGE)
             if input_result.status != 0:
                 raise RuntimeError(f"Microphone node failed: status={input_result.status}")
 

@@ -26,7 +26,9 @@ test whose subject is paste-counter accounting must send the command
 themselves, as this module does.
 """
 import asyncio
+import importlib.util
 import time
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +48,25 @@ async def harness(pattern_catalog):
     await h.start()
     yield h
     await h.stop()
+
+
+def _load_apply_itn():
+    """Return the real ``apply_itn`` from the shared STT package.
+
+    The wheelhouse venv cannot import ``shared_stt``, so the module is
+    loaded by file path. A hard-coded copy would pass on any commit.
+    """
+    path = (
+        Path(__file__).parents[4]
+        / "services" / "stt_providers" / "shared" / "shared_stt"
+        / "transcript_rules.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_shared_stt_transcript_rules_by_path", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.apply_itn
 
 
 async def _start_utterance(harness, utterance_id):
@@ -839,3 +860,161 @@ class TestTheRestorePutsBackOnlyWhatTheRetractRemoved:
             "prefix before resetting its counter. The replay must put "
             f"it back exactly once. Screen: {screen!r}"
         )
+
+
+
+
+# wh-itn-percent-digits, acceptance item 2 on the screen.
+#
+# Log of 2026-10-06 18:15:49, UTT-31: Parakeet confirms "fifty", the
+# Logic process types it, and "percent" arrives 325 ms later. Both
+# provider texts come from the real ``apply_itn``.
+@pytest.mark.asyncio
+async def test_fifty_then_percent_leaves_digits_and_no_leftover_word(
+    harness,
+):
+    """Stable "fifty" is typed, the final "50 percent" corrects it.
+
+    Fails on commit 6d907456, where the final reads "fifty percent":
+    no retraction is needed, so "fifty" stays and " percent" is
+    typed after it.
+    """
+    apply_itn = _load_apply_itn()
+    stable_text = apply_itn("fifty")
+    final_text = apply_itn("fifty percent")
+
+    watcher = _RetractWatcher(harness).install()
+
+    await _start_utterance(harness, 1)
+    await harness.send_word("fifty", start_of_utterance=True)
+    utterance_one = harness._utterance_counter
+    await asyncio.sleep(0.05)
+    assert harness.recording.text_deliveries, (
+        "The stable word was never typed, so this test does not "
+        "measure the split-timing case."
+    )
+    assert stable_text == "fifty", (
+        f"The stable text is {stable_text!r}, not the bare number "
+        "word the log of UTT-31 shows."
+    )
+
+    await asyncio.sleep(0.325)
+    await harness.send_retraction_marker(utterance_one, final_text)
+    await asyncio.sleep(0.15)
+
+    screen = watcher.screen_after_retract()
+    assert "50%" in screen, (
+        "Acceptance item 2: the utterance must end with 50% on the "
+        f"screen. Final text: {final_text!r}. Screen: {screen!r}"
+    )
+    assert "fifty" not in screen.lower(), (
+        "Acceptance item 2: no leftover 'fifty' may remain on the "
+        f"screen. Final text: {final_text!r}. Screen: {screen!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fifty_then_dollars_leaves_the_dollar_amount(
+    harness,
+):
+    """Acceptance item 7 at the screen level: "fifty dollars".
+
+    This case passes on BOTH commit 6d907456 and the branch by
+    design: apply_itn answers "$50" for "fifty dollars" on both, so
+    the final breaks the stable prefix on both and the correction
+    runs the same way. It guards against the percent change
+    altering the existing currency behavior.
+    """
+    apply_itn = _load_apply_itn()
+    stable_text = apply_itn("fifty")
+    final_text = apply_itn("fifty dollars")
+
+    watcher = _RetractWatcher(harness).install()
+
+    await _start_utterance(harness, 1)
+    await harness.send_word("fifty", start_of_utterance=True)
+    utterance_one = harness._utterance_counter
+    await asyncio.sleep(0.05)
+    assert harness.recording.text_deliveries, (
+        "The stable word was never typed, so this test does not "
+        "measure the split-timing case."
+    )
+    assert stable_text == "fifty", (
+        f"The stable text is {stable_text!r}, not the bare number word."
+    )
+
+    await asyncio.sleep(0.325)
+    await harness.send_retraction_marker(utterance_one, final_text)
+    await asyncio.sleep(0.15)
+
+    screen = watcher.screen_after_retract()
+    assert "$50" in screen, (
+        "Acceptance item 7: the utterance must end with $50 on the "
+        f"screen. Final text: {final_text!r}. Screen: {screen!r}"
+    )
+    assert "fifty" not in screen.lower(), (
+        "Acceptance item 7: no leftover 'fifty' may remain on the "
+        f"screen. Final text: {final_text!r}. Screen: {screen!r}"
+    )
+
+
+
+@pytest.mark.asyncio
+async def test_percent_correction_leaves_an_earlier_utterance_alone(
+    harness,
+):
+    """Acceptance item 3: the correction changes only this utterance.
+
+    Utterance 1 types "report" and ends. Utterance 2 types "fifty",
+    and its final "50%" corrects it. The correction must remove only
+    the text utterance 2 typed.
+    """
+    apply_itn = _load_apply_itn()
+    final_text = apply_itn("fifty percent")
+
+    watcher = _RetractWatcher(harness).install()
+
+    await _start_utterance(harness, 1)
+    await harness.send_word("report", start_of_utterance=True)
+    utterance_one = harness._utterance_counter
+    await harness.send_utterance_end_marker(utterance_one)
+    await asyncio.sleep(0.15)
+    deliveries_before_two = len(harness.recording.text_deliveries)
+    assert deliveries_before_two, (
+        "The first utterance typed nothing, so there is no earlier "
+        "text for the correction to damage."
+    )
+
+    await _start_utterance(harness, 2)
+    await harness.send_word("fifty", start_of_utterance=True)
+    utterance_two = harness._utterance_counter
+    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.325)
+    await harness.send_retraction_marker(utterance_two, final_text)
+    await asyncio.sleep(0.15)
+
+    screen = watcher.screen_after_retract()
+    assert "report" in screen.lower(), (
+        "Acceptance item 3: the earlier utterance's word 'report' "
+        "must still stand on the screen after the correction. "
+        f"Final text: {final_text!r}. Screen: {screen!r}"
+    )
+    assert "50%" in screen, (
+        "Acceptance item 3: the second utterance must end with 50% "
+        f"on the screen. Final text: {final_text!r}. Screen: {screen!r}"
+    )
+    assert "fifty" not in screen.lower(), (
+        "Acceptance item 3: no leftover 'fifty' may remain on the "
+        f"screen. Final text: {final_text!r}. Screen: {screen!r}"
+    )
+    deliveries = harness.recording.text_deliveries
+    typed_by_two = len("".join(
+        deliveries[deliveries_before_two:watcher.deliveries_at_retract[0]]
+    ))
+    backspaces = sum(harness.recording.backspace_sends)
+    assert backspaces <= typed_by_two, (
+        "Acceptance item 3: the correction sent more backspaces "
+        f"({backspaces}) than the second utterance typed "
+        f"({typed_by_two} characters), so it deleted text outside "
+        f"the utterance. Screen: {screen!r}"
+    )

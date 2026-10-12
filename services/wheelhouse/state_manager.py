@@ -57,7 +57,7 @@ from services.wheelhouse.events import (
     PTTMuteStateEvent,
 )
 from services.wheelhouse.ai.server_kind import LOCAL, normalize_server_kind
-from services.wheelhouse.integrations.websocket_manager import WebSocketManager
+from services.wheelhouse.integrations.websocket_manager import WebSocketManager, read_interim_results_setting
 from services.wheelhouse.utils.speech_notifier import SpeechNotifier
 from services.wheelhouse.config_service import DEFAULT_STT_PROVIDER
 
@@ -220,7 +220,9 @@ class StateManager:
         # WheelHouse treated every report before wh-audio-suppression-auto.
         self._audio_suppression_active = True
         self._speech_enabled_before_idle = None  # Track state before idle
-        self.interim_results_enabled = True  # Whether STT sends partial results
+        # Whether STT sends partial results. The top-level INTERIM_RESULTS key
+        # sets the start value; no key means True (wh-voice-settings-window).
+        self.interim_results_enabled = read_interim_results_setting(self.config_service)
         # The level main.py already applied decides this, not a literal.
         # setup_logging (main.py:11635) sets the root level from the settings
         # file before this constructor runs (main.py:11661), so a literal
@@ -283,6 +285,10 @@ class StateManager:
         # detector. False until a capabilities frame says otherwise, because
         # a notice must never promise a wake word that cannot fire.
         self._wake_word_available = False
+        # The name of the microphone the active provider has open, "" when
+        # none is open. The GUI shows it in the menu's "Listening on" entry
+        # (wh-show-microphone-name.3).
+        self._microphone_name = ""
         # What the hold started over, and whether the plugin confirmed a mute
         # of the endpoint the audio monitor meters. A mid-hold silence report
         # may be that mute rather than the music ending, so the release must
@@ -494,6 +500,17 @@ class StateManager:
         """
         self._wake_word_available = bool(available)
 
+    def set_microphone_name(self, name: str) -> None:
+        """Record the open microphone's name and tell the GUI.
+
+        Called by the WebSocket manager when the active provider reports its
+        microphone, and with "" when the active provider disconnects. Unlike
+        the wake-word flag, the GUI reads this one, so it must reach the GUI
+        process through a state update (wh-show-microphone-name.3).
+        """
+        self._microphone_name = name if isinstance(name, str) else ""
+        self.send_state_update()
+
     async def _handle_system_config_error(self, event: SystemConfigurationErrorEvent):
         """
         Handles SystemConfigurationErrorEvent by sending user notification via IPC.
@@ -623,6 +640,7 @@ class StateManager:
                 'ai_provider': self._get_current_ai_provider(),
                 'ai_providers_available': self._get_available_ai_providers(),
                 'ai_provider_display_names': self._get_ai_provider_display_names(),
+                'microphone_name': self._microphone_name,
             }
             self.state_to_gui_queue.put_nowait(state)
         except Exception as e:
@@ -1385,6 +1403,11 @@ class StateManager:
             self._running_remote_stt_provider = provider
             self._running_remote_stt_generation = generation
             self._remote_stt_confirmed_stopped = False
+
+    def get_running_remote_stt_provider(self) -> Optional[str]:
+        """The remote provider recorded by set_running_remote_stt_provider, or None."""
+        with self._remote_stt_record_lock:
+            return self._running_remote_stt_provider
 
     def _check_remote_stt_health(self) -> None:
         """Run the owned-process watchdog on Logic's existing state-update loop."""

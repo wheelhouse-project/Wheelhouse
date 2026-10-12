@@ -21,7 +21,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from shared_stt.startup_refusal import send_startup_failed_notice
+from shared_audio.capture.winrt_capture import MICROPHONE_BLOCKED_MESSAGE
+from shared_stt.startup_refusal import (
+    CAPTURE_FAILURE_PREFIX,
+    MICROPHONE_BLOCKED_CAUSE,
+    capture_failure_message,
+    send_startup_failed_notice,
+)
 
 REFUSAL = (
     "The speech service cannot start: the audio package winsdk is not "
@@ -50,6 +56,58 @@ def test_sends_the_startup_failed_notice_with_the_message_it_was_given():
         "Parakeet v3 (CPU)", REFUSAL, kind="startup_failed"
     )
     assert delivered is True
+
+
+def _cause_of_the_notice(forwarder) -> str:
+    """The cause the one send_notification call resolves to.
+
+    send_notification's cause parameter defaults to "", so a call that
+    passes none and a call that passes "" put the same value in the frame.
+    """
+    (call,) = forwarder.send_notification.call_args_list
+    return call.kwargs.get("cause", "")
+
+
+def test_the_blocked_microphone_notice_carries_the_cause():
+    """WheelHouse shows its own on-screen notice only for this cause
+    (wh-blocked-mic-message). The helper compares the message it is given
+    with the imported MICROPHONE_BLOCKED_MESSAGE, so the sentence lives in
+    one place and a reworded sentence changes both sides at once."""
+    with patch("shared_stt.startup_refusal.WSForwarder") as forwarder_class:
+        forwarder = forwarder_class.return_value
+        forwarder.is_connected = True
+
+        send_startup_failed_notice(
+            "Parakeet v3 (CPU)", MICROPHONE_BLOCKED_MESSAGE, "localhost",
+            8765, "parakeet_tdt",
+        )
+
+    assert _cause_of_the_notice(forwarder) == "microphone_blocked"
+    # The kind WheelHouse's startup_failed branch tests stays as it was.
+    assert forwarder.send_notification.call_args.kwargs["kind"] == (
+        "startup_failed"
+    )
+
+
+def test_any_other_startup_failure_carries_no_cause():
+    """Only the one sentence earns the cause. A refusal about winsdk, or
+    a sentence that merely contains the blocked-microphone text, does not."""
+    for message in (
+        REFUSAL,
+        MICROPHONE_BLOCKED_MESSAGE + " Extra words.",
+        MICROPHONE_BLOCKED_MESSAGE.upper(),
+        "",
+    ):
+        with patch("shared_stt.startup_refusal.WSForwarder") as forwarder_class:
+            forwarder = forwarder_class.return_value
+            forwarder.is_connected = True
+
+            send_startup_failed_notice(
+                "Parakeet v3 (CPU)", message, "localhost", 8765,
+                "parakeet_tdt",
+            )
+
+        assert _cause_of_the_notice(forwarder) == "", message
 
 
 def test_the_short_lived_connection_names_its_provider():
@@ -173,3 +231,45 @@ def test_a_forwarder_that_cannot_be_built_does_not_mask_the_answer():
         )
 
     assert delivered is False
+
+
+class TestCaptureFailureMessage:
+    """The message and cause for a failure the capture handshake reports.
+
+    Two paths report a start failure. send_startup_failed_notice covers an
+    audio factory that raises inside a provider constructor. The capture
+    handshake covers a microphone object that was built and whose capture
+    thread then failed, and that is the path a blocked microphone always
+    takes, because the audio graph is built inside the capture thread
+    (wh-blocked-mic-message). All three providers build their handshake
+    notice with this function.
+    """
+
+    def test_the_blocked_microphone_sentence_is_sent_alone_with_its_cause(
+            self):
+        message, cause = capture_failure_message(MICROPHONE_BLOCKED_MESSAGE)
+
+        # Compared with the constant itself, never a retyped sentence.
+        assert message == MICROPHONE_BLOCKED_MESSAGE
+        assert cause == "microphone_blocked"
+        assert cause == MICROPHONE_BLOCKED_CAUSE
+
+    def test_any_other_detail_keeps_the_prefix_and_has_no_cause(self):
+        for detail in (
+            "Microphone node failed: status=4",
+            "audio capture did not become ready in time",
+            MICROPHONE_BLOCKED_MESSAGE + " Extra words.",
+            MICROPHONE_BLOCKED_MESSAGE.upper(),
+            "",
+        ):
+            message, cause = capture_failure_message(detail)
+
+            assert message == (
+                "Failed to start - transcription will not work: " + detail
+            ), detail
+            assert cause == "", detail
+
+    def test_the_prefix_is_the_one_the_providers_always_used(self):
+        assert CAPTURE_FAILURE_PREFIX == (
+            "Failed to start - transcription will not work: "
+        )

@@ -24,13 +24,35 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import asyncio
 import json
 import logging
+import queue as queue_module
 import struct
 from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, Mock, patch, PropertyMock
 
+import importlib.util
+
 from speech.word_event import WordEvent
+
+
+def _load_apply_itn():
+    """Return the real ``apply_itn`` from the shared STT package.
+
+    The wheelhouse venv cannot import ``shared_stt``, so the module is
+    loaded by file path. A hard-coded copy would pass on any commit.
+    """
+    path = (
+        Path(__file__).parents[3]
+        / "services" / "stt_providers" / "shared" / "shared_stt"
+        / "transcript_rules.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_shared_stt_transcript_rules_by_path", path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.apply_itn
 
 
 class TestStartOfUtteranceFlag:
@@ -392,6 +414,72 @@ class TestRevisionDetection:
         delta2 = manager._extract_delta("not that it's surprising comma", utterance_id)
         assert delta2 is None  # Word-level revision
         assert manager._processed_word_count == 5  # Not updated from 5
+
+
+class TestPercentSplitTimingRetraction:
+    """The provider's stable text and final text for "fifty percent".
+
+    wh-itn-percent-digits, acceptance item 2 (log of 2026-10-06 18:15:49,
+    UTT-31). Parakeet confirms "fifty" and the stable message goes out
+    before "percent" arrives. The final then reads "50 percent", which
+    no longer starts with the stable word, so the manager must detect
+    the broken prefix and queue a retraction marker for the final.
+    Both texts come from the real ``apply_itn``, so on a commit whose
+    ``apply_itn`` leaves "fifty percent" unchanged the final still
+    starts with "fifty" and no retraction is queued.
+    """
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def mock_app(self):
+        app = MagicMock()
+        app.send_command = AsyncMock()
+        return app
+
+    @pytest.fixture
+    def manager(self, event_loop, mock_app):
+        from integrations.websocket_manager import WebSocketManager
+
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.set_app(mock_app)
+        mgr.state_manager = MagicMock()
+        mgr.state_manager.config_service = MagicMock()
+        mgr.state_manager.config_service.get.return_value = False
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_a_final_with_digits_breaks_the_stable_prefix(self, manager):
+        """Stable "fifty", final "50 percent": a retraction marker is queued."""
+        apply_itn = _load_apply_itn()
+        stable_text = apply_itn("fifty")
+        final_text = apply_itn("fifty percent")
+
+        messages = [
+            {"type": "stable", "text": stable_text, "utterance_id": 31},
+            {"type": "final", "text": final_text, "utterance_id": 31},
+        ]
+        ws = _make_mock_ws(messages)
+        await manager.handle_connection(ws)
+
+        events = _drain_queue(manager.word_queue)
+        retraction_markers = [e for e in events if e.is_retraction_marker]
+
+        assert len(retraction_markers) == 1, (
+            "Acceptance item 2: the final text broke the word prefix of "
+            f"the stable text {stable_text!r}, so one retraction marker "
+            f"was expected. Final text: {final_text!r}. "
+            f"Events: {[(e.word, e.is_retraction_marker) for e in events]!r}"
+        )
+        assert retraction_markers[0].retraction_full_text == "50 percent", (
+            "Acceptance item 2: the retraction must carry the digit form "
+            f"of the final. Got {retraction_markers[0].retraction_full_text!r}"
+        )
+        assert retraction_markers[0].utterance_id == 31
 
 
 class TestLogMessageHandling:
@@ -939,6 +1027,215 @@ class TestNotificationHandling:
             {"action": "hide_working", "owner": "stt:3"}
         )
         mock_notifier._send_notification.assert_called_once()
+
+    async def _run_notification(
+        self, manager, kind, cause, *, declare=True, launch_current=True,
+        message="Some provider message",
+    ):
+        """Feed one provider notification through handle_connection.
+
+        Returns the launcher mock, the state manager mock, and its
+        notifier mock. The provider declares itself first when
+        ``declare`` is true, as every shipped provider does.
+        ``launch_current`` is the answer of the launcher to "is the
+        launch that owns this connection still the current one".
+        """
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.launch_generation.return_value = 3
+        launcher.launch_is_current.return_value = launch_current
+        mock_sm, mock_notifier = self._state_manager_with_notifier()
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        frame = {
+            "type": "notification",
+            "title": "Google STT",
+            "message": message,
+            "kind": kind,
+        }
+        if cause is not None:
+            frame["cause"] = cause
+        messages = [frame]
+        if declare:
+            messages.insert(0, {
+                "type": "capabilities",
+                "provider": "google_stt",
+                "emits_eos": False,
+            })
+        await manager.handle_connection(_make_mock_ws(messages))
+        return launcher, mock_sm, mock_notifier
+
+    @staticmethod
+    def _microphone_blocked_puts(mock_sm):
+        """The messages with action "microphone_blocked" that the
+        manager put on the GUI queue."""
+        return [
+            c.args[0]
+            for c in mock_sm.state_to_gui_queue.put_nowait.call_args_list
+            if c.args and c.args[0].get("action") == "microphone_blocked"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_microphone_failure_queues_the_gui_notice_and_keeps_the_rest(
+        self, manager
+    ):
+        """cause="microphone_blocked" on a startup_failed notice puts one
+        more message on the GUI queue (wh-blocked-mic-message). The
+        branch keeps what it always did: it ends the starting state,
+        closes the working dialog, and sends the Windows notification."""
+        launcher, mock_sm, mock_notifier = await self._run_notification(
+            manager, "startup_failed", "microphone_blocked")
+
+        assert self._microphone_blocked_puts(mock_sm) == [
+            {"action": "microphone_blocked", "message": "Some provider message"}
+        ]
+        launcher.signal_provider_startup_failed.assert_called_once_with(3)
+        mock_sm.state_to_gui_queue.put_nowait.assert_any_call(
+            {"action": "hide_working", "owner": "stt:3"}
+        )
+        mock_notifier._send_notification.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_the_queued_notice_carries_the_text_of_the_provider_frame(
+        self, manager
+    ):
+        """The GUI shows the text that the provider sent, word for word
+        (wh-blocked-mic-message, item 1): the message key of the queued
+        action is the message of the frame, not a copy kept here."""
+        sentence = "Text from the provider, unlike any text kept in the GUI."
+        _launcher, mock_sm, _notifier = await self._run_notification(
+            manager, "startup_failed", "microphone_blocked", message=sentence)
+
+        assert self._microphone_blocked_puts(mock_sm) == [
+            {"action": "microphone_blocked", "message": sentence}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_frame_with_no_text_queues_no_microphone_notice(
+        self, manager
+    ):
+        """A notice with nothing to show is not queued. The Windows
+        notification and the rest of the branch are unchanged."""
+        launcher, mock_sm, mock_notifier = await self._run_notification(
+            manager, "startup_failed", "microphone_blocked", message="")
+
+        assert self._microphone_blocked_puts(mock_sm) == []
+        launcher.signal_provider_startup_failed.assert_called_once_with(3)
+        mock_notifier._send_notification.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_replaced_launch_queues_no_microphone_notice(self, manager):
+        """A blocked-microphone failure from a provider that a later launch
+        has replaced must not raise a notice that stays until the user
+        closes it, while the replacement starts normally
+        (wh-blocked-mic-message, item 2). The check is the one that guards
+        the hide_working message above it."""
+        _launcher, mock_sm, _notifier = await self._run_notification(
+            manager, "startup_failed", "microphone_blocked",
+            launch_current=False)
+
+        assert self._microphone_blocked_puts(mock_sm) == []
+
+    @pytest.mark.asyncio
+    async def test_the_current_launch_queues_the_microphone_notice(
+        self, manager
+    ):
+        """The same frame from the launch that owns the display is queued,
+        so the check above refuses the replaced launch and nothing else."""
+        launcher, mock_sm, _notifier = await self._run_notification(
+            manager, "startup_failed", "microphone_blocked",
+            launch_current=True)
+
+        assert len(self._microphone_blocked_puts(mock_sm)) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cause", [None, "", "something_else"])
+    async def test_any_other_startup_failure_queues_no_microphone_notice(
+        self, manager, cause
+    ):
+        """No cause key (a provider built before the key existed), an
+        empty cause, and an unknown cause all leave the GUI queue as it
+        was."""
+        launcher, mock_sm, mock_notifier = await self._run_notification(
+            manager, "startup_failed", cause)
+
+        assert self._microphone_blocked_puts(mock_sm) == []
+        launcher.signal_provider_startup_failed.assert_called_once_with(3)
+        mock_notifier._send_notification.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["ready", "error", ""])
+    async def test_the_cause_alone_does_not_queue_the_microphone_notice(
+        self, manager, kind
+    ):
+        """The message is queued inside the startup_failed branch only. A
+        notice of another kind that carries the cause is not a startup
+        failure and shows no on-screen microphone notice."""
+        _launcher, mock_sm, _mock_notifier = await self._run_notification(
+            manager, kind, "microphone_blocked")
+
+        assert self._microphone_blocked_puts(mock_sm) == []
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_microphone_failure_without_a_gui_queue_still_toasts(
+        self, manager
+    ):
+        """A state manager with no GUI queue (some test and headless
+        paths) must not turn the extra message into an exception that
+        skips the Windows notification. No exception leaves the handler,
+        the launcher still hears the failure, and the notification is
+        still sent once with the text of the provider."""
+        launcher = MagicMock()
+        launcher.is_starting = True
+        launcher.launch_generation.return_value = 3
+        launcher.launch_is_current.return_value = True
+        mock_notifier = MagicMock()
+        mock_sm = MagicMock(spec=["speech_notifier"])
+        mock_sm.speech_notifier = mock_notifier
+        manager.remote_stt_launcher = launcher
+        manager.state_manager = mock_sm
+
+        # An exception that left the handler would fail this await.
+        await manager.handle_connection(_make_mock_ws([{
+            "type": "capabilities", "provider": "google_stt",
+            "emits_eos": False,
+        }, {
+            "type": "notification", "title": "Google STT",
+            "message": "m", "kind": "startup_failed",
+            "cause": "microphone_blocked",
+        }]))
+
+        launcher.signal_provider_startup_failed.assert_called_once_with(3)
+        mock_notifier._send_notification.assert_called_once_with(
+            "Google STT", "m"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_microphone_failure_with_a_refusing_gui_queue_still_toasts(
+        self, manager
+    ):
+        """A GUI queue that refuses the message (full) must not skip the
+        Windows notification either."""
+        launcher, mock_sm, mock_notifier = await self._run_notification(
+            manager, "startup_failed", "microphone_blocked")
+        mock_sm.state_to_gui_queue.put_nowait.side_effect = queue_module.Full
+        mock_notifier._send_notification.reset_mock()
+        launcher.signal_provider_startup_failed.reset_mock()
+
+        await manager.handle_connection(_make_mock_ws([{
+            "type": "capabilities", "provider": "google_stt",
+            "emits_eos": False,
+        }, {
+            "type": "notification", "title": "Google STT",
+            "message": "m", "kind": "startup_failed",
+            "cause": "microphone_blocked",
+        }]))
+
+        launcher.signal_provider_startup_failed.assert_called_once_with(3)
+        mock_notifier._send_notification.assert_called_once_with(
+            "Google STT", "m"
+        )
 
     @pytest.mark.asyncio
     async def test_ready_kind_dismisses_the_dialog_naming_its_own_launch(
@@ -1586,6 +1883,149 @@ class TestStaleClientNotificationGate:
         mock_notifier._send_notification.assert_not_called()
         launcher.signal_provider_startup_failed.assert_not_called()
         launcher.signal_provider_ready.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: the provider's microphone frame (wh-show-microphone-name.3)
+# ---------------------------------------------------------------------------
+
+class TestMicrophoneFrame:
+    """A {"type": "microphone", "device": name} frame from the ACTIVE
+    client reaches StateManager; remove_client of the active client clears
+    the name. An empty device means no microphone is open."""
+
+    @pytest.fixture
+    def event_loop(self):
+        loop = asyncio.new_event_loop()
+        yield loop
+        loop.close()
+
+    @pytest.fixture
+    def manager(self, event_loop):
+        from integrations.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(loop=event_loop)
+        mgr.state_manager = MagicMock()
+        return mgr
+
+    @staticmethod
+    def _names(manager):
+        """Every name handed to StateManager, in order."""
+        return [c.args[0] for c in
+                manager.state_manager.set_microphone_name.call_args_list]
+
+    @pytest.mark.asyncio
+    async def test_an_active_clients_frame_stores_the_name(self, manager):
+        await manager.handle_connection(_make_mock_ws([
+            {"type": "microphone", "device": "Studio Mic"},
+        ]))
+        # The second entry is the disconnect clearing it again.
+        assert self._names(manager) == ["Studio Mic", ""]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_device_stores_an_empty_name(self, manager):
+        await manager.handle_connection(_make_mock_ws([
+            {"type": "microphone", "device": ""},
+        ]))
+        assert self._names(manager)[0] == ""
+
+    @pytest.mark.asyncio
+    async def test_a_frame_without_a_device_stores_an_empty_name(self, manager):
+        await manager.handle_connection(_make_mock_ws([
+            {"type": "microphone"},
+        ]))
+        assert self._names(manager)[0] == ""
+
+    @pytest.mark.asyncio
+    async def test_a_frame_from_a_non_active_client_is_ignored(self, manager):
+        stale_gate = asyncio.Event()
+        active_gate = asyncio.Event()
+        stale_ws = _GatedWS(
+            [{"type": "microphone", "device": "Stale Mic"}],
+            stale_gate, ("127.0.0.1", 9001))
+        active_ws = _GatedWS([], active_gate, ("127.0.0.1", 9002))
+
+        stale_task = asyncio.create_task(manager.handle_connection(stale_ws))
+        await _wait_until(lambda: manager._active_stt_client is stale_ws)
+        active_task = asyncio.create_task(manager.handle_connection(active_ws))
+        await _wait_until(lambda: manager._active_stt_client is active_ws)
+
+        stale_gate.set()
+        await stale_task
+        active_gate.set()
+        await active_task
+
+        assert "Stale Mic" not in self._names(manager)
+
+    @pytest.mark.asyncio
+    async def test_a_frame_with_no_state_manager_is_survivable(self, manager):
+        manager.state_manager = None
+        # An exception that left the handler would fail this await.
+        await manager.handle_connection(_make_mock_ws([
+            {"type": "microphone", "device": "Studio Mic"},
+        ]))
+
+    @pytest.mark.asyncio
+    async def test_a_state_manager_without_the_setter_is_survivable(
+        self, manager
+    ):
+        manager.state_manager = MagicMock(spec=["speech_notifier"])
+        await manager.handle_connection(_make_mock_ws([
+            {"type": "microphone", "device": "Studio Mic"},
+        ]))
+
+    @pytest.mark.asyncio
+    async def test_removing_the_active_client_clears_the_name(self, manager):
+        ws = AsyncMock()
+        ws.remote_address = ("127.0.0.1", 5000)
+        await manager.add_client(ws)
+        manager.state_manager.set_microphone_name.reset_mock()
+
+        manager.remove_client(ws)
+
+        assert self._names(manager) == [""]
+
+    @pytest.mark.asyncio
+    async def test_removing_the_active_client_clears_it_with_another_left(
+        self, manager
+    ):
+        """Not only when the LAST client leaves: an older disabled client
+        stays connected, and its presence must not keep the name."""
+        ws1 = AsyncMock()
+        ws1.remote_address = ("127.0.0.1", 5001)
+        ws2 = AsyncMock()
+        ws2.remote_address = ("127.0.0.1", 5002)
+        await manager.add_client(ws1)
+        await manager.add_client(ws2)  # ws2 is now the active client.
+        manager.state_manager.set_microphone_name.reset_mock()
+
+        manager.remove_client(ws2)
+
+        assert ws1 in manager._clients
+        assert self._names(manager) == [""]
+
+    @pytest.mark.asyncio
+    async def test_removing_a_non_active_client_leaves_the_name(self, manager):
+        ws1 = AsyncMock()
+        ws1.remote_address = ("127.0.0.1", 5001)
+        ws2 = AsyncMock()
+        ws2.remote_address = ("127.0.0.1", 5002)
+        await manager.add_client(ws1)
+        await manager.add_client(ws2)
+        manager.state_manager.set_microphone_name.reset_mock()
+
+        manager.remove_client(ws1)
+
+        manager.state_manager.set_microphone_name.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_removing_the_active_client_survives_a_missing_setter(
+        self, manager
+    ):
+        manager.state_manager = MagicMock(spec=["speech_notifier"])
+        ws = AsyncMock()
+        ws.remote_address = ("127.0.0.1", 5000)
+        await manager.add_client(ws)
+        manager.remove_client(ws)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -4396,3 +4836,63 @@ class TestWinrtRefusalReachesTheUser:
         mock_notifier._send_notification.assert_called_once()
         shown = mock_notifier._send_notification.call_args.args[1]
         assert shown == self.APPROVED, shown
+
+
+class TestInterimResultsReadAtStart:
+    """wh-voice-settings-window stage A (ruling R1): the manager takes its
+    start value for interim results from the INTERIM_RESULTS config key when
+    the state manager (the holder of the config service) is attached. No key
+    keeps today's value (true)."""
+
+    @staticmethod
+    def _manager(config):
+        from integrations.websocket_manager import WebSocketManager
+
+        loop = asyncio.new_event_loop()
+        try:
+            mgr = WebSocketManager(loop=loop)
+        finally:
+            loop.close()
+        mgr.state_manager = SimpleNamespace(
+            config_service=SimpleNamespace(get=lambda k, d=None: config.get(k, d))
+        )
+        return mgr
+
+    def test_false_in_config_starts_with_interim_results_off(self):
+        assert self._manager({"INTERIM_RESULTS": False}).interim_results_enabled is False
+
+    def test_true_in_config_starts_with_interim_results_on(self):
+        assert self._manager({"INTERIM_RESULTS": True}).interim_results_enabled is True
+
+    def test_missing_key_keeps_interim_results_on(self):
+        assert self._manager({}).interim_results_enabled is True
+
+    def test_non_bool_value_keeps_interim_results_on_and_warns(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            mgr = self._manager({"INTERIM_RESULTS": 0})
+        assert mgr.interim_results_enabled is True
+        assert any(
+            "INTERIM_RESULTS" in r.getMessage() and r.levelno == logging.WARNING
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+    def test_a_new_client_is_told_the_value_read_from_config(self):
+        """The value goes to every provider that connects (line ~875)."""
+        mgr = self._manager({"INTERIM_RESULTS": False})
+        sent = []
+
+        class _WS:
+            remote_address = ("127.0.0.1", 1)
+
+            async def send(self, payload):
+                sent.append(json.loads(payload))
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+        asyncio.run(mgr.handle_connection(_WS()))
+        assert {"type": "set_interim_results", "enabled": False} in sent, sent
+

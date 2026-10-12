@@ -472,3 +472,59 @@ class TestTheEditorRestoreDoesNotAskTheInputCount:
             )
         finally:
             await proc.stop()
+
+
+class TestACorrectedPercentPhraseReadsAsDigitsInTheEditor:
+    """The editor replay is one string, so the replacement pass runs first.
+
+    wh-itn-percent-digits.1.1: the editor arm of ``_handle_retraction``
+    inserts its replay as given and no replacement pattern runs on it,
+    so the corrected final is passed through
+    ``_apply_allowed_text_replacements`` before the replay is built.
+    This reads the document the Qt deletion and replay leave behind.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_corrected_percent_phrase_ends_as_digits_with_no_word_percent(
+        self, stand,
+    ):
+        """Stable "fifty" is dictated, then the final "50 percent" corrects it.
+
+        The provider's inverse text normalization runs before the
+        processor, so the corrected final arrives as "50 percent" (the
+        split-timing case of tests/e2e/test_e2e_held_prefix_restore_scope.py,
+        where ``apply_itn("fifty percent")`` gives "50 percent"). The
+        whole-utterance retract peels "fifty" and the replay carries the
+        corrected final. The document must read "50%" and must not keep
+        the word "percent".
+        """
+        proc, app, controller, window = stand
+        await proc.start()
+        try:
+            await _start_utterance(app, 1)
+            await _word(proc, "fifty", 1, start=True, generation=1)
+            assert window._text_edit.toPlainText() == "fifty", (
+                "The dictated word did not reach the editor, so the "
+                "correction has no editor text to retract. "
+                f"Document: {window._text_edit.toPlainText()!r}"
+            )
+
+            await _retraction(proc, 1, "50 percent")
+            await asyncio.sleep(0.2)
+
+            assert controller.retracts, "No editor retract was sent."
+            outcome = controller.retracts[0]
+            assert outcome["failure_reason"] == "", (
+                "The ledger refused this retract, so the document "
+                f"proves nothing about the replay. Outcome: {outcome}"
+            )
+            document = window._text_edit.toPlainText()
+            assert document == "50%", (
+                "The editor document does not read 50% after the "
+                f"correction. Document: {document!r}"
+            )
+            assert "percent" not in document, (
+                f"The word percent is left in the document: {document!r}"
+            )
+        finally:
+            await proc.stop()

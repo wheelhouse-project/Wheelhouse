@@ -100,6 +100,27 @@ def _redact_content_fields(payload: dict) -> dict:
         for k, v in payload.items()
     }
 
+def read_interim_results_setting(config_service) -> bool:
+    """Start value of the top-level INTERIM_RESULTS config key.
+
+    Missing key means True, today's behaviour. A value that is not a bool
+    also means True, with a warning, because a mistyped value must not turn
+    partial results off without the user choosing it
+    (wh-voice-settings-window, boss ruling R1). Never raises.
+    """
+    try:
+        value = config_service.get("INTERIM_RESULTS", True)
+    except Exception:
+        logger.warning("INTERIM_RESULTS could not be read; using true.", exc_info=True)
+        return True
+    if isinstance(value, bool):
+        return value
+    logger.warning(
+        f"INTERIM_RESULTS must be true or false, got {value!r}; using true instead"
+    )
+    return True
+
+
 class WebSocketManager:
     """
     Manages active WebSocket connections and broadcasts messages.
@@ -125,8 +146,10 @@ class WebSocketManager:
         # Track current utterance ID for boundary detection
         self.current_utterance_id: Optional[int] = None
 
-        # Reference to state_manager for notifications (set after initialization)
-        self.state_manager: Optional[Any] = None
+        # Reference to state_manager for notifications (set after initialization).
+        # Plain backing field; the property below reads INTERIM_RESULTS when
+        # the reference is attached.
+        self._state_manager: Optional[Any] = None
 
         # Reference to remote_stt_launcher for startup monitoring (set after initialization)
         self.remote_stt_launcher: Optional[Any] = None
@@ -628,6 +651,28 @@ class WebSocketManager:
             )
             self._set_provider_applies_hints(declared_applies_hints)
 
+    def _apply_microphone(self, websocket: Any, data: dict) -> None:
+        """Record the name of the microphone the provider has open.
+
+        The frame is ``{"type": "microphone", "device": <name>}``; an empty
+        or missing ``device`` means no microphone is open
+        (wh-show-microphone-name.3). The active-client gate is the one the
+        capabilities handler uses: a superseded provider still delivering
+        frames describes an old stream, not the one the user hears.
+        """
+        if websocket is not self._active_stt_client:
+            logger.debug(
+                "[MICROPHONE] ignored frame from non-active client %s",
+                getattr(websocket, "remote_address", None),
+            )
+            return
+        device = data.get("device")
+        name = device if isinstance(device, str) else ""
+        if self.state_manager and hasattr(
+            self.state_manager, "set_microphone_name"
+        ):
+            self.state_manager.set_microphone_name(name)
+
     def _set_provider_applies_hints(self, value: Optional[bool]) -> None:
         """Store the tri-state hint capability and push it to the matcher.
 
@@ -856,6 +901,21 @@ class WebSocketManager:
             record.msecs = (created - int(created)) * 1000
         logger.handle(record)
 
+    @property
+    def state_manager(self) -> Optional[Any]:
+        """The state manager, attached by main.py once both exist."""
+        return self._state_manager
+
+    @state_manager.setter
+    def state_manager(self, manager: Optional[Any]) -> None:
+        self._state_manager = manager
+        # Attachment happens once at start, before any provider connects, so
+        # this is the start value of the interim-results flag. The config
+        # service is reached the same way _notify_revision reads its setting.
+        config = getattr(manager, 'config_service', None)
+        if config is not None and hasattr(config, 'get'):
+            self.interim_results_enabled = read_interim_results_setting(config)
+
     async def handle_connection(self, websocket: Any):
         """Handles a new client connection.
 
@@ -933,6 +993,11 @@ class WebSocketManager:
                         )
                         continue
 
+                    # The provider's open microphone (wh-show-microphone-name.3).
+                    if msg_type == "microphone":
+                        self._apply_microphone(websocket, data)
+                        continue
+
                     # Handle notification messages
                     if msg_type == "notification":
                         title = data.get("title", "Wheelhouse Notification")
@@ -958,6 +1023,17 @@ class WebSocketManager:
                         # supplying a default (wh-capture-winrt-required
                         # A4).
                         capture_backend = data.get("capture_backend", "")
+
+                        # Why a startup_failed happened, when WheelHouse
+                        # acts on the reason and not only on the text.
+                        # "microphone_blocked" is the one value today:
+                        # Windows is denying microphone access, and the
+                        # fix is a Windows setting the user must change
+                        # (shared_stt/startup_refusal.py sets it).
+                        # "" on every other notice, and absent for a
+                        # provider built before this field existed
+                        # (wh-blocked-mic-message).
+                        cause = data.get("cause", "")
 
                         # Same gate as _apply_capabilities (wh-nvyh.1.1):
                         # add_client keeps older connections open (merely
@@ -1045,6 +1121,33 @@ class WebSocketManager:
                                         "owner": launch_owner_token(
                                             self._stt_client_generations.get(websocket)
                                         ),
+                                    })
+                                except Exception:
+                                    pass
+                            # The Windows notification below lasts three
+                            # seconds and names no setting; this message
+                            # asks the GUI for a notice that stays until
+                            # the user closes it (wh-blocked-mic-message).
+                            # Both are kept: speech_notifier is shared by
+                            # every startup failure. The notice shows the
+                            # text of the provider word for word, so the
+                            # frame text travels in the message and no
+                            # copy of it is kept here. A notice with no
+                            # text is not queued. Only the launch that
+                            # owns the display may raise the notice: one
+                            # from a replaced launch would stay on the
+                            # screen while the replacement starts normally.
+                            if (
+                                cause == "microphone_blocked"
+                                and notification_message
+                                and self._sending_launch_is_current(websocket)
+                                and self.state_manager
+                                and hasattr(self.state_manager, 'state_to_gui_queue')
+                            ):
+                                try:
+                                    self.state_manager.state_to_gui_queue.put_nowait({
+                                        "action": "microphone_blocked",
+                                        "message": notification_message,
                                     })
                                 except Exception:
                                     pass
@@ -1854,6 +1957,14 @@ class WebSocketManager:
                 # state -- there is no active stream until the next
                 # add_client, and add_client resets again anyway.
                 self._reset_retraction_policy_state()
+                # The departed stream's microphone left with it, even when
+                # a disabled client remains connected; nothing describes
+                # an open microphone until the next active client says so
+                # (wh-show-microphone-name.3).
+                if self.state_manager and hasattr(
+                    self.state_manager, "set_microphone_name"
+                ):
+                    self.state_manager.set_microphone_name("")
 
             # Only when the removed client was the LAST one do we touch the
             # active stream's state. add_client DISABLES older clients but keeps

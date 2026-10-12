@@ -257,20 +257,23 @@ class TestHotwordOnlyBufferShortCircuit:
     Background (wh-4o1aj): _decide_buffering's match-impossibility check
     (_cannot_match) ignored requires_hotword, so a buffer like ['fix', 'word']
     (only candidate command pattern '^fix' requires the hotword) kept
-    buffering until command_timeout fired. Threading hotword_active through
-    _cannot_match -> matcher.cannot_match -> can_continue lets the router
-    short-circuit to finalization at once when the hotword is inactive.
+    buffering until command_timeout fired. (The fix-text pattern is
+    '^fix(?:ed)?$' now; bead wh-pattern-variants-numeric added the spoken
+    word 'fixed' and a closing '$'. It still requires the hotword.)
+    Threading hotword_active through _cannot_match ->
+    matcher.cannot_match -> can_continue lets the router short-circuit to
+    finalization at once when the hotword is inactive.
 
     NOTE: the dispatch named 'click' as the example word, but the live
     patterns.toml '^click to talk mode$' pattern has requires_hotword=False, so
-    'click' is NOT hotword-only and must not short-circuit. 'fix' (^fix,
+    'click' is NOT hotword-only and must not short-circuit. 'fix' (^fix(?:ed)?$,
     requires_hotword=true) is the correct hotword-only single-word candidate.
-    'save' was this fixture's word until 2026-08-20, when every single-word command traded requires_hotword for whole_utterance_only. '^fix' is the one single-word command that still requires the hotword, so it takes over the role unchanged.
+    'save' was this fixture's word until 2026-08-20, when every single-word command traded requires_hotword for whole_utterance_only. '^fix(?:ed)?$' (then '^fix') is the one single-word command that still requires the hotword, so it takes over the role unchanged.
     """
 
     def test_hotword_only_buffer_defers_as_impossible_when_inactive(self, router):
         # buffer ['fix'] + next word 'word'; hotword inactive. The only
-        # command pattern for 'fix' (^fix) requires the hotword, so the
+        # command pattern for 'fix' (^fix(?:ed)?$) requires the hotword, so the
         # buffer cannot match. wh-whole-utterance-command-matching.3
         # superseded the immediate DICTATE this test used to pin: an
         # impossible buffer now DEFERS to the utterance end on the
@@ -299,10 +302,11 @@ class TestHotwordOnlyBufferShortCircuit:
         assert "fix word" in resolved.payload
 
     def test_same_buffer_continues_when_hotword_active(self, router):
-        # With the hotword active, '^fix' is a live candidate; the buffer
-        # ['fix'] is a prefix that can still complete, so the router must NOT
-        # finalize as dictation here. (Sanity check that the gate is keyed on
-        # hotword_active, not unconditional.)
+        # The check really is keyed on hotword_active: _cannot_match(['fix'],
+        # 'command', True) is False, while the same call with False is True,
+        # because '^fix(?:ed)?$' is a live candidate only while the hotword is
+        # active. Adding 'word' removes that difference; read the comment on
+        # the decision below.
         event = WordEvent("word", start_of_utterance=False, end_of_utterance=False)
         decision = router._decide_buffering(
             event,
@@ -313,9 +317,12 @@ class TestHotwordOnlyBufferShortCircuit:
             replacement_timeout_ms=700,
             greedy_timeout_ms=5000,
         )
-        # 'fix word' is not a complete command even with hotword, but the
-        # buffer is not impossible the way the inactive case is; the key
-        # assertion is it does not DICTATE-finalize via the cannot_match path.
+        # Measured in this worktree: ['fix', 'word'] is an impossible command
+        # buffer with the hotword active as well, so the decision here equals
+        # the inactive case above -- BUFFER, timeout 1000, reason 'Impossible
+        # buffer deferred to utterance end'. The assertion holds because that
+        # deferral does not finalize at word speed, NOT because the buffer is
+        # still a live command candidate.
         assert decision.action != Action.DICTATE
 
 
@@ -493,20 +500,20 @@ class TestHotwordOnlyIdleShortCircuit:
 
     Background (wh-l4h.1.14): _decide_idle's FRESH_COMMAND branch decided to
     BUFFER (with command_timeout_ms) for a word like 'fix' even when the
-    hotword is inactive. 'fix's only command pattern '^fix' has
-    requires_hotword=true, so with the hotword inactive the word can never
+    hotword is inactive. 'fix's only command pattern ('^fix' then, '^fix(?:ed)?$'
+    now) has requires_hotword=true, so with the hotword inactive the word can never
     actually match a command -- but the idle-path impossibility check did not
     consult hotword_active, so it waited ~1000ms before dropping to dictation.
     This mirrors the wh-4o1aj fix already applied to the BUFFERING path.
 
-    'fix' (^fix, requires_hotword=true) is the hotword-only single-word
+    'fix' (^fix(?:ed)?$, requires_hotword=true) is the hotword-only single-word
     candidate; 'click' is NOT (its '^click to talk mode$' pattern has
     requires_hotword=False) -- see the note above on
     TestHotwordOnlyBufferShortCircuit.
     """
 
     def test_fresh_hotword_only_word_dictates_when_inactive(self, router):
-        # Fresh 'fix', hotword inactive. The only command pattern (^fix)
+        # Fresh 'fix', hotword inactive. The only command pattern (^fix(?:ed)?$)
         # requires the hotword, so the word cannot match a command and the idle
         # path must finalize it as dictation at once -- NOT return a BUFFER
         # decision that waits command_timeout.
@@ -527,7 +534,7 @@ class TestHotwordOnlyIdleShortCircuit:
         assert decision.action == Action.DICTATE
 
     def test_fresh_hotword_only_word_executes_when_active(self, router):
-        # Same word, hotword active: '^fix' is a live, complete single-word
+        # Same word, hotword active: '^fix(?:ed)?$' is a live, complete single-word
         # command, so the idle path takes the immediate EXECUTE path -- no
         # command_timeout wait. (wh-l4h.1.14 / deepseek: _is_single_word_complete
         # previously hardcoded hotword_active=False, so an active-hotword 'fix'

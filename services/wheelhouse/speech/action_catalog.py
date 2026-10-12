@@ -586,6 +586,27 @@ ACTION_CATALOG = (
         "group": "Text",
     },
     {
+        "name": "number_digits",
+        "label": "Spoken number as digits",
+        "summary": "Converts a spoken number to its digits, with no period.",
+        "params": [
+            {
+                "name": "number",
+                "summary": (
+                    "The number as words (twenty three) or digits (23); "
+                    "usually the capture group g1."
+                ),
+                "kind": "number",
+            },
+        ],
+        "example": (
+            'Trigger "^numeric (\\d+)$" with params ["g1"]: saying '
+            '"numeric twenty three" inserts "23".'
+        ),
+        "audience": "advanced",
+        "group": "Text",
+    },
+    {
         "name": "wrap_or_insert",
         "label": "Wrap in delimiters",
         "summary": (
@@ -1040,9 +1061,9 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^fix" with no params: saying "x-ray fix" corrects '
-            "the selected text, or all the text in the focused field when "
-            "nothing is selected."
+            'Trigger "^fix(?:ed)?$" with no params: saying "x-ray fix" or '
+            '"x-ray fixed" corrects the selected text, or all the text in '
+            "the focused field when nothing is selected."
         ),
         "audience": "advanced",
         "group": "AI",
@@ -1150,6 +1171,21 @@ ACTION_CATALOG = (
         "example": (
             'Trigger "^patterns?$" with no params: saying "patterns" '
             'opens the Pattern Manager.'
+        ),
+        "audience": "advanced",
+        "group": "Wheelhouse",
+    },
+    {
+        "name": "open_settings_window",
+        "label": "Open the Settings window",
+        "summary": (
+            "Opens the settings window, where the menu settings and a few "
+            "more can be changed with the mouse or by voice."
+        ),
+        "params": [],
+        "example": (
+            'Trigger "^settings?$" with no params: saying "settings" '
+            'opens the settings window.'
         ),
         "audience": "advanced",
         "group": "Wheelhouse",

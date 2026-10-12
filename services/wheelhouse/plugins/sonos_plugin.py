@@ -58,7 +58,11 @@ import soco.discovery
 from soco.exceptions import SoCoException, SoCoUPnPException
 
 from services.wheelhouse.plugins.base import BasePlugin, PluginState
-from services.wheelhouse.events import SonosStateChangedEvent, VolumeAdjustCommand
+from services.wheelhouse.events import (
+    SonosStateChangedEvent,
+    VolumeAdjustCommand,
+    VolumeTargetChangedEvent,
+)
 from services.wheelhouse.handlers.volume_router import get_volume_router
 
 if TYPE_CHECKING:
@@ -98,6 +102,10 @@ class SonosPlugin(BasePlugin):
         self._config: Optional["ConfigService"] = None
         self._event_bus: Optional["EventBus"] = None
         self._speaker_ip: Optional[str] = None
+        # plugins.sonos.speaker_ip, the manual override. Kept apart from
+        # _speaker_ip because the router's choice can change while Wheelhouse
+        # runs and _current_speaker_ip reads it per use (wh-sonos-tv-recheck).
+        self._configured_speaker_ip: Optional[str] = None
         self._polling_interval: int = 2
         self._monitor_task: Optional[asyncio.Task] = None
         self._player: Optional[SoCo] = None
@@ -133,6 +141,8 @@ class SonosPlugin(BasePlugin):
         read_timeout = config.get("plugins.sonos.request_read_timeout", 5.0)
         soco.config.REQUEST_TIMEOUT = (float(connect_timeout), float(read_timeout))
 
+        self._configured_speaker_ip = config.get("plugins.sonos.speaker_ip")
+
         # Get speaker IP from VolumeRouter (auto-discovered) or config fallback
         volume_router = get_volume_router()
         if volume_router.sonos_ip:
@@ -141,7 +151,7 @@ class SonosPlugin(BasePlugin):
             logger.info(f"Using auto-discovered Sonos: {volume_router.sonos_name} @ {self._speaker_ip}")
         else:
             # Fallback to config for manual override
-            self._speaker_ip = config.get("plugins.sonos.speaker_ip")
+            self._speaker_ip = self._configured_speaker_ip
             if self._speaker_ip:
                 self._sonos_available = True
                 logger.info(f"Using configured Sonos IP: {self._speaker_ip}")
@@ -172,25 +182,36 @@ class SonosPlugin(BasePlugin):
         """
         try:
             self._state = PluginState.STARTING
-            
+
+            # The router can choose Sonos later, so this subscription is taken
+            # even in disabled mode. EventBus has no unsubscribe
+            # (event_bus.py:30), which is why the decision is read per event
+            # instead of per subscription (wh-sonos-tv-recheck).
+            if self._event_bus:
+                self._event_bus.subscribe(
+                    VolumeTargetChangedEvent, self._handle_volume_target_changed
+                )
+
             # Skip all operations if no Sonos available
             if not getattr(self, '_sonos_available', False):
                 self._state = PluginState.RUNNING
                 logger.info("SonosPlugin: No Sonos available - running in disabled mode")
                 return
-            
-            # Only subscribe to volume commands if VolumeRouter selected Sonos
+
+            # Subscribed in every case. _handle_volume_adjust returns at once
+            # when the router has System Volume selected, so a later switch
+            # needs no restart.
             volume_router = get_volume_router()
+            if self._event_bus:
+                self._event_bus.subscribe(VolumeAdjustCommand, self._handle_volume_adjust)
             if volume_router.use_sonos:
-                if self._event_bus:
-                    self._event_bus.subscribe(VolumeAdjustCommand, self._handle_volume_adjust)
                 logger.info("SonosPlugin: Handling volume control (VolumeRouter selected Sonos)")
             else:
                 logger.info("SonosPlugin: Volume disabled (VolumeRouter selected System Volume)")
-            
+
             # Always start playback monitoring for speech suppression (when Sonos available)
             self._monitor_task = asyncio.create_task(self._monitor_playback())
-            
+
             self._state = PluginState.RUNNING
             logger.info("Sonos plugin started successfully")
             
@@ -268,12 +289,26 @@ class SonosPlugin(BasePlugin):
             logger.error(f"Error getting Sonos player: {e}")
             return None
     
+    def _current_speaker_ip(self) -> Optional[str]:
+        """The speaker to talk to right now.
+
+        VolumeRouter can choose a different speaker while Wheelhouse runs,
+        so the address is read per use instead of kept from initialize. Both
+        the volume commands and the playback watch call this, which is what
+        makes them follow the speaker that plays TV audio
+        (wh-sonos-tv-recheck acceptance item 6).
+        """
+        router_ip = get_volume_router().sonos_ip
+        if router_ip:
+            return router_ip
+        return self._configured_speaker_ip
+
     def _get_player_sync(self) -> Optional[SoCo]:
         """Synchronous helper to get SoCo player.
-        
+
         This runs in a thread pool via asyncio.to_thread().
         """
-        identifier_str = str(self._speaker_ip)
+        identifier_str = str(self._current_speaker_ip())
         
         # Check if it looks like an IP address
         is_ip_like = all(c in "0123456789." for c in identifier_str) and "." in identifier_str
@@ -309,8 +344,14 @@ class SonosPlugin(BasePlugin):
         Args:
             event: VolumeAdjustCommand with delta attribute
         """
+        # The router's choice is read per command, not per subscription, so a
+        # switch to Sonos or back to System Volume needs no restart
+        # (wh-sonos-tv-recheck).
+        if not get_volume_router().use_sonos:
+            return
+
         delta = event.delta
-        
+
         try:
             player = await self._get_player()
             if not player:
@@ -360,6 +401,35 @@ class SonosPlugin(BasePlugin):
             logger.info("Sonos speaker reachable again")
         self._previously_reachable = True
 
+    async def _handle_volume_target_changed(self, event: VolumeTargetChangedEvent) -> None:
+        """React to VolumeRouter's new choice.
+
+        One case needs work here: the speaker was off or absent when
+        Wheelhouse started, so this plugin ran in disabled mode with no
+        playback watch. The router found the speaker later. Without this
+        handler the thumb wheel would reach a plugin that has no watch and no
+        address (wh-sonos-tv-recheck).
+        """
+        if not event.use_sonos:
+            return
+
+        if not getattr(self, '_sonos_available', False):
+            self._sonos_available = True
+            self._speaker_ip = event.speaker_ip
+            logger.info(
+                f"SonosPlugin: Sonos selected while running, speaker "
+                f"'{event.speaker_name}' @ {event.speaker_ip}"
+            )
+            if self._event_bus:
+                self._event_bus.subscribe(VolumeAdjustCommand, self._handle_volume_adjust)
+
+        if self._state != PluginState.RUNNING:
+            return
+
+        if self._monitor_task is None or self._monitor_task.done():
+            self._monitor_task = asyncio.create_task(self._monitor_playback())
+            logger.info("SonosPlugin: Started playback monitoring after the switch")
+
     async def _monitor_playback(self) -> None:
         """Monitor Sonos playback state for speech suppression.
 
@@ -373,10 +443,13 @@ class SonosPlugin(BasePlugin):
         Continuously polls Sonos speaker for playback state and publishes
         SonosStateChangedEvent when state changes.
         """
-        if not self._speaker_ip:
+        # Read per use, so a switch moves the watch to the speaker that plays
+        # TV audio (wh-sonos-tv-recheck acceptance item 6). _get_player_sync
+        # reads it again on every poll below.
+        if not self._current_speaker_ip():
             logger.warning("Sonos speaker IP not configured, monitoring disabled")
             return
-        
+
         logger.info(f"Starting Sonos playback monitoring (interval: {self._polling_interval}s)")
         
         while self._state == PluginState.RUNNING:

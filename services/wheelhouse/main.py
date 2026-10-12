@@ -143,6 +143,8 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from version_info import get_startup_banner
 from stt import parakeet_model
+import update_check
+import update_install
 
 
 logger = logging.getLogger(__name__)
@@ -1352,6 +1354,40 @@ def _send_parakeet_model_offer(state_manager, plan) -> None:
         logger.error(f"Could not send the Parakeet model offer to the GUI: {exc}")
 
 
+def _send_update_notice(state_manager, version: str, tag: str) -> None:
+    """Ask the GUI to show the update notice (wh-release-update-check).
+
+    update_check.run_update_check calls this through its notify argument
+    when a newer release exists. One ``update_available`` action goes on
+    the Logic -> GUI queue. A failed put is NOT caught: the module logs the
+    exception and tries the notice again at the next check. This function
+    writes no record. The GUI process reports ``update_notice_shown`` when
+    the notice becomes visible, and _handle_update_notice_shown writes the
+    record then (wh-blocked-mic-message.1.2).
+    """
+    state_manager.state_to_gui_queue.put_nowait({
+        "action": "update_available",
+        "version": version,
+        "tag": tag,
+    })
+
+
+UPDATE_FAILED_ACTION = "update_failed"
+
+
+def _send_update_failed_notice(state_manager) -> None:
+    """Ask the GUI to show that the update could not start.
+
+    One ``update_failed`` action goes on the Logic -> GUI queue. A failed
+    put is caught and logged: the caller runs in a task, and an exception
+    that leaves such a task shuts Wheelhouse down (wh-release-update-check).
+    """
+    try:
+        state_manager.state_to_gui_queue.put_nowait({"action": UPDATE_FAILED_ACTION})
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"Could not send the update failure notice to the GUI: {exc}")
+
+
 def _store_setting(self, key: str, value) -> bool:
     """Write one setting in memory, refusing a malformed section instead
     of letting it close the program (wh-remote-stt-robustness).
@@ -1450,6 +1486,24 @@ def default_help_explainer_marker_path() -> Path:
         Path(__file__).resolve().parent
         / "data"
         / "help_explainer_notebook_shown.toml"
+    )
+
+
+def default_first_run_notice_marker_path() -> Path:
+    """Return the file that records the first-run notice as shown.
+
+    The Logic process reads this file once at start-up. While it is
+    missing, this is the first start after an install: the GUI is asked to
+    show the first-run notice, and the file is then written, so later
+    starts show nothing (wh-first-run-notice). It lives beside
+    help_explainer_notebook_shown.toml and uses the same reader and writer
+    (click_first_use_hint.load_hint_shown and mark_hint_shown), so
+    config.toml is never written for this step.
+    """
+    return (
+        Path(__file__).resolve().parent
+        / "data"
+        / "first_run_notice_shown.toml"
     )
 
 
@@ -1578,6 +1632,9 @@ class LogicController:
         self._shutdown_complete = False
         self.background_tasks: List[asyncio.Task] = []
         self.gui_shm_name = gui_shm_name
+        # Set once a speech provider of this start reports ready. The
+        # first-run notice waits for it (wh-first-run-notice.2).
+        self._speech_provider_ready = asyncio.Event()
 
         # wh-overlay-slow-uia-stale-badges.7: ``time.monotonic()`` stamp
         # set while an Input-side screen read (an overlay build walk or a
@@ -2388,6 +2445,223 @@ class LogicController:
             logger.info("Shutdown requested. Signaling main loop to exit...")
             self.shutdown_event.set()
 
+    def _startup_task_coroutines(self) -> dict:
+        """Name each background coroutine that main() starts after setup.
+
+        main() creates every entry as a task through
+        create_task_with_error_handling. UpdateCheck sleeps at least 60
+        seconds before its first request and runs its request in a worker
+        thread, so it never delays the other tasks. It writes no notice
+        record itself: the record is written by _handle_update_notice_shown
+        when the GUI process reports that the notice is on the screen
+        (wh-release-update-check, wh-blocked-mic-message.1.2).
+        """
+        return {
+            "PeriodicStateUpdate": self.periodic_state_updater(),
+            "UpdateCheck": self._run_update_check(),
+            "FirstRunNotice": self._run_first_run_notice(),
+        }
+
+    async def _run_first_run_notice(self) -> None:
+        """Show the first-run notice on the first start after an install.
+
+        Reads the marker once. When it says the notice was not shown (a
+        missing file does; load_hint_shown reads an unreadable file as
+        shown, so a damaged marker never repeats the notice), the GUI is
+        sent one ``open_first_run_notice`` message. This method does not
+        write the marker. A successful queue put proves only that the
+        message reached the transport, not that the GUI process read it or
+        showed a window. The GUI process sends a ``first_run_notice_shown``
+        command once the window is on screen, and
+        _handle_first_run_notice_shown writes the marker then. A start whose
+        GUI process never shows the window therefore leaves the marker
+        unwritten, and the next start tries again. The accepted trade-off
+        runs the other way: a window that appears while its command is
+        lost shows the notice once more on the next start
+        (wh-first-run-notice.1.1).
+
+        After the marker read, the method waits with no time limit until a
+        speech provider of this start reports ready (_speech_provider_ready,
+        set by _speech_provider_ready_callback). The notice used to open
+        under the loading window while the provider was still loading
+        (wh-first-run-notice.2). A start that never becomes ready sends
+        nothing, so the marker stays unwritten and the next start tries
+        again. Shutdown cancels the wait; the cancel is not an Exception,
+        so it passes the handler below and _handle_task_completion logs it
+        as a cancel. A start that finds the marker ends before the wait.
+
+        The marker read runs in a worker thread, off the event loop. This
+        method catches every exception: an exception that escapes a task
+        made by create_task_with_error_handling shuts Wheelhouse down.
+        """
+        try:
+            from services.wheelhouse.click_first_use_hint import load_hint_shown
+
+            marker = default_first_run_notice_marker_path()
+            if await asyncio.to_thread(load_hint_shown, marker):
+                return
+            await self._speech_provider_ready.wait()
+            state_manager = getattr(self, "state_manager", None)
+            queue = getattr(state_manager, "state_to_gui_queue", None)
+            if queue is None:
+                logger.warning("First-run notice: no GUI queue, not shown.")
+                return
+            try:
+                queue.put_nowait({"action": "open_first_run_notice"})
+            except Exception as exc:
+                logger.warning("First-run notice could not be queued: %s", exc)
+                return
+        except Exception as exc:
+            logger.warning("First-run notice failed: %s", exc)
+
+    def _speech_provider_ready_callback(self) -> "Callable[[], None]":
+        """Build the callback that RemoteSTTLauncher calls on an accepted ready.
+
+        Call it on the event loop; it keeps that loop. The launcher calls
+        the result on whichever thread delivered the ready, so the result
+        hands the set of _speech_provider_ready to the loop with
+        call_soon_threadsafe (wh-first-run-notice.2).
+        """
+        loop = asyncio.get_running_loop()
+        ready = self._speech_provider_ready
+
+        def on_ready() -> None:
+            loop.call_soon_threadsafe(ready.set)
+
+        return on_ready
+
+    async def _handle_first_run_notice_shown(self) -> None:
+        """Write the first-run marker after the GUI process showed the window.
+
+        The GUI process sends ``first_run_notice_shown`` once the notice is
+        on screen (GuiManager._open_first_run_notice). A second command
+        writes the marker again, which mark_hint_shown allows. The write
+        runs in a worker thread, off the event loop. This method catches
+        every exception: an exception that escapes a task made by
+        create_task_with_error_handling shuts Wheelhouse down
+        (wh-first-run-notice.1.1).
+        """
+        try:
+            from services.wheelhouse.click_first_use_hint import mark_hint_shown
+
+            marker = default_first_run_notice_marker_path()
+            if not await asyncio.to_thread(mark_hint_shown, marker):
+                logger.warning("First-run notice: the marker was not written.")
+        except Exception as exc:
+            logger.warning("First-run notice marker failed: %s", exc)
+
+    async def _handle_update_notice_shown(self, version) -> None:
+        """Write the update-notice record after the GUI process showed the notice.
+
+        The GUI process sends ``update_notice_shown`` with the notice's
+        version at the one moment the update notice becomes visible
+        (GuiManager._stack_update_notice). A notice that waits for a place
+        on the screen sends nothing, so no record hides a version the user
+        never saw (wh-blocked-mic-message.1.2). A command without a version
+        text writes nothing. A second command writes the record again. The
+        write runs in a worker thread, off the event loop. This method
+        catches every exception: an exception that escapes a task made by
+        create_task_with_error_handling shuts Wheelhouse down.
+        """
+        try:
+            if not (isinstance(version, str) and version):
+                logger.warning(
+                    "update_notice_shown dropped, version missing: %r", version
+                )
+                return
+            if not await asyncio.to_thread(
+                update_check.record_notice_shown,
+                update_check.state_file_path(),
+                version,
+                time.time(),
+            ):
+                logger.warning(
+                    "Update notice: could not record the shown notice, so the "
+                    "notice for %s can appear again at the next check.",
+                    version,
+                )
+        except Exception as exc:
+            logger.warning("Update notice record failed: %s", exc)
+
+    async def _run_update_check(self) -> None:
+        """Run the background update check until the task is cancelled.
+
+        The module catches every exception, because an exception that
+        escapes a task created by create_task_with_error_handling shuts
+        Wheelhouse down. notify puts the notice on the GUI queue.
+        """
+        await update_check.run_update_check(
+            self.config_service,
+            lambda version, tag: _send_update_notice(
+                self.state_manager, version, tag
+            ),
+        )
+
+    async def _handle_update_now(self, version, tag) -> None:
+        """Update now on the update notice: download the installer for ``tag``, then run it.
+
+        The order is the point of this method:
+
+        1. Download the installer script of the release ``tag`` and check
+           its digest (update_install.prepare_update). The download blocks,
+           so it runs in a worker thread, as the update check does
+           (update_check.run_update_check). Nothing else has happened yet.
+        2. Start the launch console (stt/parakeet_model.py
+           launch_installer) with the installer parameters of the current
+           install. The console waits for every Wheelhouse process to exit
+           and only then runs the installer.
+        3. Leave through the shutdown that the tray's Exit and the Parakeet
+           offer use (request_shutdown).
+
+        A failure in step 1 or 2 closes nothing and starts nothing. It
+        writes one warning that names the version and the reason, and sends
+        one ``update_failed`` action so the GUI shows a notice. This method
+        catches every exception: an exception that leaves a task made by
+        create_task_with_error_handling shuts Wheelhouse down.
+        """
+        if self.shutdown_event and self.shutdown_event.is_set():
+            logger.info("Update now ignored: Wheelhouse is already shutting down")
+            return
+        logger.info(f"Update now requested for version {version!r}, release tag {tag!r}")
+        try:
+            prepared = await asyncio.to_thread(
+                update_install.prepare_update, tag, update_check.get_app_version()
+            )
+            # The runtime record comes first: a scalar ``stt = "..."`` config
+            # runs fine but has no stt.last_provider (wh-release-update-check.1.3).
+            running_engine = self.state_manager.get_running_remote_stt_provider()
+            parameters = await asyncio.to_thread(
+                update_install.build_installer_parameters,
+                self.config_service,
+                running_engine=running_engine,
+            )
+            pids = self._wheelhouse_process_ids()
+            started = await asyncio.to_thread(
+                parakeet_model.launch_installer,
+                prepared.script_path,
+                pids,
+                installer_parameters=parameters,
+            )
+        except Exception as exc:  # noqa: BLE001 -- any failure leaves Wheelhouse running
+            logger.warning(f"Update to version {version!r} failed: {exc}")
+            _send_update_failed_notice(self.state_manager)
+            return
+        if not started:
+            # crewcut: the downloaded folder stays in the temporary folder
+            # after a failed start, and it also stays when a step after the
+            # download raises, which the except branch above catches. Remove
+            # it in both places with shutil.rmtree.
+            logger.warning(
+                f"Update to version {version!r} failed: the installer console did not start"
+            )
+            _send_update_failed_notice(self.state_manager)
+            return
+        logger.info(
+            f"Started the Wheelhouse installer for version {version!r}; "
+            "shutting down so it can run"
+        )
+        self.request_shutdown()
+
     async def _handle_parakeet_download_now(self) -> None:
         """Download now on the Parakeet model offer: start the installer, then exit.
 
@@ -2524,6 +2798,11 @@ class LogicController:
                 "set_interim_results", enabled=enabled
             )
             logger.info(f"Interim results {'enabled' if enabled else 'disabled'}")
+
+            # Save the new value so the next start reads it
+            # (wh-voice-settings-window). set_config_value also sends a state
+            # update; the one below repeats the same snapshot and is harmless.
+            await self.state_manager.set_config_value('INTERIM_RESULTS', enabled)
 
             # Send state update to GUI
             self.state_manager.send_state_update()
@@ -11793,6 +12072,15 @@ class LogicController:
             # Parakeet model offer. The handler asks the locator again,
             # starts the installer console, then shuts Wheelhouse down.
             "parakeet_download_now": lambda: self.create_task_with_error_handling(self._handle_parakeet_download_now(), "ParakeetDownloadNow"),
+            # wh-release-update-check: Update now on the update notice.
+            # The GUI sends the version and the release tag it was shown.
+            # The handler is a coroutine: it downloads in a worker thread.
+            "update_now": lambda: self.create_task_with_error_handling(self._handle_update_now(command.get("version"), command.get("tag")), "UpdateNow"),
+            # wh-blocked-mic-message.1.2: the GUI process sends this when the
+            # update notice becomes visible, with its version. The handler
+            # writes the shown-notice record, so a notice that waits for a
+            # place on the screen leaves no record behind.
+            "update_notice_shown": lambda: self.create_task_with_error_handling(self._handle_update_notice_shown(command.get("version", "")), "UpdateNoticeShown"),
             # The strict "is True" is deliberate. This command crosses a
             # process boundary, so the field is whatever the sender put
             # there, and bool("false") is True. Only the literal boolean
@@ -11802,6 +12090,10 @@ class LogicController:
             # a choice, and anything else records nothing
             # (wh-assistant-explainer-once-more).
             "open_help_online": lambda: self.create_task_with_error_handling(self.start_help_online(explained=command.get("explained") is True, source=str(command.get("source", "menu")), do_not_show_again=command.get("do_not_show_again") if isinstance(command.get("do_not_show_again"), bool) else None), "OpenHelpOnline"),
+            # wh-first-run-notice.1.1: the GUI process sends this once the
+            # first-run notice is on screen. The handler writes the marker,
+            # so a notice nobody saw leaves no marker behind.
+            "first_run_notice_shown": lambda: self.create_task_with_error_handling(self._handle_first_run_notice_shown(), "FirstRunNoticeShown"),
             "help_ask": lambda: self.create_task_with_error_handling(self._handle_help_ask(command.get("question", "")), "HelpAsk"),
             "help_reset": lambda: self._handle_help_reset(),
             "help_cancel": lambda: self._handle_help_cancel(),
@@ -12227,6 +12519,10 @@ class LogicController:
                 self.service_manager.remote_stt_launcher.set_provider_stopped_callback(
                     _mark_stt_stopped
                 )
+                # The first-run notice waits for this (wh-first-run-notice.2).
+                self.service_manager.remote_stt_launcher.set_provider_ready_callback(
+                    self._speech_provider_ready_callback()
+                )
                 # Wire up reverse reference so WebSocket manager can signal provider ready
                 self.app.websocket_manager.remote_stt_launcher = self.service_manager.remote_stt_launcher
                 # Auto-start the last selected remote STT provider
@@ -12257,11 +12553,7 @@ class LogicController:
                 "GuiCommandListener"
             )
 
-            task_coroutines = {
-                "PeriodicStateUpdate": self.periodic_state_updater()
-            }
-
-            for name, coro in task_coroutines.items():
+            for name, coro in self._startup_task_coroutines().items():
                 self.create_task_with_error_handling(coro, name)
 
             logger.info(f"LogicController setup complete with {len(self.background_tasks)} tasks. Running...")

@@ -137,6 +137,7 @@ runner._run_pytest = _run_pytest_showing_reasons
 CAPTURE_TESTS = (
     "tests/test_winrt_capture.py::TestMicrophoneOutageCallback",
     "tests/test_winrt_capture.py::TestMicrophoneLossRecovery",
+    "tests/test_winrt_capture.py::TestMicrophoneNameReport",
 )
 FACTORY_TESTS = "tests/test_audio_capture_factory.py"
 NOTICE_TESTS = "tests/test_mic_notice.py"
@@ -152,6 +153,26 @@ LOSS_AND_RECOVERY = "test_a_loss_and_its_recovery_each_call_the_callback_once"
 LOSS_BEFORE_RETURN = "test_the_loss_call_comes_before_the_microphone_returns"
 NO_REMINDER_CALLS = "test_reminders_never_call_the_callback"
 RAISING_CALLBACK = "test_a_raising_callback_is_logged_and_recovery_completes"
+
+# tests/test_winrt_capture.py, class TestMicrophoneNameReport
+OPENED_REPORTED = "test_the_first_graph_reports_its_device_as_opened"
+OPENED_NO_NAME = (
+    "test_a_node_with_no_device_and_a_failing_lookup_is_opened_with_none")
+OUTSIDE_THE_LOCK = "test_opened_and_closed_run_outside_the_lifecycle_lock"
+CLOSED_ONCE = "test_stopping_reports_closed_once"
+STOP_AND_RESTART = (
+    "test_the_stop_and_restart_clears_the_name_then_sets_the_new_one")
+NAME_AFTER_RECOVERY = (
+    "test_a_loss_and_recovery_move_the_name_through_the_notifier")
+
+# tests/test_mic_notice.py, class TestTheMicrophoneReport
+NAME_ON_OPENED = "test_opened_sends_the_device_name"
+NAME_ON_CLOSED = "test_closed_sends_an_empty_name"
+NAME_ON_LOST = "test_lost_sends_an_empty_name_and_still_sends_its_notice"
+NAME_ON_RECOVERED = (
+    "test_recovered_sends_the_device_name_and_still_sends_its_notice")
+NAME_UNGATED = "test_the_name_goes_out_when_the_loss_was_never_announced"
+NAME_FAULT = "test_a_failed_name_send_does_not_cost_the_notices"
 
 # tests/test_audio_capture_factory.py
 FACTORY_PASSES = "test_passes_the_outage_callback_through"
@@ -236,6 +257,21 @@ CAPTURE_MUTATIONS = [
         "recovering.device)\n",
         "                        self._report_outage('recovered', None)\n",
         LOSS_AND_RECOVERY,
+    ),
+    # wh-show-microphone-name: the open and the close are reported.
+    _capture(
+        "the-opened-report-is-never-made",
+        "                self._report_outage('opened', _device_name(owned[1]))\n",
+        "                pass\n",
+        OPENED_REPORTED, OPENED_NO_NAME, OUTSIDE_THE_LOCK, CLOSED_ONCE,
+        STOP_AND_RESTART, NAME_AFTER_RECOVERY,
+    ),
+    _capture(
+        "the-closed-report-is-never-made",
+        "        self._report_outage('closed', None)\n",
+        "        pass\n",
+        OUTSIDE_THE_LOCK, CLOSED_ONCE, STOP_AND_RESTART,
+        NAME_AFTER_RECOVERY,
     ),
     # Ruling D3: a reminder is a log line only. Two reminder sites exist:
     # a graph that built but never delivered (the poll loop), and a rebuild
@@ -339,12 +375,56 @@ NOTICE_MUTATIONS = [
         'MIC_RECOVERED_KIND = "mic_restored"\n',
         KINDS, PAIR_SENT,
     ),
+    # wh-show-microphone-name acceptance 4: the name report is gated by the
+    # loss flag that gates the notices.
+    _notice(
+        "the-recovered-name-is-gated-by-the-loss-flag",
+        "            self._report_microphone(device or \"\")\n"
+        "            if not self._loss_announced:\n",
+        "            if self._loss_announced:\n"
+        "                self._report_microphone(device or \"\")\n"
+        "            if not self._loss_announced:\n",
+        NAME_UNGATED, "test_the_name_goes_out_with_no_loss_at_all",
+    ),
+    _notice(
+        "the-opened-event-sends-no-name",
+        "        if event == OUTAGE_OPENED:\n"
+        "            self._report_microphone(device or \"\")\n",
+        "        if event == OUTAGE_OPENED:\n"
+        "            pass\n",
+        NAME_ON_OPENED,
+    ),
+    _notice(
+        "the-closed-event-sends-no-name",
+        "        elif event == OUTAGE_CLOSED:\n"
+        "            self._report_microphone(\"\")\n",
+        "        elif event == OUTAGE_CLOSED:\n"
+        "            pass\n",
+        NAME_ON_CLOSED,
+    ),
+    _notice(
+        "the-lost-event-sends-no-name",
+        "        elif event == OUTAGE_LOST:\n"
+        "            self._report_microphone(\"\")\n",
+        "        elif event == OUTAGE_LOST:\n"
+        "            pass\n",
+        NAME_ON_LOST,
+    ),
+    _notice(
+        "a-name-report-fault-is-not-contained",
+        "        try:\n"
+        "            forwarder.send_microphone(name)\n"
+        "        except Exception as e:\n",
+        "        forwarder.send_microphone(name)\n"
+        "        if False:\n",
+        NAME_FAULT,
+    ),
     # Ruling K2 removed: a recovery goes out with no sent loss before it.
     _notice(
         "k2-a-recovery-is-sent-without-a-sent-loss",
-        "        elif event == OUTAGE_RECOVERED:\n"
+        "            self._report_microphone(device or \"\")\n"
         "            if not self._loss_announced:\n",
-        "        elif event == OUTAGE_RECOVERED:\n"
+        "            self._report_microphone(device or \"\")\n"
         "            if False:\n",
         K2_SILENT_LOSS, K2_NEXT_OUTAGE, ONE_RECOVERY, FAILED_LOSS_SEND,
     ),
@@ -367,9 +447,11 @@ NOTICE_MUTATIONS = [
     # loss notice was NOT sent inherits the previous outage's "sent".
     _notice(
         "the-sent-flag-is-not-reset-by-a-new-loss",
-        "        if event == OUTAGE_LOST:\n"
+        "        elif event == OUTAGE_LOST:\n"
+        "            self._report_microphone(\"\")\n"
         "            self._loss_announced = False\n",
-        "        if event == OUTAGE_LOST:\n"
+        "        elif event == OUTAGE_LOST:\n"
+        "            self._report_microphone(\"\")\n"
         "            pass\n",
         "test_a_new_outage_whose_loss_was_not_sent_sends_no_recovery",
     ),

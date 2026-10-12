@@ -1054,6 +1054,25 @@ class TestCheckQueuesAndEvents:
         # set_indeterminate(False) should NOT be called again
         manager.button.set_indeterminate.assert_not_called()
 
+    def test_a_state_update_stores_the_microphone_name(self, manager):
+        manager.initial_state_received = True
+        msg = {'action': 'state_update', 'microphone_name': 'Studio Mic'}
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+        assert manager.microphone_name == 'Studio Mic'
+
+    def test_a_state_update_without_a_microphone_name_clears_it(self, manager):
+        manager.initial_state_received = True
+        manager.microphone_name = 'Studio Mic'
+        msg = {'action': 'state_update', 'speech_enabled': True}
+        manager.state_from_logic_queue.get_nowait.side_effect = [msg, Empty()]
+        with patch.object(manager, 'update_ui_state'):
+            manager._check_queues_and_events()
+
+        assert manager.microphone_name == ''
+
     def test_a_state_update_during_a_resize_leaves_the_size_alone(self, manager):
         """The stored size is the one from before the drag started.
 
@@ -3159,6 +3178,138 @@ class TestTheTwoMenusOfferTheSameEntries:
 
 
 # -----------------------------------------------------------------------
+# The "Listening on" entry (wh-show-microphone-name.3)
+# -----------------------------------------------------------------------
+
+class TestListeningOnEntryOnBothMenus:
+    """One disabled entry names the open microphone, directly above
+    "STT Provider", in both branches of ``_create_menu``.
+
+    The two strings are a user-visible contract (David approved them):
+    "Listening on: <name>" and "Listening on: no microphone".
+    """
+
+    NO_MIC = "Listening on: no microphone"
+
+    def _tray_top(self, manager):
+        import pystray
+        return [item for item in manager._create_menu(is_tray_menu=True)
+                if item is not pystray.Menu.SEPARATOR]
+
+    def _window_top(self, manager):
+        menu = manager._create_menu(is_tray_menu=False)
+        # Keep the menu alive while the caller reads the actions.
+        self._keep = menu
+        return [a for a in menu.actions() if not a.isSeparator()]
+
+    def test_the_gui_starts_with_no_microphone_name(self, menu_manager):
+        assert menu_manager.microphone_name == ""
+
+    def test_tray_entry_names_the_microphone(self, menu_manager):
+        menu_manager.microphone_name = "Studio Mic"
+        assert "Listening on: Studio Mic" in _tray_entries(menu_manager)
+
+    def test_window_entry_names_the_microphone(self, menu_manager):
+        menu_manager.microphone_name = "Studio Mic"
+        assert "Listening on: Studio Mic" in _window_entries(menu_manager)
+
+    def test_tray_entry_says_no_microphone_when_no_name_is_stored(
+        self, menu_manager
+    ):
+        menu_manager.microphone_name = ""
+        entries = _tray_entries(menu_manager)
+        assert self.NO_MIC in entries, entries
+
+    def test_window_entry_says_no_microphone_when_no_name_is_stored(
+        self, menu_manager
+    ):
+        menu_manager.microphone_name = ""
+        entries = _window_entries(menu_manager)
+        assert self.NO_MIC in entries, entries
+
+    def test_tray_entry_sits_directly_above_stt_provider(self, menu_manager):
+        menu_manager.microphone_name = "Studio Mic"
+        labels = [item.text for item in self._tray_top(menu_manager)]
+        position = labels.index(STT_SUBMENU_TITLE)
+        assert labels[position - 1] == "Listening on: Studio Mic", labels
+
+    def test_window_entry_sits_directly_above_stt_provider(self, menu_manager):
+        menu_manager.microphone_name = "Studio Mic"
+        labels = [a.text() for a in self._window_top(menu_manager)]
+        position = labels.index(STT_SUBMENU_TITLE)
+        assert labels[position - 1] == "Listening on: Studio Mic", labels
+
+    def test_tray_entry_is_present_when_no_engine_is_available(
+        self, menu_manager
+    ):
+        menu_manager.stt_providers_available = []
+        menu_manager.microphone_name = "Studio Mic"
+        entries = _tray_entries(menu_manager)
+        assert STT_SUBMENU_TITLE not in entries
+        assert "Listening on: Studio Mic" in entries, entries
+
+    def test_window_entry_is_present_when_no_engine_is_available(
+        self, menu_manager
+    ):
+        menu_manager.stt_providers_available = []
+        menu_manager.microphone_name = "Studio Mic"
+        entries = _window_entries(menu_manager)
+        assert STT_SUBMENU_TITLE not in entries
+        assert "Listening on: Studio Mic" in entries, entries
+
+    def test_the_two_menus_agree_with_no_engine_available(self, menu_manager):
+        menu_manager.stt_providers_available = []
+        menu_manager.microphone_name = "Studio Mic"
+        assert _tray_entries(menu_manager) == _window_entries(menu_manager)
+
+    def test_the_tray_entry_is_not_clickable(self, menu_manager):
+        menu_manager.microphone_name = "Studio Mic"
+        entry = [i for i in self._tray_top(menu_manager)
+                 if i.text == "Listening on: Studio Mic"]
+        assert len(entry) == 1
+        assert entry[0].enabled is False
+
+    def test_the_window_entry_is_not_clickable(self, menu_manager):
+        menu_manager.microphone_name = "Studio Mic"
+        entry = [a for a in self._window_top(menu_manager)
+                 if a.text() == "Listening on: Studio Mic"]
+        assert len(entry) == 1
+        assert entry[0].isEnabled() is False
+
+    def test_the_window_entry_doubles_an_ampersand_in_a_device_name(
+        self, menu_manager
+    ):
+        """Qt reads "&" in an action's text as the keyboard-shortcut
+        marker, so "Mic & Line" would display as "Mic  Line" with an
+        underline. The label doubles the character, which displays one.
+        David approved the text "Listening on: <name>", so it must reach
+        the screen unchanged.
+        """
+        menu_manager.microphone_name = "Mic & Line"
+        entry = [a for a in self._window_top(menu_manager)
+                 if a.text().startswith("Listening on: ")]
+        assert len(entry) == 1, _window_entries(menu_manager)
+        assert entry[0].text() == "Listening on: Mic && Line"
+
+    def test_the_tray_entry_doubles_an_ampersand_in_a_device_name(
+        self, menu_manager
+    ):
+        """pystray passes its text straight to InsertMenuItemW as an
+        MFT_STRING item, and it escapes nothing on Windows: see
+        pystray/_win32.py:308-321, where dwTypeData is the text and
+        fType is 0, and pystray/_util/win32.py:55, where MFT_STRING is
+        0. Its only escape call is on the GTK path. Win32 therefore
+        reads "&" as the keyboard-shortcut marker, exactly as Qt does,
+        so the tray entry must carry two to display one.
+        """
+        menu_manager.microphone_name = "Mic & Line"
+        entry = [i for i in self._tray_top(menu_manager)
+                 if i.text.startswith("Listening on: ")]
+        assert len(entry) == 1
+        assert entry[0].text == "Listening on: Mic && Line"
+
+
+# -----------------------------------------------------------------------
 # Voice teaching sits inside the STT Provider submenu
 # (wh-voice-teaching-stt-submenu)
 # -----------------------------------------------------------------------
@@ -3434,3 +3585,117 @@ class TestParakeetNotInstalledEntry:
         with patch.object(offer_manager, 'update_ui_state'):
             offer_manager._check_queues_and_events()
         assert offer_manager.stt_providers_not_installed == {}
+
+
+# -----------------------------------------------------------------------
+# The Settings entry on both menus (wh-voice-settings-window, acceptance 1
+# and 6)
+# -----------------------------------------------------------------------
+
+#: The entries both menus held before the Settings entry was added, in
+#: order. Acceptance 6: none of them changes, moves or disappears.
+EXISTING_TOP_LEVEL_ENTRIES = [
+    "Speech Enabled",
+    "Show Floating Button",
+    "Interim Results",
+    "Push-to-Talk Mode",
+    "STT Provider",
+    "AI Model",
+    "Pattern Manager",
+    "Debug",
+    "Help",
+    "About Wheelhouse",
+    "Restart Wheelhouse",
+    "Exit",
+]
+SETTINGS_TOOLTIP = (
+    "Open the settings window. It holds the settings in this menu and a few"
+    " more. The spoken command \"settings\" opens the same window."
+)
+
+
+class TestSettingsEntryOnBothMenus:
+    """Both branches of ``_create_menu`` hold a "Settings" item that opens the
+    settings window, and every earlier item stays as it was."""
+
+    def _tray_labels(self, manager):
+        import pystray
+        menu = manager._create_menu(is_tray_menu=True)
+        return [item.text for item in menu
+                if item is not pystray.Menu.SEPARATOR
+                and not (item.default and not item.visible)]
+
+    def _window_labels(self, manager):
+        menu = manager._create_menu(is_tray_menu=False)
+        return [action.text() for action in menu.actions()
+                if not action.isSeparator()]
+
+    def test_both_menus_keep_every_existing_entry_in_order(self, menu_manager):
+        for name, labels in (("tray", self._tray_labels(menu_manager)),
+                             ("window", self._window_labels(menu_manager))):
+            assert "Settings" in labels, name
+            # "Listening on: ..." was added later (wh-show-microphone-name.3)
+            # and has its own tests in TestListeningOnEntryOnBothMenus.
+            without = [text for text in labels
+                       if text != "Settings"
+                       and not text.startswith("Listening on: ")]
+            assert without == EXISTING_TOP_LEVEL_ENTRIES, name
+
+    def test_settings_follows_pattern_manager_in_both_menus(self, menu_manager):
+        for labels in (self._tray_labels(menu_manager),
+                       self._window_labels(menu_manager)):
+            assert labels.index("Settings") == labels.index("Pattern Manager") + 1
+
+    def test_the_tray_item_asks_the_qt_thread_to_open_the_window(
+        self, menu_manager
+    ):
+        """pystray runs a menu callback on its own thread, and the window is
+        built on the Qt thread, so the item only queues the request."""
+        import threading
+        import pystray
+
+        menu = menu_manager._create_menu(is_tray_menu=True)
+        item = [i for i in menu if i is not pystray.Menu.SEPARATOR
+                and i.text == "Settings"][0]
+        failures = []
+
+        def invoke():
+            try:
+                item(menu_manager.icon)
+            except BaseException as exc:
+                failures.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        worker.join(timeout=2)
+        assert not worker.is_alive(), "the tray callback never returned"
+        assert not failures, failures
+        menu_manager.state_from_logic_queue.put.assert_called_once_with(
+            {"action": "open_settings_window"}
+        )
+
+    def test_the_window_item_opens_the_window(self, menu_manager):
+        with patch.object(menu_manager, "_open_settings_window") as opened:
+            menu = menu_manager._create_menu(is_tray_menu=False)
+            action = [a for a in menu.actions() if a.text() == "Settings"][0]
+            action.trigger()
+        opened.assert_called_once()
+
+    def test_the_window_item_has_its_hover_comment(self, menu_manager):
+        menu = menu_manager._create_menu(is_tray_menu=False)
+        action = [a for a in menu.actions() if a.text() == "Settings"][0]
+        assert action.toolTip() == SETTINGS_TOOLTIP
+
+    def test_both_items_stay_greyed_until_the_first_state_arrives(
+        self, menu_manager
+    ):
+        import pystray
+
+        menu_manager.initial_state_received = False
+        tray = menu_manager._create_menu(is_tray_menu=True)
+        item = [i for i in tray if i is not pystray.Menu.SEPARATOR
+                and i.text == "Settings"][0]
+        assert item.enabled is False
+        window = menu_manager._create_menu(is_tray_menu=False)
+        action = [a for a in window.actions() if a.text() == "Settings"][0]
+        assert action.isEnabled() is False

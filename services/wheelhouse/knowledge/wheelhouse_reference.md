@@ -40,7 +40,7 @@ Captures the selected text, or all the text in the focused field when nothing is
 
 Parameters: none.
 
-Example: `Trigger "^fix" with no params: saying "x-ray fix" corrects the selected text, or all the text in the focused field when nothing is selected.`
+Example: `Trigger "^fix(?:ed)?$" with no params: saying "x-ray fix" or "x-ray fixed" corrects the selected text, or all the text in the focused field when nothing is selected.`
 
 #### Rewrite text with AI
 
@@ -464,6 +464,18 @@ Parameters, in the order a pattern passes them:
 
 Example: `Trigger "^select (.+)$" with params ["g1"]: saying "x-ray select brown fox" selects the first "brown fox" in the document. This one needs the safety word first.`
 
+#### Spoken number as digits
+
+Action name: `number_digits`. The Pattern Manager lists it under Advanced actions, Text.
+
+Converts a spoken number to its digits, with no period.
+
+Parameters, in the order a pattern passes them:
+
+- `number` (number) -- The number as words (twenty three) or digits (23); usually the capture group g1.
+
+Example: `Trigger "^numeric (\d+)$" with params ["g1"]: saying "numeric twenty three" inserts "23".`
+
 #### Transform selected text
 
 Action name: `transform_selection`. The Pattern Manager lists it under Advanced actions, Text.
@@ -536,6 +548,16 @@ Parameters: none.
 
 Example: `Trigger "^patterns?$" with no params: saying "patterns" opens the Pattern Manager.`
 
+#### Open the Settings window
+
+Action name: `open_settings_window`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
+
+Opens the settings window, where the menu settings and a few more can be changed with the mouse or by voice.
+
+Parameters: none.
+
+Example: `Trigger "^settings?$" with no params: saying "settings" opens the settings window.`
+
 #### Set speech interaction mode
 
 Action name: `set_speech_interaction_mode`. The Pattern Manager's action list does not offer this action.
@@ -596,12 +618,16 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 | **Error Creating Pattern** (message box) | You clicked Create in the pattern editor, then closed the editor before Wheelhouse answered. Wheelhouse then reported that it could not create the pattern. While the editor stays open, it shows such an error inside the editor instead. | The new pattern was not saved. The message text is the reason Wheelhouse gave. | Click OK. Open the editor again the same way and enter the pattern again. If the same message comes back, read its reason and fix that problem first. |
 | **Error Updating Pattern** (message box) | You clicked Save while you edited one of your patterns, then closed the editor before Wheelhouse answered. Wheelhouse then reported that it could not save the change. | Your change to the pattern was not saved. The message text is the reason Wheelhouse gave. | Click OK. Select the pattern, click Edit..., and make the change again. |
 | **Error Deleting Pattern** (message box) | You clicked Delete Pattern or Remove customization, then clicked Yes. Wheelhouse could not delete the pattern. | Wheelhouse did not delete the pattern. The message gives the reason, for example that the pattern was not found. | Click OK. Close and reopen the Pattern Manager to refresh the list. If the pattern is still in the list, try again. |
-| **WheelHouse settings** (notice) | You moved or resized the floating button, turned Show Floating Button on or off, or changed the Pattern Manager font size, and Wheelhouse could not save the change. | Wheelhouse shows no notice while it saves a setting or when the save succeeds. "Couldn't save settings" and "Couldn't send settings" mean the change was not saved. Wheelhouse then puts back the last saved values. "Couldn't confirm the settings" means Wheelhouse got no answer, even after it checked the saved settings, so the change may not be saved. | After a message that starts with "Couldn't", make the change again. For "Couldn't change button visibility", select Show Floating Button in the menu again. |
+| **WheelHouse settings** (notice) | You moved or resized the floating button, turned Show Floating Button on or off, changed the Pattern Manager font size, or changed a saved setting in the WheelHouse Settings window, and Wheelhouse could not save the change. When a save from the WheelHouse Settings window fails, that window also shows "Not saved". | Wheelhouse shows no notice while it saves a setting or when the save succeeds. "Couldn't save settings" and "Couldn't send settings" mean the change was not saved. Wheelhouse then puts back the last saved values. "Couldn't confirm the settings" means Wheelhouse got no answer, even after it checked the saved settings, so the change may not be saved. | After a message that starts with "Couldn't", make the change again. For "Couldn't change button visibility", select Show Floating Button in the menu again. |
 | **Wheelhouse** (notice) | You selected Assistant in the "Ask the Wheelhouse Assistant" window, and Wheelhouse could not save your choice about the "Do not show this again" box. | The notice reads "Wheelhouse could not save your choice from the Assistant window. The window can appear again when you choose Help." Your choice was not kept, so the next Help shows the window again. Other short notices also use the title Wheelhouse. | Choose Help again. When the window appears, set the check box the way you want and select Assistant again. |
 | **Terminal Dictation** (window) | You dictate while a terminal window is in front and waiting at its prompt. Windows Terminal, Command Prompt, and PowerShell count as terminals. Wheelhouse opens this window and types your words into it. The terminal inside Visual Studio Code does not open this window. A terminal that runs as administrator does not open this window either. | Wheelhouse collects your dictated command here, so you can check it before it reaches the terminal. | Check or edit the text. Press Enter or click Submit to paste the text into the terminal and run it. Press Shift+Enter for a new line. Press Escape or click Cancel to close the window and discard the text. |
 | **Terminal paste failed** (Windows notification) | You pressed Enter or clicked Submit in the Terminal Dictation window. Wheelhouse could not paste the text into the terminal. | Wheelhouse did not press Enter in the terminal, so the command did not run. The Terminal Dictation window closed and its text was cleared. In some cases the text already reached the terminal prompt. | Click the terminal and check its prompt. Then dictate the command again. Wheelhouse does not paste into a terminal that runs as administrator. Type the command there with the keyboard. |
 | **Wheelhouse: Speech setup** (Windows notification) | Wheelhouse checks each speech engine's installed files once, when it first starts a speech engine after launch. It shows this notice when an engine's files are out of date. It also shows it when Windows lacks a new enough Microsoft Visual C++ runtime. | Speech can fail to start, or the speech engine can crash. Wheelhouse shows one notice for each problem it finds. | If the message says "Speech environment is out of date", run the Wheelhouse installer again. For the Visual C++ runtime message, run the installer again and select Yes when Windows asks for permission. If you already did that, restart the computer. |
 | **Wheelhouse: STT Choice Not Saved** (Windows notification) | You picked a speech engine from STT Provider in the right-click menu. The settings file could not record the choice. | Wheelhouse already stopped the old engine and started the new one, so the new engine is running now. The settings file was not changed. It has a plain value where its stt section belongs, so it cannot store the choice. The next time Wheelhouse starts, it will not remember this choice. | Select Exit in the menu to close Wheelhouse. Open the settings file, %LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml, in Notepad. Find the line that sets stt to one value, such as stt = "whisper", and delete it. Or copy config.toml.example over config.toml to restore every default. Then start Wheelhouse and pick the engine again from STT Provider. |
+| **Windows is blocking your microphone** (notice in the corner of the screen) | A speech engine starts, and Windows refuses it the microphone because "Let desktop apps access your microphone" is off. Parakeet, Distil-Whisper, and Google Cloud all report this. A Windows notification near the clock also appears and closes itself after a few seconds. | Wheelhouse cannot hear you, so dictation and voice commands do not work. The notice reads "WheelHouse cannot use your microphone. Windows is blocking it." and then names the Windows setting to change. The notice has only a close button and stays on the screen until you close it. | Open Settings > Privacy and security > Microphone and turn on "Let desktop apps access your microphone". Then start Wheelhouse again. Click the close button to close the notice. |
+| **Wheelhouse {version} is available** (notice in the corner of the screen) | Wheelhouse checks once a day whether a newer public release exists, and it found one. The title shows the new version number in place of {version}. The notice does not close by itself. Wheelhouse does not check when CHECK_FOR_UPDATES is false in config.toml. | A newer version of Wheelhouse can be installed. The notice has two buttons, Update now and Later. | Click Update now to download the installer, check it, close Wheelhouse, and run the installer. Click Later, or close the notice, to hide it. Wheelhouse can show the notice for the same version again 7 days after it last appeared. A newer version shows its notice at once. |
+| **Wheelhouse update** (notice in the corner of the screen) | You clicked Update now on the notice "Wheelhouse {version} is available", and one step of the update failed. The update has three steps that can fail. Wheelhouse could not download the installer script. Or Wheelhouse could not check the download against the digest (a check value) and the size that the release names. Or Wheelhouse could not start the installer console. Wheelhouse keeps running. The notice has only a close button and closes by itself after about 20 seconds. | The update did not start, and Wheelhouse was not changed. The notice for the same version can appear again 7 days after it last appeared. A newer version shows its notice at once. | Run the installer from the website. Updating Wheelhouse describes how. |
+| **Welcome to Wheelhouse** (window) | You start Wheelhouse for the first time after an install, or for the first time after an update from a release that did not have this window. Wheelhouse shows this window one time. It does not come back on a later start or after a later update. | The window says that the round red button shows that Wheelhouse hears you. The button pulses from red to orange while you speak. It also says that you can say the word help on its own to open the help page. The window has two buttons: Open help and Close. | Click Open help to open the help page in your browser. The Enter key also chooses Open help, because it is the default button. Click Close, press Escape, or click the X in the title bar to close the window. |
 
 ## Configuration Reference
 
@@ -629,6 +655,8 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 **LOG_TRANSCRIPTS** *(default: `false`)* -- A privacy setting: false keeps the words you dictate and your clipboard contents out of the log files (only text lengths are noted). Set true only while troubleshooting recognition, then turn it back off; while on, everything you dictate, including passwords, accumulates in the logs.
 
+**CHECK_FOR_UPDATES** *(default: `true`)* -- Whether Wheelhouse asks api.github.com once a day if a newer release exists. When one exists, a notice offers to install it. Set false to stop the update check. Wheelhouse then makes no update request. Without this key, the check is on.
+
 **SIDE_OFFSET** *(default: `10`)* -- Width in pixels of the left-edge screen zone where the mouse thumb wheel adjusts brightness instead of volume. Raise it if the brightness zone is hard to hit.
 
 **BRIGHTNESS_INCREMENT** *(default: `1.0`)* -- The size of each thumb-wheel brightness adjustment step. Raise for faster, coarser changes; lower for finer control.
@@ -650,6 +678,8 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 **FLOATING_BUTTON_VISIBLE** *(default: `true`)* -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target. In push-to-talk mode the floating button is the only way to listen, because the hold works on it alone.
 
 **SPEECH_ENABLED_ON_STARTUP** *(default: `true`)* -- Whether Wheelhouse starts listening as soon as it launches. Set false to turn the microphone on manually each session.
+
+**INTERIM_RESULTS** *(default: `true`)* -- Whether Wheelhouse shows words while you speak, before the speech engine finishes the sentence. The Interim Results item in the right-click menu and in the Settings window changes this setting and saves it. Set false to see words only after the speech engine finishes each sentence. Without this key, or with a value that is not true or false, the setting is on.
 
 **SHOW_SPEECH_PULSE** *(default: `true`)* -- Pulse the floating button while Wheelhouse hears you, as a signal that your speech is reaching it. The tray icon does not pulse. With this off, the button still flashes green when an utterance has been processed. Turn off only if the animation distracts.
 
@@ -679,7 +709,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 **device_type** *(default: `"default"`)* -- Which audio device to control. Valid values: "default" (the usual choice) or "communications".
 
-**volume_step_db** *(default: `1.5`)* -- Loudness change per wheel step, in decibels.
+**volume_step_db** *(default: `1.5`)* -- Loudness change, in decibels, for each unit of VOLUME_INCREMENT. One wheel step sends VOLUME_INCREMENT units, so with the defaults (1.5 and 0.5) one step changes the loudness by 0.75 dB.
 
 **min_volume_db** *(default: `-96.0`)* -- The volume floor, in decibels.
 
@@ -859,4 +889,4 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ---
 
-Generated: 2026-10-01 for the v1.2.2 release
+Generated: 2026-10-11 for the v1.3.0 release

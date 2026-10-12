@@ -183,9 +183,11 @@ class _Rig:
         """Put one utterance's words on the queue, then its end marker.
 
         The end marker is what the STT intake sends after the last word of an
-        utterance, and it is what finalizes a buffer whose pattern could still
-        have grown (``^fix`` has no closing anchor). Sending the words without
-        it would leave the command waiting on the command timeout.
+        utterance, and it is what finalizes the command buffer. (The fix-text
+        expression was ``^fix``, with no closing anchor, until bead
+        wh-pattern-variants-numeric made it ``^fix(?:ed)?$``. Every rewrite
+        trigger ends in ``$`` now.) Sending the words without the end marker
+        would leave the command waiting on the command timeout.
         """
         for index, word in enumerate(words):
             await self.processor.word_queue.put(

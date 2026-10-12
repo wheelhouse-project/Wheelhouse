@@ -33,6 +33,7 @@ import logging
 import threading
 import time
 
+from shared_audio.capture.winrt_capture import MICROPHONE_BLOCKED_MESSAGE
 from shared_stt.ws_forwarder import WSForwarder
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,48 @@ _CONNECT_POLL_S = 0.05
 # crashes. NOT 2 either: google_stt_server/config_loader.py exits 2 on a
 # bad configuration file.
 REFUSAL_EXIT_CODE = 3
+
+# The value of the "cause" key on a startup_failed notice when Windows is
+# blocking the microphone. WheelHouse's websocket_manager.py reads it and
+# shows its own on-screen notice (wh-blocked-mic-message). The two sides
+# agree on this string; there is no import between the processes.
+MICROPHONE_BLOCKED_CAUSE = "microphone_blocked"
+
+
+# What every provider puts in front of a capture failure that its capture
+# handshake reports. The one exception is the blocked-microphone sentence
+# (capture_failure_message below).
+CAPTURE_FAILURE_PREFIX = "Failed to start - transcription will not work: "
+
+
+def capture_failure_message(detail: str) -> tuple[str, str]:
+    """The notice text and cause for a failure the capture handshake reports.
+
+    Two paths report a start failure. send_startup_failed_notice below
+    serves the first: the audio factory raised inside a provider
+    constructor, so no capture object exists. This function serves the
+    second: the capture object was built, its capture thread then failed,
+    and the provider read setup_error after wait_ready() returned False.
+    A blocked microphone always takes the second path, because the audio
+    graph is built inside the capture thread (wh-blocked-mic-message).
+
+    Args:
+        detail: setup_error from the capture object, or the provider's own
+            sentence for a wait that expired with no error.
+
+    Returns:
+        (message, cause). For MICROPHONE_BLOCKED_MESSAGE the message is
+        that sentence with nothing in front of it and the cause is
+        MICROPHONE_BLOCKED_CAUSE: the sentence already tells the user what
+        to do, and a prefix about transcription not working would only
+        bury it in a Windows notification. For any other detail the
+        message is CAPTURE_FAILURE_PREFIX followed by the detail and the
+        cause is "". The detail is compared with the constant it was built
+        from, so the sentence has one copy.
+    """
+    if detail == MICROPHONE_BLOCKED_MESSAGE:
+        return MICROPHONE_BLOCKED_MESSAGE, MICROPHONE_BLOCKED_CAUSE
+    return CAPTURE_FAILURE_PREFIX + detail, ""
 
 
 def send_startup_failed_notice(
@@ -121,7 +164,20 @@ def send_startup_failed_notice(
         if not wait_for_notice_connection(
                 forwarder, f"ws://{ws_host}:{ws_port}", connect_timeout):
             return False
-        forwarder.send_notification(title, message, kind="startup_failed")
+        # The one failure WheelHouse shows its own on-screen notice for
+        # (wh-blocked-mic-message). The message is compared with the
+        # constant it was built from, so the sentence has one copy and a
+        # reworded sentence changes both sides at once. Any other
+        # message sends the call it always sent: send_notification
+        # defaults cause to "", and the frame carries it empty.
+        if message == MICROPHONE_BLOCKED_MESSAGE:
+            forwarder.send_notification(
+                title, message, kind="startup_failed",
+                cause=MICROPHONE_BLOCKED_CAUSE,
+            )
+        else:
+            forwarder.send_notification(
+                title, message, kind="startup_failed")
         return True
     except Exception:
         # Nothing may escape this function. The caller is a provider

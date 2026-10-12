@@ -141,7 +141,11 @@ MUTATIONS = [
         # the retracted arm now prepends the previous utterance's
         # held words to it. The mirror still mirrors what was
         # actually replayed, so only the name here changed.
-        "old": "                self._words_this_utterance = editor_replay.split()\n",
+        # wh-itn-percent-digits.1.1 (d749e693) renamed it again, to
+        # spoken_replay, because the editor now holds the percent symbol
+        # while this record must keep the spoken word. The mirror still
+        # mirrors the spoken form, so again only the name here changed.
+        "old": "                self._words_this_utterance = spoken_replay.split()\n",
         "new": "                pass\n",
         "expect": ["test_editor_retraction_mirrors_final_text"],
     },

@@ -30,7 +30,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Union
+from typing import Iterable, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
@@ -413,12 +413,36 @@ def _powershell_exe() -> str:
     )
 
 
+# One installer parameter, as the console writes it unquoted: a name such as
+# -StartNow, or a value made only of letters, digits, "_", "." and "-".
+_PARAMETER_NAME = re.compile(r"-[A-Za-z][A-Za-z0-9]*")
+_PARAMETER_VALUE = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.\-]*")
+
+
+def _installer_call_parameters(parameters: Sequence[str]) -> str:
+    """The text of a parameter list, checked so that it cannot change the command.
+
+    The console writes the parameters without quotes, so a space, a quote or
+    a ";" in one of them would start another command. Each item must be a
+    name or a plain value. Raises ValueError for any other item.
+    """
+    checked = []
+    for item in parameters:
+        if not isinstance(item, str) or not (
+            _PARAMETER_NAME.fullmatch(item) or _PARAMETER_VALUE.fullmatch(item)
+        ):
+            raise ValueError(f"installer parameter is not a plain name or value: {item!r}")
+        checked.append(item)
+    return " ".join(checked)
+
+
 def build_launch_command(
     script_path: Union[str, Path],
     pids: Iterable[int],
     *,
-    auto_start: bool,
+    auto_start: Optional[bool] = None,
     timeout_seconds: int = WAIT_FOR_EXIT_SECONDS,
+    installer_parameters: Optional[Sequence[str]] = None,
 ) -> list[str]:
     """The powershell.exe command that waits for Wheelhouse, then installs.
 
@@ -431,6 +455,10 @@ def build_launch_command(
     runs the script with -SttProvider parakeet_tdt -StartNow yes and the
     given -AutoStart, then waits for a key so the installer's last messages
     stay readable. When WMI cannot be asked, the given ids alone decide.
+
+    ``installer_parameters`` (the update path) is a list of parameter names
+    and values that replaces those three parameters. Give exactly one of
+    ``auto_start`` and ``installer_parameters``; ValueError otherwise.
 
     The script is a single argument without double quotes, so the C runtime
     and powershell.exe read it the same way.
@@ -445,10 +473,27 @@ def build_launch_command(
         raise ValueError("timeout_seconds must be positive")
 
     names_filter = " OR ".join(f"Name = ''{name}''" for name in RUNNING_PROCESS_NAMES)
-    installer_call = (
-        f"& {_ps_quote(str(script_path))} -SttProvider {PROVIDER_NAME} "
-        f"-StartNow yes -AutoStart {'yes' if auto_start else 'no'}"
-    )
+    if (auto_start is None) == (installer_parameters is None):
+        raise ValueError("give exactly one of auto_start and installer_parameters")
+    if installer_parameters is None:
+        parameter_text = (
+            f"-SttProvider {PROVIDER_NAME} "
+            f"-StartNow yes -AutoStart {'yes' if auto_start else 'no'}"
+        )
+        # The Parakeet offer comes back from the model list.
+        retry_text = "then choose Parakeet again."
+    else:
+        parameter_text = _installer_call_parameters(installer_parameters)
+        # A parameter list reaches this function only from "Update now".
+        # The update notice closes when Update now is pressed, and the
+        # notice for the same version can appear again only 7 days after it
+        # last appeared (update_check.notice_is_due), so the user has no
+        # button to press until the notice appears again. A later caller
+        # with another purpose owes its own instruction here.
+        retry_text = "then run the installer from the website."
+    installer_call = f"& {_ps_quote(str(script_path))}"
+    if parameter_text:
+        installer_call += " " + parameter_text
     statements = [
         "$ids = @(" + ",".join(ids) + ")",
         f"$limit = {limit}",
@@ -469,7 +514,7 @@ def build_launch_command(
         "while (((Get-WheelhouseCount) -gt 0) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 1 }",
         "if ((Get-WheelhouseCount) -gt 0) { "
         f"Write-Host 'Wheelhouse did not close within {limit} seconds, so the Wheelhouse installer was not started.'; "
-        "Write-Host 'Exit Wheelhouse (right-click the Wheelhouse tray icon and choose Exit), then choose Parakeet again.'; "
+        f"Write-Host 'Exit Wheelhouse (right-click the Wheelhouse tray icon and choose Exit), {retry_text}'; "
         "Write-Host 'Press any key to close this window.'; "
         "try { $null = [Console]::ReadKey($true) } catch { }; "
         "exit 1 "
@@ -499,21 +544,29 @@ def launch_installer(
     pids: Iterable[int],
     *,
     auto_start: Optional[bool] = None,
+    installer_parameters: Optional[Sequence[str]] = None,
 ) -> bool:
     """Start the launch console and return at once. False if it did not start.
 
     auto_start None means: keep the current answer, read from whether the
-    Startup shortcut exists now. The console gets its own window
+    Startup shortcut exists now. ``installer_parameters`` (the update path)
+    replaces the three Parakeet parameters; the shortcut is then not read,
+    and ``auto_start`` must not be given. The console gets its own window
     (CREATE_NEW_CONSOLE). Its working directory is the script's folder,
     because the installer deletes and rebuilds the app folder. No
     CREATE_BREAKAWAY_FROM_JOB: Wheelhouse puts only the local AI server in a
     job object (ai/server_launcher.py), not itself, so nothing ends this
     console when Wheelhouse exits.
     """
-    if auto_start is None:
+    if installer_parameters is None and auto_start is None:
         auto_start = startup_shortcut_exists()
     script_path = Path(script_path)
-    cmd = build_launch_command(script_path, pids, auto_start=auto_start)
+    cmd = build_launch_command(
+        script_path,
+        pids,
+        auto_start=auto_start,
+        installer_parameters=installer_parameters,
+    )
     try:
         _popen(cmd, cwd=str(script_path.parent), creationflags=CREATE_NEW_CONSOLE)
     except Exception as exc:  # noqa: BLE001 -- the caller reports the failure

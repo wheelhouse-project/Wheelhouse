@@ -1,4 +1,4 @@
-"""Tests for launcher.py crash recovery and process supervision.
+"""Tests for launcher.py crash detection and process supervision.
 
 Target: services/wheelhouse/launcher.py
 
@@ -1860,11 +1860,12 @@ class TestResetFirstUseHintsBootstrap:
 class TestLauncherLoggingResilience:
     """The supervisor thread must never block on a frozen console.
 
-    Crash recovery previously logged synchronously to stderr on the
-    supervisor thread (logger.error at child death), so a conhost hang
-    wedged the restart loop before it could respawn the dead child. The
-    launcher now uses the same producer-queue / listener-thread split as
-    the service processes, with the file handler ahead of stderr.
+    The child-death path previously logged synchronously to stderr on
+    the supervisor thread (logger.error at child death), so a conhost
+    hang wedged the supervisor loop before it could shut the other
+    processes down. The launcher now uses the same producer-queue /
+    listener-thread split as the service processes, with the file handler
+    ahead of stderr.
     """
 
     @pytest.fixture
@@ -2879,3 +2880,107 @@ class TestRotateLogForNewCycle:
         finally:
             launcher._teardown_launcher_logging()
             root.handlers[:] = saved
+
+
+class TestTranscriptFlagReadEachCycle:
+    """wh-voice-settings-window stage A (boss ruling R2): the launcher reads
+    LOG_TRANSCRIPTS again at the top of EVERY start cycle, before it starts
+    any child, so a value the user changes in config.toml between two cycles
+    reaches the next cycle's children. A stale export from the first cycle
+    would keep the privacy switch (scripts/release/public/PRIVACY.md:35) in
+    the old position."""
+
+    _TWO_CYCLE_TIMES = TestOneLogRotationPerStartCycle._TWO_CYCLE_TIMES
+
+    def _run(self, launcher_env, monkeypatch, tmp_path, flip_to,
+             start="LOG_TRANSCRIPTS = true\n"):
+        """Run two cycles; cycle 1 reads start, the file then becomes flip_to.
+
+        Returns the WHEELHOUSE_LOG_TRANSCRIPTS value each child saw at start,
+        in start order.
+        """
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(start, encoding="utf-8")
+        real_read = launcher._read_transcript_logging_flag
+        monkeypatch.setattr(
+            launcher, "_read_transcript_logging_flag",
+            lambda _path: real_read(cfg),
+        )
+
+        seen = []
+        app_data = launcher_env["app_data"]
+        (app_data / "wheelhouse.restart").write_text("")
+
+        names = ["LogicProcess", "InputProcess", "GuiProcess"]
+        process_mocks = []
+        for i in range(6):
+            proc = launcher_env["make_process"](
+                alive=False, exitcode=0, name=names[i % 3], pid=42 + i)
+
+            def on_start(first=(i == 0)):
+                seen.append(os.environ.get("WHEELHOUSE_LOG_TRANSCRIPTS"))
+                if first:
+                    # The user edits config.toml while cycle 1 runs.
+                    cfg.write_text(flip_to, encoding="utf-8")
+
+            proc.start.side_effect = on_start
+            process_mocks.append(proc)
+        shm_mocks = []
+        for i in range(4):
+            m = MagicMock()
+            m.name = f"shm_{i}"
+            shm_mocks.append(m)
+
+        with patch("services.wheelhouse.utils.system.get_app_data_path",
+                   return_value=str(app_data)), \
+             patch.object(launcher, "cleanup_stale_resources"), \
+             patch("launcher.shared_memory.SharedMemory", side_effect=shm_mocks), \
+             patch("launcher.multiprocessing.Queue", return_value=Mock()), \
+             patch("launcher.multiprocessing.Event",
+                   return_value=launcher_env["shutdown_event"]), \
+             patch("launcher.multiprocessing.Process", side_effect=process_mocks), \
+             patch.dict("sys.modules", launcher_env["sys_modules"]), \
+             patch.object(launcher, "time", _fake_time_ns(self._TWO_CYCLE_TIMES)):
+            launcher.main()
+        return seen
+
+    def test_a_switch_turned_off_between_cycles_reaches_the_second_cycle(
+        self, launcher_env, monkeypatch, tmp_path
+    ):
+        seen = self._run(
+            launcher_env, monkeypatch, tmp_path, "LOG_TRANSCRIPTS = false\n")
+        assert seen == ["1", "1", "1", "0", "0", "0"], seen
+
+    def test_a_switch_turned_on_between_cycles_reaches_the_second_cycle(
+        self, launcher_env, monkeypatch, tmp_path
+    ):
+        seen = self._run(
+            launcher_env, monkeypatch, tmp_path, "LOG_TRANSCRIPTS = true\n",
+            start="LOG_TRANSCRIPTS = false\n")
+        assert seen == ["0", "0", "0", "1", "1", "1"], seen
+
+    def test_the_enabled_line_is_logged_only_for_a_cycle_that_has_it_on(
+        self, launcher_env, monkeypatch, tmp_path, caplog
+    ):
+        with caplog.at_level(logging.INFO):
+            self._run(
+                launcher_env, monkeypatch, tmp_path,
+                "LOG_TRANSCRIPTS = false\n")
+        enabled = [
+            r for r in caplog.records
+            if "Transcript logging ENABLED" in r.getMessage()
+        ]
+        assert len(enabled) == 1, [r.getMessage() for r in caplog.records]
+
+    def test_the_enabled_line_is_logged_for_every_cycle_that_has_it_on(
+        self, launcher_env, monkeypatch, tmp_path, caplog
+    ):
+        with caplog.at_level(logging.INFO):
+            self._run(
+                launcher_env, monkeypatch, tmp_path,
+                "LOG_TRANSCRIPTS = true\n")
+        enabled = [
+            r for r in caplog.records
+            if "Transcript logging ENABLED" in r.getMessage()
+        ]
+        assert len(enabled) == 2, [r.getMessage() for r in caplog.records]

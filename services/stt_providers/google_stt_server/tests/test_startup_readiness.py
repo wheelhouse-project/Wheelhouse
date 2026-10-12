@@ -119,7 +119,7 @@ class TestTheReadyNoticeFollowsTheHandshake:
     def test_a_ready_capture_gets_the_ready_notice(self):
         assert _after_capture(
             None, _mic(ready=True), _running()) == (
-                "Google STT", "Transcription service ready", "ready")
+                "Google STT", "Transcription service ready", "ready", "")
 
     def test_the_handshake_is_actually_called(self):
         mic = _mic(ready=True)
@@ -137,7 +137,7 @@ class TestTheReadyNoticeFollowsTheHandshake:
         assert args == () and kwargs == {}
 
     def test_a_failed_capture_never_gets_the_ready_notice(self):
-        _t, message, _k = _after_capture(
+        _t, message, _k, _c = _after_capture(
             None, _mic(ready=False, setup_error="Device unavailable"),
             _running())
         assert message != "Transcription service ready"
@@ -147,13 +147,13 @@ class TestTheFailureNotice:
     """Criterion 2: a failed handshake reports startup_failed."""
 
     def test_a_failed_capture_sends_startup_failed(self):
-        _t, _m, kind = _after_capture(
+        _t, _m, kind, _c = _after_capture(
             None, _mic(ready=False, setup_error="Device unavailable"),
             _running())
         assert kind == "startup_failed"
 
     def test_the_failure_notice_names_the_cause(self):
-        _t, message, _k = _after_capture(
+        _t, message, _k, _c = _after_capture(
             None, _mic(ready=False, setup_error="Device unavailable"),
             _running())
         assert "Device unavailable" in message
@@ -161,14 +161,14 @@ class TestTheFailureNotice:
     def test_a_timeout_with_no_reason_still_names_what_happened(self):
         """False with setup_error None means the wait expired with setup
         unfinished. The user still needs a sentence."""
-        _t, message, _k = _after_capture(
+        _t, message, _k, _c = _after_capture(
             None, _mic(ready=False, setup_error=None), _running())
         assert message.strip() != ""
         assert "None" not in message
 
     def test_the_notice_keeps_the_providers_own_title(self):
         """WheelHouse routes on the title the other notices use."""
-        title, _m, _k = _after_capture(
+        title, _m, _k, _c = _after_capture(
             None, _mic(ready=False, setup_error="Device unavailable"),
             _running())
         assert title == server_main.startup_notification(None)[0]
@@ -191,7 +191,8 @@ class TestTheCredentialsFailureKeepsPrecedence:
         triple = _after_capture(
             "keyfile missing", _mic(ready=False, setup_error="Device gone"),
             _running())
-        assert triple == server_main.startup_notification("keyfile missing")
+        assert triple == (
+            *server_main.startup_notification("keyfile missing"), "")
 
     def test_a_credentials_error_does_not_wait_on_capture(self):
         """Waiting out the handshake before sending a notice that will
@@ -204,7 +205,8 @@ class TestTheCredentialsFailureKeepsPrecedence:
     def test_a_credentials_error_with_a_working_mic_still_fails(self):
         triple = _after_capture(
             "keyfile missing", _mic(ready=True), _running())
-        assert triple == server_main.startup_notification("keyfile missing")
+        assert triple == (
+            *server_main.startup_notification("keyfile missing"), "")
 
 
 class TestTheNotificationSender:
@@ -223,7 +225,7 @@ class TestTheNotificationSender:
         # rather than being loosened.
         forwarder.send_notification.assert_called_once_with(
             "Google STT", "Transcription service ready", kind="ready",
-            capture_backend="winrt")
+            capture_backend="winrt", cause="")
 
     def test_a_failed_capture_sends_the_failure_notification(self):
         forwarder = MagicMock()

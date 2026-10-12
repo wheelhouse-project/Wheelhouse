@@ -5,6 +5,33 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-11
+
+### Added
+
+- Wheelhouse now checks once a day whether a newer release exists. It asks `api.github.com`, and the first check happens at least 60 seconds after start. When a newer release exists, the notice "Wheelhouse [version] is available" offers "Update now" and "Later". "Update now" downloads the installer, checks it, closes Wheelhouse, and runs it. The installer keeps your speech engine and your start-at-login choice. If the update cannot start, Wheelhouse stays open and shows "The update could not start. Try again later, or run the installer from the website." "Later" hides that version's notice. Wheelhouse can show it again 7 days after the notice last appeared. If the notice has no free place on the screen, it waits until another notice closes. The request carries no user data, but GitHub sees your IP address. The check is on by default. To turn it off, clear "Check for updates" in the Settings window, or set `CHECK_FOR_UPDATES = false` in `config.toml`. An update keeps the record file `data/update_check_state.toml`.
+- A new "WheelHouse Settings" window shows your settings in one place. Say "settings", or choose "Settings" in the tray menu or the floating button's right-click menu. The window holds the menu settings, the STT Provider and AI Model choices, and six more settings. These are "Check for updates", "Log transcripts", "Wake word", "Replacement timeout", "Command timeout" and "Audio suppression". Every control is a check box, a radio button, or a button, so "show numbers" and "click N" reach each one. The "Decrease" and "Increase" buttons change a timeout by 100 ms, from 200 to 3000 ms. A setting that applies only after a restart shows "takes effect after restart". The "Restart WheelHouse" button restarts Wheelhouse.
+- The Settings window has a "Help" button. It opens the "WheelHouse Settings Help" window, which explains each of the 13 settings in the order of the Settings window. Its "Close" button and the Escape key close it.
+- On the first start after an install, the "Welcome to Wheelhouse" window appears when speech recognition is ready. It explains the round red button and tells you to say "help" to open the help page. Its "Open help" button opens the help page in your browser. Wheelhouse shows this window once. An update from 1.2.2 or earlier also shows it once, because those releases did not have it. Later updates do not show it again.
+- The tray menu and the floating button's right-click menu show the microphone that Wheelhouse uses. A grey line above "STT Provider" reads "Listening on: " and the microphone name. When no microphone is open, the line reads "Listening on: no microphone".
+- The new command "numeric [number]" types a number as digits. For example, "numeric twenty three" types "23".
+
+### Changed
+
+- When Windows blocks desktop apps from the microphone, Wheelhouse now names the cause. The notice "Windows is blocking your microphone" stays on the screen until you close it. It tells you to open Settings > Privacy and security > Microphone and turn on "Let desktop apps access your microphone". Before, Wheelhouse reported only that the microphone failed. Other microphone failures keep their messages.
+- The thumb wheel now stays on the Sonos TV speaker whatever it plays: TV audio, music, a radio stream, or nothing. Before, the wheel moved to the Windows volume when the TV speaker played music or radio. The wheel moves to the Windows volume when the TV speaker does not answer two checks in a row, about 90 seconds.
+- The Interim Results setting now stays after a restart. Wheelhouse saves it as `INTERIM_RESULTS` in `config.toml`. A missing key means on.
+- A change to `LOG_TRANSCRIPTS` now takes effect when you choose "Restart Wheelhouse". Before, it took effect only after you exited Wheelhouse and started it again.
+- "questioned mark" now types a question mark, the same as "question mark". As a result, the dictated words "questioned mark" also become a question mark.
+- "x-ray fixed" now works the same as "x-ray fix".
+- The help documents now say what Wheelhouse shows when Windows blocks the microphone. They also say that the install needs a keyboard and a mouse, or a person who can use them.
+
+### Fixed
+
+- Wheelhouse now checks again which device gets the thumb-wheel volume. Before, it decided once at startup. A Sonos TV speaker that started TV audio later never got the wheel, so you had to restart Wheelhouse. Wheelhouse now checks every 45 seconds, and when you turn the thumb wheel while the Windows volume has it. When the wheel moves to the Sonos, Wheelhouse sets the Windows volume to 50 percent.
+- Wheelhouse now finds the Sonos TV speaker in every Sonos household on your network. Before, a speaker in another household could answer first and hide the TV speaker.
+- With the Parakeet speech engine, "fifty percent" now types "50%". Before, it typed "fifty%".
+
 ## [1.2.2] - 2026-10-01
 
 ### Changed

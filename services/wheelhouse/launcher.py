@@ -1,22 +1,32 @@
 """Supervised launcher and process manager for WheelHouse services.
 
 This module serves as the main entry point and supervisor for the WheelHouse
-application. It manages process lifecycle, handles crash recovery, maintains
-shared resources, and provides graceful shutdown capabilities. The launcher
-ensures robust operation by automatically restarting crashed processes while
-preventing infinite restart loops.
+application. It manages process lifecycle, detects a service process that
+stops, maintains shared resources, and provides graceful shutdown
+capabilities.
+
+When the Logic, Input, or GUI process stops unexpectedly, the launcher shuts
+all three of them down and does NOT start them again: WheelHouse exits. The
+launcher starts them again only when the restart flag file
+(``RESTART_FLAG_PATH``) exists, which is a restart the user asks for.
+A cycle shorter than ``CRASH_THRESHOLD_S`` (15 seconds) is a crash. The
+launcher counts that crash in the log only when the restart flag file does
+not exist. ``MAX_CRASHES`` bounds the supervisor loop, but the code that
+counts a crash also ends the loop, so the count stops at one and never
+reaches ``MAX_CRASHES``.
 
 Key Features:
-  - Process supervision with crash detection and recovery
+  - Process supervision with crash detection, followed by a full shutdown
   - Shared memory management for inter-process communication
   - PID file management and stale process cleanup
-  - Configurable crash thresholds and restart policies
+  - A second cycle only when the user asks for a restart
   - Graceful shutdown with resource cleanup
 
 Key Functions:
-  - main: Primary supervisor loop and entry point.
+  - main: Entry point; handles the one-shot CLI shortcuts, else supervises.
+  - _run_supervisor: The supervisor loop over the three service processes.
   - cleanup_stale_resources: Removes leftover resources from previous runs.
-  - Process lifecycle management with restart counting.
+  - Process lifecycle management with crash counting.
 
 Typical Usage:
   python launcher.py
@@ -76,7 +86,7 @@ APP_NAME = "WheelHouse"
 SHARED_MEM_SIZE = 1024 * 64  # 64 KiB buffer
 GUI_OVERLAY_SHM_SIZE = 256  # Small buffer for GUI activity state
 CRASH_THRESHOLD_S = 15  # If a process exits faster than this, it's a crash.
-MAX_CRASHES = 3  # Abort after this many consecutive crashes.
+MAX_CRASHES = 3  # Supervisor loop bound. A crash ends the loop, so the count stops at 1.
 SHUTDOWN_GRACE_PERIOD_S = 5 # How long to wait for processes to exit gracefully
 
 # The console-probe helper (wh-jvrs.1) owns all foreign-console attachment in
@@ -272,11 +282,11 @@ def stop_previous_instance(path, *, _psutil=None):
     * The recorded creation time must match the live process before
       anything is killed. A mismatch means the PID was reused, so the
       record is stale and the live process belongs to somebody else.
-    * The parent is killed BEFORE its children. The old launcher
-      supervises its children and restarts them when they die, so killing
-      a child first can make the old supervisor respawn it. The child
-      list is read before the parent dies, because psutil finds children
-      through the parent.
+    * The parent is killed BEFORE its children. The old launcher watches
+      its children, and one dead child makes it shut every WheelHouse
+      process down and unlink the shared memory, so killing a child first
+      runs that cleanup beside this start. The child list is read before
+      the parent dies, because psutil finds children through the parent.
     """
     ps = _psutil or psutil
     record = read_instance_record(path)
@@ -711,9 +721,9 @@ def _configure_launcher_logging(project_root):
     """Queue/listener logging for the launcher (wh-console-write-resilience).
 
     The supervisor thread must never block on a frozen console: the
-    crash-recovery path logged synchronously to stderr (logger.error at
-    child death), so a conhost hang / mark mode wedged the restart loop
-    at the log call, before it could respawn the dead child. Same split
+    child-death path logged synchronously to stderr (logger.error at
+    child death), so a conhost hang / mark mode wedged the supervisor loop
+    at the log call, before it could shut the other processes down. Same split
     the service processes use via setup_logging: the supervisor enqueues
     records on a bounded non-blocking queue; a listener thread writes the
     FILE handler first (durable even when the console is frozen), then
@@ -849,6 +859,24 @@ def _read_transcript_logging_flag(config_path) -> bool:
         return False
 
 
+def _export_transcript_logging_flag(config_path) -> bool:
+    """Read LOG_TRANSCRIPTS and export it as WHEELHOUSE_LOG_TRANSCRIPTS.
+
+    Runs once per start cycle before the cycle starts any child process, so
+    every child inherits the value that config.toml holds at that moment
+    (see _read_transcript_logging_flag). Logs the enabled case only; the
+    disabled case is the release default and gets no line.
+    """
+    enabled = _read_transcript_logging_flag(config_path)
+    os.environ["WHEELHOUSE_LOG_TRANSCRIPTS"] = "1" if enabled else "0"
+    if enabled:
+        logger.info(
+            "Transcript logging ENABLED (LOG_TRANSCRIPTS = true): dictated "
+            "text will appear in logs."
+        )
+    return enabled
+
+
 def _run_supervisor():
     """The main launcher and supervisor loop."""
     # --- Configure Python Path ---
@@ -875,17 +903,9 @@ def _run_supervisor():
         _warn_log_rotation_failed(_first_rotation_error)
 
     # --- Transcript-logging switch (wh-transcript-log-defaults) ---
-    # Exported before any child spawn so all processes inherit it; see
-    # _read_transcript_logging_flag.
+    # Read and exported at the top of every start cycle, below, before any
+    # child starts; see _export_transcript_logging_flag.
     _config_toml = os.path.join(os.path.dirname(__file__), "config.toml")
-    os.environ["WHEELHOUSE_LOG_TRANSCRIPTS"] = (
-        "1" if _read_transcript_logging_flag(_config_toml) else "0"
-    )
-    if os.environ["WHEELHOUSE_LOG_TRANSCRIPTS"] == "1":
-        logger.info(
-            "Transcript logging ENABLED (LOG_TRANSCRIPTS = true): dictated "
-            "text will appear in logs."
-        )
 
     # --- Log rotation belongs to the launcher (wh-log-triple-rotation) ---
     # Exported before any child spawn, like WHEELHOUSE_LOG_TRANSCRIPTS: the
@@ -971,6 +991,11 @@ def _run_supervisor():
             if _rotation_error is not None:
                 _warn_log_rotation_failed(_rotation_error)
         first_cycle = False
+        # Read config.toml again for every cycle, before this cycle starts
+        # any child, so a changed LOG_TRANSCRIPTS reaches the new children
+        # and no stale export outlives the file
+        # (wh-voice-settings-window, boss ruling R2).
+        _export_transcript_logging_flag(_config_toml)
         start_time = time.time()
         
         # Using a unique name for the SHM block to avoid collisions from stale runs
@@ -1046,7 +1071,7 @@ def _run_supervisor():
                     if not gui_alive:
                         dead.append(f"GUI(exit={gui_proc.exitcode})")
                     logger.error(f"Process(es) terminated unexpectedly: {', '.join(dead)}")
-                    shutdown_event.set() # Trigger a full shutdown/restart cycle
+                    shutdown_event.set() # Shut every process down; a new cycle starts only if the restart flag exists
                     break
                 time.sleep(0.5)
             

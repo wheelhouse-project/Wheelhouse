@@ -612,6 +612,7 @@ class ActionFunctions:
         self._functions["transform_selection"] = self.transform_selection
         self._functions["text"] = self.text  # Wrapper for replacement patterns
         self._functions["number_point"] = self.number_point
+        self._functions["number_digits"] = self.number_digits
         self._functions["wrap_or_insert"] = self.wrap_or_insert
         self._functions["skip_clipboard_restore"] = self.skip_clipboard_restore
         # Local
@@ -644,6 +645,8 @@ class ActionFunctions:
         self._functions["wheelhouse_help_online"] = self.wheelhouse_help_online
         # Pattern Manager
         self._functions["open_pattern_manager"] = self.open_pattern_manager
+        # Settings window (wh-voice-settings-window)
+        self._functions["open_settings_window"] = self.open_settings_window
         # Voice calibration (wh-7ou.7.2.4)
         self._functions["open_calibration"] = self.open_calibration
         # Mode switching
@@ -724,6 +727,23 @@ class ActionFunctions:
         if num is None:
             return self.insert_text(f"{number_word}.")
         return self.insert_text(f"{num}.")
+
+    def number_digits(self, number_word: str):
+        """Convert a spoken number to its digits, with no period.
+
+        Used by "numeric [number]" command: "numeric twenty three" -> "23"
+
+        Args:
+            number_word: Number as words ("twenty three") or digits ("23")
+
+        Returns:
+            Dictionary payload for intelligent text insertion. When the words
+            are not a number they are typed as spoken, the same as number_point.
+        """
+        num = words_to_int(number_word)
+        if num is None:
+            return self.insert_text(number_word)
+        return self.insert_text(str(num))
 
     def insert_text(self, text: str):
         """Creates the payload for intelligent text insertion.
@@ -2082,6 +2102,12 @@ class ActionFunctions:
         """Open the Pattern Manager dialog via GUI IPC."""
         self._send_gui_action({"action": "open_pattern_manager"})
         logger.info("Sent open_pattern_manager to GUI")
+        return None
+
+    async def open_settings_window(self):
+        """Open the settings window via GUI IPC (wh-voice-settings-window)."""
+        self._send_gui_action({"action": "open_settings_window"})
+        logger.info("Sent open_settings_window to GUI")
         return None
 
     async def open_calibration(self):

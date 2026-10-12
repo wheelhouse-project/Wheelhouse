@@ -68,6 +68,8 @@ The installer provides everything else and checks the hardware before it begins.
 
 **Where speech is processed.** By default, Wheelhouse converts speech to text on the local machine. No audio or text is transmitted, and the application reports no telemetry. Cloud speech recognition is available; it is not the default, and it can be selected at install time or afterwards. [Speech Engines](#speech-engines) compares the engines and states what each one transmits.
 
+**Update check.** Once a day, Wheelhouse asks api.github.com whether a newer public release exists. The first request is sent at least 60 seconds after start. The request carries no user data, but GitHub sees the IP address. When a newer release exists, a notice names the new version and offers to install it. To turn the update check off, set `CHECK_FOR_UPDATES = false` in config.toml.
+
 **Operation.** Wheelhouse converts microphone audio to text on the local machine and then classifies the result. Text matching a known command ("undo", "select all") is executed as that command. All other text is dictation, and is inserted into the focused window -- a document, an email, a chat field -- with capitalization and spacing applied automatically. Punctuation is spoken: "comma" and "period" insert the corresponding symbols. Text is inserted continuously while you speak, typically beginning within two seconds, rather than after the utterance ends. [Speech Modes](#speech-modes) documents how the classification is decided.
 
 **Getting answers.** The Wheelhouse Assistant answers questions about any part of this document in plain language, without requiring you to find the right section first. It also holds the reference for actions, notices, and configuration settings, so it answers questions this document does not cover. See [Getting Help](#getting-help).
@@ -194,7 +196,7 @@ There are two kinds of voice pattern. **Commands** perform an action -- press a 
 **Example 1 -- Dictating and correcting an email**
 
 1. Dictate the body of the message, speaking the punctuation inline: "hi team comma new paragraph the release is ready period"
-2. To correct a mistyped word, say **"backspace 2"** to remove the last two characters, then dictate the word again.
+2. To correct a misheard word, say **"delete last word"** to remove it, then dictate the word again.
 3. To correct the capitals, numbers, and punctuation of a paragraph, select it with **"select paragraph"**, then say **"x-ray fix"**, which sends it to the AI server and replaces it with the corrected version.
 4. Say **"activate outlook"** (substitute your mail application) to bring its window forward, starting it if it is not already open, then **"submit"** to press Enter.
 
@@ -217,12 +219,13 @@ Every voice command and replacement is listed below, one row each, in a table un
 | insert [text] | Inserts raw text with no capitalization, spacing, or formatting applied | Useful for exact fragments like an email address or a product code |
 | no space [words] | Types the words that follow with every space removed | e.g. "no space hello world" types "helloworld" |
 | item [number] | Inserts a numbered list marker like "1." | e.g. "item 1", "item 5" |
+| numeric twenty three | Types a spoken number as digits, like "23", with no period | e.g. "numeric five" types "5"; "numeric 23" types "23" |
 | submit | Presses Enter. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. |  |
 | submitted | Presses Enter. Fires only when it is the whole utterance. |  |
 | type [words] / dictate [words] | Types the words that follow as ordinary dictation, so a phrase that would otherwise run as a command is written out instead | e.g. "type delete all" writes those words rather than clearing the field |
 | enter | Presses the Enter key. Fires only when it is the whole utterance. | "submit" does the same |
 
-These commands control what is typed and let you dictate a word that collides with a command. "literal [words]" types the words that follow exactly, bypassing all command and replacement processing. "insert [text]" inserts raw text with no capitalization, spacing, or formatting. "submit" presses Enter when it is the whole utterance.
+These commands control what is typed and let you dictate a word that collides with a command. "literal [words]" types the words that follow exactly, bypassing all command and replacement processing. "insert [text]" inserts raw text with no capitalization, spacing, or formatting. "submit" presses Enter when it is the whole utterance. "numeric [number]", also as the whole utterance, types the number as digits with no period: "numeric twenty three" types "23".
 
 Utterances beginning with "okay Google", "ok Google", or "hey Google" are discarded, so speech aimed at a nearby voice assistant is not transcribed.
 
@@ -454,7 +457,7 @@ Counts can be digits ("3") or spoken words ("one", "fifteen", "twenty three"). A
 | comma | Types , inline during dictation |  |
 | colon | Types : inline during dictation |  |
 | semicolon | Types ; inline during dictation |  |
-| question mark | Types ? inline during dictation |  |
+| question mark | Types ? inline during dictation | "questioned mark" also works |
 | exclamation point | Types ! inline during dictation | "exclamation mark" also works |
 | apostrophe | Types ' inline during dictation |  |
 | hyphen | Types - inline during dictation | "minus sign" also works |
@@ -613,8 +616,9 @@ Wheelhouse can click buttons, links, menu items, and other on-screen controls. A
 | stop listening | Switches listening off, as clicking the floating button or the tray icon does while it listens. Applies only when the words are the whole utterance; inside a longer sentence they dictate normally. | In toggle mode, say the wake word ("computer") to switch listening back on. In push-to-talk mode the wake word ends only the idle pause, so the way back is the next hold of the floating button. A notice confirms that listening is off |
 | help | Opens the Wheelhouse Assistant (the official online help) in your browser, after a short explanation window. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "open voice access help" also opens it. Uses the assistant_url setting under [ai.help]; if blanked, the command shows a notice that online help is not configured and no window appears. Release 1.2.1 and earlier named the setting gem_url; updating with the installer renames it to assistant_url and replaces an old assistant address with the current one. The explanation window is the same one the Help menu item shows, and both take the same route through the Logic process; ticking "Do not show this again" and selecting Assistant sets explain_before_open to false under [ai.help], which turns the window off for the command and the menu item alike. If Windows cannot start a browser, the notice "Wheelhouse could not open your browser." appears |
 | patterns | Opens the Pattern Manager. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | "pattern manager", "what can I say", "show commands", "show all commands", and "show command list" also open it; see "Selected Commands in Detail" in the Voice Commands section |
+| settings | Opens the Settings window, which holds the settings of the right-click menu and six more. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | The Settings item in the right-click menu opens the same window. The window has 13 settings: Speech Enabled, Show Floating Button, Interim Results, Push-to-Talk Mode, Debug, the STT Provider, and the AI Model from the menu; and Check for updates, Log transcripts, the replacement timeout, the command timeout, audio suppression, and the wake word. Every control is a check box, a radio button, or a button, so "show numbers" and "click" with a number change any setting by voice. The timeouts have Decrease and Increase buttons that change the value by 100 milliseconds, between 200 and 3000. Interim Results saves to config.toml. Speech Enabled and Debug do not save. Log transcripts, both timeouts, audio suppression, and the wake word show the text "takes effect after restart". The Restart WheelHouse button restarts Wheelhouse. The Help button opens a window that explains each of the 13 settings. Turning speech off while the wake word is off leaves no spoken way to turn it on again. All other settings stay in config.toml |
 | learn my voice | Opens the voice-teaching window, where Wheelhouse learns how you sound so it stops missing short words | "calibrate my voice" also works; only the Distil-Whisper speech engine uses it; See "Teaching Wheelhouse your voice" in the Speech Engines section |
-| x-ray fix | Sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- then replaces the selection with the result. The AI is told not to reword the text or add or remove words | Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure |
+| x-ray fix | Sends the selected text to the configured AI server for formatting correction -- capitals, numbers, amounts of money, common abbreviations, and obvious punctuation -- then replaces the selection with the result. The AI is told not to reword the text or add or remove words | "x-ray fixed" also works. Requires the AI server to be configured and reachable; Wheelhouse shows its progress and outcome on screen rather than out loud, and always preserves your original text on any failure |
 | simplify | Rewrites the selected text in plain language, using shorter sentences and simpler words. Keeps every fact and leaves the layout alone -- line breaks, indentation, bullet marks, numbering, code lines and addresses come back unchanged. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix"; the selection comes back as plain text, so formatting applied in a word processor is lost |
 | shorten | Rewrites the selected text more briefly, cutting repetition and padding. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | Same AI server and same safeguards as "x-ray fix" |
 | x-ray make formal | Rewrites the selected text in a formal register, avoiding contractions and casual wording | Same AI server and same safeguards as "x-ray fix" |
@@ -623,7 +627,7 @@ Wheelhouse can click buttons, links, menu items, and other on-screen controls. A
 | cancel fix | Cancels an in-progress fix or rewrite. Needs no prefix word. When no AI request is running, Wheelhouse types your words as ordinary text and shows no notice. If you said "x-ray" first, it shows the notice "No AI job is running." and types nothing. |  |
 | boost | Adds the selected text to the speech recognition hints. Applies only when the word is the whole utterance; inside a longer sentence it dictates normally. | See "Selected Commands in Detail" in the Voice Commands section -- works only when the running engine applies hints: Google always, Parakeet and Distil-Whisper only with hint biasing on. Otherwise Wheelhouse types the word as dictation |
 
-These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" is described in the table above. It shows its progress on screen rather than out loud ("Correcting..."), then a notice with the outcome (for example "Done.", "No changes needed." or "Cancelled."), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under [Selected Commands in Detail](#selected-commands-in-detail), which also covers adding others. "boost" adds the selected text to the speech recognition hints when the running engine applies hints (see "boost" below), "patterns" opens the Pattern Manager, "help" opens the Wheelhouse Assistant in the default browser after a short explanation window, and "cancel fix" stops a correction or rewrite still running; it needs no safety word either. Every other command in this paragraph written without the "x-ray" prefix needs no safety word, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.
+These commands control Wheelhouse itself: listening modes, help, personal patterns, and the AI features. "push to talk mode" and "click to talk mode" switch between the two listening modes. "x-ray fix" is described in the table above. It shows its progress on screen rather than out loud ("Correcting..."), then a notice with the outcome (for example "Done.", "No changes needed." or "Cancelled."), and leaves the original text in place if the request fails. Five further commands rewrite the selection instead: "simplify", "shorten", "x-ray make formal", "pirate", and "x-ray translate to [language]"; see "Rewriting the selected text" under [Selected Commands in Detail](#selected-commands-in-detail), which also covers adding others. "boost" adds the selected text to the speech recognition hints when the running engine applies hints (see "boost" below), "patterns" opens the Pattern Manager, "settings" opens the Settings window described under [Floating Button and Tray Icon](#floating-button-and-tray-icon), "help" opens the Wheelhouse Assistant in the default browser after a short explanation window, and "cancel fix" stops a correction or rewrite still running; it needs no safety word either. Every other command in this paragraph written without the "x-ray" prefix needs no safety word, and each of those fires only as your whole utterance: the same words inside a longer sentence are typed, not obeyed.
 
 Three further commands act on text through the host application: "x-ray find [text]" opens its find box and searches for the words spoken, "replace" opens its find-and-replace box, and "search" copies the selection and searches the web for it in the default browser.
 
@@ -724,7 +728,7 @@ In toggle mode, pressing and holding the floating button for about a fifth of a 
 
 ### Push-to-talk mode
 
-Wheelhouse listens only while the floating button is held down. Press and hold to speak; releasing stops listening. During the hold, the computer's speakers are muted, so that sound from a video or from music cannot reach the microphone and be transcribed; the previous volume is restored on release. The System Volume plugin performs this muting ([Plugins](#plugins)); it is enabled by default, and disabling it also disables the muting. In this mode a single left-click on the tray icon has no effect; the hold operates on the floating button.
+Wheelhouse listens only while the floating button is held down. Press and hold to speak; releasing stops listening. During the hold, the computer's speakers are muted, so that sound from a video or from music cannot reach the microphone and be transcribed; the previous volume is restored on release. If the volume choice changes from System Volume to the Sonos TV speaker during the hold, Wheelhouse restores the previous volume on release and then sets the Windows volume to 50 percent, as described in [Plugins](#plugins). The System Volume plugin performs this muting ([Plugins](#plugins)); it is enabled by default, and disabling it also disables the muting. In this mode a single left-click on the tray icon has no effect; the hold operates on the floating button.
 
 Three constraints apply:
 
@@ -737,7 +741,7 @@ Three constraints apply:
 Any of the following, at any time:
 
 - **By voice**: "push to talk mode" switches to push-to-talk; "click to talk mode" switches back to toggle mode.
-- **From the menu**: right-click the floating button or the tray icon -- both open the same menu -- and click "Push-to-Talk Mode". A checkmark on that item indicates that push-to-talk is active.
+- **From the menu**: right-click the floating button or the tray icon -- both open the same menu -- and click "Push-to-Talk Mode". A checkmark on that item indicates that push-to-talk is active. The Push-to-Talk Mode check box in the Settings window, which the menu item "Settings" opens, does the same.
 - **Double-click**: double-clicking the floating button or the tray icon alternates between the two modes.
 - **At startup**: the interaction_mode setting in the [speech] section of the settings file, either "toggle" or "push_to_talk", selects the mode Wheelhouse starts in. The voice, menu, and double-click switches change it while Wheelhouse is running.
 
@@ -793,11 +797,13 @@ The floating button and the tray icon open the same menu. Most items are unavail
 
 - **Speech Enabled** -- switch listening on or off. The checkmark shows the current state. In push-to-talk mode, selecting it switches listening on and changes the mode to toggle mode.
 - **Show Floating Button** -- show or hide the floating button. The checkmark shows whether it is visible.
-- **Interim Results** -- selects whether words are typed as they are recognized and corrected afterwards, or held until the phrase ends. The first is the streaming insertion described under [Speech Modes](#speech-modes); switching this off trades the immediate feedback for text that arrives already settled.
+- **Interim Results** -- selects whether words are typed as they are recognized and corrected afterwards, or held until the phrase ends. The first is the streaming insertion described under [Speech Modes](#speech-modes); switching this off trades the immediate feedback for text that arrives already settled. The choice is saved in the settings file, so the next start uses it too.
 - **Push-to-Talk Mode** -- switch between the two interaction modes. The checkmark shows when push-to-talk is active.
+- **Listening on** -- shows the name of the microphone that Wheelhouse listens to, or "no microphone" when no microphone is open. This item cannot be selected, and it shows even before Wheelhouse has finished starting.
 - **STT Provider** -- select the speech engine. Only engines set up on this computer are listed, plus **Parakeet (model not installed)** when the installer turned Parakeet off because its speech model is missing. See [Speech Engines](#speech-engines). The last item in this list, **Teach WheelHouse your voice...**, opens the voice-teaching session for the Distil-Whisper engine. See [Teaching Wheelhouse your voice](#teaching-wheelhouse-your-voice).
-- **AI Model** -- select the AI model. The list holds the model named in the settings file and, for a local AI server, the models that server offers. The configured model always appears as a normal checked item, even when the server no longer offers it; the menu does not report a missing model. When the AI features are switched off or no AI server is configured, the list holds one unavailable item, "AI disabled" or "AI not configured".
+- **AI Model** -- select the AI model. The list holds the model named in the settings file and, for a local AI server, the models that server offers. While the AI features are on, the configured model always appears as a normal checked item, even when the server no longer offers it; the menu does not report a missing model. When the AI features are switched off or no AI server is configured, the list holds the unavailable item "AI disabled" or "AI not configured". When the settings file names a model, a second unavailable line names it, for example "(configured: Gemma 4 E4b -- not available)".
 - **Pattern Manager** -- open the editor for personal voice patterns. See [Voice Commands](#voice-commands).
+- **Settings** -- open the Settings window. It holds the settings of this menu and six more. Every control in it is a check box, a radio button, or a button, so "show numbers" and "click" with a number change any setting by voice. The spoken command "settings" opens the same window.
 - **Debug** -- switch detailed logging on or off. Leave it off except when diagnosing or reporting a problem.
 - **Help** -- open the Wheelhouse Assistant in the browser. A short explanation window appears first, with an **Assistant** button that opens it and a **Cancel** button that does not; tick **Do not show this again** and then select **Assistant** to skip the window from then on. This is the same page, and the same window, that the spoken command "help" produces. See [Getting Help](#getting-help).
 - **About Wheelhouse** -- show the program name and the running version. Include the version in any problem report.
@@ -806,7 +812,7 @@ The floating button and the tray icon open the same menu. Most items are unavail
 
 ## Configuration
 
-No settings need to be edited to use Wheelhouse. Every value ships with a working default, and the most common choices -- which speech engine to use, push-to-talk versus click-to-talk -- can be changed from the floating button's or the tray icon's right-click menu without opening a file. The listening mode can also be changed by voice; the speech engine cannot. This section covers the adjustments available in the settings file.
+No settings need to be edited to use Wheelhouse. Every value ships with a working default, and the most common choices -- which speech engine to use, push-to-talk versus click-to-talk -- can be changed from the floating button's or the tray icon's right-click menu without opening a file. The listening mode can also be changed by voice; the speech engine cannot. The Settings window, which opens from the right-click menu or when you say "settings", holds the settings of that menu and six more; all other settings stay in config.toml. The **Help** button at the bottom of the Settings window opens the Wheelhouse Settings Help window, which explains each setting in the Settings window, in the same order. This section covers the adjustments available in the settings file.
 
 **Where the settings file is.** Wheelhouse keeps its settings in a plain text file named config.toml, which opens in Notepad. It is at:
 
@@ -842,7 +848,7 @@ If Wheelhouse feels laggy or unreliable on an older computer, these changes help
 
 ## Plugins
 
-Plugins are optional add-ons that connect Wheelhouse to extra hardware and services: your laptop screen, Sonos speakers, a Sony TV, and a few Windows features. Each plugin described below has its own `[plugins.*]` section in config.toml with an `enabled` switch, so you can turn each one on or off without deleting anything. You do not need any of them for dictation and voice commands to work. A plugin that cannot find its hardware at startup turns itself off for the session and reports the reason in the log; the rest of Wheelhouse runs unaffected. Hardware that is present but unreachable is a different case: the Sonos plugin keeps polling a speaker whose address it resolved at startup, so a speaker that comes back on the network is picked up again without a restart.
+Plugins are optional add-ons that connect Wheelhouse to extra hardware and services: your laptop screen, Sonos speakers, a Sony TV, and a few Windows features. Each plugin described below has its own `[plugins.*]` section in config.toml with an `enabled` switch, so you can turn each one on or off without deleting anything. You do not need any of them for dictation and voice commands to work. A plugin that cannot find its hardware at startup turns itself off for the session and reports the reason in the log; the rest of Wheelhouse runs unaffected. The Sonos plugin is the exception: when a later check finds a TV speaker, it turns itself on again without a restart. Hardware that is present but unreachable is a different case: the Sonos plugin keeps polling a speaker whose address it resolved at startup, so a speaker that comes back on the network is picked up again without a restart.
 
 Four of the plugins described below respond to the mouse thumb wheel -- the small horizontal wheel on the side of the mouse, under your thumb. This is not the main scroll wheel: that one keeps its normal scrolling job. Wheelhouse reads the thumb wheel directly from the device, which currently works only with Logitech MX-series mice. Screen zones pick what the thumb wheel controls: pointer at the left edge of the screen, it adjusts brightness; anywhere else, volume -- no command or click needed. Step size and zone width are adjustable in the configuration reference.
 
@@ -854,10 +860,21 @@ Controls the brightness of a laptop's built-in screen from the brightness scroll
 
 Adjusts Sonos speaker volume from the volume scroll zone, and pauses Wheelhouse's listening while a music service is playing on the Sonos, so song lyrics are not transcribed into your documents. Enable with `plugins.sonos.enabled` (default: disabled).
 
-Volume control through this plugin requires a specific arrangement: a Sonos sound bar connected to the display this computer uses, receiving the computer's or the display's audio. Wheelhouse sends volume commands to the Sonos only when this plugin is enabled and two conditions hold at once -- Windows is playing to an external audio device rather than the machine's own speakers, and the Sonos reports that it is receiving television audio. In any other arrangement, including Sonos speakers elsewhere in the house, volume commands go to the normal Windows volume instead. Settings:
+Volume control through this plugin requires a specific arrangement: a Sonos sound bar that plays the audio of the display this computer uses. Wheelhouse sends volume commands to one Sonos speaker, the TV speaker, only when this plugin is enabled and Windows plays to an external audio device, not to the machine's own speakers. An output device with no name, for example while the TV is off, counts as external.
+
+While the TV speaker that Wheelhouse identified earlier answers, it stays the TV speaker, whatever it plays. Otherwise, the TV speaker is the Sonos speaker that plays television audio. When no speaker plays television audio, the TV speaker is the speaker that Wheelhouse identified earlier. When Wheelhouse identified no speaker earlier, the TV speaker is the only Sonos sound bar on the network. Another sound bar never replaces a TV speaker that stops answering, so Wheelhouse finds a new TV sound bar only after a restart or when it plays television audio. Wheelhouse looks for speakers in every Sonos household on the network. If there are two or more sound bars, none plays television audio, and none was identified earlier, there is no TV speaker. Wheelhouse does not choose between two sound bars. When another sound bar starts to play television audio, Wheelhouse keeps the TV speaker it identified first while that speaker answers.
+
+The volume scroll zone stays on the TV speaker whatever the TV speaker plays: television audio, music, a radio stream, or nothing. A change of what it plays never moves the volume commands. Volume commands go to the normal Windows volume instead in these cases:
+
+- The plugin is disabled.
+- The Windows output device is the machine's own speakers.
+- No TV speaker exists.
+- The TV speaker does not answer two checks in a row (about 90 seconds).
+
+A check runs at startup, every 45 seconds, and when the thumb wheel turns while System Volume is selected. A volume command never waits for a check. Each time the choice changes, Wheelhouse writes one line to its log with the direction, the speaker name, and the reason. When the choice changes from System Volume to the TV speaker, Wheelhouse sets the Windows volume to 50 percent. When it changes to System Volume, the Windows volume stays as it is. The listening pause described below also watches the TV speaker. Settings:
 
 - `polling_interval` -- how often, in seconds, to check whether music is playing (default 2).
-- `speaker_ip` -- optional. Automatic discovery runs once at startup, and only when this plugin is enabled and the Windows output device is an external one: Wheelhouse reads the name of the default output device and skips discovery when that name looks like built-in hardware (Realtek, Intel, "Speakers", "Headphones", and similar). A discovered speaker wins over this setting; set it when discovery finds nothing.
+- `speaker_ip` -- optional. A check runs at startup and every 45 seconds. The network search runs only when no TV speaker is known or the TV speaker does not answer a direct query. Discovery runs only when this plugin is enabled and the Windows output device is an external one (a device with no name counts as external): Wheelhouse reads the name of the default output device and skips discovery when that name looks like built-in hardware (Realtek, Intel, "Speakers", "Headphones", and similar). A discovered speaker wins over this setting; set it when discovery finds nothing.
 - `request_connect_timeout` / `request_read_timeout` -- advanced network timeouts (defaults 2.0 and 5.0 seconds); rarely need changing.
 
 It connects to the speaker over your home network directly -- no Sonos account or internet service is involved.
@@ -871,10 +888,10 @@ A second, separate mechanism can pause listening for computer audio, whether or 
 Controls the normal Windows volume (the same one as the taskbar speaker icon) from the volume scroll zone, and quiets system audio while you hold the push-to-talk button. Enable with `plugins.system_volume.enabled` (default: enabled). Settings:
 
 - `device_type` -- which audio device to control: `"default"` (the usual choice) or `"communications"`.
-- `volume_step_db` -- loudness change per wheel step, in decibels (default 1.5).
+- `volume_step_db` -- loudness change, in decibels, for each unit of `VOLUME_INCREMENT` (default 1.5). Each wheel step sends `VOLUME_INCREMENT` units (default 0.5), so with both defaults one wheel step changes the loudness by 0.75 dB.
 - `min_volume_db` / `max_volume_db` -- the volume floor and ceiling (defaults -96.0 and 0.0).
 
-Fully local, no network. Both volume plugins can stay enabled: at startup Wheelhouse picks one to receive volume commands -- Sonos when the Sonos plugin is enabled, the Windows output device is external, and a discovered Sonos reports that it is receiving television audio; System Volume in every other case. With `plugins.sonos.enabled` set to false, volume commands always go to System Volume, and Wheelhouse does not search the network for Sonos speakers.
+Fully local, no network. Both volume plugins can stay enabled. Wheelhouse picks one to receive volume commands -- Sonos when the Sonos plugin is enabled, the Windows output device is external, and a TV speaker exists (the Sonos section above explains how Wheelhouse finds it); System Volume in every other case. Wheelhouse picks again at startup, every 45 seconds, and when the thumb wheel turns while System Volume is selected, so the choice can change without a restart. When the choice changes from System Volume to the Sonos TV speaker, Wheelhouse sets the Windows volume to 50 percent. When it changes to System Volume, the Windows volume stays as it is. With `plugins.sonos.enabled` set to false, volume commands always go to System Volume, and Wheelhouse does not search the network for Sonos speakers.
 
 ### Bravia (Sony TV)
 
@@ -952,6 +969,8 @@ If all five pass, the installation is working; any remaining problem is specific
 - *Symptom:* Wheelhouse starts, nothing happens when you speak, and Windows Sound settings show no input activity.
 - *Likely cause:* Windows is using a different microphone, or a privacy setting is blocking desktop applications from the microphone.
 - *Action:* Open Settings > Privacy and security > Microphone and confirm that "Let desktop apps access your microphone" is on. Then open Sound settings > Input and select the microphone in use. Restart Wheelhouse afterward.
+- *Note:* When the privacy setting blocks the microphone, Wheelhouse shows a notice titled "Windows is blocking your microphone". The notice names the same setting and stays on the screen until you close it.
+- *Check:* The menu on the floating button or the tray icon shows "Listening on:" and the name of the microphone that Wheelhouse uses. "Listening on: no microphone" means that no speech engine has a microphone open.
 
 **Wheelhouse does not start and neither the tray icon nor the floating button appears**
 
@@ -1035,5 +1054,5 @@ Include the Wheelhouse version from **About Wheelhouse** in the right-click menu
 
 ---
 
-Generated: 2026-10-01 for the v1.2.2 release
-Wheelhouse version: 1.2.2
+Generated: 2026-10-11 for the v1.3.0 release
+Wheelhouse version: 1.3.0

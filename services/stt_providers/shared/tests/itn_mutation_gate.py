@@ -19,7 +19,7 @@ deleted for that reason. The three pass-through canaries ("", "hello
 world", "no numbers here") are equally unkillable and are kept on
 purpose as regression canaries.
 
-One hundred and four mutations, all inside
+One hundred and ten mutations, all inside
 shared_stt/transcript_rules.py.
 Each one loosens a real guard rather than deleting a line a later
 branch would catch anyway.
@@ -1104,6 +1104,44 @@ MUTATIONS = [
             "test_the_ordinary_letter_still_stays_words",
             "test_letter_o_reads_as_the_spoken_zero",
         ],
+    ),
+    (
+        "M105-the-percent-rule-is-not-wired-in",
+        "            _try_percent,\n",
+        "",
+        ["test_percent_phrases"],
+    ),
+    (
+        "M106-the-percent-rule-eats-the-word-percent",
+        "    return _write_number(run, value), anchor\n",
+        "    return _write_number(run, value), anchor + 1\n",
+        ["test_percent_phrases"],
+    ),
+    (
+        "M107-the-percent-vocabulary-is-empty",
+        '_PERCENT_WORDS = {"percent"}\n',
+        "_PERCENT_WORDS = set()\n",
+        ["test_percent_phrases"],
+    ),
+    (
+        "M108-the-rule-reads-a-run-of-any-length",
+        "    if len(run) != 1:\n",
+        "    if False:\n",
+        ["test_percent_phrases"],
+    ),
+    (
+        "M109-the-leading-fraction-refusal-never-fires",
+        "    if _leading_fraction_before(records, anchor - len(run)):\n"
+        "        return None\n",
+        "    if False:\n        return None\n",
+        ["test_percent_phrases"],
+    ),
+    (
+        "M110-the-refusal-stops-in-front-of-the-spoken-zero",
+        "        if records[index - 1].low not in _ITN_OH_WORDS:\n"
+        "            break\n",
+        "        if True:\n            break\n",
+        ["test_percent_phrases"],
     ),
 ]
 

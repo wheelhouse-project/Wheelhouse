@@ -199,6 +199,7 @@ class RemoteSTTLauncher:
         self._show_working_callback: Optional["Callable[[str, Optional[int]], None]"] = None
         self._hide_working_callback: Optional["Callable[[Optional[int]], None]"] = None
         self._provider_stopped_callback: Optional["Callable[..., None]"] = None
+        self._provider_ready_callback: Optional["Callable[[], None]"] = None
         # Event signaled when provider sends "ready" notification via WebSocket
         # Initialized as set so is_starting returns False before any provider launch
         self._provider_ready_event: threading.Event = threading.Event()
@@ -413,6 +414,18 @@ class RemoteSTTLauncher:
                 (wh-remote-stt-robustness.2.5, .2.6).
         """
         self._provider_stopped_callback = callback
+
+    def set_provider_ready_callback(self, callback: "Callable[[], None]") -> None:
+        """Set the callback for a ready that this launcher accepts.
+
+        signal_provider_ready calls it, with no arguments, for a ready
+        from the launch that is still current and whose startup did not
+        fail. A ready from a replaced launch does not call it. The
+        caller is whichever thread delivered the ready, so the callback
+        must not block and must hand any event-loop work to the loop
+        (wh-first-run-notice.2: the first-run notice waits for it).
+        """
+        self._provider_ready_callback = callback
 
     def _provider_stopped(
         self,
@@ -673,9 +686,22 @@ class RemoteSTTLauncher:
             # shown as started while dictation still came from the
             # provider it replaced (wh-ready-connection-stamp).
             self._end_starting_state(generation)
+            # Decided under the same lock as the end of the starting
+            # state, so a switch cannot land between the two answers.
+            accepted = self.launch_is_current(generation) and not (
+                signal is not None and signal.failed
+            )
         logger.debug(
             f"Provider ready signal received (launch generation {generation})"
         )
+        # Called after the lock is released: the callback belongs to
+        # another module. It runs on the WebSocket reader, so an
+        # exception from it must not escape (wh-first-run-notice.2).
+        if accepted and self._provider_ready_callback is not None:
+            try:
+                self._provider_ready_callback()
+            except Exception as exc:
+                logger.warning(f"Provider ready callback failed: {exc}")
         # The supervisor restarts a child that crashes soon after its
         # start, so a crash it recovered from reaches wheelhouse.log only here
         # (wh-provider-native-crash-trace, ruling R2). On the event loop

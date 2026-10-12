@@ -4,7 +4,7 @@ Wheelhouse is a voice-control application built for people who depend on hands-f
 
 ## No telemetry
 
-The Wheelhouse desktop application sends no telemetry, analytics, crash reports, or usage data to the project or to any third party. There is no phone-home code. The only network connections made by the application are the ones you configure, listed below.
+The Wheelhouse desktop application sends no telemetry, analytics, crash reports, or usage data to the project or to any third party. One connection is not a setting that you chose: the update check, described below. It is on until you turn it off. Every other network connection is one that you configure, listed below.
 
 ## What leaves your machine, per speech provider
 
@@ -17,6 +17,16 @@ The Wheelhouse desktop application sends no telemetry, analytics, crash reports,
 ## AI features (optional)
 
 The dictation fix-up and help-chat features send the text they operate on to the OpenAI-compatible server you configure (`[ai.server]` in `config.toml`). With the default configuration that is a local Ollama server, the text stays on your machine. If you point it at a hosted endpoint, that text leaves your machine under that provider's terms. If no server is configured or reachable, the AI features disable themselves and nothing is sent anywhere.
+
+## Update check
+
+Once a day, Wheelhouse asks `api.github.com` whether a newer public release exists. The first request happens at least 60 seconds after Wheelhouse starts.
+
+* **What the request sends.** The request carries the address of the release list and a `User-Agent` header. The header names Wheelhouse and its version. It carries no audio, no text, and no other data about you or your machine.
+* **What GitHub sees.** GitHub receives the request, so GitHub also sees your IP address. Read GitHub's privacy statement for how GitHub handles it.
+* **What Wheelhouse stores.** Wheelhouse records the time of the last check, and the version and the time of the last notice it showed, in `data/update_check_state.toml`. The record stays on your machine.
+* **What happens when a newer release exists.** A notice names the new version. "Update now" downloads the installer of that release, checks it, closes Wheelhouse, and runs the installer. "Later" hides the notice for that version. Wheelhouse can show it again 7 days after the notice last appeared.
+* **How to turn it off.** Set `CHECK_FOR_UPDATES = false` in `config.toml` and restart. Wheelhouse then makes no update request. A `config.toml` without the key behaves as if the key is `true`.
 
 ## Logs
 

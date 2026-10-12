@@ -383,6 +383,24 @@ class TestNotificationKind:
         payload = forwarder._queue.put.call_args.args[0]
         assert payload["kind"] == ""
 
+    def test_cause_defaults_to_empty_and_is_present(self):
+        """Empty, not absent: WheelHouse reads one shape for every
+        notification (wh-blocked-mic-message)."""
+        forwarder = self._forwarder()
+        forwarder.send_notification("Google STT", "hello")
+        payload = forwarder._queue.put.call_args.args[0]
+        assert "cause" in payload
+        assert payload["cause"] == ""
+
+    def test_cause_is_included_in_the_payload(self):
+        forwarder = self._forwarder()
+        forwarder.send_notification(
+            "Google STT", "broken", kind="startup_failed",
+            cause="microphone_blocked",
+        )
+        payload = forwarder._queue.put.call_args.args[0]
+        assert payload["cause"] == "microphone_blocked"
+
 
 class TestNotificationKindOnTheWire:
     """The kind must survive all the way into the outgoing JSON. The
@@ -451,5 +469,67 @@ class TestNotificationKindOnTheWire:
             "service ready": "ready",
             "credentials problem": "startup_failed",
             "engine error": "error",
+            "plain notice": "",
+        }
+
+    @pytest.mark.asyncio
+    async def test_the_cause_reaches_the_outgoing_json(self):
+        """_sender_loop rebuilds the notification payload key by key, so
+        a cause stored by send_notification and not copied there never
+        leaves the process (wh-blocked-mic-message)."""
+        import json
+
+        import websockets
+
+        received = []
+        connection_established = asyncio.Event()
+        got_both = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send(
+                '{"type": "status", "transcription_enabled": true}'
+            )
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    data = json.loads(message)
+                    if data.get("type") == "notification":
+                        received.append(data)
+                        if len(received) >= 2:
+                            got_both.set()
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        event = threading.Event()
+        event.set()
+        forwarder = WSForwarder(
+            host="127.0.0.1",
+            port=port,
+            transcription_enabled_event=event,
+            debug=False,
+        )
+        forwarder.start()
+        try:
+            await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+            await asyncio.sleep(0.1)
+
+            forwarder.send_notification(
+                "T", "blocked", kind="startup_failed",
+                cause="microphone_blocked",
+            )
+            forwarder.send_notification("T", "plain notice")
+
+            await asyncio.wait_for(got_both.wait(), timeout=3.0)
+        finally:
+            forwarder.stop()
+            server.close()
+            await server.wait_closed()
+
+        by_message = {d["message"]: d.get("cause") for d in received}
+        assert by_message == {
+            "blocked": "microphone_blocked",
             "plain notice": "",
         }

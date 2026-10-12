@@ -55,6 +55,9 @@ GOOGLE = PROVIDERS / "google_stt_server"
 READINESS_TESTS = "tests/test_startup_readiness.py"
 RUNNER_TESTS = "tests/test_mutation_gate_runner.py"
 RUNNER = SHARED / "tests" / "mutation_gate_runner.py"
+REFUSAL_TESTS = "tests/test_startup_refusal.py"
+BLOCKED_TESTS = "tests/test_blocked_microphone_notice.py"
+REFUSAL = SHARED / "shared_stt" / "startup_refusal.py"
 
 
 def _provider_mutations(label, service, indent="        "):
@@ -181,11 +184,12 @@ def _provider_mutations(label, service, indent="        "):
             "service": service,
             "test_file": READINESS_TESTS,
             "file": main,
-            "old": (f'{b}    f"Failed to start - transcription will not '
-                    f'work: {{detail}}",\n'
+            # The message line is part of the pattern because
+            # '    kind="startup_failed",' on its own would also match
+            # any other startup_failed send in the file.
+            "old": (f'{b}    message,\n'
                     f'{b}    kind="startup_failed",'),
-            "new": (f'{b}    f"Failed to start - transcription will not '
-                    f'work: {{detail}}",\n'
+            "new": (f'{b}    message,\n'
                     f'{b}    kind="error",'),
             "expect": ["test_a_failed_capture_sends_startup_failed"],
         },
@@ -196,10 +200,14 @@ def _provider_mutations(label, service, indent="        "):
             "service": service,
             "test_file": READINESS_TESTS,
             "file": main,
-            "old": (f'{b}    f"Failed to start - transcription will not '
-                    f'work: {{detail}}",'),
-            "new": (f'{b}    "Failed to start - transcription will not '
-                    f'work",'),
+            # The text and the cause are built by the shared
+            # capture_failure_message since wh-blocked-mic-message, so the
+            # reason is dropped by handing it an empty detail. The next
+            # line is part of the pattern so the match is the send's own.
+            "old": (f'{b}message, cause = capture_failure_message(detail)\n'
+                    f'{b}self.forwarder.send_notification('),
+            "new": (f'{b}message, cause = capture_failure_message("")\n'
+                    f'{b}self.forwarder.send_notification('),
             "expect": ["test_the_failure_notice_names_the_cause"],
         },
         {
@@ -375,9 +383,15 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "service": GOOGLE,
         "test_file": READINESS_TESTS,
         "file": GOOGLE / "main.py",
-        "old": ('        "Failed to start - transcription will not work: " '
-                "+ detail,"),
-        "new": '        "Failed to start - transcription will not work",',
+        # The reason is dropped by handing the shared
+        # capture_failure_message an empty detail
+        # (wh-blocked-mic-message).
+        "old": ("    message, cause = capture_failure_message(detail)\n"
+                '    return ("Google STT", message, "startup_failed", '
+                "cause)"),
+        "new": ('    message, cause = capture_failure_message("")\n'
+                '    return ("Google STT", message, "startup_failed", '
+                "cause)"),
         "expect": ["test_the_failure_notice_names_the_cause"],
     },
     {
@@ -388,12 +402,11 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "service": GOOGLE,
         "test_file": READINESS_TESTS,
         "file": GOOGLE / "main.py",
-        "old": ('        "Failed to start - transcription will not work: " '
-                "+ detail,\n"
-                '        "startup_failed",'),
-        "new": ('        "Failed to start - transcription will not work: " '
-                "+ detail,\n"
-                '        "ready",'),
+        "old": ("    message, cause = capture_failure_message(detail)\n"
+                '    return ("Google STT", message, "startup_failed", '
+                "cause)"),
+        "new": ("    message, cause = capture_failure_message(detail)\n"
+                '    return ("Google STT", message, "ready", cause)'),
         "expect": ["test_a_failed_capture_sends_startup_failed"],
     },
     {
@@ -404,14 +417,12 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "service": GOOGLE,
         "test_file": READINESS_TESTS,
         "file": GOOGLE / "main.py",
-        "old": ("    return (\n"
-                '        "Google STT",\n'
-                '        "Failed to start - transcription will not work: " '
-                "+ detail,"),
-        "new": ("    return (\n"
-                '        "Google Speech",\n'
-                '        "Failed to start - transcription will not work: " '
-                "+ detail,"),
+        "old": ("    message, cause = capture_failure_message(detail)\n"
+                '    return ("Google STT", message, "startup_failed", '
+                "cause)"),
+        "new": ("    message, cause = capture_failure_message(detail)\n"
+                '    return ("Google Speech", message, "startup_failed", '
+                "cause)"),
         "expect": ["test_the_notice_keeps_the_providers_own_title"],
     },
     {
@@ -444,9 +455,11 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "test_file": READINESS_TESTS,
         "file": GOOGLE / "main.py",
         "old": ("    if startup_error is not None:\n"
-                "        return startup_notification(startup_error)"),
+                "        return (*startup_notification(startup_error), "
+                '"")'),
         "new": ("    if False:\n"
-                "        return startup_notification(startup_error)"),
+                "        return (*startup_notification(startup_error), "
+                '"")'),
         "expect": [
             "test_a_credentials_error_is_reported_not_the_capture_error",
             "test_a_credentials_error_with_a_working_mic_still_fails"],
@@ -635,6 +648,109 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "old": "    stale, broken = [], []",
         "new": "    stale = broken = []",
         "expect": ["test_stale_and_non_compiling_are_counted_apart"],
+    },
+
+    # -- the blocked-microphone cause (wh-blocked-mic-message) ------------
+    {
+        # The whole feature in one line. With the branch gone, the
+        # approved sentence goes out with the "Failed to start" prefix in
+        # front of it and with no cause, so WheelHouse shows nothing on
+        # the screen and the user never reads which Windows setting to
+        # change. "if False:" rather than a deletion, because deleting
+        # the only statement of an if-body leaves a construct that does
+        # not compile, and a mutant that does not compile reads as caught
+        # while it proves nothing (mutation-gate skill).
+        "name": "blocked-microphone-branch-removed",
+        "service": SHARED,
+        "test_file": REFUSAL_TESTS,
+        "file": REFUSAL,
+        "old": ("    if detail == MICROPHONE_BLOCKED_MESSAGE:\n"
+                "        return MICROPHONE_BLOCKED_MESSAGE, "
+                "MICROPHONE_BLOCKED_CAUSE"),
+        "new": ("    if False:\n"
+                "        return MICROPHONE_BLOCKED_MESSAGE, "
+                "MICROPHONE_BLOCKED_CAUSE"),
+        "expect": [
+            "test_the_blocked_microphone_sentence_is_sent_alone_with_its_cause"],
+    },
+    {
+        # The one string the GUI process and the provider agree on, with
+        # no import between them. Emptied, the frame carries no cause,
+        # and WheelHouse's websocket_manager.py drops the on-screen
+        # notice in silence while the Windows notification still appears.
+        # The catcher is a provider test, not the shared helper test: the
+        # helper test compares the constant with itself and cannot see
+        # this, while each provider test asserts the literal value.
+        "name": "blocked-microphone-cause-emptied",
+        "service": PARAKEET,
+        "test_file": BLOCKED_TESTS,
+        "file": REFUSAL,
+        "old": 'MICROPHONE_BLOCKED_CAUSE = "microphone_blocked"',
+        "new": 'MICROPHONE_BLOCKED_CAUSE = ""',
+        "expect": [
+            "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
+    },
+    {
+        # The helper decides the cause and the send site then throws it
+        # away. The message still reads correctly, so nothing in a log
+        # or a Windows notification shows the defect; only the frame
+        # does. One entry per provider, because each send site is its
+        # own line and a mutation of one cannot fail another's test.
+        "name": "parakeet-cause-not-sent",
+        "service": PARAKEET,
+        "test_file": BLOCKED_TESTS,
+        "file": PARAKEET / "main.py",
+        "old": ('                kind="startup_failed",\n'
+                "                cause=cause,\n"
+                "            )"),
+        "new": ('                kind="startup_failed",\n'
+                "            )"),
+        "expect": [
+            "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
+    },
+    {
+        "name": "distil-cause-not-sent",
+        "service": DISTIL,
+        "test_file": BLOCKED_TESTS,
+        "file": DISTIL / "main.py",
+        "old": ('                kind="startup_failed",\n'
+                "                cause=cause,\n"
+                "            )"),
+        "new": ('                kind="startup_failed",\n'
+                "            )"),
+        "expect": [
+            "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
+    },
+    {
+        # Google's send site, which serves all three outcomes through one
+        # call. The capture_backend line is part of the pattern because
+        # it makes the snippet unique.
+        "name": "google-cause-not-sent",
+        "service": GOOGLE,
+        "test_file": BLOCKED_TESTS,
+        "file": GOOGLE / "main.py",
+        "old": ("            capture_backend=CAPTURE_BACKEND_NAME "
+                'if kind == "ready" else "",\n'
+                "            cause=cause)"),
+        "new": ("            capture_backend=CAPTURE_BACKEND_NAME "
+                'if kind == "ready" else "")'),
+        "expect": [
+            "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
+    },
+    {
+        # Google alone carries the cause through a four-item result, so
+        # it has a second place to lose it: the result itself. The send
+        # site above still passes cause=cause, so the frame key exists
+        # and is empty, which is exactly the shape that reads as "no
+        # cause" to WheelHouse.
+        "name": "google-cause-dropped-from-the-result",
+        "service": GOOGLE,
+        "test_file": BLOCKED_TESTS,
+        "file": GOOGLE / "main.py",
+        "old": '    return ("Google STT", message, "startup_failed", cause)',
+        "new": '    return ("Google STT", message, "startup_failed", "")',
+        "expect": [
+            "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
     },
 ]
 

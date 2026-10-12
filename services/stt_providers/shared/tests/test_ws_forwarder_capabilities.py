@@ -266,3 +266,131 @@ def test_applies_hints_defaults_to_not_declared(monkeypatch):
 def test_applies_hints_none_is_not_declared(monkeypatch):
     frame = _first_frame_with_applies_hints(monkeypatch, None)
     assert "applies_hints" not in frame
+
+
+# wh-show-microphone-name.1: the forwarder keeps the last microphone name it
+# was given and repeats it, right after the capabilities frame, on every
+# (re)connect. None (never given) is distinct from "" (given: no microphone
+# is open). The name is sent directly, not through the queue, because the
+# queue is cleared on disconnect.
+
+
+def _microphone_forwarder():
+    return WSForwarder(
+        "127.0.0.1",
+        9999,
+        threading.Event(),
+        provider_name="parakeet_tdt",
+        emits_eos=False,
+    )
+
+
+def test_microphone_name_is_resent_on_every_connect(monkeypatch):
+    stop_evt = threading.Event()
+    first = _FakeWS(stop_evt, after_first_send="close")
+    second = _FakeWS(stop_evt, after_first_send="stop")
+    _install_fake_websockets(monkeypatch, [first, second])
+
+    fwd = _microphone_forwarder()
+    # No loop is running yet, so this call only records the name.
+    fwd.send_microphone("Headset Mic (USB)")
+    fwd.send_microphone("Desk Mic")
+    fwd._stop_evt = stop_evt
+    _run_sender_loop(fwd, timeout_s=15.0)
+
+    expected = {"type": "microphone", "device": "Desk Mic"}
+    assert first.sent[0]["type"] == "capabilities"
+    assert first.sent[1] == expected, "first connect must repeat the last name"
+    assert second.sent[0]["type"] == "capabilities"
+    assert second.sent[1] == expected, "reconnect must repeat the last name"
+
+
+def test_empty_microphone_name_is_resent_on_connect(monkeypatch):
+    """An empty name means no microphone is open; it is a name, not an absence."""
+    stop_evt = threading.Event()
+    ws = _FakeWS(stop_evt, after_first_send="stop")
+    _install_fake_websockets(monkeypatch, [ws])
+
+    fwd = _microphone_forwarder()
+    fwd.send_microphone("")
+    fwd._stop_evt = stop_evt
+    _run_sender_loop(fwd)
+
+    assert ws.sent[0]["type"] == "capabilities"
+    assert ws.sent[1] == {"type": "microphone", "device": ""}
+
+
+def test_no_microphone_frame_when_no_name_was_given(monkeypatch):
+    stop_evt = threading.Event()
+    first = _FakeWS(stop_evt, after_first_send="close")
+    second = _FakeWS(stop_evt, after_first_send="stop")
+    _install_fake_websockets(monkeypatch, [first, second])
+
+    fwd = _microphone_forwarder()
+    fwd._stop_evt = stop_evt
+    _run_sender_loop(fwd, timeout_s=15.0)
+
+    for ws in (first, second):
+        assert ws.sent and ws.sent[0]["type"] == "capabilities"
+        assert [f for f in ws.sent if f["type"] == "microphone"] == []
+
+
+# wh-show-microphone-name.4: the connect-time repeat above is sent directly
+# and has its own payload. A name given while a loop is running goes through
+# the queue, and the sender loop rebuilds that payload key by key, so the
+# "device" key must be named there to leave the process. These tests read
+# the third frame, the one the sender loop wrote for the queued message.
+
+
+class _StopAfterThreeSends(_FakeWS):
+    """Stops the forwarder once the third frame is written: capabilities,
+    the connect-time microphone repeat, then the queued microphone frame."""
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(json.loads(payload))
+        if len(self.sent) == 3:
+            self._stop_evt.set()
+
+
+def _frames_for_a_queued_name(monkeypatch, name):
+    stop_evt = threading.Event()
+    ws = _StopAfterThreeSends(stop_evt, after_first_send="stop")
+    _install_fake_websockets(monkeypatch, [ws])
+
+    fwd = _microphone_forwarder()
+    fwd._stop_evt = stop_evt
+
+    async def run():
+        fwd._queue = asyncio.Queue()
+        fwd._loop = asyncio.get_running_loop()
+        # The real method queues the message, as it does at runtime. It
+        # also records the name, so the connect-time repeat is frame two.
+        fwd.send_microphone(name)
+        try:
+            await asyncio.wait_for(fwd._sender_loop(), timeout=5.0)
+        except asyncio.TimeoutError:
+            # Fewer than three frames were written, so the stop event never
+            # fired. The caller's assertions on the frames report it.
+            pass
+
+    asyncio.run(run())
+    return ws.sent
+
+
+def test_a_queued_microphone_name_reaches_the_wire(monkeypatch):
+    sent = _frames_for_a_queued_name(monkeypatch, "Headset Mic (USB)")
+
+    assert [f["type"] for f in sent] == [
+        "capabilities", "microphone", "microphone"
+    ]
+    assert sent[2] == {"type": "microphone", "device": "Headset Mic (USB)"}
+
+
+def test_a_queued_empty_microphone_name_reaches_the_wire(monkeypatch):
+    """An empty name means no microphone is open; it is sent, not skipped."""
+    sent = _frames_for_a_queued_name(monkeypatch, "")
+
+    assert [f["type"] for f in sent] == [
+        "capabilities", "microphone", "microphone"
+    ]
+    assert sent[2] == {"type": "microphone", "device": ""}

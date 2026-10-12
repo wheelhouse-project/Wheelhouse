@@ -383,7 +383,15 @@ class PluginRegistry:
                     if p.state == PluginState.FAILED)
         
         logger.info(f"Plugin startup complete. Running: {running}, Failed: {failed}")
-    
+
+        # The repeated TV-audio check starts last, so the first switch reaches
+        # plugins that already subscribe to VolumeTargetChangedEvent
+        # (wh-sonos-tv-recheck).
+        try:
+            get_volume_router().start_tv_recheck()
+        except Exception as e:
+            logger.error(f"Cannot start the VolumeRouter TV-audio re-check: {e}", exc_info=True)
+
     async def stop_all(self) -> None:
         """Stop all running plugins in reverse initialization order.
 
@@ -406,7 +414,15 @@ class PluginRegistry:
             ```
         """
         logger.info(f"Stopping {len(self.plugins)} plugin(s)...")
-        
+
+        # Cancel the repeated TV-audio check before the plugins go, so no
+        # switch arrives at a plugin that is shutting down
+        # (wh-sonos-tv-recheck).
+        try:
+            await get_volume_router().stop_tv_recheck()
+        except Exception as e:
+            logger.error(f"Cannot stop the VolumeRouter TV-audio re-check: {e}", exc_info=True)
+
         # Stop in reverse order
         for plugin_name in reversed(self._plugin_order):
             plugin = self.plugins[plugin_name]

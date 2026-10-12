@@ -1319,10 +1319,73 @@ LETTER_O_STAYS_WORDS_CASES = [
 ]
 
 
+PERCENT_CASES = [
+    # David's live failure, 2026-10-06 (UTT-31): a lone number word in
+    # front of "percent" stayed a word, and the Logic process wrote the
+    # "%" behind it, so the screen read "fifty%".
+    ("fifty percent", "50 percent"),
+    ("one percent", "1 percent"),
+    # Runs of two or more words already converted before the percent
+    # anchor existed; these cases hold that behavior still.
+    ("twenty five percent", "25 percent"),
+    ("one hundred percent", "100 percent"),
+    ("fifteen thousand percent", "15,000 percent"),
+    # The decimal rule owns the "point" anchor, so the percent anchor
+    # must not take it: these two read as decimals, not as cardinals.
+    ("three point five percent", "3.5 percent"),
+    ("ninety nine point nine percent", "99.9 percent"),
+    ("fifty percent of the time", "50 percent of the time"),
+    # The anchor word licenses the lone number word and nothing else.
+    # A run that reads as two numbers stays words, exactly as it does
+    # with no anchor behind it.
+    ("twelve thirty percent", "twelve thirty percent"),
+    ("four ten percent", "four ten percent"),
+    # "percent" said alone reaches no number run, so this module leaves
+    # it for the punct-percent replacement pattern to write.
+    ("percent", "percent"),
+    ("fifty", "fifty"),
+    # A bare scale word is the one single word that can reach the
+    # grouping threshold, and it converts here exactly as it does behind
+    # a dollar anchor. Measured on base 6d907456: "hundred dollars" is
+    # "$100" and "million dollars" is "$1,000,000".
+    ("hundred percent", "100 percent"),
+    ("million percent", "1,000,000 percent"),
+    # The article keeps its place, which is what "a hundred dollars" ->
+    # "a $100" already does on that same base commit.
+    ("a hundred percent", "a 100 percent"),
+    # Runs of two or more words belong to the rules behind this one, and
+    # one of them writes an address number bare. These two cases hold
+    # that division: the long run keeps 20000, and the lone word in the
+    # same position converts.
+    ("twenty thousand percent main street", "20000 percent main street"),
+    ("fifty percent main street", "50 percent main street"),
+    # A lone word that stands behind a leading "point" is the tail of a
+    # fraction the decimal rule deliberately keeps as words, because that
+    # phrase has no whole half. The percent anchor must not read it on its
+    # own: it wrote "point 5 percent", and the replacement pattern then
+    # made the screen read "point 5%" (wh-itn-percent-digits.1.2).
+    # Measured on base 6d907456: every one of these five stayed words.
+    ("point five percent", "point five percent"),
+    ("point twenty percent", "point twenty percent"),
+    ("point fifteen percent", "point fifteen percent"),
+    # The spoken zero stands between the "point" and the tail, and the
+    # refusal reaches back over it. Both spellings of that zero count.
+    ("point oh five percent", "point oh five percent"),
+    ("point o five percent", "point o five percent"),
+    # The three cases the refusal must NOT reach, each measured on base
+    # 6d907456 with the same answer. A whole half makes the phrase an
+    # ordinary decimal, a two-word tail belongs to the rules behind this
+    # one, and a two-word fraction was already no decimal.
+    ("zero point five percent", "0.5 percent"),
+    ("point one hundred percent", "point 100 percent"),
+    ("point zero five percent", "point zero five percent"),
+]
+
 ITN_ALL_CASES = (
     CARDINAL_CASES
     + COMMAND_SAFETY_CASES
     + MONEY_CASES
+    + PERCENT_CASES
     + CLOCK_TIME_CASES
     + DECIMAL_CASES
     + CONJUNCTION_CONNECTOR_CASES
@@ -1353,6 +1416,17 @@ class TestItnCommandSafety:
 class TestItnMoney:
     @pytest.mark.parametrize("spoken,expected", MONEY_CASES)
     def test_money_phrases(self, spoken, expected):
+        assert apply_itn(spoken) == expected
+
+
+class TestItnPercent:
+    """The percent anchor licenses a lone number word, exactly as the
+    dollar anchor does in _try_money. The anchor word itself stays, and
+    the Logic process writes the "%" from the punct-percent replacement
+    pattern (wh-itn-percent-digits)."""
+
+    @pytest.mark.parametrize("spoken,expected", PERCENT_CASES)
+    def test_percent_phrases(self, spoken, expected):
         assert apply_itn(spoken) == expected
 
 

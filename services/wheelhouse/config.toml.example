@@ -78,6 +78,14 @@ LOG_LEVEL = "INFO"
 # dictate (including passwords) accumulates in the rotated log files.
 LOG_TRANSCRIPTS = false
 
+# Update check: when true (the default), Wheelhouse asks api.github.com once
+# a day whether a newer public release exists. The first request is sent at
+# least 60 seconds after start. The request carries no user data, only a
+# User-Agent header with the Wheelhouse version, so GitHub also sees your
+# IP address. When a newer release exists, a notice offers to install it.
+# Set false to turn the check off. Wheelhouse then makes no update request.
+CHECK_FOR_UPDATES = true
+
 # Thumb wheel. With the mouse inside this many pixels of the left screen
 # edge the wheel changes TV brightness; anywhere else it changes volume.
 SIDE_OFFSET = 10
@@ -131,6 +139,8 @@ FLOATING_BUTTON_VISIBLE = true
 # PATTERN_MANAGER_FONT_SIZE = 12
 
 SPEECH_ENABLED_ON_STARTUP = true
+# Show words while you speak, before the speech engine finishes the sentence. The Interim Results menu item changes this.
+INTERIM_RESULTS = true
 SHOW_SPEECH_PULSE = true
 ICON_PATH = "WheelHouse.ico"
 

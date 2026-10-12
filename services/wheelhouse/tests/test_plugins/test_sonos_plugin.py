@@ -14,7 +14,9 @@ from unittest.mock import AsyncMock, Mock, patch, MagicMock, PropertyMock
 from services.wheelhouse.plugins.base import PluginState
 from services.wheelhouse.plugins.sonos_plugin import SonosPlugin
 import services.wheelhouse.plugins.sonos_plugin as sonos_mod
-from services.wheelhouse.events import VolumeAdjustCommand, SonosStateChangedEvent
+from services.wheelhouse.events import (
+    VolumeAdjustCommand, SonosStateChangedEvent, VolumeTargetChangedEvent,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +155,11 @@ class TestSonosStartStop:
         with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_sonos):
             await p.start()
 
-        mock_event_bus.subscribe.assert_called_once_with(
-            VolumeAdjustCommand, p._handle_volume_adjust
-        )
+        # wh-sonos-tv-recheck: the plugin also subscribes to the router's
+        # target-change event, so assert both calls by event type.
+        subscribed = [c.args for c in mock_event_bus.subscribe.call_args_list]
+        assert (VolumeAdjustCommand, p._handle_volume_adjust) in subscribed
+        assert (VolumeTargetChangedEvent, p._handle_volume_target_changed) in subscribed
         assert p.state == PluginState.RUNNING
         assert p._monitor_task is not None
         await p.stop()
@@ -169,8 +173,96 @@ class TestSonosStartStop:
 
         await p.start()
         assert p.state == PluginState.RUNNING
-        mock_event_bus.subscribe.assert_not_called()
+        # Disabled mode takes no volume subscription, but it must listen for
+        # the router choosing Sonos later (wh-sonos-tv-recheck).
+        subscribed = [c.args for c in mock_event_bus.subscribe.call_args_list]
+        assert not any(args[0] is VolumeAdjustCommand for args in subscribed)
+        assert (VolumeTargetChangedEvent, p._handle_volume_target_changed) in subscribed
         assert p._monitor_task is None
+
+    @pytest.mark.asyncio
+    async def test_the_switch_revives_a_plugin_that_started_in_disabled_mode(
+        self, mock_event_bus
+    ):
+        """The speaker was off at startup and plays TV audio later.
+
+        This is the case wh-sonos-tv-recheck exists for. Disabled mode takes
+        no VolumeAdjustCommand subscription and starts no playback watch, so
+        _handle_volume_target_changed is the only mechanism that gives the
+        thumb wheel a Sonos speaker again. Without it the router selects
+        Sonos, SystemVolumePlugin stops acting, and the wheel reaches nobody
+        until a restart (wh-sonos-tv-recheck.1.2).
+        """
+        p = await self._started_in_disabled_mode(mock_event_bus)
+
+        await p._handle_volume_target_changed(
+            VolumeTargetChangedEvent(
+                use_sonos=True, speaker_name="Living Room", speaker_ip="192.168.1.50"
+            )
+        )
+
+        assert p._sonos_available is True
+        assert p._speaker_ip == "192.168.1.50"
+        subscribed = [c.args for c in mock_event_bus.subscribe.call_args_list]
+        assert (VolumeAdjustCommand, p._handle_volume_adjust) in subscribed
+        assert p._monitor_task is not None
+        assert not p._monitor_task.done()
+        await p.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_switch_back_leaves_a_disabled_plugin_disabled(self, mock_event_bus):
+        """The negative guard for the test above.
+
+        A handler that acts on every event would take the wheel while the
+        router has System Volume selected.
+        """
+        p = await self._started_in_disabled_mode(mock_event_bus)
+
+        await p._handle_volume_target_changed(
+            VolumeTargetChangedEvent(use_sonos=False, speaker_name=None, speaker_ip=None)
+        )
+
+        assert p._sonos_available is False
+        assert mock_event_bus.subscribe.call_args_list == []
+        assert p._monitor_task is None
+
+    @pytest.mark.asyncio
+    async def test_a_second_switch_adds_no_second_command_subscription(
+        self, mock_event_bus, mock_volume_router_sonos
+    ):
+        """EventBus has no unsubscribe (event_bus.py:30).
+
+        A second subscription would make every wheel step move the speaker
+        twice.
+        """
+        p = await self._started_in_disabled_mode(mock_event_bus)
+        event = VolumeTargetChangedEvent(
+            use_sonos=True, speaker_name="Living Room", speaker_ip="192.168.1.50"
+        )
+
+        await p._handle_volume_target_changed(event)
+        await p._handle_volume_target_changed(event)
+
+        subscribed = [c.args for c in mock_event_bus.subscribe.call_args_list]
+        command_subscriptions = [
+            args for args in subscribed if args[0] is VolumeAdjustCommand
+        ]
+        assert len(command_subscriptions) == 1
+        await p.stop()
+
+    @staticmethod
+    async def _started_in_disabled_mode(bus):
+        """Start the plugin with no speaker found, then forget the start calls."""
+        p = SonosPlugin()
+        p._event_bus = bus
+        p._sonos_available = False
+        p._polling_interval = 2
+        p._state = PluginState.INITIALIZED
+        await p.start()
+        assert p.state == PluginState.RUNNING
+        assert p._monitor_task is None
+        bus.subscribe.reset_mock()
+        return p
 
     @pytest.mark.asyncio
     async def test_stop_cancels_monitor_task(self, mock_event_bus, mock_volume_router_sonos):
@@ -205,6 +297,12 @@ class TestSonosVolumeAdjust:
     async def _sync_to_thread(func, *args):
         """Run to_thread target synchronously."""
         return func(*args)
+
+    @pytest.fixture(autouse=True)
+    def _router_selects_sonos(self, mock_volume_router_sonos):
+        """Router chooses Sonos: the handler and the monitor read it per use (wh-sonos-tv-recheck)."""
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_sonos):
+            yield
 
     @pytest.mark.asyncio
     async def test_volume_up(self, mock_event_bus, mock_player):
@@ -288,34 +386,40 @@ class TestSonosVolumeAdjust:
 # ---------------------------------------------------------------------------
 
 class TestSonosPlayerConnection:
-    def test_get_player_sync_by_ip(self):
+    def test_get_player_sync_by_ip(self, mock_volume_router_sonos):
         p = SonosPlugin()
         p._speaker_ip = "192.168.1.50"
 
-        with patch.object(sonos_mod, "SoCo") as mock_soco:
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_sonos), \
+                patch.object(sonos_mod, "SoCo") as mock_soco:
             mock_soco.return_value = Mock()
             result = p._get_player_sync()
 
         mock_soco.assert_called_with("192.168.1.50")
         assert result is not None
 
-    def test_get_player_sync_by_name(self):
+    def test_get_player_sync_by_name(self, mock_volume_router_no_sonos):
         p = SonosPlugin()
         p._speaker_ip = "Office"
+        # wh-sonos-tv-recheck: the router has no speaker, so the configured
+        # identifier is the one _current_speaker_ip returns.
+        p._configured_speaker_ip = "Office"
 
-        with patch.object(sonos_mod.soco, "discovery") as mock_disc:
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_no_sonos), \
+                patch.object(sonos_mod.soco, "discovery") as mock_disc:
             mock_disc.by_name = Mock(return_value=Mock())
             result = p._get_player_sync()
 
         mock_disc.by_name.assert_called_with("Office")
         assert result is not None
 
-    def test_get_player_sync_exception_returns_none(self):
+    def test_get_player_sync_exception_returns_none(self, mock_volume_router_sonos):
         from soco.exceptions import SoCoException
         p = SonosPlugin()
         p._speaker_ip = "192.168.1.50"
 
-        with patch.object(sonos_mod, "SoCo", side_effect=SoCoException("timeout")):
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_sonos), \
+                patch.object(sonos_mod, "SoCo", side_effect=SoCoException("timeout")):
             result = p._get_player_sync()
 
         assert result is None
@@ -326,6 +430,12 @@ class TestSonosPlayerConnection:
 # ---------------------------------------------------------------------------
 
 class TestSonosMonitorPlayback:
+    @pytest.fixture(autouse=True)
+    def _router_selects_sonos(self, mock_volume_router_sonos):
+        """Router chooses Sonos: the handler and the monitor read it per use (wh-sonos-tv-recheck)."""
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_sonos):
+            yield
+
     @pytest.mark.asyncio
     async def test_music_playing_publishes_suppression(self, mock_event_bus, mock_player):
         """Streaming music should suppress speech."""
@@ -464,14 +574,18 @@ class TestSonosMonitorPlayback:
         assert sonos_events[0].is_playing is False
 
     @pytest.mark.asyncio
-    async def test_no_speaker_ip_exits_immediately(self, mock_event_bus):
+    async def test_no_speaker_ip_exits_immediately(self, mock_event_bus, mock_volume_router_no_sonos):
         """Monitor should exit early if no speaker IP configured."""
         p = SonosPlugin()
         p._event_bus = mock_event_bus
         p._speaker_ip = None
+        p._configured_speaker_ip = None
         p._state = PluginState.RUNNING
 
-        await p._monitor_playback()
+        # No router speaker and no configured one (overrides the class
+        # fixture that selects Sonos, wh-sonos-tv-recheck).
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_no_sonos):
+            await p._monitor_playback()
         mock_event_bus.publish.assert_not_called()
 
 
@@ -529,6 +643,12 @@ class TestSonosUnreachableLogGating:
     """The speaker dropping must produce ONE warning, quiet debug lines while
     it stays down, and one info line on recovery -- not an ERROR every 2s
     poll (wh-1f9c)."""
+
+    @pytest.fixture(autouse=True)
+    def _router_selects_sonos(self, mock_volume_router_sonos):
+        """Router chooses Sonos: the handler and the monitor read it per use (wh-sonos-tv-recheck)."""
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_sonos):
+            yield
 
     @pytest.mark.asyncio
     async def test_repeated_failures_warn_once_then_debug(
@@ -743,6 +863,12 @@ class TestSonosHealth:
 # ---------------------------------------------------------------------------
 
 class TestSonosAdversarial:
+    @pytest.fixture(autouse=True)
+    def _router_selects_sonos(self, mock_volume_router_sonos):
+        """Router chooses Sonos: the handler and the monitor read it per use (wh-sonos-tv-recheck)."""
+        with patch.object(sonos_mod, "get_volume_router", return_value=mock_volume_router_sonos):
+            yield
+
     @pytest.mark.asyncio
     async def test_soco_exception_during_volume(self, mock_event_bus, mock_player):
         """SoCo exception during volume adjust should be caught."""

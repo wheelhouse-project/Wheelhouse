@@ -18,7 +18,7 @@ from pycaw.pycaw import EDataFlow, ERole
 from services.wheelhouse.plugins.base import PluginState
 from services.wheelhouse.events import (
     VolumeAdjustCommand, PTTStartedEvent, PTTStoppedEvent, PTTMuteStateEvent,
-    SystemConfigurationErrorEvent,
+    SystemConfigurationErrorEvent, VolumeTargetChangedEvent,
 )
 
 
@@ -333,11 +333,17 @@ class TestSystemVolumeStartStop:
                 await p.start()
 
         assert p.state == PluginState.RUNNING
-        # VolumeAdjustCommand + PTTStartedEvent + PTTStoppedEvent = 3 subscriptions
-        assert mock_event_bus.subscribe.call_count == 3
+        # wh-sonos-tv-recheck: VolumeAdjustCommand and VolumeTargetChangedEvent
+        # are subscribed in every case, plus the two PTT events.
+        subscribed = [c.args for c in mock_event_bus.subscribe.call_args_list]
+        assert (VolumeAdjustCommand, p._handle_volume_adjust) in subscribed
+        assert (VolumeTargetChangedEvent, p._handle_volume_target_changed) in subscribed
+        assert (PTTStartedEvent, p._handle_ptt_started) in subscribed
+        assert (PTTStoppedEvent, p._handle_ptt_stopped) in subscribed
+        assert mock_event_bus.subscribe.call_count == 4
 
     @pytest.mark.asyncio
-    async def test_start_no_subscribe_when_router_selects_sonos(self, mock_event_bus):
+    async def test_start_subscribes_the_same_four_when_router_selects_sonos(self, mock_event_bus):
         router = Mock()
         router.use_system_volume = False
 
@@ -352,8 +358,14 @@ class TestSystemVolumeStartStop:
                 await p.start()
 
         assert p.state == PluginState.RUNNING
-        # PTT subscriptions always happen even when Sonos handles volume
-        assert mock_event_bus.subscribe.call_count == 2
+        # wh-sonos-tv-recheck: the same four subscriptions are taken when
+        # Sonos is selected; _handle_volume_adjust ignores commands then.
+        subscribed = [c.args for c in mock_event_bus.subscribe.call_args_list]
+        assert (VolumeAdjustCommand, p._handle_volume_adjust) in subscribed
+        assert (VolumeTargetChangedEvent, p._handle_volume_target_changed) in subscribed
+        assert (PTTStartedEvent, p._handle_ptt_started) in subscribed
+        assert (PTTStoppedEvent, p._handle_ptt_stopped) in subscribed
+        assert mock_event_bus.subscribe.call_count == 4
 
     @pytest.mark.asyncio
     async def test_stop_releases_interface(self, mock_event_bus):
@@ -1364,3 +1376,184 @@ class TestAHoldIsKeptOnDiskUntilTheLevelIsBack:
         record = ptt_volume_record.read_record()
         assert record is not None, "the release deleted the record of the next hold"
         assert record.pre_hold_db == -20.0
+
+
+class TestASwitchToSonosDuringAHoldWaitsForTheRelease:
+    """A switch to Sonos that arrives during a push-to-talk hold defers.
+
+    The hold turns the speakers down and puts the old level back at the
+    release. A 50 percent write during the hold would turn the speakers back
+    up while the hold is still listening to them
+    (wh-ptt-audio-override.1.4), and the restore would then overwrite the 50
+    percent. So the plugin keeps the set until the restore is done
+    (wh-sonos-tv-recheck).
+    """
+
+    PRE_PTT_LEVEL = -10.0
+
+    @pytest.fixture
+    def plugin(self, synthetic_metered_endpoint):
+        from services.wheelhouse.plugins.system_volume_plugin import SystemVolumePlugin
+        p = SystemVolumePlugin()
+        p._audio_device_id = synthetic_metered_endpoint
+        p._volume_interface = MagicMock()
+        p._volume_interface.GetMasterVolumeLevel.return_value = self.PRE_PTT_LEVEL
+        p._min_volume_db = -65.25
+        p._max_volume_db = 0.0
+        p._state = PluginState.RUNNING
+        return p
+
+    @staticmethod
+    def _switch():
+        return VolumeTargetChangedEvent(
+            use_sonos=True, speaker_name="Living Room", speaker_ip="192.168.1.50"
+        )
+
+    @staticmethod
+    def _switch_back():
+        return VolumeTargetChangedEvent(
+            use_sonos=False, speaker_name=None, speaker_ip=None
+        )
+
+    @staticmethod
+    def _level_calls(interface):
+        return [
+            (name, args[0])
+            for name, args, _kwargs in interface.mock_calls
+            if name in ("SetMasterVolumeLevel", "SetMasterVolumeLevelScalar")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_switch_during_the_hold_writes_nothing_and_logs_one_line(
+        self, plugin, caplog
+    ):
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+
+        with caplog.at_level(logging.INFO):
+            await plugin._handle_volume_target_changed(self._switch())
+
+        plugin._volume_interface.SetMasterVolumeLevelScalar.assert_not_called()
+        assert plugin._pending_sonos_handover is True
+        assert plugin._pending_sonos_handover_speaker == "Living Room"
+        waiting = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "waits for the release" in r.getMessage()
+        ]
+        assert len(waiting) == 1
+        assert "Living Room" in waiting[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_the_release_sets_50_percent_after_it_puts_the_level_back(self, plugin):
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+        await plugin._handle_volume_target_changed(self._switch())
+        plugin._volume_interface.reset_mock()
+
+        await plugin._handle_ptt_stopped(PTTStoppedEvent(reason="released"))
+
+        assert self._level_calls(plugin._volume_interface) == [
+            ("SetMasterVolumeLevel", self.PRE_PTT_LEVEL),
+            ("SetMasterVolumeLevelScalar", 0.5),
+        ]
+        assert plugin._pending_sonos_handover is False
+        assert plugin._pending_sonos_handover_speaker is None
+
+    @pytest.mark.asyncio
+    async def test_a_second_release_does_not_set_50_percent_again(self, plugin):
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+        await plugin._handle_volume_target_changed(self._switch())
+        await plugin._handle_ptt_stopped(PTTStoppedEvent(reason="released"))
+        plugin._volume_interface.reset_mock()
+
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+        await plugin._handle_ptt_stopped(PTTStoppedEvent(reason="released"))
+
+        plugin._volume_interface.SetMasterVolumeLevelScalar.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_release_without_a_switch_never_sets_50_percent(self, plugin):
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+
+        await plugin._handle_ptt_stopped(PTTStoppedEvent(reason="released"))
+
+        plugin._volume_interface.SetMasterVolumeLevelScalar.assert_not_called()
+        plugin._volume_interface.SetMasterVolumeLevel.assert_called_with(
+            self.PRE_PTT_LEVEL, None
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_lost_device_drops_the_waiting_switch(self, plugin):
+        """The 50 percent set has no device to write to, and a later hold must
+        not inherit the wait."""
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+        await plugin._handle_volume_target_changed(self._switch())
+        plugin._volume_interface = None
+
+        await plugin._handle_ptt_stopped(PTTStoppedEvent(reason="released"))
+
+        assert plugin._pending_sonos_handover is False
+        assert plugin._pending_sonos_handover_speaker is None
+
+    @pytest.mark.asyncio
+    async def test_no_hold_sets_50_percent_at_once(self, plugin):
+        plugin._pre_ptt_volume_db = None
+
+        await plugin._handle_volume_target_changed(self._switch())
+
+        plugin._volume_interface.SetMasterVolumeLevelScalar.assert_called_once_with(
+            0.5, None
+        )
+        assert plugin._pending_sonos_handover is False
+
+    @pytest.mark.asyncio
+    async def test_the_switch_back_during_the_hold_cancels_the_waiting_set(
+        self, plugin, caplog
+    ):
+        """A switch back makes the waiting 50 percent set wrong.
+
+        Acceptance item 3 asks for the set at the switch to Sonos and only
+        then. A hold can span a switch to Sonos and a switch back: wheel
+        commands arrive during a hold, and the repeated check also runs
+        during one. The release must then put the held level back and stop
+        there (wh-sonos-tv-recheck.1.1).
+        """
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+        await plugin._handle_volume_target_changed(self._switch())
+
+        with caplog.at_level(logging.INFO):
+            await plugin._handle_volume_target_changed(self._switch_back())
+
+        assert plugin._pending_sonos_handover is False
+        assert plugin._pending_sonos_handover_speaker is None
+        cancelled = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "cancels the 50 percent" in r.getMessage()
+        ]
+        assert len(cancelled) == 1
+
+        plugin._volume_interface.reset_mock()
+        await plugin._handle_ptt_stopped(PTTStoppedEvent(reason="released"))
+
+        assert self._level_calls(plugin._volume_interface) == [
+            ("SetMasterVolumeLevel", self.PRE_PTT_LEVEL),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_switch_back_with_nothing_waiting_writes_nothing(
+        self, plugin, caplog
+    ):
+        """Acceptance item 5: the switch back leaves the level alone.
+
+        This is the negative guard for the test above. A cancel that writes
+        to the device, or that logs its line when nothing waits, fails here.
+        """
+        plugin._pre_ptt_volume_db = self.PRE_PTT_LEVEL
+
+        with caplog.at_level(logging.INFO):
+            await plugin._handle_volume_target_changed(self._switch_back())
+
+        assert self._level_calls(plugin._volume_interface) == []
+        assert plugin._pending_sonos_handover is False
+        assert plugin._pre_ptt_volume_db == self.PRE_PTT_LEVEL
+        assert not [
+            r for r in caplog.records if "cancels the 50 percent" in r.getMessage()
+        ]

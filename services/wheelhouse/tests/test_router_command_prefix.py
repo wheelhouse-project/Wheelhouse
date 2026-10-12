@@ -108,12 +108,13 @@ class TestFinalizationCommandPrefix:
         assert decision.before_remainder == "question"
 
     def test_hotword_gated_prefix_needs_hotword(self, router):
-        # '^fix' requires the hotword. Without it, 'fix hello' must not
+        # '^fix(?:ed)?$' requires the hotword. Without it, 'fix hello' must not
         # reach the AI server -- it dictates, exactly as before the fix.
         #
         # This pair used 'save' until 2026-08-20, when every single-word
         # command traded requires_hotword for whole_utterance_only and a
-        # prefix split stopped being available to it. '^fix' is the one
+        # prefix split stopped being available to it. '^fix(?:ed)?$' (then
+        # '^fix'; bead wh-pattern-variants-numeric added 'fixed' and the '$') is the one
         # single-word command that still requires the hotword.
         decision = router._resolve_finalization(
             ["fix", "hello"], hotword_active=False

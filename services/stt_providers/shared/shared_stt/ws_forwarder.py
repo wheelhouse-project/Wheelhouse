@@ -152,6 +152,12 @@ class WSForwarder:
         # as it did before the field existed. Set by each provider main
         # before start(), the same way as wake_word_available.
         self.applies_hints: bool | None = None
+        # The last microphone name given to send_microphone
+        # (wh-show-microphone-name). None means no name was ever given
+        # and nothing is sent on connect; "" is a name that means no
+        # microphone is open. Kept here, not in the queue, so every
+        # (re)connect can repeat it: the queue is cleared on disconnect.
+        self._microphone_device: str | None = None
         self._log = log_func or logger.info
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -346,6 +352,34 @@ class WSForwarder:
                                 "reconnecting"
                             )
 
+                    # Repeat the last microphone name right after the
+                    # capabilities frame (wh-show-microphone-name). Sent
+                    # directly, for the same reason as capabilities: a
+                    # queued one-shot is cleared on disconnect and would
+                    # not repeat on reconnect. Nothing is sent when no
+                    # name was ever given (None); "" is a name. A send
+                    # failure is caught like the capabilities one and
+                    # follows the same close/reconnect path.
+                    microphone_device = self._microphone_device
+                    if capabilities_sent and microphone_device is not None:
+                        try:
+                            await ws.send(json.dumps({
+                                "type": "microphone",
+                                "device": microphone_device,
+                            }))
+                            if self.debug:
+                                self._log(
+                                    "[ws] sent microphone: "
+                                    f"device={microphone_device!r}"
+                                )
+                        except Exception as mic_err:
+                            capabilities_sent = False
+                            if self.debug:
+                                self._log(
+                                    f"[ws] microphone send error: {mic_err}; "
+                                    "reconnecting"
+                                )
+
                     while capabilities_sent and not self._stop_evt.is_set():
                         # Check if connection was closed by the server
                         # websockets 15.x uses state attribute instead of closed
@@ -385,7 +419,9 @@ class WSForwarder:
                                 # key by key, so a field added to
                                 # send_notification and not added here
                                 # never leaves the process
-                                # (wh-capture-winrt-required A4).
+                                # (wh-capture-winrt-required A4). cause
+                                # follows the same rule
+                                # (wh-blocked-mic-message).
                                 payload = {
                                     "type": msg_type,
                                     "title": msg_data.get("title", ""),
@@ -393,8 +429,20 @@ class WSForwarder:
                                     "kind": msg_data.get("kind", ""),
                                     "capture_backend": msg_data.get(
                                         "capture_backend", ""),
+                                    "cause": msg_data.get("cause", ""),
                                     "utterance_id": utt_id,
                                     "is_partial": is_partial
+                                }
+                            elif msg_type == "microphone":
+                                # Name of the microphone the provider
+                                # opened; "" means none is open
+                                # (wh-show-microphone-name). Rebuilt key
+                                # by key like every shape here, so the
+                                # device key must be named in this
+                                # payload to leave the process.
+                                payload = {
+                                    "type": msg_type,
+                                    "device": msg_data.get("device", ""),
                                 }
                             elif msg_type == "log":
                                 # Log messages for centralized logging
@@ -870,7 +918,7 @@ class WSForwarder:
             pass
 
     def send_notification(self, title: str, message: str, kind: str = "",
-                          capture_backend: str = ""):
+                          capture_backend: str = "", cause: str = ""):
         """Send a notification message to trigger a Windows toast notification.
 
         Args:
@@ -888,6 +936,15 @@ class WSForwarder:
                 (wh-capture-winrt-required A4). Always present in the
                 frame, empty rather than absent, so WheelHouse reads one
                 shape for every notification.
+            cause: The specific reason behind a kind="startup_failed"
+                notice, when WheelHouse needs to act on that reason and
+                not only show the text ("microphone_blocked" is the
+                one value today); "" on every other notice. WheelHouse
+                reads it in integrations/websocket_manager.py and shows
+                its own on-screen notice for that value
+                (wh-blocked-mic-message). Always present in the frame,
+                empty rather than absent, so WheelHouse reads one shape
+                for every notification.
         """
         if not self._loop or not self._queue:
             return
@@ -898,6 +955,37 @@ class WSForwarder:
             "message": message,
             "kind": kind,
             "capture_backend": capture_backend,
+            "cause": cause,
+            "utterance_id": 0,
+            "is_partial": False
+        }
+
+        try:
+            asyncio.run_coroutine_threadsafe(self._queue.put(msg_data), self._loop)
+        except Exception:
+            pass
+
+    def send_microphone(self, device: str) -> None:
+        """Tell WheelHouse which microphone the provider has open.
+
+        The name is remembered and sent again, right after the
+        capabilities frame, on every (re)connect, so WheelHouse learns it
+        even when the provider opened the microphone before the
+        connection existed (wh-show-microphone-name). The name is kept
+        even when no loop is running yet.
+
+        Args:
+            device: The microphone name. "" is valid and means no
+                microphone is open; it is queued and sent, not skipped.
+        """
+        self._microphone_device = device
+
+        if not self._loop or not self._queue:
+            return
+
+        msg_data = {
+            "type": "microphone",
+            "device": device,
             "utterance_id": 0,
             "is_partial": False
         }

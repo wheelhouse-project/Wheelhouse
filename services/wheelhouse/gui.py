@@ -270,6 +270,40 @@ PARAKEET_OFFER_LAUNCH_BUTTON = "Download now"
 PARAKEET_OFFER_FALLBACK_BUTTON = "Copy command"
 PARAKEET_OFFER_DECLINE_BUTTON = "Not now"
 
+# The update notice (wh-release-update-check). The Logic process sends an
+# update_available action when a newer release exists. The notice uses its
+# own GrantPromptToast, like the Parakeet offer, and does not close by
+# itself. The title takes the version number.
+UPDATE_NOTICE_TITLE = "Wheelhouse {version} is available"
+UPDATE_NOTICE_BODY = (
+    "A newer version of Wheelhouse is available. Update now downloads it, "
+    "closes Wheelhouse, and runs the installer. Later hides this notice. "
+    "Wheelhouse can show it again one week after this notice appeared."
+)
+UPDATE_NOTICE_ACCEPT_BUTTON = "Update now"
+UPDATE_NOTICE_DECLINE_BUTTON = "Later"
+# Pixels between the update notice and the prompt notice below it.
+UPDATE_NOTICE_GAP = 8
+# The notice after a failed update. Logic sends an update_failed action when
+# the download, the digest check or the start of the installer fails. The
+# notice reuses the toast of the update notice, shows only the close button,
+# and closes by itself after a time.
+UPDATE_FAILED_TITLE = "Wheelhouse update"
+UPDATE_FAILED_BODY = (
+    "The update could not start. Try again later, or run the "
+    "installer from the website."
+)
+UPDATE_FAILED_LIFETIME_MS = 20000
+# The notice when Windows blocks the microphone (wh-blocked-mic-message).
+# Logic sends a microphone_blocked action when a speech provider reports a
+# startup failure with the cause "microphone_blocked". The notice has a
+# toast of its own, shows only the close button, and stays on the screen
+# until the user closes it. Its body is the text of that provider message,
+# word for word: the sentence is written once, in the provider
+# (MICROPHONE_BLOCKED_MESSAGE in shared_audio/capture/winrt_capture.py),
+# and travels in the "message" key. No copy is kept here.
+MICROPHONE_BLOCKED_TITLE = "Windows is blocking your microphone"
+
 
 def _screen_bounds(exclude=None):
     """Return every connected screen as ``(x, y, width, height)``.
@@ -1294,6 +1328,9 @@ class GuiManager(QObject):
         self.ai_provider_display_names = {}  # AI provider name -> display name mapping
         self.interim_results_enabled = True  # Whether STT sends partial results
         self.debug_mode = False  # Whether log level is DEBUG
+        # Name of the microphone the active provider has open, "" when none
+        # (wh-show-microphone-name.3). Shown as the menu's "Listening on" entry.
+        self.microphone_name = ""
         self.speech_interaction_mode = "toggle"  # Updated from state_update
         self._ptt_held = False
         self._ptt_request_id = None
@@ -1314,6 +1351,9 @@ class GuiManager(QObject):
 
         self.button = FloatingButton()
         self.working_dialog = WorkingDialog()
+        # True while a first-run notice waits for the loading window to
+        # close (wh-first-run-notice.2).
+        self._first_run_notice_held = False
         # wh-lzsbd: rejection toast widget. Lazy-built on first use so
         # Qt does not pay the construction cost when no rejection has
         # fired yet.
@@ -1341,6 +1381,24 @@ class GuiManager(QObject):
         self._parakeet_offer_toast = None
         self._parakeet_offer_kind = None
         self._parakeet_offer_command = ""
+        # wh-release-update-check: the update notice has its own toast,
+        # built on first use. The version and tag of the notice on screen
+        # go back to Logic when Update now is pressed.
+        self._update_notice_toast = None
+        self._update_notice_version = ""
+        self._update_notice_tag = ""
+        # wh-blocked-mic-message.1.2: the version of an update notice that
+        # has not yet been reported to Logic as visible. Empty when no such
+        # notice exists, and always empty for the update-failure notice.
+        self._update_notice_unreported_version = ""
+        # wh-blocked-mic-message: the blocked-microphone notice has its
+        # own toast too, built on first use. Three notices once shared
+        # the update toast, and the one that arrived second overwrote the
+        # text of the first.
+        self._microphone_blocked_toast = None
+        # wh-blocked-mic-message.1.1: true while the update notice waits
+        # for a place that covers no other notice.
+        self._update_notice_waits = False
         # Per-tuple per-session dedup. A tuple is added when the user
         # clicks Yes or No on the prompt for that tuple; subsequent
         # threshold events for the same tuple are suppressed. A
@@ -1935,6 +1993,7 @@ class GuiManager(QObject):
                     self.ai_provider_display_names = message.get('ai_provider_display_names', {})
                     self.interim_results_enabled = message.get('interim_results_enabled', True)
                     self.debug_mode = message.get('debug_mode', False)
+                    self.microphone_name = message.get('microphone_name', '')
                     self.speech_interaction_mode = message.get('speech_interaction_mode', 'toggle')
                     self._handle_ptt_state(message)
                     # Not while the user is dragging. Size and position are
@@ -1978,7 +2037,11 @@ class GuiManager(QObject):
 
                     self.update_ui_state()
                 elif action in ('config_write_result', 'config_values_result'):
-                    self._handle_settings_result(message)
+                    # The settings window reads its own reply, or learns the
+                    # outcome of its own save, before the shared handler
+                    # settles and forgets the request.
+                    if not self._route_settings_window_reply(message):
+                        self._handle_settings_result(message)
                 elif action == 'toggle_button_visibility':
                     self.toggle_button_visibility()
                 elif action == "show_working":
@@ -1998,6 +2061,16 @@ class GuiManager(QObject):
                     )
                 elif action == "hide_working":
                     self.working_dialog.hide_working(message.get("owner"))
+                    # The dialog ignores a hide from a replaced launch, so
+                    # the message alone does not prove the window closed.
+                    # The held notice opens only once it is not visible
+                    # (wh-first-run-notice.2).
+                    if (
+                        self._first_run_notice_held
+                        and not self.working_dialog.isVisible()
+                    ):
+                        self._first_run_notice_held = False
+                        self._open_first_run_notice()
                 elif action == "show_notification":
                     if not send_notice(
                         message.get("title", "Wheelhouse"),
@@ -2100,10 +2173,22 @@ class GuiManager(QObject):
                     # threshold. Per-tuple per-session deduped on the
                     # GUI side; dismiss-without-click resets dedup.
                     self._show_grant_prompt_toast(message)
+                    self._stack_update_notice()
                 elif action == "parakeet_model_offer":
                     # wh-parakeet-model-download-offer: Parakeet was
                     # picked and its speech model is not complete.
                     self._show_parakeet_model_offer(message)
+                    self._stack_update_notice()
+                elif action == "update_available":
+                    # wh-release-update-check: a newer release exists.
+                    self._show_update_notice(message)
+                elif action == "update_failed":
+                    # wh-release-update-check: the update did not start.
+                    self._show_update_failed_notice(message)
+                elif action == "microphone_blocked":
+                    # wh-blocked-mic-message: Windows blocks the
+                    # microphone. The notice stays until it is closed.
+                    self._show_microphone_blocked_notice(message)
                 elif action == "soft_allow_write_failed":
                     # wh-9dkse: disk-write-fails follow-up toast.
                     # LogicController.add_soft_allow emits this when the
@@ -2122,6 +2207,11 @@ class GuiManager(QObject):
                     self._show_declined_write_failed_toast(message)
                 elif action == "open_pattern_manager":
                     self._open_pattern_manager()
+                elif action == "open_settings_window":
+                    # wh-voice-settings-window: the voice command "settings"
+                    # and the tray item arrive here (the tray callback runs
+                    # on pystray's thread and only queues the request).
+                    self._open_settings_window()
                 elif action == "open_help_explainer":
                     # The Logic process decided the user needs the
                     # explanation before the browser opens. It holds the
@@ -2131,6 +2221,16 @@ class GuiManager(QObject):
                     self._open_help_explainer(
                         start_ticked=message.get("start_ticked") is True
                     )
+                elif action == "open_first_run_notice":
+                    # The Logic process read its marker file at start-up
+                    # and found this is the first start after an install
+                    # (wh-first-run-notice). The notice never opens under
+                    # the always-on-top loading window; it waits for the
+                    # hide_working that closes it (wh-first-run-notice.2).
+                    if self.working_dialog.isVisible():
+                        self._first_run_notice_held = True
+                    else:
+                        self._open_first_run_notice()
                 elif action == "open_calibration":
                     # wh-7ou.7.3.1: voice-command path ("learn my voice").
                     # Logic asks the GUI to open the voice-teaching window.
@@ -2842,6 +2942,365 @@ class GuiManager(QObject):
                 logger.warning("Could not copy the install command: %s", exc)
 
     # ------------------------------------------------------------------
+    # Update notice (wh-release-update-check)
+    # ------------------------------------------------------------------
+
+    def _show_update_notice(self, message: dict) -> None:
+        """Show the update notice that the Logic process sent.
+
+        Logic sends ``update_available`` with the new ``version`` and the
+        release ``tag`` when a newer release exists. The notice has two
+        buttons. Update now sends ``update_now`` to Logic with the version
+        and the tag. Later and the X button send nothing.
+
+        One toast is built and reused, so a second notice while one is
+        shown or waiting replaces its text and tag. The toast does not
+        close by itself. It is placed above any prompt notice already on
+        screen (boss ruling Q5). When the notice becomes visible,
+        _stack_update_notice sends the Logic process one
+        ``update_notice_shown`` command with the version, and Logic writes
+        the shown-notice record then. A notice that waits for a place
+        sends nothing (wh-blocked-mic-message.1.2). Never raises.
+        """
+        version = message.get("version")
+        tag = message.get("tag")
+        if not (isinstance(version, str) and version
+                and isinstance(tag, str) and tag):
+            logger.warning(
+                "update_available dropped, version or tag missing: %r", message,
+            )
+            return
+        try:
+            from grant_prompt_toast import GrantPromptToast
+
+            if self._update_notice_toast is None:
+                self._update_notice_toast = GrantPromptToast()
+                self._update_notice_toast.yes_clicked.connect(
+                    self._on_update_notice_accepted
+                )
+                self._update_notice_toast.dismissed.connect(
+                    self._on_update_notice_closed
+                )
+            self._update_notice_version = version
+            self._update_notice_tag = tag
+            # The failure notice hides both buttons on this toast.
+            self._update_notice_toast._yes_button.show()
+            self._update_notice_toast._no_button.show()
+            self._update_notice_toast.show_prompt(
+                title=UPDATE_NOTICE_TITLE.format(version=version),
+                body=UPDATE_NOTICE_BODY,
+                yes_label=UPDATE_NOTICE_ACCEPT_BUTTON,
+                no_label=UPDATE_NOTICE_DECLINE_BUTTON,
+                lifetime_ms=None,
+            )
+            # The version becomes reportable only after the text reached the
+            # toast. If show_prompt raised, the toast still holds the old
+            # text, and a report would record a version nobody saw
+            # (wh-blocked-mic-message.1.2).
+            self._update_notice_unreported_version = version
+            self._stack_update_notice()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not show the update notice: %s", exc)
+
+    def _show_update_failed_notice(self, message: dict) -> None:
+        """Show that the update could not start.
+
+        Logic sends ``update_failed`` when the download, the digest check
+        or the start of the installer fails. Wheelhouse keeps running. The
+        notice reuses the toast of the update notice and hides its two
+        buttons, so only the close button is left. It closes by itself
+        after ``UPDATE_FAILED_LIFETIME_MS``. The next update notice shows
+        the buttons again. Never raises.
+        """
+        try:
+            from grant_prompt_toast import GrantPromptToast
+
+            if self._update_notice_toast is None:
+                self._update_notice_toast = GrantPromptToast()
+                self._update_notice_toast.yes_clicked.connect(
+                    self._on_update_notice_accepted
+                )
+                self._update_notice_toast.dismissed.connect(
+                    self._on_update_notice_closed
+                )
+            # The toast now holds the failure text, which carries no
+            # version, so a waiting update notice is never reported.
+            self._update_notice_unreported_version = ""
+            # Hide the buttons before show_prompt, which sizes the toast.
+            self._update_notice_toast._yes_button.hide()
+            self._update_notice_toast._no_button.hide()
+            self._update_notice_toast.show_prompt(
+                title=UPDATE_FAILED_TITLE,
+                body=UPDATE_FAILED_BODY,
+                lifetime_ms=UPDATE_FAILED_LIFETIME_MS,
+            )
+            self._stack_update_notice()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not show the update failure notice: %s", exc)
+
+    def _show_microphone_blocked_notice(self, message: dict) -> None:
+        """Show that Windows is blocking the microphone.
+
+        Logic sends ``microphone_blocked`` when a speech provider fails to
+        start because Windows denies microphone access. The ``message``
+        key holds the provider's own sentence, which names the Windows
+        setting and where it is, and the notice shows it as its body.
+        A message with no text shows nothing. The fix is a Windows
+        setting that WheelHouse cannot change, so the notice does not
+        close by itself. It has a toast of its own, so it never removes
+        the update notice and the update notice never removes it. Only
+        the close button is shown. Never raises.
+        """
+        text = message.get("message")
+        if not (isinstance(text, str) and text):
+            logger.warning(
+                "microphone_blocked dropped, message text missing: %r", message,
+            )
+            return
+        try:
+            from grant_prompt_toast import GrantPromptToast
+
+            if self._microphone_blocked_toast is None:
+                self._microphone_blocked_toast = GrantPromptToast()
+                # A waiting update notice gets its place when this one
+                # closes. Both buttons are hidden and lifetime_ms is
+                # None, so the close button is the only way it closes
+                # and ``dismissed`` always carries it.
+                self._microphone_blocked_toast.dismissed.connect(
+                    self._on_microphone_notice_closed
+                )
+            # Hide the buttons before show_prompt, which sizes the toast.
+            self._microphone_blocked_toast._yes_button.hide()
+            self._microphone_blocked_toast._no_button.hide()
+            self._microphone_blocked_toast.show_prompt(
+                title=MICROPHONE_BLOCKED_TITLE,
+                body=text,
+                lifetime_ms=None,
+            )
+            self._stack_update_notice()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not show the microphone notice: %s", exc)
+
+    def _on_update_notice_accepted(self) -> None:
+        """Update now was pressed: ask Logic to update to the shown tag.
+
+        Later and the X button need no message. The Logic process recorded
+        the version and the time when the GUI reported that the notice
+        appeared (``update_notice_shown``), so Later, the X button and no
+        answer all start the same 7-day wait.
+        """
+        self.send_command({
+            "action": "update_now",
+            "version": self._update_notice_version,
+            "tag": self._update_notice_tag,
+        })
+
+    def _on_microphone_notice_closed(self) -> None:
+        """The blocked-microphone notice closed, so place the stack again.
+
+        GrantPromptToast emits ``dismissed`` from closeEvent BEFORE it
+        calls the base class, so the notice is still visible while this
+        runs and a placement would measure it as present. hide() makes
+        isVisible() false at once, so the update notice can take the
+        place this notice leaves. close() hides the widget itself after
+        the event, and a second hide() changes nothing.
+        """
+        if self._microphone_blocked_toast is not None:
+            self._microphone_blocked_toast.hide()
+        self._stack_update_notice()
+
+    def _report_update_notice_shown(self) -> None:
+        """Tell Logic that the update notice is visible, once per notice.
+
+        Called at the two places in _stack_update_notice where the update
+        notice takes a place on the screen. Logic writes the shown-notice
+        record on this command, so the notice is reported only when the user
+        can see it: a notice that waits sends nothing, and the update-failure
+        notice has no version to send. The version is cleared before the
+        command goes out, so a later placement of the same notice sends
+        nothing (wh-blocked-mic-message.1.2).
+        """
+        version = self._update_notice_unreported_version
+        if not version:
+            return
+        self._update_notice_unreported_version = ""
+        self.send_command({"action": "update_notice_shown", "version": version})
+
+    def _on_update_notice_closed(self) -> None:
+        """The update notice closed, so it no longer waits for a place.
+
+        The user closes the notice with its own close button, or the
+        update-failure notice closes on its lifetime timer. A notice that
+        waits has no running timer, because ``_stack_update_notice``
+        stops the count before it hides the notice
+        (wh-blocked-mic-message.1.3), so only a notice the user could
+        read reaches this method.
+        """
+        self._update_notice_waits = False
+
+    def _stack_update_notice(self) -> None:
+        """Place the blocked-microphone and update notices above the prompts.
+
+        GrantPromptToast anchors itself at one fixed point and nothing
+        queues two notices, so a second one would sit exactly over the
+        first. The widget has no stacking option and the Parakeet offer
+        and the grant prompt must not change, so the other two notices
+        are moved after the widget has anchored itself. From the bottom
+        of the screen the order is: the Parakeet offer and the grant
+        prompt at their own anchor, the blocked-microphone notice above
+        them, and the update notice above that. Each notice's bottom edge
+        goes ``UPDATE_NOTICE_GAP`` pixels above the highest visible notice
+        below it in the same column. When the next notice would reach above
+        the top of the available screen area, it starts a column to the
+        left of the current column, with its bottom edge on the same line
+        as the bottom of the anchored notices, and the stack continues
+        upward there. A notice is moved to the top of the available area
+        only when it is the lowest notice in its own column, where no
+        notice can be covered, or when the column to the left would be
+        outside the available area. Without a visible blocked-microphone
+        notice the update notice sits above the Parakeet offer or the grant
+        prompt, as before. Called after any of the four is shown, so the
+        order of arrival does not matter. Never raises.
+
+        The screen can be too small for every notice: at 150 or 200
+        percent display scaling the available area holds neither one
+        column of notices nor a third column. Then two rules decide
+        (wh-blocked-mic-message.1.1). The blocked-microphone notice never
+        waits, because no voice feature works while Windows blocks the
+        microphone, so it takes its place even when that place covers the
+        Parakeet offer or the grant prompt; the covered prompt stays open
+        and shows again when the user closes the notice over it. The
+        update notice covers nothing: when every place it can take covers
+        another notice, it hides itself and waits, and it appears when the
+        user closes the blocked-microphone notice. On a screen smaller
+        again, where even the place above the grant prompt reaches over
+        the top of the area, the update notice has no free place at all.
+        A notice that never appears sends nothing to the Logic process, so
+        no record hides its version, and the notice returns at the next
+        update check. That check comes at most CHECK_INTERVAL_SECONDS (24
+        hours) after the last check, not at the next launch
+        (wh-blocked-mic-message.1.2). Measured on a 683x336 available
+        area, which a 1366x768 panel gives at 200 percent.
+
+        At the moment the update notice becomes visible, this method sends
+        the Logic process one ``update_notice_shown`` command with the
+        version, through _report_update_notice_shown. The two places that
+        call it are the two places that call resume_lifetime for the update
+        notice. The command goes out once per update_available message: a
+        second message for a version whose notice waits replaces the waiting
+        notice on the one toast, and the command goes out when that notice
+        appears.
+        """
+        # crewcut: only the blocked-microphone notice re-places the stack
+        # when it closes, so closing the Parakeet offer or the grant
+        # prompt leaves a waiting update notice hidden until the next
+        # notice arrives, and a notice that closes leaves a gap below it.
+        # To remove this: connect the ``dismissed`` signal of all four
+        # notices to this method.
+        try:
+            anchors = [
+                toast
+                for toast in (self._parakeet_offer_toast, self._grant_prompt_toast)
+                if toast is not None and toast.isVisible()
+            ]
+            placed = [
+                toast
+                for toast in (self._microphone_blocked_toast, self._update_notice_toast)
+                if toast is not None
+                and (
+                    toast.isVisible()
+                    or (
+                        toast is self._update_notice_toast
+                        and self._update_notice_waits
+                    )
+                )
+            ]
+            if not placed:
+                return
+            screen = QApplication.primaryScreen()
+            area = screen.availableGeometry() if screen is not None else None
+            # Every notice in a column has the same right edge, as the
+            # widget's own anchor gives it.
+            if anchors:
+                anchor_bottom = max(toast.y() + toast.height() for toast in anchors)
+                column_top = min(toast.y() for toast in anchors)
+                column_left = min(toast.x() for toast in anchors)
+                column_right = max(toast.x() + toast.width() for toast in anchors)
+            else:
+                # Nothing is below the first notice, so it keeps its place.
+                first = placed[0]
+                if first is self._update_notice_toast:
+                    # Nothing is below it, so it covers nothing.
+                    self._update_notice_waits = False
+                    if not first.isVisible():
+                        first.show()
+                    first.resume_lifetime()
+                    self._report_update_notice_shown()
+                anchor_bottom = first.y() + first.height()
+                column_top = first.y()
+                column_left = first.x()
+                column_right = first.x() + first.width()
+                placed = placed[1:]
+            for toast in placed:
+                y = column_top - toast.height() - UPDATE_NOTICE_GAP
+                if area is not None and y < area.y() + 24:
+                    next_right = column_left - UPDATE_NOTICE_GAP
+                    if next_right - toast.width() >= area.x():
+                        column_right = next_right
+                        column_left = column_right
+                        y = anchor_bottom - toast.height()
+                    # The clamp keeps the notice on the screen. It can
+                    # put the notice over the one already in this
+                    # column, which is why the update notice tests its
+                    # place below.
+                    y = max(y, area.y() + 24)
+                x = column_right - toast.width()
+                if toast is self._update_notice_toast and self._covers_a_notice(
+                    toast, x, y
+                ):
+                    self._update_notice_waits = True
+                    # The lifetime of the update-failure notice must not
+                    # count while the user cannot read the text
+                    # (wh-blocked-mic-message.1.3).
+                    toast.pause_lifetime()
+                    toast.hide()
+                    continue
+                if toast is self._update_notice_toast:
+                    self._update_notice_waits = False
+                    if not toast.isVisible():
+                        toast.show()
+                    toast.resume_lifetime()
+                    self._report_update_notice_shown()
+                toast.move(x, y)
+                column_top = y
+                column_left = min(column_left, x)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not place the update notices: %s", exc)
+
+    def _covers_a_notice(self, toast, x: int, y: int) -> bool:
+        """Would this notice cover another notice at this point?
+
+        The rectangle is the notice's own frame moved to the point, so
+        this answer and the tests measure the same rectangles. Only the
+        update notice asks, and the three notices it must not cover are
+        the ones below.
+        """
+        place = toast.frameGeometry()
+        place.moveTo(x, y)
+        others = (
+            self._grant_prompt_toast,
+            self._parakeet_offer_toast,
+            self._microphone_blocked_toast,
+        )
+        return any(
+            other is not None
+            and other is not toast
+            and other.isVisible()
+            and place.intersects(other.frameGeometry())
+            for other in others
+        )
+
+    # ------------------------------------------------------------------
     # Three-strikes grant prompt (wh-bqv9c)
     # ------------------------------------------------------------------
 
@@ -3286,6 +3745,7 @@ class GuiManager(QObject):
         self.button.set_ptt_mode(self.speech_interaction_mode == "push_to_talk")
         self.button.setVisible(self.button_visible)
         self.update_tray_menu()
+        self._refresh_settings_window()
 
     def send_command(self, command: dict):
         """:flow: GUI State Synchronization
@@ -3909,6 +4369,10 @@ class GuiManager(QObject):
         self.button.set_state(False)
         self.button.set_ptt_mode(new_mode == "push_to_talk")
         self.update_tray_menu()
+        # The settings window is not refreshed here: the tray menu calls this
+        # method on pystray's thread, and Qt widgets may change only on the Qt
+        # thread. The state update that Logic sends after the mode change
+        # refreshes the window (update_ui_state).
 
     def _on_button_press(self):
         """Handle floating button mouse-down for PTT detection."""
@@ -4484,6 +4948,209 @@ class GuiManager(QObject):
             "do_not_show_again": bool(do_not_show_again),
         })
 
+    def _open_settings_window(self):
+        """Open the settings window (wh-voice-settings-window).
+
+        Built once; every later call shows the same window again. The saved
+        settings (8 to 13 in the window) are asked of the Logic process on
+        every open, so the window never shows a value from before an edit
+        of config.toml.
+        """
+        from settings_window_dialog import CONFIG_KEYS, SettingsWindowDialog
+        dialog = getattr(self, '_sw_dialog', None)
+        if dialog is None:
+            dialog = SettingsWindowDialog(parent=None)
+            self._sw_dialog = dialog
+            # Settings 1 to 7 call the callable the right-click menu's Qt
+            # branch uses for the same entry, so the window and the menu
+            # cannot drift apart. None of these saves from the window.
+            dialog.speech_toggle_requested.connect(self.send_toggle_speech_command)
+            dialog.button_visibility_toggle_requested.connect(self.toggle_button_visibility)
+            dialog.interim_toggle_requested.connect(self.toggle_interim_results)
+            dialog.ptt_toggle_requested.connect(self._toggle_ptt_mode)
+            dialog.stt_provider_requested.connect(self.switch_stt_provider)
+            dialog.ai_provider_requested.connect(self.switch_ai_provider)
+            dialog.debug_toggle_requested.connect(
+                lambda: self.send_command({'action': 'toggle_log_level'})
+            )
+            # Settings 8 to 13 are saved by the Logic process, which owns
+            # config.toml; this process never writes it.
+            dialog.setting_changed.connect(self._save_settings_window_value)
+            dialog.restart_requested.connect(self.request_restart)
+        dialog.apply_live_state(self._settings_window_live_state())
+        self._sw_read_request_id = uuid.uuid4().hex
+        self.send_command({
+            'action': 'get_config_values',
+            'request_id': self._sw_read_request_id,
+            'keys': list(CONFIG_KEYS),
+        })
+        state = dialog.windowState()
+        if state & Qt.WindowState.WindowMinimized:
+            dialog.setWindowState(
+                (state & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        # The voice command arrives by the Logic-to-GUI queue, so this
+        # process holds no foreground right; see _open_pattern_manager.
+        try:
+            from terminal_editor_window import _steal_foreground
+
+            _steal_foreground(int(dialog.winId()))
+        except Exception as exc:
+            logger.debug("Settings window foreground request failed: %s", exc)
+
+    def _settings_window_live_state(self) -> dict:
+        """What the window shows for settings 1 to 7, from this manager's state.
+
+        The provider lists are the right-click menu's own lists, with the
+        same labels and the same placeholders.
+        """
+        ai_entries = []
+        for provider in self.ai_providers_available:
+            if provider == "__ai_unconfigured__":
+                ai_entries.append((provider, "AI not configured", False))
+            elif provider == "__ai_disabled__":
+                ai_entries.append((provider, "AI disabled", False))
+            else:
+                ai_entries.append(
+                    (provider, self._get_ai_provider_display_name(provider), True)
+                )
+        absent_label = None
+        if (
+            self.ai_provider is not None
+            and self.ai_provider not in self.ai_providers_available
+        ):
+            absent_label = (
+                f"(configured: {self._get_ai_provider_display_name(self.ai_provider)}"
+                " -- not available)"
+            )
+        return {
+            'ready': bool(self.initial_state_received),
+            'speech_enabled': bool(self.speech_enabled),
+            'button_visible': bool(self.button_visible),
+            'interim_results': bool(self.interim_results_enabled),
+            'push_to_talk': self.speech_interaction_mode == "push_to_talk",
+            'debug': bool(self.debug_mode),
+            'stt_providers': [
+                (p, self._get_provider_display_name(p))
+                for p in self.stt_providers_available
+            ],
+            'stt_current': self.stt_provider,
+            'stt_not_installed': list(self.stt_providers_not_installed.items()),
+            'ai_providers': ai_entries,
+            'ai_current': self.ai_provider,
+            'ai_absent_label': absent_label,
+        }
+
+    def _refresh_settings_window(self) -> None:
+        """Show the live state in the settings window, if one exists.
+
+        Sends no command: the window sets its controls with their signals
+        blocked.
+        """
+        dialog = getattr(self, '_sw_dialog', None)
+        if dialog is None:
+            return
+        try:
+            dialog.apply_live_state(self._settings_window_live_state())
+        except Exception:
+            logger.exception('Could not refresh the settings window')
+
+    def _save_settings_window_value(self, key, value) -> None:
+        """Save one setting the user changed in the settings window.
+
+        Goes through the Logic process with a request ID (send_command adds
+        it), like every other acknowledged settings write.
+        """
+        self.send_command({'action': 'set_config_value', 'key': key, 'value': value})
+
+    def _route_settings_window_reply(self, message) -> bool:
+        """Give the settings window the reply that belongs to it.
+
+        Returns True when the reply was the answer to the window's own read
+        and nothing else needs it. A write result is shown in the window and
+        then still handed to the shared handler, which settles the request.
+        Must run before that handler, because it forgets the request.
+        """
+        dialog = getattr(self, '_sw_dialog', None)
+        if dialog is None:
+            return False
+        from settings_window_dialog import CONFIG_KEYS
+        request_id = message.get('request_id')
+        values = message.get('values')
+        if not isinstance(values, dict):
+            return False
+        if message['action'] == 'config_values_result':
+            if request_id != getattr(self, '_sw_read_request_id', None):
+                return False
+            dialog.apply_config_values(values)
+            return True
+        saved = message.get('saved')
+        pending = self._settings_requests.get(request_id)
+        if type(saved) is not bool or pending is None:
+            return False
+        keys = [key for key in pending['values']
+                if key in CONFIG_KEYS and key in values
+                and self._settings_latest.get(key) == request_id]
+        if keys:
+            dialog.apply_config_values({key: values[key] for key in keys})
+            dialog.show_save_result(saved)
+        return False
+
+    def _open_first_run_notice(self):
+        """Show the window that tells a new user how to see Wheelhouse hear them.
+
+        One window only: a second message while it is open raises the one
+        already there. The window is modeless, so this method returns at
+        once and the queue this call came from keeps being read.
+
+        Once the window is on screen this method sends the Logic process one
+        ``first_run_notice_shown`` command, and the Logic process writes the
+        marker file then. A second message sends the command again; the
+        Logic process writes the marker again without an error. A window
+        that fails to show raises before the command, so no marker is
+        written for a notice nobody saw (wh-first-run-notice.1.1).
+        """
+        from first_run_notice_window import FirstRunNoticeWindow
+        if getattr(self, '_first_run_notice', None) is None:
+            self._first_run_notice = FirstRunNoticeWindow(parent=None)
+            self._first_run_notice.help_chosen.connect(
+                self._on_first_run_notice_help
+            )
+        self._first_run_notice.show()
+        self._first_run_notice.raise_()
+        self._first_run_notice.activateWindow()
+        # The message arrives by the Logic-to-GUI queue, so this process
+        # holds no foreground right and Windows would only flash the
+        # taskbar button. Same remedy and same guard as
+        # _open_help_explainer (wh-assistant-window-behind).
+        try:
+            from terminal_editor_window import _steal_foreground
+
+            _steal_foreground(int(self._first_run_notice.winId()))
+        except Exception as exc:
+            logger.debug("First-run notice foreground request failed: %s", exc)
+        self.send_command({"action": "first_run_notice_shown"})
+
+    def _on_first_run_notice_help(self):
+        """Act on the notice's Open help button.
+
+        Sends the command the assistant explanation window's button sends
+        (``explained`` true), so the Logic process opens the help page
+        directly and does not ask for a second window. No
+        ``do_not_show_again`` key: that key makes the Logic process save the
+        explanation window's setting and marker. Close and the Escape key
+        never reach here.
+        """
+        self.send_command({
+            "action": "open_help_online",
+            "explained": True,
+            "source": "first_run_notice",
+        })
+
     def _open_calibration(self):
         """Open the voice-teaching (calibration) window (wh-7ou.7.3.1)."""
         from calibration_dialog import CalibrationDialog
@@ -4521,6 +5188,25 @@ class GuiManager(QObject):
         button_is_visible = bool(self.button_visible)
         interim_results_checked = bool(self.interim_results_enabled)
         debug_is_checked = bool(self.debug_mode)
+        # The one label both branches show, built once so the two menus
+        # cannot disagree (wh-show-microphone-name.3). David approved both
+        # strings; do not reword them.
+        #
+        # Both menus read "&" as the keyboard-shortcut marker and draw
+        # neither the character nor the marker, so a device name that
+        # holds one must carry two to display one. Qt does this in a
+        # QAction's text. pystray does the same on Windows, although it
+        # draws no menu itself: it passes the text to InsertMenuItemW as
+        # an MFT_STRING item (pystray/_win32.py:308-321 sets dwTypeData
+        # to the text with fType 0, and MFT_STRING is 0 in
+        # pystray/_util/win32.py:55), and its only escape call is on the
+        # GTK path. The doubling therefore belongs here, once, and not in
+        # either branch (BOSS RULING 11:56, 2026-10-10).
+        listening_on_label = (
+            f"Listening on: {self.microphone_name}"
+            if self.microphone_name
+            else "Listening on: no microphone"
+        ).replace("&", "&&")
 
         if is_tray_menu:
             # Build base menu items
@@ -4556,6 +5242,12 @@ class GuiManager(QObject):
                     enabled=is_ready,
                 ),
             ]
+
+            # Not clickable, and outside the provider gate below: the entry
+            # shows even when no engine is available.
+            menu_items.append(
+                pystray.MenuItem(listening_on_label, lambda: None, enabled=False)
+            )
 
             # Add STT Provider submenu if providers available
             if self.stt_providers_available:
@@ -4665,6 +5357,15 @@ class GuiManager(QObject):
                 )
             )
 
+            # Settings window (marshal to Qt thread via state queue)
+            menu_items.append(
+                pystray.MenuItem(
+                    "Settings",
+                    lambda: self.state_from_logic_queue.put({"action": "open_settings_window"}),
+                    enabled=is_ready
+                )
+            )
+
             # Add remaining items
             menu_items.extend([
                 pystray.Menu.SEPARATOR,
@@ -4731,6 +5432,17 @@ class GuiManager(QObject):
             )
             ptt_mode_action.triggered.connect(self._toggle_ptt_mode)
             menu.addAction(ptt_mode_action)
+
+            # Not clickable, and outside the provider gate below: the entry
+            # shows even when no engine is available. The label already
+            # carries its doubled ampersand; see where it is built.
+            listening_on_action = QAction(listening_on_label, self)
+            listening_on_action.setEnabled(False)
+            listening_on_action.setToolTip(
+                "The microphone Wheelhouse is listening to, or \"no microphone\""
+                " when none is open."
+            )
+            menu.addAction(listening_on_action)
 
             # STT Provider submenu (only if providers available)
             if self.stt_providers_available:
@@ -4842,6 +5554,16 @@ class GuiManager(QObject):
             pm_action.setEnabled(is_ready)
             pm_action.setToolTip("Open the editor for personal voice patterns.")
             pm_action.triggered.connect(self._open_pattern_manager)
+
+            # Settings window
+            settings_action = menu.addAction("Settings")
+            settings_action.setEnabled(is_ready)
+            settings_action.setToolTip(
+                "Open the settings window. It holds the settings in this menu"
+                " and a few more. The spoken command \"settings\" opens the"
+                " same window."
+            )
+            settings_action.triggered.connect(self._open_settings_window)
 
             menu.addSeparator()
 

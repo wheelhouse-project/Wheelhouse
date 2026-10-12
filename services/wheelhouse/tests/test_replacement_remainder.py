@@ -219,3 +219,201 @@ class TestRemainderHelperEarliestSelection:
         h = self._harness()
         winner = h.processor._find_earliest_replacement("just plain words")
         assert winner is None
+
+
+class TestTheTextOnlyReplacementPass:
+    """wh-itn-percent-digits.1.1: the pass the editor replay uses.
+
+    ``SpeechProcessor._apply_allowed_text_replacements`` rewrites the
+    text of a corrected final the way the word-by-word replay would,
+    for the patterns named in ``_EDITOR_REPLAY_TEXT_DOC_IDS`` and for no
+    others, and it runs no pattern action. It is built on the helper
+    the tests above cover, which is replacement-only already.
+    """
+
+    def _processor(self):
+        return SpeechPipelineHarness().processor
+
+    def test_the_pass_runs_no_pattern_action(self):
+        """A string the pass REWRITES sends nothing to the app.
+
+        Acceptance item 2. The pattern's own action, run through the text
+        parser, would send ``intelligent_insert_text`` to the app.
+        """
+        h = SpeechPipelineHarness()
+        # The string must contain the word percent: only a string that
+        # matches the listed pattern makes the loop body run, and only a
+        # running body can run an action. A command word such as
+        # "backspace" never reaches the body (its pattern is typed a
+        # command, so the scan finds no replacement).
+        result = h.processor._apply_allowed_text_replacements("50 percent")
+        assert result == "50%", (
+            "The pass did not reach its loop body, so this test proves "
+            f"nothing about actions: {result!r}."
+        )
+        assert h.get_outputs() == [], (
+            "The pass sent an action to the app: "
+            f"{[(o.action, o.params) for o in h.get_outputs()]}"
+        )
+
+    def test_the_pass_leaves_a_command_word_alone(self):
+        """A string that matches a command pattern comes back unchanged.
+
+        ``backspace`` fullmatches a command pattern whose action presses
+        a key. The pass must hand the string back as it came and send
+        nothing to the app.
+        """
+        h = SpeechPipelineHarness()
+        text = "backspace"
+        result = h.processor._apply_allowed_text_replacements(text)
+        assert result == text, (
+            f"The pass changed a command string: {result!r}."
+        )
+        assert h.get_outputs() == [], (
+            "The pass sent an action to the app: "
+            f"{[(o.action, o.params) for o in h.get_outputs()]}"
+        )
+
+    def test_the_pass_writes_the_percent_symbol_against_its_number(self):
+        proc = self._processor()
+        assert proc._apply_allowed_text_replacements("50 percent") == "50%"
+
+    def test_the_pass_leaves_a_replacement_outside_the_list_alone(self):
+        """``period`` is a one-step text replacement too, and is not listed.
+
+        Acceptance item 4: only the doc_ids in the one explicit list
+        are applied.
+        """
+        proc = self._processor()
+        text = "hello period world"
+        assert proc._apply_allowed_text_replacements(text) == text
+
+    def test_the_list_holds_exactly_the_percent_pattern(self):
+        import sys
+        module = sys.modules[type(self._processor()).__module__]
+        assert list(module._EDITOR_REPLAY_TEXT_DOC_IDS) == ["punct-percent"]
+
+    def test_the_scan_continues_after_the_text_it_wrote(self, monkeypatch):
+        """A replacement that contains its own trigger is not rescanned.
+
+        The percent pattern's text is changed, for this test only, to
+        a string that matches the pattern again. A pass that restarted
+        at the beginning of the string after each write would not
+        finish; this one writes each match once and moves on. Acceptance
+        item 3.
+        """
+        proc = self._processor()
+        patterns = [
+            p for p in proc.text_parser.patterns
+            if p.get("doc_id") == "punct-percent"
+        ]
+        assert len(patterns) == 1
+        monkeypatch.setitem(patterns[0], "actions", [
+            {"function": "text", "params": ["x percent y"]},
+        ])
+        result = proc._apply_allowed_text_replacements(
+            "a percent b percent c"
+        )
+        assert result == "a x percent y b x percent y c", (
+            f"The scan did not move past the text it wrote: {result!r}"
+        )
+
+    def test_a_word_replacement_keeps_the_whitespace_in_front_of_it(
+        self, monkeypatch,
+    ):
+        """The pass removes whitespace only in front of punctuation.
+
+        ``PatternCatalog._merge_entries`` lets a user entry replace a
+        system entry whole, so a user can give ``punct-percent`` a word
+        as its replacement text. The pass must write that word where the
+        match stood. It must not apply the rule that pulls punctuation
+        against the word before it, because that rule first removes
+        every whitespace character in front of the match.
+        """
+        proc = self._processor()
+        patterns = [
+            p for p in proc.text_parser.patterns
+            if p.get("doc_id") == "punct-percent"
+        ]
+        assert len(patterns) == 1
+        monkeypatch.setitem(patterns[0], "actions", [
+            {"function": "text", "params": ["whole"]},
+        ])
+        result = proc._apply_allowed_text_replacements("a\n\npercent b")
+        assert result == "a\n\nwhole b", (
+            "a replacement that is a word must keep the whitespace in "
+            f"front of it. Result: {result!r}"
+        )
+
+    def test_text_with_no_listed_trigger_never_scans_the_catalog(
+        self, monkeypatch,
+    ):
+        """A correction with no percent word costs no catalog scan.
+
+        wh-itn-percent-digits.1.1: the pass runs on every editor
+        correction, so it returns the text at once when no listed pattern
+        can match it. The catalog scan is ``_find_earliest_replacement``.
+        """
+        proc = self._processor()
+        scans = []
+
+        def counting_scan(text):
+            scans.append(text)
+            return None
+
+        monkeypatch.setattr(proc, "_find_earliest_replacement", counting_scan)
+        text = "hello period world"
+        assert proc._apply_allowed_text_replacements(text) == text
+        assert scans == [], (
+            "The pass scanned the whole catalog for a text that holds no "
+            f"word of a listed pattern: {scans!r}"
+        )
+
+    def test_a_run_of_exactly_the_bound_logs_nothing(
+        self, monkeypatch, caplog,
+    ):
+        """Three matches under a bound of three is a complete pass."""
+        import logging
+        import sys
+        proc = self._processor()
+        module = sys.modules[type(proc).__module__]
+        monkeypatch.setattr(
+            module, "_TEXT_REPLACEMENT_PASS_MAX_STEPS", 3,
+        )
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            result = proc._apply_allowed_text_replacements(
+                "percent percent percent"
+            )
+        assert result == "%%%", f"The pass did not finish: {result!r}"
+        lines = [
+            r for r in caplog.records if r.name == module.__name__
+        ]
+        assert lines == [], (
+            "The bound warned although no match was left: "
+            f"{[r.getMessage() for r in lines]}"
+        )
+
+    def test_the_iteration_bound_stops_the_pass_and_logs_one_line(
+        self, monkeypatch, caplog,
+    ):
+        """The bound is the second defence: the rest stays as it was."""
+        import logging
+        import sys
+        proc = self._processor()
+        module = sys.modules[type(proc).__module__]
+        monkeypatch.setattr(
+            module, "_TEXT_REPLACEMENT_PASS_MAX_STEPS", 3,
+        )
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            result = proc._apply_allowed_text_replacements(
+                "percent percent percent percent percent"
+            )
+        assert result == "%%% percent percent", (
+            f"The bound did not stop the pass after three steps: {result!r}"
+        )
+        lines = [
+            r for r in caplog.records if r.name == module.__name__
+        ]
+        assert len(lines) == 1, (
+            f"Expected one log line at the bound, got {len(lines)}."
+        )

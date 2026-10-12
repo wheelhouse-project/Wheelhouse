@@ -514,6 +514,64 @@ class TestSendMethods:
         assert msg["message"] == "Test message body"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("device", ["Headset Mic (USB)", ""])
+    async def test_send_microphone_reaches_the_wire(self, device):
+        """send_microphone must put {"type": "microphone", "device": ...}
+        on the socket (wh-show-microphone-name.1).
+
+        The sender loop rebuilds every payload key by key, so this reads
+        the JSON the server received, not the queued dict. The empty
+        string is a valid device ("no microphone is open") and must be
+        sent, not skipped.
+        """
+        import websockets
+        import json
+
+        received_messages = []
+        connection_established = asyncio.Event()
+
+        async def handler(websocket):
+            await websocket.send('{"type": "status", "transcription_enabled": true}')
+            connection_established.set()
+            try:
+                async for message in websocket:
+                    _frame = json.loads(message)
+                    # wh-nvyh: every (re)connect leads with a capabilities
+                    # frame; these tests assert on the payload frames.
+                    if _frame.get("type") != "capabilities":
+                        received_messages.append(_frame)
+            except Exception:
+                pass
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+
+        event = threading.Event()
+        event.set()
+
+        forwarder = WSForwarder(
+            host="127.0.0.1",
+            port=port,
+            transcription_enabled_event=event,
+            debug=False
+        )
+        forwarder.start()
+
+        await asyncio.wait_for(connection_established.wait(), timeout=2.0)
+        await asyncio.sleep(0.1)
+
+        forwarder.send_microphone(device)
+        await asyncio.sleep(0.5)
+
+        forwarder.stop()
+        server.close()
+        await server.wait_closed()
+
+        mic_frames = [m for m in received_messages if m.get("type") == "microphone"]
+        assert len(mic_frames) == 1
+        assert mic_frames[0] == {"type": "microphone", "device": device}
+
+    @pytest.mark.asyncio
     async def test_send_vad_start_queues_message(self):
         """send_vad_start should queue a vad_start message."""
         import websockets

@@ -196,3 +196,114 @@ class TestTheNotifier:
         for c in forwarder.send_notification.call_args_list:
             assert len(c.args) == 2
             assert set(c.kwargs) == {"kind"}
+
+
+class TestTheMicrophoneReport:
+    """wh-show-microphone-name Stage B: the notifier also tells the
+    forwarder which microphone is open. The report is independent of the
+    two notices: it is never held back by the loss flag (acceptance 4), and
+    the notices keep their words and their gating (acceptance 5)."""
+
+    def test_opened_sends_the_device_name(self):
+        forwarder = Mock()
+        notifier, _ = _notifier(forwarder)
+
+        notifier("opened", "USB Webcam Microphone")
+
+        forwarder.send_microphone.assert_called_once_with(
+            "USB Webcam Microphone")
+        forwarder.send_notification.assert_not_called()
+
+    def test_closed_sends_an_empty_name(self):
+        forwarder = Mock()
+        notifier, _ = _notifier(forwarder)
+
+        notifier("closed", None)
+
+        forwarder.send_microphone.assert_called_once_with("")
+        forwarder.send_notification.assert_not_called()
+
+    def test_lost_sends_an_empty_name_and_still_sends_its_notice(self):
+        forwarder = Mock()
+        notifier, _ = _notifier(forwarder)
+
+        notifier("lost", None)
+
+        forwarder.send_microphone.assert_called_once_with("")
+        forwarder.send_notification.assert_called_once_with(
+            TITLE, MIC_LOST_MESSAGE, kind="mic_lost")
+
+    def test_recovered_sends_the_device_name_and_still_sends_its_notice(
+            self):
+        forwarder = Mock()
+        notifier, _ = _notifier(forwarder)
+
+        notifier("lost", None)
+        forwarder.reset_mock()
+        notifier("recovered", "USB Webcam Microphone")
+
+        forwarder.send_microphone.assert_called_once_with(
+            "USB Webcam Microphone")
+        forwarder.send_notification.assert_called_once_with(
+            TITLE,
+            "Microphone is back (USB Webcam Microphone). "
+            "Speech recognition works again.",
+            kind="mic_recovered")
+
+    def test_a_recovery_with_no_device_name_sends_an_empty_name(self):
+        forwarder = Mock()
+        notifier, _ = _notifier(forwarder)
+
+        notifier("lost", None)
+        notifier("recovered", None)
+
+        assert forwarder.send_microphone.call_args_list == [
+            call(""), call("")]
+
+    def test_the_name_goes_out_when_the_loss_was_never_announced(self):
+        """Acceptance 4. The loss came before any forwarder existed, so the
+        recovery notice stays silent (ruling K2), but the shown name must
+        still be right."""
+        notifier, holder = _notifier(None)
+        notifier("lost", None)
+        forwarder = Mock()
+        holder["forwarder"] = forwarder
+
+        notifier("recovered", "USB Webcam Microphone")
+
+        forwarder.send_notification.assert_not_called()
+        forwarder.send_microphone.assert_called_once_with(
+            "USB Webcam Microphone")
+
+    def test_the_name_goes_out_with_no_loss_at_all(self):
+        """Acceptance 4. A recovery with no loss before it sends no notice
+        and still reports the name."""
+        forwarder = Mock()
+        notifier, _ = _notifier(forwarder)
+
+        notifier("recovered", "USB Webcam Microphone")
+
+        forwarder.send_notification.assert_not_called()
+        forwarder.send_microphone.assert_called_once_with(
+            "USB Webcam Microphone")
+
+    def test_no_forwarder_sends_nothing_and_does_not_raise(self):
+        notifier, _ = _notifier(None)
+
+        for event, device in (("opened", "Mic"), ("closed", None),
+                              ("lost", None), ("recovered", "Mic")):
+            notifier(event, device)
+
+    def test_a_failed_name_send_does_not_cost_the_notices(self):
+        """A fault in the name report must not stop the loss or recovery
+        notice, which keep their existing gating."""
+        forwarder = Mock()
+        forwarder.send_microphone.side_effect = RuntimeError("closed")
+        notifier, _ = _notifier(forwarder)
+
+        notifier("lost", None)
+        notifier("recovered", "Mic")
+
+        assert [c.kwargs["kind"] for c in
+                forwarder.send_notification.call_args_list] == [
+            "mic_lost", "mic_recovered"]

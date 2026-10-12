@@ -32,18 +32,24 @@ MIC_RECOVERED_MESSAGE = "Microphone is back. Speech recognition works again."
 MIC_RECOVERED_ON_DEVICE_MESSAGE = (
     "Microphone is back ({device}). Speech recognition works again.")
 
-# The two event names the capture passes as the callback's first argument
+# The event names the capture passes as the callback's first argument
 # (shared_audio/capture/winrt_capture.py, WinRTAudioCapture._report_outage).
+# "lost" and "recovered" also drive the two notices; "opened" and "closed"
+# carry only the microphone name (wh-show-microphone-name).
 OUTAGE_LOST = "lost"
 OUTAGE_RECOVERED = "recovered"
+OUTAGE_OPENED = "opened"
+OUTAGE_CLOSED = "closed"
 
 
 class _NoticeForwarder(Protocol):
-    """The one forwarder method this module calls (shared_stt.ws_forwarder
-    .WSForwarder.send_notification)."""
+    """The forwarder methods this module calls (shared_stt.ws_forwarder
+    .WSForwarder.send_notification and .send_microphone)."""
 
     def send_notification(self, title: str, message: str,
                           kind: str = "") -> None: ...
+
+    def send_microphone(self, device: str) -> None: ...
 
 
 def recovery_message(device: Optional[str]) -> str:
@@ -58,10 +64,15 @@ def recovery_message(device: Optional[str]) -> str:
 
 
 class MicOutageNotifier:
-    """The capture's outage_callback: sends the loss and recovery notices.
+    """The capture's outage_callback: sends the loss and recovery notices
+    and reports the open microphone's name.
 
     Called on the capture thread as notifier(event, device), with event
-    OUTAGE_LOST or OUTAGE_RECOVERED. The capture calls it inside its own
+    OUTAGE_LOST, OUTAGE_RECOVERED, OUTAGE_OPENED or OUTAGE_CLOSED. The
+    forwarder gets the name on all four events (OUTAGE_OPENED and
+    OUTAGE_RECOVERED carry it; the other two send "", meaning none is
+    open), and the name is never gated by the loss flag that gates the two
+    notices (wh-show-microphone-name). The capture calls it inside its own
     try/except (ruling K1), so an exception here costs one notice and never
     the recovery.
 
@@ -83,8 +94,31 @@ class MicOutageNotifier:
         # by the capture thread, the one thread that calls this.
         self._loss_announced = False
 
+    def _report_microphone(self, name: str) -> None:
+        """Tell the forwarder which microphone is open ("" for none).
+
+        Deliberately NOT gated by _loss_announced: the name WheelHouse shows
+        must be right whether or not a notice went out
+        (wh-show-microphone-name). A fault here is logged and swallowed so
+        it can never cost the notice that follows it.
+        """
+        forwarder = self._get_forwarder()
+        if forwarder is None:
+            return
+        try:
+            forwarder.send_microphone(name)
+        except Exception as e:
+            logger.warning(
+                f'The microphone name report failed: '
+                f'{type(e).__name__}: {e}')
+
     def __call__(self, event: str, device: Optional[str]) -> None:
-        if event == OUTAGE_LOST:
+        if event == OUTAGE_OPENED:
+            self._report_microphone(device or "")
+        elif event == OUTAGE_CLOSED:
+            self._report_microphone("")
+        elif event == OUTAGE_LOST:
+            self._report_microphone("")
             self._loss_announced = False
             forwarder = self._get_forwarder()
             if forwarder is None:
@@ -98,6 +132,7 @@ class MicOutageNotifier:
                 self._title, MIC_LOST_MESSAGE, kind=MIC_LOST_KIND)
             self._loss_announced = True
         elif event == OUTAGE_RECOVERED:
+            self._report_microphone(device or "")
             if not self._loss_announced:
                 return
             self._loss_announced = False

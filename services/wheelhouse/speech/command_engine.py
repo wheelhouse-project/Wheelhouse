@@ -91,7 +91,7 @@ _TEXT_INSERTION_ACTIONS = frozenset(
 # step is evaluated the read marker may have cleared, and the transform
 # would then mutate the post-read foreground. Editor-routable
 # intelligent-insert producers (text, insert_text, insert_newlines,
-# number_point) are deliberately NOT here: their gate runs per payload,
+# number_point, number_digits) are deliberately NOT here: their gate runs per payload,
 # after the editor consult, so the editor exemption survives.
 # crewcut: a hand-edited multi-step pattern that puts an hk before an
 # intelligent-insert step would run its hk before the per-payload gate

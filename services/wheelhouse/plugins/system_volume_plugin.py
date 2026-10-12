@@ -63,7 +63,7 @@ from comtypes import COMError, CLSCTX_ALL
 from services.wheelhouse.plugins.base import BasePlugin, PluginState
 from services.wheelhouse.events import (
     VolumeAdjustCommand, PTTStartedEvent, PTTStoppedEvent, PTTMuteStateEvent,
-    SystemConfigurationErrorEvent,
+    SystemConfigurationErrorEvent, VolumeTargetChangedEvent,
 )
 from services.wheelhouse.handlers.volume_router import get_volume_router
 from services.wheelhouse.utils import ptt_volume_record
@@ -105,6 +105,12 @@ class SystemVolumePlugin(BasePlugin):
       (wh-named-device-doc-removal.1.3).
     """
     
+    # The Windows volume slider value this plugin sets when the thumb wheel
+    # moves to a Sonos speaker. David asked for 50 percent on 2026-10-06, so
+    # the PC sound sits at a known level once the speakers stop following the
+    # thumb wheel. It is a slider value (scalar), not a dB step.
+    SONOS_HANDOVER_VOLUME_SCALAR = 0.5
+
     def __init__(self):
         """Initialize plugin state."""
         super().__init__()
@@ -119,6 +125,13 @@ class SystemVolumePlugin(BasePlugin):
         self._device_name: Optional[str] = None
         self._last_error: Optional[str] = None
         self._pre_ptt_volume_db: Optional[float] = None
+        # A switch to Sonos that arrives during a push-to-talk hold waits
+        # here. _handle_ptt_stopped sets the 50 percent slider value after it
+        # puts the held level back, so acceptance item 3 of
+        # wh-sonos-tv-recheck still holds: the slider reads 50 after the
+        # switch. The name is only for the log line.
+        self._pending_sonos_handover: bool = False
+        self._pending_sonos_handover_speaker: Optional[str] = None
         # Which configured-device refusals the user has already been told
         # about. Cleared by the next successful mute, so a fault that comes
         # back is reported again (wh-codex-merge-audit.6.1.4).
@@ -231,11 +244,18 @@ class SystemVolumePlugin(BasePlugin):
         try:
             self._state = PluginState.STARTING
             
-            # Only subscribe to volume commands if VolumeRouter selected system volume
+            # Subscribed in every case. _handle_volume_adjust returns at once
+            # when the router has Sonos selected, so a switch to Sonos or back
+            # to System Volume needs no restart. EventBus has no unsubscribe
+            # (event_bus.py:30), which is why the decision is read per event
+            # (wh-sonos-tv-recheck).
             volume_router = get_volume_router()
+            if self._event_bus:
+                self._event_bus.subscribe(VolumeAdjustCommand, self._handle_volume_adjust)
+                self._event_bus.subscribe(
+                    VolumeTargetChangedEvent, self._handle_volume_target_changed
+                )
             if volume_router.use_system_volume:
-                if self._event_bus:
-                    self._event_bus.subscribe(VolumeAdjustCommand, self._handle_volume_adjust)
                 logger.info("SystemVolumePlugin: Handling volume control (VolumeRouter selected System Volume)")
             else:
                 # Still connect to audio device for potential future use, but don't handle volume
@@ -420,6 +440,18 @@ class SystemVolumePlugin(BasePlugin):
         Args:
             event: VolumeAdjustCommand with delta attribute
         """
+        # The router's choice is read per command, not per subscription, so a
+        # switch to Sonos needs no restart (wh-sonos-tv-recheck).
+        volume_router = get_volume_router()
+        if not volume_router.use_system_volume:
+            return
+
+        # Ask the router to look for a Sonos speaker that plays TV audio
+        # (acceptance item 1). This returns at once: the check runs as its own
+        # task, so this command never waits for a network search (acceptance
+        # item 2) and goes to the target selected right now.
+        volume_router.request_tv_recheck()
+
         if not self._volume_interface:
             logger.warning("Cannot adjust volume - audio device not connected")
             return
@@ -486,6 +518,75 @@ class SystemVolumePlugin(BasePlugin):
             except Exception as e:
                 self._last_error = f"Unexpected error: {e}"
                 logger.error(f"Unexpected error adjusting system volume: {e}", exc_info=True)
+
+    async def _handle_volume_target_changed(self, event: VolumeTargetChangedEvent) -> None:
+        """Set this device to 50 percent when the thumb wheel moves to Sonos.
+
+        wh-sonos-tv-recheck acceptance item 3 asks for the set at the switch
+        to Sonos and only then. Item 5 asks for no change on the switch back,
+        so the switch back writes no level. It still cancels a set that waits
+        for a push-to-talk release, because that set has no switch to Sonos
+        behind it any more (wh-sonos-tv-recheck.1.1).
+        """
+        if not event.use_sonos:
+            # A 50 percent set can still wait for a push-to-talk release. The
+            # switch back takes the reason for that set away, and item 3 asks
+            # for the set at the switch to Sonos and only then, so the wait
+            # ends here. The level itself stays as it is, which is item 5
+            # (wh-sonos-tv-recheck.1.1).
+            async with self._ptt_audio_lock:
+                if self._pending_sonos_handover:
+                    self._pending_sonos_handover = False
+                    self._pending_sonos_handover_speaker = None
+                    logger.info(
+                        "[PTT] The switch back to System Volume cancels the 50 "
+                        "percent set that waited for the release"
+                    )
+            return
+
+        if not self._volume_interface:
+            logger.warning(
+                "Cannot set the system volume to 50 percent - audio device not connected"
+            )
+            return
+
+        async with self._ptt_audio_lock:
+            if self._pre_ptt_volume_db is not None:
+                # The set waits for the release. Writing 50 percent now would
+                # turn the speakers back up while the hold is still listening
+                # to them (wh-ptt-audio-override.1.4), and the restore would
+                # then overwrite the 50 percent with the held level.
+                self._pending_sonos_handover = True
+                self._pending_sonos_handover_speaker = event.speaker_name
+                logger.info(
+                    f"[PTT] A push-to-talk hold holds this device down. The 50 "
+                    f"percent set for the switch to Sonos "
+                    f"'{event.speaker_name}' waits for the release"
+                )
+                return
+
+            await self._set_handover_volume(event.speaker_name)
+
+    async def _set_handover_volume(self, speaker_name: Optional[str]) -> None:
+        """Set this device to the 50 percent slider value for a Sonos switch.
+
+        Call only with _ptt_audio_lock held, and only when
+        self._volume_interface is set.
+        """
+        try:
+            await asyncio.to_thread(
+                self._volume_interface.SetMasterVolumeLevelScalar,
+                self.SONOS_HANDOVER_VOLUME_SCALAR,
+                None,
+            )
+            logger.info(
+                f"Set the system volume to 50 percent for the switch to Sonos "
+                f"'{speaker_name}'"
+            )
+            self._last_error = None
+        except Exception as e:
+            self._last_error = f"Sonos handover volume error: {e}"
+            logger.error(f"Cannot set the system volume to 50 percent: {e}")
 
     async def _handle_ptt_started(self, event: PTTStartedEvent) -> None:
         """Mute system audio when push-to-talk begins.
@@ -681,6 +782,8 @@ class SystemVolumePlugin(BasePlugin):
                 # back when WheelHouse stops or starts
                 # (wh-ptt-mute-orphaned-on-process-loss).
                 self._pre_ptt_volume_db = None
+                self._pending_sonos_handover = False
+                self._pending_sonos_handover_speaker = None
                 return
 
             try:
@@ -693,6 +796,16 @@ class SystemVolumePlugin(BasePlugin):
                 logger.error(f"[PTT] Failed to restore system audio: {e}")
             else:
                 await self._delete_ptt_volume_record()
+
+            # The switch to Sonos that arrived during the hold sets the level
+            # last, so the slider reads 50 after the release. The restore
+            # above runs first on purpose: it puts the held level back, and
+            # this set then replaces it.
+            if self._pending_sonos_handover:
+                self._pending_sonos_handover = False
+                speaker_name = self._pending_sonos_handover_speaker
+                self._pending_sonos_handover_speaker = None
+                await self._set_handover_volume(speaker_name)
 
     async def _write_ptt_volume_record(self, pre_hold_db: float) -> None:
         """Keep the hold on disk, so the launcher can put the level back if this process is lost.

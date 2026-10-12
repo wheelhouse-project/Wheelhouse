@@ -44,7 +44,7 @@
 <p>Action name: <code>fix_text_ai</code>. The Pattern Manager lists it under Advanced actions, AI.</p>
 <p>Captures the selected text, or all the text in the focused field when nothing is selected, sends it to the configured AI for correction, and pastes the corrected version back.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^fix" with no params: saying "x-ray fix" corrects the selected text, or all the text in the focused field when nothing is selected.</code></p>
+<p>Example: <code>Trigger "^fix(?:ed)?$" with no params: saying "x-ray fix" or "x-ray fixed" corrects the selected text, or all the text in the focused field when nothing is selected.</code></p>
 <h4 id="rewrite-text-with-ai">Rewrite text with AI</h4>
 <p>Action name: <code>rewrite_text_ai</code>. The Pattern Manager lists it under Advanced actions, AI.</p>
 <p>Captures the selected text, or all the text in the focused field when nothing is selected, sends it to the configured AI to be rewritten in the style you describe, and pastes the rewritten version back. You write the style sentence and nothing else: Wheelhouse adds the wording that keeps the layout intact and the wording that stops the highlighted text from redirecting the AI.</p>
@@ -312,6 +312,14 @@
 <li><code>phrase</code> (text) -- The words to find; may be a capture group like g1.</li>
 </ul>
 <p>Example: <code>Trigger "^select (.+)$" with params ["g1"]: saying "x-ray select brown fox" selects the first "brown fox" in the document. This one needs the safety word first.</code></p>
+<h4 id="spoken-number-as-digits">Spoken number as digits</h4>
+<p>Action name: <code>number_digits</code>. The Pattern Manager lists it under Advanced actions, Text.</p>
+<p>Converts a spoken number to its digits, with no period.</p>
+<p>Parameters, in the order a pattern passes them:</p>
+<ul>
+<li><code>number</code> (number) -- The number as words (twenty three) or digits (23); usually the capture group g1.</li>
+</ul>
+<p>Example: <code>Trigger "^numeric (\d+)$" with params ["g1"]: saying "numeric twenty three" inserts "23".</code></p>
 <h4 id="transform-selected-text">Transform selected text</h4>
 <p>Action name: <code>transform_selection</code>. The Pattern Manager lists it under Advanced actions, Text.</p>
 <p>Changes the currently selected text: case conversion (snake case, title case, and so on) or wrapping in quotes or brackets.</p>
@@ -357,6 +365,11 @@
 <p>Opens the Pattern Manager window for viewing and editing voice patterns.</p>
 <p>Parameters: none.</p>
 <p>Example: <code>Trigger "^patterns?$" with no params: saying "patterns" opens the Pattern Manager.</code></p>
+<h4 id="open-the-settings-window">Open the Settings window</h4>
+<p>Action name: <code>open_settings_window</code>. The Pattern Manager lists it under Advanced actions, Wheelhouse.</p>
+<p>Opens the settings window, where the menu settings and a few more can be changed with the mouse or by voice.</p>
+<p>Parameters: none.</p>
+<p>Example: <code>Trigger "^settings?$" with no params: saying "settings" opens the settings window.</code></p>
 <h4 id="set-speech-interaction-mode">Set speech interaction mode</h4>
 <p>Action name: <code>set_speech_interaction_mode</code>. The Pattern Manager's action list does not offer this action.</p>
 <p>Switches how the microphone is engaged: click to talk (toggle) or push to talk.</p>
@@ -466,7 +479,7 @@
 </tr>
 <tr>
 <td><strong>WheelHouse settings</strong> (notice)</td>
-<td>You moved or resized the floating button, turned Show Floating Button on or off, or changed the Pattern Manager font size, and Wheelhouse could not save the change.</td>
+<td>You moved or resized the floating button, turned Show Floating Button on or off, changed the Pattern Manager font size, or changed a saved setting in the WheelHouse Settings window, and Wheelhouse could not save the change. When a save from the WheelHouse Settings window fails, that window also shows "Not saved".</td>
 <td>Wheelhouse shows no notice while it saves a setting or when the save succeeds. "Couldn't save settings" and "Couldn't send settings" mean the change was not saved. Wheelhouse then puts back the last saved values. "Couldn't confirm the settings" means Wheelhouse got no answer, even after it checked the saved settings, so the change may not be saved.</td>
 <td>After a message that starts with "Couldn't", make the change again. For "Couldn't change button visibility", select Show Floating Button in the menu again.</td>
 </tr>
@@ -500,6 +513,30 @@
 <td>Wheelhouse already stopped the old engine and started the new one, so the new engine is running now. The settings file was not changed. It has a plain value where its stt section belongs, so it cannot store the choice. The next time Wheelhouse starts, it will not remember this choice.</td>
 <td>Select Exit in the menu to close Wheelhouse. Open the settings file, %LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml, in Notepad. Find the line that sets stt to one value, such as stt = "whisper", and delete it. Or copy config.toml.example over config.toml to restore every default. Then start Wheelhouse and pick the engine again from STT Provider.</td>
 </tr>
+<tr>
+<td><strong>Windows is blocking your microphone</strong> (notice in the corner of the screen)</td>
+<td>A speech engine starts, and Windows refuses it the microphone because "Let desktop apps access your microphone" is off. Parakeet, Distil-Whisper, and Google Cloud all report this. A Windows notification near the clock also appears and closes itself after a few seconds.</td>
+<td>Wheelhouse cannot hear you, so dictation and voice commands do not work. The notice reads "WheelHouse cannot use your microphone. Windows is blocking it." and then names the Windows setting to change. The notice has only a close button and stays on the screen until you close it.</td>
+<td>Open Settings &gt; Privacy and security &gt; Microphone and turn on "Let desktop apps access your microphone". Then start Wheelhouse again. Click the close button to close the notice.</td>
+</tr>
+<tr>
+<td><strong>Wheelhouse {version} is available</strong> (notice in the corner of the screen)</td>
+<td>Wheelhouse checks once a day whether a newer public release exists, and it found one. The title shows the new version number in place of {version}. The notice does not close by itself. Wheelhouse does not check when CHECK_FOR_UPDATES is false in config.toml.</td>
+<td>A newer version of Wheelhouse can be installed. The notice has two buttons, Update now and Later.</td>
+<td>Click Update now to download the installer, check it, close Wheelhouse, and run the installer. Click Later, or close the notice, to hide it. Wheelhouse can show the notice for the same version again 7 days after it last appeared. A newer version shows its notice at once.</td>
+</tr>
+<tr>
+<td><strong>Wheelhouse update</strong> (notice in the corner of the screen)</td>
+<td>You clicked Update now on the notice "Wheelhouse {version} is available", and one step of the update failed. The update has three steps that can fail. Wheelhouse could not download the installer script. Or Wheelhouse could not check the download against the digest (a check value) and the size that the release names. Or Wheelhouse could not start the installer console. Wheelhouse keeps running. The notice has only a close button and closes by itself after about 20 seconds.</td>
+<td>The update did not start, and Wheelhouse was not changed. The notice for the same version can appear again 7 days after it last appeared. A newer version shows its notice at once.</td>
+<td>Run the installer from the website. Updating Wheelhouse describes how.</td>
+</tr>
+<tr>
+<td><strong>Welcome to Wheelhouse</strong> (window)</td>
+<td>You start Wheelhouse for the first time after an install, or for the first time after an update from a release that did not have this window. Wheelhouse shows this window one time. It does not come back on a later start or after a later update.</td>
+<td>The window says that the round red button shows that Wheelhouse hears you. The button pulses from red to orange while you speak. It also says that you can say the word help on its own to open the help page. The window has two buttons: Open help and Close.</td>
+<td>Click Open help to open the help page in your browser. The Enter key also chooses Open help, because it is the default button. Click Close, press Escape, or click the X in the title bar to close the window.</td>
+</tr>
 </tbody>
 </table></div>
 <h2 id="configuration-reference">Configuration Reference</h2>
@@ -515,6 +552,7 @@
 <p><strong>LOG_FILE</strong> <em>(default: <code>""</code>)</em> -- Has no effect. No part of Wheelhouse reads this setting. Wheelhouse always writes its activity log to wheelhouse.log in its install folder, %LOCALAPPDATA%\Wheelhouse\app.</p>
 <p><strong>LOG_LEVEL</strong> <em>(default: <code>"INFO"</code>)</em> -- How detailed the activity log is. Change only when a support conversation asks you to.</p>
 <p><strong>LOG_TRANSCRIPTS</strong> <em>(default: <code>false</code>)</em> -- A privacy setting: false keeps the words you dictate and your clipboard contents out of the log files (only text lengths are noted). Set true only while troubleshooting recognition, then turn it back off; while on, everything you dictate, including passwords, accumulates in the logs.</p>
+<p><strong>CHECK_FOR_UPDATES</strong> <em>(default: <code>true</code>)</em> -- Whether Wheelhouse asks api.github.com once a day if a newer release exists. When one exists, a notice offers to install it. Set false to stop the update check. Wheelhouse then makes no update request. Without this key, the check is on.</p>
 <p><strong>SIDE_OFFSET</strong> <em>(default: <code>10</code>)</em> -- Width in pixels of the left-edge screen zone where the mouse thumb wheel adjusts brightness instead of volume. Raise it if the brightness zone is hard to hit.</p>
 <p><strong>BRIGHTNESS_INCREMENT</strong> <em>(default: <code>1.0</code>)</em> -- The size of each thumb-wheel brightness adjustment step. Raise for faster, coarser changes; lower for finer control.</p>
 <p><strong>VOLUME_INCREMENT</strong> <em>(default: <code>0.5</code>)</em> -- The size of each thumb-wheel volume adjustment step. Raise for faster, coarser changes; lower for finer control.</p>
@@ -526,6 +564,7 @@
 <p><strong>FLOATING_BUTTON_POS</strong> <em>(default: <code>[100, 100]</code>)</em> -- Screen position of the small on-screen status button, as [x, y] pixels from the top-left of the desktop. Dragging the button writes this setting, and so does resizing it, because the button grows and shrinks around its own centre.</p>
 <p><strong>FLOATING_BUTTON_VISIBLE</strong> <em>(default: <code>true</code>)</em> -- Whether the small on-screen status button is shown. Set true for an always-visible microphone click target. In push-to-talk mode the floating button is the only way to listen, because the hold works on it alone.</p>
 <p><strong>SPEECH_ENABLED_ON_STARTUP</strong> <em>(default: <code>true</code>)</em> -- Whether Wheelhouse starts listening as soon as it launches. Set false to turn the microphone on manually each session.</p>
+<p><strong>INTERIM_RESULTS</strong> <em>(default: <code>true</code>)</em> -- Whether Wheelhouse shows words while you speak, before the speech engine finishes the sentence. The Interim Results item in the right-click menu and in the Settings window changes this setting and saves it. Set false to see words only after the speech engine finishes each sentence. Without this key, or with a value that is not true or false, the setting is on.</p>
 <p><strong>SHOW_SPEECH_PULSE</strong> <em>(default: <code>true</code>)</em> -- Pulse the floating button while Wheelhouse hears you, as a signal that your speech is reaching it. The tray icon does not pulse. With this off, the button still flashes green when an utterance has been processed. Turn off only if the animation distracts.</p>
 <p><strong>SPATIAL_SOUND_EXEC</strong> <em>(default: <code>""</code>)</em> -- Path to the small free NirSoft helper tool used for voice switching of Dolby Atmos spatial sound; empty means the feature is off. Fill in the tool path only if you use Dolby Atmos and have that tool installed; everyone else can ignore it.</p>
 <p><strong>SPATIAL_SOUND_FORMAT</strong> <em>(default: <code>"Dolby Atmos for home theater"</code>)</em> -- The spatial sound format name passed to the helper tool. Only matters if SPATIAL_SOUND_EXEC is set.</p>
@@ -540,7 +579,7 @@
 <h3 id="pluginssystem_volume">[plugins.system_volume]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the System Volume plugin on or off; it controls the normal Windows volume from the volume scroll zone and quiets system audio during push-to-talk holds.</p>
 <p><strong>device_type</strong> <em>(default: <code>"default"</code>)</em> -- Which audio device to control. Valid values: "default" (the usual choice) or "communications".</p>
-<p><strong>volume_step_db</strong> <em>(default: <code>1.5</code>)</em> -- Loudness change per wheel step, in decibels.</p>
+<p><strong>volume_step_db</strong> <em>(default: <code>1.5</code>)</em> -- Loudness change, in decibels, for each unit of VOLUME_INCREMENT. One wheel step sends VOLUME_INCREMENT units, so with the defaults (1.5 and 0.5) one step changes the loudness by 0.75 dB.</p>
 <p><strong>min_volume_db</strong> <em>(default: <code>-96.0</code>)</em> -- The volume floor, in decibels.</p>
 <p><strong>max_volume_db</strong> <em>(default: <code>0.0</code>)</em> -- The volume ceiling, in decibels.</p>
 <h3 id="pluginsbravia">[plugins.bravia]</h3>
@@ -637,7 +676,7 @@
       <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
       <a href="#top">Back to top ↑</a>
     </nav>
-    <p class="fine-print">Documentation for Wheelhouse 1.2.2. Speech recognition runs on your computer by default; cloud options are optional.</p>
+    <p class="fine-print">Documentation for Wheelhouse 1.3.0. Speech recognition runs on your computer by default; cloud options are optional.</p>
   </footer>
 </body>
 </html>

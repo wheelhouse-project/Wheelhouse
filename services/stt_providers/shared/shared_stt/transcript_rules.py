@@ -275,6 +275,7 @@ _ITN_GROUP_MIN = 10000
 
 _DOLLAR_WORDS = {"dollar", "dollars"}
 _CENT_WORDS = {"cent", "cents"}
+_PERCENT_WORDS = {"percent"}
 _PERIOD_WORDS = {"am", "pm"}
 
 # Rule 6. A paired house number converts only in front of one of these
@@ -755,6 +756,82 @@ def _try_money(
             return None
         return f"{_write_number(run, value)} {records[anchor].core}", anchor + 1
     return None
+
+
+def _leading_fraction_before(records: list[_Token], start: int) -> bool:
+    """True when the run at `start` is the tail of a leading "point".
+
+    "point five percent" is the shape. _try_decimal refuses that phrase
+    because its whole half is missing, so the words stay as spoken; the
+    scan then restarts on the tail, where the run is one word and the
+    anchor is "percent". Without this test the percent anchor read that
+    lone word on its own and wrote "point 5 percent", which the
+    replacement pattern turned into "point 5%" on the screen
+    (wh-itn-percent-digits.1.2, Codex round 3).
+
+    The spoken zero can stand between the "point" and the tail, because
+    the decimal grammar has always read "three point oh five" as 3.05,
+    so the walk back steps over every "oh" and "o" first.
+
+    Adjacency is the same test the decimal rules use: punctuation
+    between the "point" and the run makes them two phrases, and the
+    quantity behind the punctuation converts as it should.
+    """
+    index = start
+    while _adjacent(records, index):
+        if records[index - 1].low not in _ITN_OH_WORDS:
+            break
+        index -= 1
+    return _adjacent(records, index) and records[index - 1].low == "point"
+
+
+def _try_percent(
+    records: list[_Token], run: list[str], anchor: int
+) -> tuple[str, int] | None:
+    """The digits of a run that stands directly in front of "percent".
+
+    The anchor licenses a LONE number word, which is the whole reason
+    this rule exists: _try_cardinal refuses a one-word run by the
+    command-safety rule above, so "fifty percent" kept its words and the
+    screen read "fifty%" (wh-itn-percent-digits, David's UTT-31 of
+    2026-10-06). A dollar anchor already licenses the same lone word in
+    _try_money, and the reasoning is the same one -- a number word with a
+    unit behind it is a quantity the speaker said, never a command word.
+
+    The end is `anchor`, not `anchor + 1`, so the word "percent" STAYS in
+    the text. The Logic process writes the "%" from the punct-percent
+    replacement pattern, which is how "twenty five percent" has always
+    reached the screen as "25%". Keeping that one writer means this rule
+    adds no second way to produce the symbol.
+
+    A run of two or more words is NOT this rule's work, and the length
+    test below is what keeps it out. _try_cardinal already converts such
+    a run with no anchor at all, and it owns one exception this rule must
+    not repeat: a cardinal within reach of a street suffix is an address
+    number and is written bare. Reading "twenty thousand percent main
+    street" here wrote "20,000 percent main street" where the module
+    writes "20000 percent main street", so the longer run goes back to
+    the rules behind this one, which hold that answer already.
+
+    A lone word that stands behind a leading "point" is NOT this rule's
+    work either, and _leading_fraction_before is what keeps it out. The
+    decimal rule refuses such a phrase because its whole half is
+    missing, so the tail reached this anchor on its own and wrote
+    "point 5 percent" (wh-itn-percent-digits.1.2).
+
+    _single_value is the same reader the dollar branch uses, so a word
+    that is no number at all answers None here.
+    """
+    if records[anchor].low not in _PERCENT_WORDS:
+        return None
+    if len(run) != 1:
+        return None
+    if _leading_fraction_before(records, anchor - len(run)):
+        return None
+    value = _single_value(run)
+    if value is None:
+        return None
+    return _write_number(run, value), anchor
 
 
 def _period_word(record: _Token) -> str | None:
@@ -1387,7 +1464,12 @@ def _match_number_phrase(
         return None, _absorbed_refusal_end(records, end)
     anchor = end if _adjacent(records, end) else None
     if anchor is not None:
-        for rule in (_try_money, _try_clock_time, _try_decimal):
+        for rule in (
+            _try_money,
+            _try_clock_time,
+            _try_decimal,
+            _try_percent,
+        ):
             anchored = rule(records, run, anchor)
             if anchored is not None:
                 return anchored
@@ -1434,6 +1516,9 @@ def apply_itn(text: str) -> str:
     - Money: 'fifty nine dollars and seventeen cents' -> '$59.17'
     - Clock times, AM/PM anchored: 'eleven fifteen PM' -> '11:15 PM'
     - Decimals: 'three point five' -> '3.5'
+    - Percent, 'percent' anchored: 'fifty percent' -> '50 percent'.
+      The word stays; the Logic process writes the '%' from the
+      punct-percent replacement pattern.
     - Digit sequences, 'oh' as zero: 'nine oh two one oh' -> '90210'
     - House numbers, street-suffix anchored: 'twelve thirty four main
       street' -> '1234 main street'

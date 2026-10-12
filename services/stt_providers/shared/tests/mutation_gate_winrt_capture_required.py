@@ -55,6 +55,7 @@ from pathlib import Path
 # invoked by an absolute path from another directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import mutation_gate_runner as runner  # noqa: E402
 from mutation_gate_runner import run  # noqa: E402
 
 SHARED = Path(__file__).resolve().parents[1]
@@ -74,6 +75,57 @@ WINRT_CAPTURE_TESTS = "tests/test_winrt_capture.py"
 SHARED_BACKEND_TESTS = "tests/test_ready_backend_name.py"
 REFUSAL_TESTS = "tests/test_winrt_capture_required.py"
 BACKEND_TESTS = "tests/test_ready_backend_name.py"
+
+
+# --------------------------------------------------------------------------
+# The launcher: start pytest directly, never through ``uv run``
+# --------------------------------------------------------------------------
+# The runner's default launcher starts pytest through scripts/run_tests.py,
+# which runs ``uv run pytest`` in the service directory. That default cannot
+# run this gate, for two reasons, and the first one is a rule.
+# services/stt_providers/shared must never receive a ``uv`` command: its venv
+# in the main checkout holds a manually installed pywhispercpp Vulkan wheel
+# that any sync removes, and .claude/scripts/prepare_worktree.py deliberately
+# gives the shared package no venv of its own in a worktree. The second
+# reason applies to every service: in a git worktree ``uv`` builds a .venv
+# inside the tree, and such a .venv is what makes a worktree undeletable.
+#
+# This gate therefore starts pytest directly, the same replacement that
+# mutation_gate_mic_loss_recovery.py and
+# services/wheelhouse/tests/mutation_gate_pattern_manager_tree_changed.py
+# already make. One thing differs from those two gates. The mutations here
+# run tests in four services, so one interpreter cannot serve them all. Each
+# provider runs under its own venv. The shared package has no venv of its
+# own in a worktree, and its tests run under the Google provider's venv,
+# because two tests in tests/test_ready_backend_name.py carry
+# @pytest.mark.asyncio and the Google venv is the only one of the three that
+# installs pytest-asyncio. Measured 2026-10-09 in this worktree: the
+# Parakeet and distil venvs answer no for pytest_asyncio, and those two
+# tests fail there with "You need to install a suitable plugin for your
+# async framework". Under the Google venv the four shared test files this
+# gate uses report 151 passed. The gate names that interpreter rather than
+# borrowing its own, so the result does not depend on how the gate started.
+# Nothing else about the run changes: the same owned Windows Job, the same
+# timeout, the same pre-launch marker, and the same output parsing.
+def _launch(service, test_file, report, collect):
+    """The argv and working directory for one pytest run, as a 2-tuple."""
+    owner = GOOGLE if service.resolve() == SHARED.resolve() else service
+    python = owner / ".venv" / "Scripts" / "python.exe"
+    if not python.exists():
+        raise FileNotFoundError(
+            f"No interpreter for {service}: {python} does not exist. Run "
+            f".claude/scripts/prepare_worktree.py to sync the providers.")
+    command = [
+        str(python), "-m", "pytest",
+        *runner._targets(test_file),
+        f"--junitxml={report}",
+        *(["--collect-only", "-q"] if collect
+          else ["-q", "-rf", "-p", "no:randomly"]),
+    ]
+    return command, service
+
+
+runner.LAUNCH = _launch
 
 
 # --------------------------------------------------------------------------
@@ -428,11 +480,13 @@ BACKEND_MUTATIONS = [
             "        forwarder.send_notification(\n"
             "            title, message, kind=kind,\n"
             "            capture_backend=CAPTURE_BACKEND_NAME if kind =="
-            " \"ready\" else \"\")\n"
+            " \"ready\" else \"\",\n"
+            "            cause=cause)\n"
         ),
         "new": (
             "        forwarder.send_notification(\n"
-            "            title, message, kind=kind)\n"
+            "            title, message, kind=kind,\n"
+            "            cause=cause)\n"
         ),
         "expect": [
             "test_the_ready_notice_names_the_winrt_capture",
@@ -452,9 +506,9 @@ BACKEND_MUTATIONS = [
         "file": GOOGLE / "main.py",
         "old": (
             "            capture_backend=CAPTURE_BACKEND_NAME if kind =="
-            " \"ready\" else \"\")\n"
+            " \"ready\" else \"\",\n"
         ),
-        "new": "            capture_backend=CAPTURE_BACKEND_NAME)\n",
+        "new": "            capture_backend=CAPTURE_BACKEND_NAME,\n",
         "expect": [
             "test_a_capture_that_never_opened_claims_no_backend",
             "test_a_credentials_failure_claims_no_backend",
@@ -793,6 +847,162 @@ AUDIO_DEVICE_MUTATIONS = [
 
 
 # --------------------------------------------------------------------------
+# wh-blocked-mic-message: Windows blocking the microphone names the setting
+# --------------------------------------------------------------------------
+#
+# create_device_input_node_async answers status 4 (ACCESS_DENIED) when
+# "Let desktop apps access your microphone" is off, and _setup_graph used to
+# raise "Microphone node failed: status=4", a number where the user needed a
+# setting. The branch that fixed it can break six ways, one mutation each.
+# The tests that see them are in class
+# TestABlockedMicrophoneHasItsOwnRefusal in tests/test_winrt_capture.py.
+#
+# Every `old` below quotes text that exists only in that branch or its
+# constants, so each matches once. The branch is quoted whole in two of them;
+# _BLOCKED_BRANCH is that text.
+
+_BLOCKED_BRANCH = (
+    "            if input_result.status == AUDIO_INPUT_NODE_ACCESS_DENIED:\n"
+    "                # Windows refused the microphone, which means the privacy\n"
+    "                # setting is off. The enum name goes in the log, never in\n"
+    "                # the notice: see MICROPHONE_BLOCKED_MESSAGE above for the\n"
+    "                # length measurement. log_failure is False on a rebuild\n"
+    "                # for the same reason as the graph branch above -- the\n"
+    "                # rebuild retries every REBUILD_RETRY_SECONDS and its own\n"
+    "                # reminder line carries the failure at most once a minute.\n"
+    "                if log_failure:\n"
+    "                    logger.error(MICROPHONE_BLOCKED_LOG_LINE)\n"
+    "                raise RuntimeError(MICROPHONE_BLOCKED_MESSAGE)\n"
+)
+
+_GENERIC_NODE_CHECK = (
+    "            if input_result.status != 0:\n"
+    "                raise RuntimeError(f\"Microphone node failed:"
+    " status={input_result.status}\")\n"
+)
+
+BLOCKED_MIC_MUTATIONS = [
+    {
+        # The value the branch compares against. Status 3 is
+        # UNKNOWN_FAILURE, which names no action a user could take, so the
+        # mutant sends the privacy-setting words to a failure that is not
+        # about the setting, and sends the real status 4 to the developer
+        # text. Both halves of the branch's contract break at once.
+        "name": "blocked-mic-compares-the-wrong-status",
+        "service": SHARED,
+        "test_file": WINRT_CAPTURE_TESTS,
+        "file": WINRT_CAPTURE,
+        "old": "AUDIO_INPUT_NODE_ACCESS_DENIED = 4\n",
+        "new": "AUDIO_INPUT_NODE_ACCESS_DENIED = 3\n",
+        "expect": [
+            "test_a_blocked_microphone_raises_the_approved_words",
+            "test_the_refusal_names_the_setting_and_its_place",
+            "test_a_rebuild_raises_the_same_words_without_the_error_line",
+            "test_the_developer_detail_is_logged_rather_than_shown",
+            "test_the_refusal_does_not_carry_the_status_number",
+            "test_another_node_status_keeps_the_developer_message",
+        ],
+    },
+    {
+        # The whole branch gone: status 4 reaches the generic check and the
+        # user reads "status=4" again, which is the defect the change fixed.
+        "name": "blocked-mic-branch-removed",
+        "service": SHARED,
+        "test_file": WINRT_CAPTURE_TESTS,
+        "file": WINRT_CAPTURE,
+        "old": _BLOCKED_BRANCH,
+        "new": "",
+        "expect": [
+            "test_a_blocked_microphone_raises_the_approved_words",
+            "test_the_refusal_names_the_setting_and_its_place",
+            "test_a_rebuild_raises_the_same_words_without_the_error_line",
+            "test_the_developer_detail_is_logged_rather_than_shown",
+            "test_the_refusal_does_not_carry_the_status_number",
+        ],
+    },
+    {
+        # The developer half of the refusal. The raised words stay right, so
+        # only a test that reads the log can see the line go missing.
+        "name": "blocked-mic-error-line-removed",
+        "service": SHARED,
+        "test_file": WINRT_CAPTURE_TESTS,
+        "file": WINRT_CAPTURE,
+        "old": (
+            "                if log_failure:\n"
+            "                    logger.error(MICROPHONE_BLOCKED_LOG_LINE)\n"
+        ),
+        "new": "",
+        "expect": [
+            "test_the_developer_detail_is_logged_rather_than_shown",
+        ],
+    },
+    {
+        # The guard inverted: the first attempt says nothing and every
+        # rebuild writes the line, which is the once-a-minute flood
+        # wh-mic-loss-capture-recovery removed from the graph branch.
+        "name": "blocked-mic-log-guard-inverted",
+        "service": SHARED,
+        "test_file": WINRT_CAPTURE_TESTS,
+        "file": WINRT_CAPTURE,
+        "old": (
+            "                if log_failure:\n"
+            "                    logger.error(MICROPHONE_BLOCKED_LOG_LINE)\n"
+        ),
+        "new": (
+            "                if not log_failure:\n"
+            "                    logger.error(MICROPHONE_BLOCKED_LOG_LINE)\n"
+        ),
+        "expect": [
+            "test_a_rebuild_raises_the_same_words_without_the_error_line",
+            "test_the_developer_detail_is_logged_rather_than_shown",
+        ],
+    },
+    {
+        # The one thing the user must be able to act on. The reworded text
+        # keeps the place ("Settings > Privacy and security > Microphone")
+        # and the opening sentences and loses only the setting's name, so
+        # the test that asserts the name on its own is the one that has to
+        # fire, not just the equality test.
+        "name": "blocked-mic-message-loses-the-setting-name",
+        "service": SHARED,
+        "test_file": WINRT_CAPTURE_TESTS,
+        "file": WINRT_CAPTURE,
+        "old": (
+            "    \"\\\"Let desktop apps access your microphone\\\", then start"
+            " WheelHouse \"\n"
+        ),
+        "new": (
+            "    \"the microphone switch, then start WheelHouse \"\n"
+        ),
+        "expect": [
+            "test_a_blocked_microphone_raises_the_approved_words",
+            "test_the_refusal_names_the_setting_and_its_place",
+            "test_a_rebuild_raises_the_same_words_without_the_error_line",
+        ],
+    },
+    {
+        # A MOVE, not a copy: the branch is deleted where it stands and
+        # written again after the generic check. Status 4 meets `!= 0`
+        # first and raises the developer text, so the moved branch can
+        # never run (mutation-gate skill, placement mutations).
+        "name": "blocked-mic-branch-after-the-generic-check",
+        "service": SHARED,
+        "test_file": WINRT_CAPTURE_TESTS,
+        "file": WINRT_CAPTURE,
+        "old": _BLOCKED_BRANCH + _GENERIC_NODE_CHECK,
+        "new": _GENERIC_NODE_CHECK + _BLOCKED_BRANCH,
+        "expect": [
+            "test_a_blocked_microphone_raises_the_approved_words",
+            "test_the_refusal_names_the_setting_and_its_place",
+            "test_a_rebuild_raises_the_same_words_without_the_error_line",
+            "test_the_developer_detail_is_logged_rather_than_shown",
+            "test_the_refusal_does_not_carry_the_status_number",
+        ],
+    },
+]
+
+
+# --------------------------------------------------------------------------
 # .1.5: a refusal is not a crash, so the supervisor must not start it again
 # --------------------------------------------------------------------------
 #
@@ -987,6 +1197,7 @@ MUTATIONS = (
     + LIST_DEVICES_MUTATIONS
     + CAPTURE_FAILURE_MUTATIONS
     + AUDIO_DEVICE_MUTATIONS
+    + BLOCKED_MIC_MUTATIONS
     + REFUSAL_EXIT_MUTATIONS
     + NOTICE_WAIT_MUTATIONS
 )

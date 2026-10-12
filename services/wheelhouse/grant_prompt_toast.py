@@ -87,6 +87,10 @@ class GrantPromptToast(QDialog):
         self._lifetime_timer = QTimer(self)
         self._lifetime_timer.setSingleShot(True)
         self._lifetime_timer.timeout.connect(self.close)
+        # The period of the running count, and whether a caller stopped
+        # it. ``pause_lifetime`` and ``resume_lifetime`` below use both.
+        self._lifetime_ms: Optional[int] = None
+        self._lifetime_paused: bool = False
 
     def _build_ui(self) -> None:
         outer = QFrame(self)
@@ -232,12 +236,38 @@ class GrantPromptToast(QDialog):
         if not self.isVisible():
             self.show()
         self.raise_()
+        self._lifetime_paused = False
         if lifetime_ms is None:
             # A timer left running by an earlier show would otherwise
             # close this one.
+            self._lifetime_ms = None
             self._lifetime_timer.stop()
         else:
-            self._lifetime_timer.start(max(500, int(lifetime_ms)))
+            self._lifetime_ms = max(500, int(lifetime_ms))
+            self._lifetime_timer.start(self._lifetime_ms)
+
+    def pause_lifetime(self) -> None:
+        """Stop the lifetime count while this notice waits for a place.
+
+        A QTimer counts on a hidden widget as well, and ``close()`` on a
+        hidden widget still emits ``dismissed``, so a notice that waited
+        out of sight was reported as closed and the user never read it
+        (wh-blocked-mic-message.1.3). Does nothing when no count runs.
+        """
+        if self._lifetime_timer.isActive():
+            self._lifetime_timer.stop()
+            self._lifetime_paused = True
+
+    def resume_lifetime(self) -> None:
+        """Start the count again after ``pause_lifetime`` stopped it.
+
+        The count starts from the beginning, so the user gets the whole
+        period to read the text. Does nothing when no caller stopped the
+        count, or when this notice has no lifetime.
+        """
+        if self._lifetime_paused and self._lifetime_ms is not None:
+            self._lifetime_paused = False
+            self._lifetime_timer.start(self._lifetime_ms)
 
     def closeEvent(self, event):  # type: ignore[override]
         # Emit ``dismissed`` only when the close was not preceded by a

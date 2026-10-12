@@ -89,6 +89,18 @@ class RetractMockTextParser:
     def __init__(self):
         self.executed: List[str] = []
         self.last_executed_pattern_type: Optional[str] = "command"
+        # The editor retract arm now reads the pattern list through
+        # _replay_text_triggers, so this mock owes the attribute that the
+        # real parser always has. TextParser sets self.patterns in its own
+        # constructor (speech/command_engine.py:186) and logs its length
+        # twelve lines later, and main.py:11290 replaces the list object
+        # without ever removing the attribute, so a parser with no
+        # patterns attribute cannot reach that arm in the running app.
+        # An empty catalog IS a state the real parser reaches
+        # (tests/test_pattern_manager_update.py:768 asserts it), and it
+        # leaves the mirrored text unchanged, which is what these two
+        # tests measure.
+        self.patterns: List[dict] = []
 
     async def parse_and_execute(
         self, text, return_remainder=False, authorized_command=False
