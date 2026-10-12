@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from services.wheelhouse.click_first_use_hint import FirstUseHintTracker
     from services.wheelhouse.click_overlay_state import OverlayState
     from services.wheelhouse.overlay_focus_hooks import FocusChangeDebouncer
