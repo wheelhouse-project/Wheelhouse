@@ -346,6 +346,30 @@ def locate_installer(
     return InstallerLaunchPlan(script_path=script)
 
 
+def send_parakeet_model_offer(state_manager, plan) -> None:
+    """Ask the GUI to show the Parakeet model offer (wh-parakeet-model-download-offer).
+
+    One action on the Logic -> GUI queue: kind "launch" when ``plan`` is an
+    InstallerLaunchPlan (the notice offers Download now), otherwise kind
+    "fallback" with the one-line install command (the notice offers Copy
+    command). The ruled notice texts live in the GUI process, which shows
+    them. LogicController (main.py) and ServiceManager.start_remote_stt both
+    call this one function. Never raises.
+    """
+    if isinstance(plan, InstallerLaunchPlan):
+        message = {"action": "parakeet_model_offer", "kind": "launch"}
+    else:
+        message = {
+            "action": "parakeet_model_offer",
+            "kind": "fallback",
+            "command": getattr(plan, "command", "") or ONE_LINE_INSTALL_COMMAND,
+        }
+    try:
+        state_manager.state_to_gui_queue.put_nowait(message)
+    except Exception as exc:  # noqa: BLE001 -- an offer must not stop its caller
+        logger.error("Could not send the Parakeet model offer to the GUI: %s", exc)
+
+
 # --- Startup shortcut -------------------------------------------------------
 
 

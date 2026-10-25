@@ -54,7 +54,7 @@ from services.wheelhouse.events import (
     SonosStateChangedEvent, AudioStateChangedEvent,
     SystemConfigurationErrorEvent, SystemIdleStateChangedEvent,
     WakeWordDetectedEvent, PTTStartedEvent, PTTStoppedEvent,
-    PTTMuteStateEvent,
+    PTTMuteStateEvent, SpeakerExclusiveStateChangedEvent,
 )
 from services.wheelhouse.ai.server_kind import LOCAL, normalize_server_kind
 from services.wheelhouse.integrations.websocket_manager import WebSocketManager, read_interim_results_setting
@@ -144,6 +144,14 @@ MAX_PTT_MUTE_CONFIRM_SECONDS = 1.0
 MIN_PTT_SAFETY_TIMEOUT_SECONDS = 1.0
 MAX_PTT_SAFETY_TIMEOUT_SECONDS = 300.0
 
+# How long the exclusive-speaker pause must last before the floating button
+# hides, and how long it must stay ended before the button comes back
+# (wh-kodi-pause-hide-button). Kodi holds the speaker for 0.4 to 0.6 seconds
+# around a video, and takes it again 0.58 seconds after letting go (David's
+# check log on wh-kodi-playback-echo-stutter), so without the wait the button
+# would blink. Listening does not wait: only the button does.
+EXCLUSIVE_PAUSE_BUTTON_DELAY_SECONDS = 1.0
+
 # Every text below is one Windows notification. utils/notice_text.py caps a
 # message at 255 wide characters and a title at 63, because a longer notice
 # never appears at all; all of these are far under both.
@@ -213,6 +221,24 @@ class StateManager:
         self._speech_suppressed_by_audio = False
         self._speech_suppressed_by_sonos = False
         self._speech_suppressed_by_idle = False
+        # An app holds the default speaker in exclusive mode
+        # (wh-kodi-playback-echo-stutter). Unlike the pauses above, nothing
+        # but the release event clears it: not the wake word, not the user's
+        # switch, not a push-to-talk hold. It is also kept out of
+        # enable_speech_clearing_pauses on purpose.
+        self._speech_suppressed_by_exclusive_speaker = False
+        # Whether the floating button is hidden for that pause
+        # (wh-kodi-pause-hide-button). It lags the pause by
+        # EXCLUSIVE_PAUSE_BUTTON_DELAY_SECONDS in both directions, and it is
+        # sent to the GUI in every snapshot. It never touches
+        # FLOATING_BUTTON_VISIBLE, which stays the user's saved choice.
+        self._button_hidden_for_exclusive_speaker = False
+        self._button_hide_timer = None
+        self._button_show_timer = None
+        # Whether that pause applies this session. LogicController.main sets
+        # it from ENABLE_AUDIO_SUPPRESSION (apply_exclusive_speaker_pause_gate);
+        # True until then, because the setting's default is "auto".
+        self._exclusive_speaker_pause_gate = True
         # Whether sound this computer plays pauses listening this session.
         # LogicController.main replaces this with the startup decision before
         # any service runs (apply_audio_suppression_decision). True until
@@ -305,6 +331,10 @@ class StateManager:
         # Subscribe to events
         self.event_bus.subscribe(SonosStateChangedEvent, self._handle_sonos_state_changed)
         self.event_bus.subscribe(AudioStateChangedEvent, self._handle_audio_state_changed)
+        self.event_bus.subscribe(
+            SpeakerExclusiveStateChangedEvent,
+            self._handle_exclusive_speaker_state_changed,
+        )
         self.event_bus.subscribe(SystemConfigurationErrorEvent, self._handle_system_config_error)
         self.event_bus.subscribe(SystemIdleStateChangedEvent, self._handle_idle_state_changed)
         self.event_bus.subscribe(WakeWordDetectedEvent, self._handle_wake_word_detected)
@@ -343,6 +373,14 @@ class StateManager:
     async def _handle_sonos_state_changed(self, event: SonosStateChangedEvent):
         """Handles the SonosStateChangedEvent."""
         self._set_speech_suppressed_by_sonos(event.is_playing)
+
+    async def _handle_exclusive_speaker_state_changed(
+        self, event: SpeakerExclusiveStateChangedEvent
+    ):
+        """Handles the SpeakerExclusiveStateChangedEvent."""
+        self._set_speech_suppressed_by_exclusive_speaker(
+            event.held, event.endpoint_name, event.method
+        )
 
     async def _handle_audio_state_changed(self, event: AudioStateChangedEvent):
         """:flow: Speech Suppression by Audio
@@ -388,7 +426,9 @@ class StateManager:
 
                 # Broadcast update
                 if self.websocket_manager:
-                    message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="idle")
+                    message = self.websocket_manager.set_transcription_status(
+                        self.speech_enabled, reason=self._reason_during_exclusive_pause("idle")
+                    )
                     self.loop.create_task(self.websocket_manager.broadcast(message))
 
                 self.send_state_update()
@@ -443,6 +483,19 @@ class StateManager:
         leaves push-to-talk mode: a voice command that silently changed the
         interaction mode would surprise a push-to-talk user.
         """
+        if self._exclusive_speaker_pause_active():
+            # An app holds the speaker in exclusive mode. The wake word must
+            # not end that pause, and it does not switch the user's own
+            # setting on either (wh-kodi-playback-echo-stutter).
+            logger.info(f"Wake word '{event.keyword}' detected while an app holds the speaker - ignoring")
+            # The provider may already have turned transcription on for this
+            # wake word, so tell it again that listening is off.
+            if self.websocket_manager:
+                message = self.websocket_manager.set_transcription_status(
+                    False, reason="exclusive_speaker"
+                )
+                self.loop.create_task(self.websocket_manager.broadcast(message))
+            return
         if self._speech_interaction_mode == "push_to_talk":
             self._wake_word_ends_idle_pause_only(event)
             return
@@ -550,6 +603,40 @@ class StateManager:
         """
         self._audio_suppression_active = bool(active)
 
+    def apply_exclusive_speaker_pause_gate(self, enabled: bool) -> None:
+        """Record whether an app holding the speaker in exclusive mode pauses listening.
+
+        LogicController.main calls this once at startup, next to
+        apply_audio_suppression_decision. ``enabled`` is False only when the
+        ENABLE_AUDIO_SUPPRESSION setting is false: that value means the user
+        turned off every pause for sound from this computer. It does not
+        depend on the echo canceller decision above, because an echo canceller
+        on the microphone does not help when an app has taken the speaker over.
+
+        The gate is read at startup only. Writing it later does not announce
+        a change by itself; the next event or reconnect shows the new state.
+        """
+        self._exclusive_speaker_pause_gate = bool(enabled)
+
+    def _exclusive_speaker_pause_active(self) -> bool:
+        """True while an app holds the speaker in exclusive mode and the setting allows the pause."""
+        return (
+            self._speech_suppressed_by_exclusive_speaker
+            and self._exclusive_speaker_pause_gate
+        )
+
+    def _reason_during_exclusive_pause(self, reason: Optional[str]) -> Optional[str]:
+        """The reason to send with a status, given the call site's own reason.
+
+        While the exclusive pause holds, every status is a disable, and it
+        must name "exclusive_speaker": every other pause reason arms the
+        provider's wake-word detector (WAKE_WORD_ARMED_REASONS), and on a
+        wake word the provider turns transcription back on by itself.
+        """
+        if self._exclusive_speaker_pause_active():
+            return "exclusive_speaker"
+        return reason
+
     @property
     def speech_enabled(self) -> bool:
         """Determines if speech processing should be active.
@@ -590,6 +677,12 @@ class StateManager:
             self.config_service.get("ENABLE_IDLE_SUPPRESSION", True)
         )
 
+        # No override lifts this pause, push-to-talk included: while an app
+        # holds the speaker in exclusive mode, no speech is acted on
+        # (wh-kodi-playback-echo-stutter, boss ruling 23:05).
+        if self._exclusive_speaker_pause_active():
+            return False
+
         return (
             self._speech_enabled and
             not audio_suppression_active and
@@ -615,6 +708,7 @@ class StateManager:
                 'action': 'state_update',
                 'speech_enabled': self.speech_enabled,
                 'button_visible': self.config_service.get('FLOATING_BUTTON_VISIBLE', True),
+                'button_hidden_for_exclusive_speaker': self._button_hidden_for_exclusive_speaker,
                 'FLOATING_BUTTON_SIZE': self.config_service.get('FLOATING_BUTTON_SIZE', 50),
                 'FLOATING_BUTTON_POS': self.config_service.get('FLOATING_BUTTON_POS', [100, 100]),
                 'SHOW_SPEECH_PULSE': self.config_service.get('SHOW_SPEECH_PULSE', True),
@@ -670,6 +764,10 @@ class StateManager:
         """
         if enabled or self._speech_interaction_mode == "push_to_talk":
             return push_to_talk_reason
+        # Not a reason the wake word arms on: the wake word must not end this
+        # pause (shared_stt.wake_word_detector.WAKE_WORD_ARMED_REASONS).
+        if self._exclusive_speaker_pause_active():
+            return "exclusive_speaker"
         if not self._speech_enabled:
             return "manual"
         if self._speech_suppressed_by_audio and self._audio_suppression_active:
@@ -787,7 +885,9 @@ class StateManager:
             self.speech_notifier.notify_debug(f"Unexpected disable result: {old_speech_enabled} -> {self.speech_enabled}")
 
         if self.websocket_manager:
-            message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="manual")
+            message = self.websocket_manager.set_transcription_status(
+                self.speech_enabled, reason=self._reason_during_exclusive_pause("manual")
+            )
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
         self.send_state_update()
@@ -796,6 +896,8 @@ class StateManager:
         """Describe the existing suppression decision; never change that decision."""
         if not self._ptt_active or self.speech_enabled:
             return ""
+        if self._exclusive_speaker_pause_active():
+            return "Another app has taken sole control of the speaker. Listening is paused until it lets go."
         if self._speech_suppressed_by_sonos and self.config_service.get("ENABLE_SONOS_SUPPRESSION", True):
             return "Sonos is playing. Pause Sonos before using push to talk."
         if (self._speech_suppressed_by_audio and not self._ptt_audio_override
@@ -1147,6 +1249,40 @@ class StateManager:
             )
             self.loop.create_task(self.websocket_manager.broadcast(message))
 
+    async def hold_engine_for_lead_word_playback(self) -> None:
+        """Tell the engine transcription is off while a recording plays.
+
+        wh-first-sound-lost.23, acceptance item 22. The 'Your training word'
+        window plays a recording on the speakers, and the microphone would
+        hear it. Only the engine is told; the user's speech setting stays as
+        it was, so no notice appears and nothing is saved. The reason is not
+        one the wake word arms on (WAKE_WORD_ARMED_REASONS), so the wake word
+        cannot turn listening back on during the playback. The send is
+        awaited, so the caller starts the sound after the engine has the
+        message.
+        """
+        if not self.websocket_manager:
+            return
+        message = self.websocket_manager.set_transcription_status(
+            False, reason="lead_word_playback"
+        )
+        await self.websocket_manager.broadcast(message)
+
+    def release_engine_after_lead_word_playback(self) -> None:
+        """Send the engine the computed speech state again after a playback.
+
+        Puts the engine back to the state it had before the hold, as the
+        user's setting and the pauses stand now. Same message as the other
+        resends in this class (_ptt_audio_recheck).
+        """
+        if not self.websocket_manager:
+            return
+        message = self.websocket_manager.set_transcription_status(
+            self.speech_enabled,
+            reason=self._engine_status_reason(self.speech_enabled, None),
+        )
+        self.loop.create_task(self.websocket_manager.broadcast(message))
+
     def _ptt_safety_timeout(self):
         """Safety timeout: auto-stop PTT if ptt_stop was never received."""
         logger.warning("[PTT] Safety timeout expired -- auto-stopping PTT")
@@ -1172,7 +1308,9 @@ class StateManager:
             logger.info("[MODE] Speech disabled on interaction mode change")
             self.speech_notifier.notify_speech_disabled("Mode switch")
             if self.websocket_manager:
-                message = self.websocket_manager.set_transcription_status(False, reason="manual")
+                message = self.websocket_manager.set_transcription_status(
+                    False, reason=self._reason_during_exclusive_pause("manual")
+                )
                 self.loop.create_task(self.websocket_manager.broadcast(message))
         elif old_mode == "push_to_talk" and mode == "toggle" and self.websocket_manager:
             # Listening was already off, so nothing above told the engine,
@@ -1225,7 +1363,9 @@ class StateManager:
             if self.websocket_manager:
                 # Broadcast the change to STT clients
                 if is_suppressed:
-                    message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="audio")
+                    message = self.websocket_manager.set_transcription_status(
+                        self.speech_enabled, reason=self._reason_during_exclusive_pause("audio")
+                    )
                 else:
                     message = self.websocket_manager.set_transcription_status(
                         self.speech_enabled,
@@ -1259,7 +1399,9 @@ class StateManager:
             if self.websocket_manager:
                 # Broadcast the change to STT clients
                 if is_suppressed:
-                    message = self.websocket_manager.set_transcription_status(self.speech_enabled, reason="sonos")
+                    message = self.websocket_manager.set_transcription_status(
+                        self.speech_enabled, reason=self._reason_during_exclusive_pause("sonos")
+                    )
                 else:
                     message = self.websocket_manager.set_transcription_status(
                         self.speech_enabled,
@@ -1269,6 +1411,140 @@ class StateManager:
 
             # Update the GUI
             self.send_state_update()
+
+    def _schedule_button_hide_change(self, held: bool) -> None:
+        """Arm the wait before the floating button hides or comes back.
+
+        Called when the pause starts or ends with its gate open. The button
+        follows the pause only after the pause has lasted, or has stayed
+        ended, for EXCLUSIVE_PAUSE_BUTTON_DELAY_SECONDS. A change in the other
+        direction inside the wait cancels the timer and nothing changes.
+        Listening is not delayed; the caller has already changed it.
+
+        Runs on the Logic event loop, because the detector's event handler
+        calls it, so call_later on that loop is the right clock.
+        """
+        if held:
+            self._cancel_button_timer("_button_show_timer")
+            if not self._button_hidden_for_exclusive_speaker:
+                self._cancel_button_timer("_button_hide_timer")
+                self._button_hide_timer = self.loop.call_later(
+                    EXCLUSIVE_PAUSE_BUTTON_DELAY_SECONDS,
+                    self._finish_button_hide_change,
+                    True,
+                )
+        else:
+            self._cancel_button_timer("_button_hide_timer")
+            if self._button_hidden_for_exclusive_speaker:
+                self._cancel_button_timer("_button_show_timer")
+                self._button_show_timer = self.loop.call_later(
+                    EXCLUSIVE_PAUSE_BUTTON_DELAY_SECONDS,
+                    self._finish_button_hide_change,
+                    False,
+                )
+
+    def _finish_button_hide_change(self, hidden: bool) -> None:
+        """The wait is over: hide the button, or let it follow the setting again."""
+        if hidden:
+            self._button_hide_timer = None
+        else:
+            self._button_show_timer = None
+        self._button_hidden_for_exclusive_speaker = hidden
+        self.send_state_update()
+
+    def _cancel_button_timer(self, name: str) -> None:
+        timer = getattr(self, name)
+        if timer is not None:
+            timer.cancel()
+            setattr(self, name, None)
+
+    def _clear_button_hide_for_user_write(self, values: dict[str, Any]) -> bool:
+        """The user turned the floating button on during the pause: it wins.
+
+        True when this write turns FLOATING_BUTTON_VISIBLE from off to on
+        while the button is hidden for the pause, or a hide or a show is
+        waiting. Then the hide is cleared and both timers are cancelled, and
+        the button stays shown until the next pause starts. A write of true
+        over a saved true does not clear it, and neither does a write that
+        turns the button off: the pause then ends with the button hidden.
+        The caller sends the snapshot, so it can do so before the disk save.
+        """
+        if not values.get('FLOATING_BUTTON_VISIBLE'):
+            return False
+        if self.config_service.get('FLOATING_BUTTON_VISIBLE', True):
+            return False
+        if not (
+            self._button_hidden_for_exclusive_speaker
+            or self._button_hide_timer is not None
+            or self._button_show_timer is not None
+        ):
+            return False
+        self._cancel_button_timer("_button_hide_timer")
+        self._cancel_button_timer("_button_show_timer")
+        self._button_hidden_for_exclusive_speaker = False
+        return True
+
+    def _set_speech_suppressed_by_exclusive_speaker(
+        self, held: bool, endpoint_name: str, method: str
+    ) -> None:
+        """Start or end the pause for an app that holds the speaker in exclusive mode.
+
+        Called for SpeakerExclusiveStateChangedEvent. Acts only on a change,
+        so a detector that repeats its answer logs and sends nothing. With the
+        setting gate closed (ENABLE_AUDIO_SUPPRESSION false) the flag is
+        recorded and nothing else happens: speech_enabled ignores it, so
+        there is no change to log, tell the engine, or show.
+
+        Args:
+            held: True when the app took the speaker, False when it let go.
+            endpoint_name: friendly name of the speaker, for the log.
+            method: which detection method saw the change, for the log.
+        """
+        if self._speech_suppressed_by_exclusive_speaker == held:
+            return
+        old_speech_enabled = self.speech_enabled
+        self._speech_suppressed_by_exclusive_speaker = held
+        if not self._exclusive_speaker_pause_gate:
+            logger.debug(
+                f"[EXCLUSIVE SPEAKER] Speaker {'held' if held else 'released'} on "
+                f"'{endpoint_name}' ({method}); the pause is off because "
+                f"ENABLE_AUDIO_SUPPRESSION is false"
+            )
+            return
+        new_speech_enabled = self.speech_enabled
+
+        if held:
+            logger.info(
+                f"[EXCLUSIVE SPEAKER] Listening paused: an app holds the speaker "
+                f"'{endpoint_name}' in exclusive mode (detected by {method}). "
+                f"State: user_enabled={self._speech_enabled} -> final={new_speech_enabled}"
+            )
+        else:
+            logger.info(
+                f"[EXCLUSIVE SPEAKER] Pause ended: no app holds the speaker "
+                f"'{endpoint_name}' in exclusive mode now (detected by {method}). "
+                f"State: user_enabled={self._speech_enabled} -> final={new_speech_enabled}"
+            )
+
+        self._schedule_button_hide_change(held)
+
+        if old_speech_enabled != new_speech_enabled:
+            details = f"Speech enabled: {self._speech_enabled}, Speaker: {endpoint_name}"
+            self.speech_notifier.notify_suppression_change("Exclusive Speaker", held, details)
+
+        if self.websocket_manager:
+            if held:
+                message = self.websocket_manager.set_transcription_status(
+                    self.speech_enabled, reason="exclusive_speaker"
+                )
+            else:
+                message = self.websocket_manager.set_transcription_status(
+                    self.speech_enabled,
+                    reason=self._engine_status_reason(self.speech_enabled, None),
+                )
+            self.loop.create_task(self.websocket_manager.broadcast(message))
+
+        self.send_state_update()
 
     async def toggle_button_visibility(self):
         """Toggles the visibility of the floating button."""
@@ -1282,10 +1558,15 @@ class StateManager:
         failure leaves the confirmed live value intact. Legacy callers without
         an ID retain their in-memory-first behavior and receive the saved bool.
         """
+        cleared = self._clear_button_hide_for_user_write({key: value})
         if request_id is not None:
+            if cleared:
+                self.send_state_update()
             return await self._save_gui_settings({key: value}, request_id)
         logger.debug(f"Updating config: '{key}' = {value}")
         self.config_service.set(key, value)
+        if cleared:
+            self.send_state_update()
         saved = await self.config_service.save()
         if not saved:
             logger.error(f"Config '{key}' changed in memory but was NOT saved to disk")
@@ -1305,13 +1586,18 @@ class StateManager:
         A request ID selects the staged, acknowledged path; legacy callers
         receive only the saved bool, as in set_config_value.
         """
+        cleared = self._clear_button_hide_for_user_write(values)
         if request_id is not None:
+            if cleared:
+                self.send_state_update()
             return await self._save_gui_settings(values, request_id)
         if not values:
             return True
         logger.debug(f"Updating config group: {values}")
         for key, value in values.items():
             self.config_service.set(key, value)
+        if cleared:
+            self.send_state_update()
         saved = await self.config_service.save()
         if not saved:
             logger.error(
@@ -1371,7 +1657,10 @@ class StateManager:
     async def cancel_pending_saves(self):
         """Cancels any pending configuration saves, typically during shutdown."""
         # This is now handled by the ConfigService, but we keep the method for API compatibility
-        pass
+        # The only thing StateManager still has to stop at shutdown is the
+        # two timers that hide and show the floating button.
+        self._cancel_button_timer("_button_hide_timer")
+        self._cancel_button_timer("_button_show_timer")
 
     def set_remote_stt_launcher(self, launcher) -> None:
         """Set reference to RemoteSTTLauncher for provider discovery."""
@@ -1587,7 +1876,7 @@ class StateManager:
         """Tray-menu entries for engines that are set up but cannot run yet.
 
         Maps provider name to menu label, today only
-        {"parakeet_tdt": "Parakeet (model not installed)"} when the
+        {"parakeet_tdt": "Parakeet V3 (Local) - model not installed"} when the
         installer turned Parakeet off because its model is missing
         (wh-parakeet-model-download-offer). Kept apart from
         stt_providers_available, which lists engines that can start, so

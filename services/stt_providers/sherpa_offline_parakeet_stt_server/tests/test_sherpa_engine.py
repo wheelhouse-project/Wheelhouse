@@ -41,10 +41,13 @@ def engine_factory(monkeypatch):
         SherpaOfflineEngine, "_load_model", lambda *a, **kw: None
     )
 
-    def _make(recognizer_text: str = "hello world"):
+    def _make(recognizer_text: str = "hello world", tokens=None):
         engine = SherpaOfflineEngine(model_path="/nonexistent")
         stream = MagicMock()
         stream.result.text = recognizer_text
+        # The engine builds its text from the tokens, so by default one
+        # token carries the whole text.
+        stream.result.tokens = [recognizer_text] if tokens is None else tokens
         recognizer = MagicMock()
         recognizer.create_stream.return_value = stream
         engine._recognizer = recognizer
@@ -67,6 +70,21 @@ class TestRecognizeStripsLeadingAndTrailingWhitespace:
         engine = engine_factory(recognizer_text="  hello  ")
         audio = np.zeros(16000, dtype=np.float32)
         assert engine._recognize(audio) == "hello"
+
+
+class TestRecognizeBuildsTextFromTokens:
+    """wh-parakeet-spinning-upgrade: from sherpa-onnx 1.13.4 (commit
+    768fd7a99) result.text loses the space before every ASCII punctuation
+    character, "$" too, and no option turns that off. result.tokens keeps
+    the space, so the engine joins the tokens instead."""
+
+    def test_the_space_before_a_dollar_sign_stays(self, engine_factory):
+        engine = engine_factory(
+            recognizer_text="It costs$5.",
+            tokens=[" It", " cost", "s", " ", "$", "5", "."],
+        )
+        audio = np.zeros(16000, dtype=np.float32)
+        assert engine._recognize(audio) == "It costs $5."
 
 
 # ---------------------------------------------------------------------------
@@ -217,3 +235,100 @@ class TestItnDoesNotDoubleConvert:
             engine.get_result()
             == "set it to 25 percent and call 703-555-1234"
         )
+
+
+# ---------------------------------------------------------------------------
+# wh-first-sound-lost.1: the engine keeps the audio of its final decode
+# ---------------------------------------------------------------------------
+
+def _noise_chunks(count: int = 3, n: int = 8000, seed: int = 7):
+    """Distinct float32 chunks, so a wrong order or a dropped chunk shows."""
+    rng = np.random.default_rng(seed)
+    return [
+        (rng.standard_normal(n) * 0.1).astype(np.float32) for _ in range(count)
+    ]
+
+
+def _last_waveform(engine) -> np.ndarray:
+    """The array the fake recognizer's stream received on its latest call."""
+    stream = engine._recognizer.create_stream.return_value
+    return stream.accept_waveform.call_args.args[1]
+
+
+class TestLastFinalAudio:
+    """last_final_audio is the float32 array handed to the recognizer for the
+    final decode. AudioProcessor passes it to the engine-audio saver."""
+
+    def test_it_starts_as_none(self, engine_factory):
+        assert engine_factory().last_final_audio is None
+
+    def test_after_a_final_decode_it_equals_what_the_recognizer_received(
+        self, engine_factory
+    ):
+        engine = engine_factory(recognizer_text="hello there")
+        chunks = _noise_chunks()
+        for chunk in chunks:
+            engine.process_audio(chunk.tobytes())
+        engine.finalize()
+
+        received = _last_waveform(engine)
+        assert engine.last_final_audio is not None
+        assert engine.last_final_audio.dtype == np.float32
+        assert np.array_equal(engine.last_final_audio, received)
+        # And that array is the whole utterance, in the order it arrived.
+        assert np.array_equal(engine.last_final_audio, np.concatenate(chunks))
+
+    def test_it_is_set_when_the_final_decode_gives_no_text(self, engine_factory):
+        engine = engine_factory(recognizer_text="")
+        chunks = _noise_chunks(2)
+        for chunk in chunks:
+            engine.process_audio(chunk.tobytes())
+        engine.finalize()
+
+        assert engine.get_result() == ""
+        assert np.array_equal(engine.last_final_audio, np.concatenate(chunks))
+
+    def test_reset_clears_it(self, engine_factory):
+        engine = engine_factory()
+        engine.process_audio(_noise_chunks(1)[0].tobytes())
+        engine.finalize()
+        assert engine.last_final_audio is not None
+
+        engine.reset()
+
+        assert engine.last_final_audio is None
+
+    def test_a_partial_decode_does_not_set_it(self, engine_factory):
+        engine = engine_factory()
+        engine.process_audio(_noise_chunks(1)[0].tobytes())
+        engine._run_inference()
+        assert engine._recognizer.create_stream.return_value \
+            .accept_waveform.called
+        assert engine.last_final_audio is None
+
+    def test_a_periodic_decode_inside_process_audio_does_not_set_it(
+        self, engine_factory
+    ):
+        """process_audio runs _run_inference itself once the interval has
+        passed; three seconds of fed audio means several partial decodes and
+        no final one."""
+        engine = engine_factory()
+        for chunk in _noise_chunks(3, n=16000):
+            engine.process_audio(chunk.tobytes())
+        assert engine.is_endpoint() is False
+        assert engine.last_final_audio is None
+
+    def test_the_second_utterance_gets_its_own_audio(self, engine_factory):
+        engine = engine_factory(recognizer_text="one")
+        first = _noise_chunks(2, seed=1)
+        for chunk in first:
+            engine.process_audio(chunk.tobytes())
+        engine.finalize()
+        engine.reset()
+
+        second = _noise_chunks(2, n=4000, seed=2)
+        for chunk in second:
+            engine.process_audio(chunk.tobytes())
+        engine.finalize()
+
+        assert np.array_equal(engine.last_final_audio, np.concatenate(second))

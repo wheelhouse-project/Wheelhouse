@@ -4,7 +4,7 @@
 
 [provider]
 name = "parakeet_tdt"
-display_name = "Parakeet v3 ({mode})"
+display_name = "Parakeet V3 (Local)"
 launcher = "launcher.py"
 enabled = true
 
@@ -31,6 +31,24 @@ num_threads = 4
 re_inference_interval_ms = 600
 endpoint_silence_ms = 600
 silence_rms_threshold = 0.01
+
+# Lead-word join (wh-first-sound-lost.22). Path of a WAV file that holds one
+# spoken word, "hello", and its 50 ms tail: 16 kHz, 1 channel, 16-bit PCM.
+# The provider puts the word in front of the audio on every decode pass and
+# removes it from the text. Empty means the join is off. A file the provider
+# cannot use writes one log line and leaves the join off.
+# The 'Your training word' window of WheelHouse writes this key when you press
+# 'Keep new recording' and empties it when you press 'Turn off'. You can still
+# set it by hand.
+# Use a single-quoted TOML string for a Windows path, because the escapes of
+# a double-quoted string break the file:
+#   lead_word_path = 'C:\Users\you\hello.wav'
+lead_word_path = ""
+# Noise advice of the 'Your training word' window, in dB. The noise does not
+# refuse a recording. When the word is less than this many dB above the
+# background noise, the window shows that the background noise is high and
+# that a quieter place or a better microphone works better.
+lead_word_noise_advice_db = 30.0
 
 [hotwords]
 # Bias recognition toward the phrases in shared/hints.txt (the "x-ray boost"

@@ -520,7 +520,7 @@ class TestPushToTalkRecoveryGuidance:
 
     def test_the_wake_word_mode_setting_names_the_push_to_talk_limit(self, helpdoc):
         text = (helpdoc / "config_descriptions.toml").read_text(encoding="utf-8")
-        entry = self._entry(text, 'description = "What the wake word is used for')
+        entry = self._entry(text, 'description = "Which pauses Wheelhouse listens for the wake word in')
 
         assert "in toggle mode" in entry, entry
         assert "in push-to-talk mode" in entry, entry

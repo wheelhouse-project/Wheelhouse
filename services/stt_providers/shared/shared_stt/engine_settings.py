@@ -36,12 +36,10 @@ _ENGINE_HEADER_RE = re.compile(r"^\s*\[engine\]\s*(?:#.*)?$")
 def validate_engine_settings(settings) -> tuple[dict[str, float], str | None]:
     """Return (normalized settings, None) or ({}, error text).
 
-    The error text travels verbatim in engine_settings_result and lands
-    under the calibration window's "Show details", so it names the exact
-    key and value that failed. Booleans are rejected before the numeric
+    The error text names the exact key and value that failed. Booleans are rejected before the numeric
     check because bool is an int subclass and TOML true/false must never
-    pass as 1.0/0.0 (same rationale as whisper_engine._coerce_threshold,
-    wh-7ou.6.1.7); NaN and infinities are rejected because neither is a
+    pass as 1.0/0.0 (same rationale as the threshold check of the removed
+    Whisper engine, wh-7ou.6.1.7); NaN and infinities are rejected because neither is a
     usable probability. The range is inclusive: 0.0 and 1.0 are the
     documented off-switch values. An empty dict is an error rather than a
     no-op so a buggy caller cannot trigger a pointless provider restart.

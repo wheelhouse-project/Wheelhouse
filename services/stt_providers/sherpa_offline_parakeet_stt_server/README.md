@@ -26,6 +26,7 @@ Uses `OfflineRecognizer` with VAD-triggered batch recognition.
 Edit `config.toml`:
 - `use_gpu = true` for CUDA acceleration
 - `vad.threshold` to tune speech detection sensitivity
+- `[engine] lead_word_path` to the WAV file of the lead word (16 kHz, mono, 16-bit); empty (the default) turns the lead-word join off. The "Your training word" window of WheelHouse writes this key when you press "Keep new recording" and empties it when you press "Turn off"
 
 ## Hint boosting
 

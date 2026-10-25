@@ -65,7 +65,7 @@ def test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause():
     assert frame["message"] == MICROPHONE_BLOCKED_MESSAGE
     assert frame["cause"] == "microphone_blocked"
     assert frame["kind"] == "startup_failed"
-    assert frame["title"] == "Google STT"
+    assert frame["title"] == "Google Cloud"
 
 
 def test_any_other_capture_failure_keeps_the_prefix_and_has_no_cause():

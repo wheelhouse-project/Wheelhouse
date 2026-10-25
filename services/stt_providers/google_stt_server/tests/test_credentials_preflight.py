@@ -185,7 +185,7 @@ class TestRebuildSpeechClient:
 class TestStartupNotification:
     def test_ready_when_preflight_passed(self):
         title, message, kind = server_main.startup_notification(None)
-        assert title == "Google STT"
+        assert title == "Google Cloud"
         assert "ready" in message.lower()
         assert kind == "ready"
 
@@ -193,7 +193,7 @@ class TestStartupNotification:
         title, message, kind = server_main.startup_notification(
             "ValueError: bad key"
         )
-        assert title == "Google STT"
+        assert title == "Google Cloud"
         assert "ready" not in message.lower()
         assert "bad key" in message
         assert kind == "startup_failed"
@@ -208,7 +208,7 @@ class TestStreamerFailureNotice:
         assert notified is True
         forwarder.send_notification.assert_called_once()
         title, message = forwarder.send_notification.call_args.args
-        assert title == "Google STT"
+        assert title == "Google Cloud"
         assert "boom" in message
 
         notified = server_main.report_streamer_start_failure(

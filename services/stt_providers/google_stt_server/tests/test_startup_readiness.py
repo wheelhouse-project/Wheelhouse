@@ -119,7 +119,7 @@ class TestTheReadyNoticeFollowsTheHandshake:
     def test_a_ready_capture_gets_the_ready_notice(self):
         assert _after_capture(
             None, _mic(ready=True), _running()) == (
-                "Google STT", "Transcription service ready", "ready", "")
+                "Google Cloud", "Transcription service ready", "ready", "")
 
     def test_the_handshake_is_actually_called(self):
         mic = _mic(ready=True)
@@ -224,7 +224,7 @@ class TestTheNotificationSender:
         # here, and that visibility is the reason this line changed
         # rather than being loosened.
         forwarder.send_notification.assert_called_once_with(
-            "Google STT", "Transcription service ready", kind="ready",
+            "Google Cloud", "Transcription service ready", kind="ready",
             capture_backend="winrt", cause="")
 
     def test_a_failed_capture_sends_the_failure_notification(self):

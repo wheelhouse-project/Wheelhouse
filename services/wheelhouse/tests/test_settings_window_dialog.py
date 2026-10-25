@@ -46,7 +46,10 @@ CONFIG_KEYS = (
     "COMMAND_TIMEOUT_MS",
     "ENABLE_AUDIO_SUPPRESSION",
     "wake_word.enabled",
+    "click.overlay_keep_numbers",
 )
+KEEP_NUMBERS_KEY = "click.overlay_keep_numbers"
+KEEP_NUMBERS_LABEL = "Keep numbers on after a click or window change"
 RESTART_KEYS = {
     "LOG_TRANSCRIPTS",
     "REPLACEMENT_TIMEOUT_MS",
@@ -62,6 +65,7 @@ STORED = {
     "COMMAND_TIMEOUT_MS": 700,
     "ENABLE_AUDIO_SUPPRESSION": "auto",
     "wake_word.enabled": False,
+    "click.overlay_keep_numbers": False,
 }
 
 
@@ -328,7 +332,7 @@ def test_a_timeout_step_inside_the_range_moves_by_100():
 
 
 # --------------------------------------------------------------------------- #
-#  (e) Settings 8 to 13 send their key and value
+#  (e) Settings 8 to 14 send their key and value
 # --------------------------------------------------------------------------- #
 
 
@@ -336,6 +340,7 @@ def test_a_timeout_step_inside_the_range_moves_by_100():
     ("Check for updates", "CHECK_FOR_UPDATES", True, False),
     ("Log transcripts", "LOG_TRANSCRIPTS", False, True),
     ("Wake word", "wake_word.enabled", False, True),
+    (KEEP_NUMBERS_LABEL, KEEP_NUMBERS_KEY, False, True),
 ])
 def test_a_check_box_setting_emits_its_key_and_the_new_value(
     name, key, start, expected
@@ -416,7 +421,9 @@ def test_effective_values_come_from_the_config_values_result():
         "COMMAND_TIMEOUT_MS": 400,
         "ENABLE_AUDIO_SUPPRESSION": False,
         "wake_word.enabled": True,
+        KEEP_NUMBERS_KEY: True,
     })
+    assert _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox).isChecked() is True
     assert _named(dialog, "Check for updates", QCheckBox).isChecked() is False
     assert _named(dialog, "Log transcripts", QCheckBox).isChecked() is True
     assert _named(dialog, "Wake word", QCheckBox).isChecked() is True
@@ -431,6 +438,59 @@ def test_a_missing_wake_word_key_shows_the_code_default():
     values["wake_word.enabled"] = None   # get_persisted answers None for absent
     dialog = _make_dialog(stored=values)
     assert _named(dialog, "Wake word", QCheckBox).isChecked() is False
+
+
+def test_the_keep_numbers_box_has_the_exact_label_and_accessible_name():
+    dialog = _make_dialog()
+    box = _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox)
+    assert box.text() == KEEP_NUMBERS_LABEL
+    assert dialog.setting_labels().count(KEEP_NUMBERS_LABEL) == 1
+
+
+def test_a_missing_keep_numbers_key_shows_the_box_unchecked():
+    # An absent key means false: the numbers go away (get_persisted answers
+    # None for an absent key).
+    values = dict(STORED)
+    values[KEEP_NUMBERS_KEY] = None
+    dialog = _make_dialog(stored=values)
+    assert _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox).isChecked() is False
+
+
+def test_a_true_keep_numbers_key_shows_the_box_checked():
+    values = dict(STORED)
+    values[KEEP_NUMBERS_KEY] = True
+    dialog = _make_dialog(stored=values)
+    assert _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox).isChecked() is True
+
+
+def test_the_keep_numbers_box_has_no_restart_note():
+    dialog = _make_dialog()
+    row = _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox).parentWidget()
+    notes = [w for w in dialog.findChildren(QLabel)
+             if w.text() == RESTART_TEXT and w.parentWidget() is row]
+    assert notes == []
+    assert KEEP_NUMBERS_KEY not in dialog._restart_notes
+
+
+def test_the_keep_numbers_box_saves_click_overlay_keep_numbers():
+    """The box writes the [click] key, and no other setting, when toggled."""
+    dialog = _make_dialog()
+    seen = _record(dialog)
+    box = _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox)
+    box.click()
+    box.click()
+    assert seen == [
+        ("setting_changed", ("click.overlay_keep_numbers", True)),
+        ("setting_changed", ("click.overlay_keep_numbers", False)),
+    ]
+
+
+def test_the_keep_numbers_box_follows_the_wake_word_box_in_the_tab_order():
+    dialog = _make_dialog()
+    order = dialog.tab_order_widgets()
+    box = _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox)
+    assert order.index(box) == order.index(dialog._wake_box) + 1
+    assert order.index(box) + 1 == order.index(dialog._training_word_btn)
 
 
 def test_missing_update_and_transcript_keys_show_their_code_defaults():
@@ -457,12 +517,14 @@ def test_a_missing_timeout_shows_not_set_and_cannot_be_stepped():
 
 def test_the_saved_settings_stay_disabled_until_the_values_arrive():
     dialog = _make_dialog(loaded=False)
-    for name in ("Check for updates", "Log transcripts", "Wake word"):
+    for name in ("Check for updates", "Log transcripts", "Wake word",
+                 KEEP_NUMBERS_LABEL):
         assert not _named(dialog, name, QCheckBox).isEnabled()
     assert not _named(dialog, "Increase command timeout").isEnabled()
     assert not _named(dialog, "Audio suppression: on").isEnabled()
     dialog.apply_config_values(dict(STORED))
-    for name in ("Check for updates", "Log transcripts", "Wake word"):
+    for name in ("Check for updates", "Log transcripts", "Wake word",
+                 KEEP_NUMBERS_LABEL):
         assert _named(dialog, name, QCheckBox).isEnabled()
     assert _named(dialog, "Increase command timeout").isEnabled()
     assert _named(dialog, "Audio suppression: on").isEnabled()
@@ -499,8 +561,8 @@ def test_live_state_sets_the_controls_and_emits_nothing():
     assert not _named(dialog, "Interim Results", QCheckBox).isChecked()
     assert _named(dialog, "Push-to-Talk Mode", QCheckBox).isChecked()
     assert _named(dialog, "Debug", QCheckBox).isChecked()
-    assert _named(dialog, "STT Provider: Parakeet", QRadioButton).isChecked()
-    assert not _named(dialog, "STT Provider: Google STT",
+    assert _named(dialog, "Speech-to-Text Provider: Parakeet", QRadioButton).isChecked()
+    assert not _named(dialog, "Speech-to-Text Provider: Google STT",
                       QRadioButton).isChecked()
     assert _named(dialog, "AI Model: Qwen", QRadioButton).isChecked()
 
@@ -524,11 +586,11 @@ def test_provider_lists_follow_the_live_state_and_not_installed_are_buttons():
     ))
     seen = _record(dialog)
     radios = [r.accessibleName() for r in dialog.findChildren(QRadioButton)
-              if r.accessibleName().startswith(("STT", "AI"))]
-    assert radios == ["STT Provider: Google STT", "STT Provider: Parakeet",
+              if r.accessibleName().startswith(("Speech-to-Text", "AI"))]
+    assert radios == ["Speech-to-Text Provider: Google STT", "Speech-to-Text Provider: Parakeet",
                       "AI Model: AI disabled"]
     assert not _named(dialog, "AI Model: AI disabled", QRadioButton).isEnabled()
-    _named(dialog, "STT Provider: Parakeet v3 (needs its model)",
+    _named(dialog, "Speech-to-Text Provider: Parakeet v3 (needs its model)",
            QPushButton).click()
     assert seen == [("stt_provider_requested", ("parakeet_v3",))]
 
@@ -536,7 +598,7 @@ def test_provider_lists_follow_the_live_state_and_not_installed_are_buttons():
 def test_controls_for_live_settings_are_disabled_until_the_gui_is_ready():
     dialog = _make_dialog(live=_live(ready=False))
     assert not _named(dialog, "Speech Enabled", QCheckBox).isEnabled()
-    assert not _named(dialog, "STT Provider: Google STT",
+    assert not _named(dialog, "Speech-to-Text Provider: Google STT",
                       QRadioButton).isEnabled()
     dialog.apply_live_state(_live(ready=True))
     assert _named(dialog, "Speech Enabled", QCheckBox).isEnabled()
@@ -645,9 +707,80 @@ def test_the_tab_order_follows_a_rebuilt_provider_list():
         stt_providers=[("only", "Only one")], stt_current="only"))
     listed = dialog.tab_order_widgets()
     names = [w.accessibleName() for w in listed]
-    assert "STT Provider: Only one" in names
-    assert "STT Provider: Google STT" not in names
+    assert "Speech-to-Text Provider: Only one" in names
+    assert "Speech-to-Text Provider: Google STT" not in names
     assert set(dialog.findChildren(QAbstractButton)) <= set(listed)
+
+
+# --------------------------------------------------------------------------- #
+#  The 'Training word...' button (wh-first-sound-lost.23, acceptance item 19)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_training_word_button_sits_in_the_other_settings_group():
+    from PySide6.QtWidgets import QGroupBox
+
+    dialog = _make_dialog()
+    button = _named(dialog, "Training word...", QPushButton)
+    assert button.text() == "Training word..."
+    parent = button.parentWidget()
+    while parent is not None and not isinstance(parent, QGroupBox):
+        parent = parent.parentWidget()
+    assert parent is not None and parent.title() == "Other settings"
+
+
+def test_the_training_word_button_emits_training_word_requested():
+    dialog = _make_dialog()
+    seen = []
+    dialog.training_word_requested.connect(lambda: seen.append("asked"))
+    _named(dialog, "Training word...", QPushButton).click()
+    assert seen == ["asked"]
+
+
+def test_the_training_word_button_is_not_one_of_the_fourteen_settings():
+    dialog = _make_dialog()
+    assert "Training word..." not in dialog.setting_labels()
+    assert len(dialog.setting_labels()) == 14
+
+
+def test_the_training_word_button_is_in_the_tab_order_before_help():
+    dialog = _make_dialog()
+    listed = dialog.tab_order_widgets()
+    button = _named(dialog, "Training word...", QPushButton)
+    assert listed.index(button) == listed.index(
+        _named(dialog, KEEP_NUMBERS_LABEL, QCheckBox)) + 1
+    assert listed.index(button) + 1 == listed.index(
+        _named(dialog, "Help", QPushButton))
+
+
+def test_the_training_word_button_has_its_accessible_name_and_no_default_action():
+    dialog = _make_dialog()
+    button = _named(dialog, "Training word...", QPushButton)
+    assert button.accessibleName() == "Training word..."
+    assert button.autoDefault() is False and button.isDefault() is False
+
+
+def test_the_training_word_button_follows_the_live_state_both_ways():
+    dialog = _make_dialog(live=_live(ready=True))
+    button = _named(dialog, "Training word...", QPushButton)
+    assert button.isEnabled() is True
+    dialog.apply_live_state(_live(ready=False))
+    assert button.isEnabled() is False
+
+
+def test_the_training_word_button_waits_for_the_first_state():
+    dialog = _make_dialog(live=_live(ready=False))
+    assert _named(dialog, "Training word...", QPushButton).isEnabled() is False
+    dialog.apply_live_state(_live(ready=True))
+    assert _named(dialog, "Training word...", QPushButton).isEnabled() is True
+
+
+def test_the_gui_connects_the_button_to_the_window_it_opens(quiet_gui):
+    manager = _make_manager()
+    with patch.object(manager, "_open_lead_word") as opened:
+        manager._open_settings_window()
+        _named(manager._sw_dialog, "Training word...", QPushButton).click()
+    opened.assert_called_once_with()
 
 
 def test_the_window_is_hidden_not_destroyed_on_close():
@@ -678,7 +811,7 @@ def test_the_gui_dispatch_opens_the_window_and_reuses_it(quiet_gui):
     assert manager._sw_dialog is first
 
 
-def test_opening_asks_logic_for_the_six_saved_settings(quiet_gui):
+def test_opening_asks_logic_for_the_seven_saved_settings(quiet_gui):
     manager = _make_manager()
     manager._open_settings_window()
     sent = _drain(manager.commands_to_logic_queue)
@@ -861,7 +994,7 @@ def test_provider_radios_use_the_menus_switch_commands(quiet_gui):
     manager = _make_manager()
     dialog, _ = _open(manager)
     _drain(manager.commands_to_logic_queue)
-    _named(dialog, "STT Provider: Parakeet", QRadioButton).click()
+    _named(dialog, "Speech-to-Text Provider: Parakeet", QRadioButton).click()
     _named(dialog, "AI Model: Qwen", QRadioButton).click()
     sent = _drain(manager.commands_to_logic_queue)
     assert sent == [
@@ -874,7 +1007,7 @@ def test_clicking_the_running_provider_sends_nothing(quiet_gui):
     manager = _make_manager()
     dialog, _ = _open(manager)
     _drain(manager.commands_to_logic_queue)
-    _named(dialog, "STT Provider: Google STT", QRadioButton).click()
+    _named(dialog, "Speech-to-Text Provider: Google STT", QRadioButton).click()
     _named(dialog, "AI Model: GPT OSS", QRadioButton).click()
     assert _drain(manager.commands_to_logic_queue) == []
 
@@ -888,6 +1021,7 @@ def test_clicking_the_running_provider_sends_nothing(quiet_gui):
     ("Check for updates", "CHECK_FOR_UPDATES", False),
     ("Log transcripts", "LOG_TRANSCRIPTS", True),
     ("Wake word", "wake_word.enabled", True),
+    (KEEP_NUMBERS_LABEL, KEEP_NUMBERS_KEY, True),
 ])
 def test_a_check_box_setting_sends_set_config_value_with_a_request_id(
     quiet_gui, name, key, expected
@@ -1046,7 +1180,7 @@ def test_a_state_update_while_the_window_is_open_refreshes_without_commands(
     assert not _named(dialog, "Speech Enabled", QCheckBox).isChecked()
     assert _named(dialog, "Debug", QCheckBox).isChecked()
     assert not _named(dialog, "Interim Results", QCheckBox).isChecked()
-    assert _named(dialog, "STT Provider: Parakeet", QRadioButton).isChecked()
+    assert _named(dialog, "Speech-to-Text Provider: Parakeet", QRadioButton).isChecked()
     assert _named(dialog, "AI Model: Qwen", QRadioButton).isChecked()
     assert _drain(manager.commands_to_logic_queue) == []
 

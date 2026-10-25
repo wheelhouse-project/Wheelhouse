@@ -126,8 +126,7 @@ var
     it substituted, a requirement this machine does not meet, a step it could
     not finish. Collected from its tagged NOTICE output and shown on the finish
     page. EngineNoticesDropped counts the ones that did not fit, so the user is
-    told they exist rather than left with a list that quietly stops
-    (wh-wizard-distil-fallback). }
+    told they exist rather than left with a list that quietly stops. }
   EngineNotices: string;
   EngineNoticesDropped: Integer;
 
@@ -250,7 +249,6 @@ function SpeechProviderArg: string;
 begin
   case SpeechPage.SelectedValueIndex of
     1: Result := 'google_stt';
-    2: Result := 'distil_medium_en';
   else
     Result := 'parakeet_tdt';
   end;
@@ -518,15 +516,16 @@ begin
     True, False);
   SpeechPage.Add('Parakeet - works offline, recommended for almost everyone');
   SpeechPage.Add('Google Cloud - more accurate, advanced, needs a Google account');
-  SpeechPage.Add('Distil-Whisper - needs an NVIDIA graphics card (advanced)');
   { On a re-run, default to the engine already installed so clicking through the
     defaults does not silently switch it. The wizard must still pass an explicit
     -SttProvider (the engine prompts interactively when it is omitted, which would
-    hang the hidden install shell), so it defaults the radio to last_provider. }
+    hang the hidden install shell), so it defaults the radio to last_provider.
+    A last_provider of distil_medium_en, the removed engine, falls to the
+    Parakeet radio like any other name the page does not list. The wizard then
+    passes -SttProvider parakeet_tdt, and the engine still sees the removed name
+    in the installed config (Get-CurrentProvider) and records the removal. }
   if CurrentProvider = 'google_stt' then
     SpeechPage.SelectedValueIndex := 1
-  else if CurrentProvider = 'distil_medium_en' then
-    SpeechPage.SelectedValueIndex := 2
   else
     SpeechPage.SelectedValueIndex := 0;
 
@@ -687,7 +686,7 @@ begin
     { Build one candidate caption per number of notes kept, from every note down
       to none. The notes go above the standing text rather than below it: a note
       saying the speech engine was substituted is the one thing on this page the
-      user did not already choose (wh-wizard-distil-fallback). MAX_NOTICE_TEXT
+      user did not already choose. MAX_NOTICE_TEXT
       bounds the characters, which says nothing about how many lines they wrap
       to, so the page may still have more than it can draw. }
     kept := EngineNotices;

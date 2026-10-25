@@ -15,7 +15,7 @@
 <body id="top">
   <a class="skip-link" href="#main">Skip to main content</a>
   <header class="site-header"><div class="header-inner wrap">
-    <a class="brand" href="index.html" aria-label="Wheelhouse home"><span class="wheel" aria-hidden="true">☸</span> Wheelhouse<span class="brand-dot" aria-hidden="true">.</span></a>
+    <a class="brand" href="index.html" aria-label="Wheelhouse home"><span class="wheel" aria-hidden="true">☸</span> Wheelhouse</a>
     <nav aria-label="Main navigation"><a href="index.html">Home</a><a href="start.html">Get started</a><a href="guide.html">User guide</a><a href="reference.html" aria-current="page">Reference</a><a href="install.html">Installation</a><a href="voice-access.html">Voice Access</a><a href="help.html">Get help</a></nav>
     <a class="button small" href="https://github.com/wheelhouse-project/Wheelhouse/releases/latest/download/Wheelhouse-Setup.exe" aria-label="Download for Windows">Download <span aria-hidden="true">↗</span></a>
   </div></header>
@@ -79,7 +79,7 @@
 <p>Action name: <code>show_overlay_command</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
 <p>Paints a number badge on every clickable control on screen so you can say "click" plus a number.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no params: saying "show numbers" shows the badges; then "click 4" clicks control number 4. "apply numbers" and "show numbers here" do the same.</code></p>
+<p>Example: <code>Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no params: saying "show numbers" shows the badges; then "click four" clicks control number 4. "apply numbers" and "show numbers here" do the same.</code></p>
 <h3 id="clipboard">Clipboard</h3>
 <h4 id="capture-clipboard">Capture clipboard</h4>
 <p>Action name: <code>capture_clipboard</code>. The Pattern Manager's action list does not offer this action.</p>
@@ -127,25 +127,25 @@
 <li><code>keys</code> (keys) -- Key names held down together, listed in order (for example ctrl, z).</li>
 <li><code>repeat</code> (number) -- Optional last value: how many times to press the combination (capped at 30); often a capture group like g1 so the spoken number is used.</li>
 </ul>
-<p>Example: <code>Trigger "^undo\s*(\d+)?$" with params ["ctrl", "z", "g1"]: saying "undo 3" presses Ctrl+Z three times.</code></p>
+<p>Example: <code>Trigger "^undo\s*(\d+)?$" with params ["ctrl", "z", "g1"]: saying "undo three" presses Ctrl+Z three times.</code></p>
 <h4 id="press-a-spoken-key-sequence">Press a spoken key sequence</h4>
 <p>Action name: <code>press_keys</code>. The Pattern Manager lists it under Advanced actions, Keyboard.</p>
 <p>Turns spoken key names into a key combination and presses it; if any name is unrecognized the whole phrase falls through to dictation.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
 <li><code>key_sequence</code> (keys) -- Space-separated spoken key names in any order (for example control alt delete); usually the capture group g1.</li>
-<li><code>repeat</code> (number) -- Optional repeat count as digits or a number word (capped at 30); the capture group g2 in "press tab 3 times".</li>
+<li><code>repeat</code> (number) -- Optional repeat count (capped at 30); the capture group g2 in "press tab three times".</li>
 </ul>
-<p>Example: <code>Trigger "^press\s*(.+?)(?:\s+(\d+)\s+times?)?$" with params ["g1", "g2"]: saying "press control alt delete" presses Ctrl+Alt+Delete, and "press tab 3 times" presses Tab three times.</code></p>
+<p>Example: <code>Trigger "^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$" with params ["g1", "g2"]: saying "press control alt delete" presses Ctrl+Alt+Delete, and "press tab three times" presses Tab three times.</code></p>
 <h4 id="press-one-key">Press one key</h4>
 <p>Action name: <code>press</code>. The Pattern Manager lists it under Advanced actions, Keyboard.</p>
 <p>Presses a single key, optionally repeated a number of times.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
 <li><code>key</code> (key) -- The key to press (for example del or backspace).</li>
-<li><code>repeat</code> (number) -- Optional repeat count as digits or a number word (capped at 50); often a capture group like g1.</li>
+<li><code>repeat</code> (number) -- Optional repeat count (capped at 50); often a capture group like g1.</li>
 </ul>
-<p>Example: <code>Trigger "^delete\s*(\d+)?$" with params ["del", "g1"]: saying "delete 3" presses the Delete key three times.</code></p>
+<p>Example: <code>Trigger "^delete\s*(\d+)?$" with params ["del", "g1"]: saying "delete three" presses the Delete key three times.</code></p>
 <h3 id="mouse-grid">Mouse grid</h3>
 <h4 id="dismiss-the-mouse-grid">Dismiss the mouse grid</h4>
 <p>Action name: <code>grid_dismiss_command</code>. The Pattern Manager lists it under Advanced actions, Mouse grid.</p>
@@ -154,7 +154,7 @@
 <p>Example: <code>Trigger "^(?:hide|dismiss) grid$" with no params: saying "hide grid" removes the grid. "dismiss grid" does the same.</code></p>
 <h4 id="mouse-grid-action-word">Mouse-grid action word</h4>
 <p>Action name: <code>grid_action_command</code>. The Pattern Manager lists it under Advanced actions, Mouse grid.</p>
-<p>Runs one grid-only action word (mark, drag, or move_here) at the grid's current cell; with the grid closed the word types as normal dictation.</p>
+<p>Runs one grid-only action word (mark, drag, or move_here) at the center of the grid that is on the screen; with the grid closed the word types as normal dictation.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
 <li><code>action</code> (text) -- Fixed action name: mark, drag, or move_here.</li>
@@ -163,7 +163,7 @@
 <p>Example: <code>Trigger "^(mark[.!?]?)$" with params ["mark", "g1"]: with the grid open, saying "mark" pins the drag start point; with it closed, "mark" just types the word.</code></p>
 <h4 id="mouse-grid-bare-click">Mouse-grid bare click</h4>
 <p>Action name: <code>grid_click_command</code>. The Pattern Manager lists it under Advanced actions, Mouse grid.</p>
-<p>Clicks at the open mouse grid's current cell center (click, tap, right click, double click, or triple click); with the grid closed it clicks at the current pointer position. The words type as dictation only when voice clicking is turned off; say "literal click" to type the word.</p>
+<p>Clicks at the center of the open mouse grid on the screen (click, tap, right click, double click, or triple click); with the grid closed it clicks at the current pointer position. The words type as dictation only when voice clicking is turned off; say "literal click" to type the word.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
 <li><code>utterance</code> (group_ref) -- Capture group holding the spoken gesture words, usually g1.</li>
@@ -171,7 +171,7 @@
 <p>Example: <code>With the grid narrowed to the target, saying "right click" opens the context menu at the cell center; with no grid open, saying "triple click" selects the line under the pointer.</code></p>
 <h4 id="mouse-grid-number">Mouse-grid number</h4>
 <p>Action name: <code>grid_number_command</code>. The Pattern Manager lists it under Advanced actions, Mouse grid.</p>
-<p>Narrows the open mouse grid to the spoken cell (1-9). With the grid closed and the numbered overlay showing, the number clicks the control with that label; with neither showing, the number types as normal dictation.</p>
+<p>Narrows the open mouse grid to the spoken cell (one to nine). With the grid closed and the numbered overlay showing, the number clicks the control with that label; with neither showing, the number types as normal dictation.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
 <li><code>utterance</code> (group_ref) -- Capture group holding the whole spoken text for the dictation fallback, usually g1.</li>
@@ -187,7 +187,7 @@
 <p>Action name: <code>grid_show_command</code>. The Pattern Manager lists it under Advanced actions, Mouse grid.</p>
 <p>Opens the 3x3 mouse grid over the focused monitor; spoken numbers then narrow it to a point you can click, drag, or move to.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^(?:show|apply) grid$" with no params: saying "show grid" or "apply grid" paints the grid; "5" then "click" clicks the center.</code></p>
+<p>Example: <code>Trigger "^(?:show|apply) grid$" with no params: saying "show grid" or "apply grid" paints the grid; "five" then "click" clicks the center.</code></p>
 <h3 id="programs-and-web">Programs and web</h3>
 <h4 id="google-search">Google search</h4>
 <p>Action name: <code>gs</code>. The Pattern Manager lists it under Advanced actions, Programs and web.</p>
@@ -241,7 +241,7 @@
 <li><code>direction</code> (choice: <code>up</code>, <code>down</code>, <code>left</code>, <code>right</code>) -- Which way to turn the wheel.</li>
 <li><code>clicks</code> (number) -- Optional last value: how many wheel notches to send (capped at 50); often a capture group like g1 so the spoken number is used.</li>
 </ul>
-<p>Example: <code>Trigger "^scroll down\s*(\d+)?$" with params ["down", "g1"]: saying "scroll down 3" turns the wheel three notches down.</code></p>
+<p>Example: <code>Trigger "^scroll down\s*(\d+)?$" with params ["down", "g1"]: saying "scroll down three" turns the wheel three notches down.</code></p>
 <h4 id="start-scrolling-and-keep-going">Start scrolling and keep going</h4>
 <p>Action name: <code>start_continuous_scroll</code>. The Pattern Manager lists it under Advanced actions, Scrolling.</p>
 <p>Starts turning the mouse wheel over and over, in one direction, until a stop command arrives or the time limit is reached.</p>
@@ -261,9 +261,9 @@
 <p>Inserts the given number of newline characters (up to 50).</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
-<li><code>count</code> (number) -- How many newlines to insert, as digits or a number word; capped at 50.</li>
+<li><code>count</code> (number) -- How many newlines to insert; capped at 50.</li>
 </ul>
-<p>Example: <code>Trigger "^blank lines (\d+)$" with params ["g1"]: saying "blank lines 3" inserts three newlines.</code></p>
+<p>Example: <code>Trigger "^blank lines (\d+)$" with params ["g1"]: saying "blank lines three" inserts three newlines.</code></p>
 <h4 id="insert-raw-text">Insert raw text</h4>
 <p>Action name: <code>insert_raw</code>. The Pattern Manager lists it under Advanced actions, Text.</p>
 <p>Inserts exact text at the cursor via paste, with no added space, capitalization, or cleanup.</p>
@@ -271,7 +271,7 @@
 <ul>
 <li><code>text</code> (text) -- The exact characters to insert; may be a capture group like g1.</li>
 </ul>
-<p>Example: <code>Trigger "^insert\s*(.+)$" with params ["g1"]: saying "insert TODO:" inserts "TODO:" exactly, no leading space.</code></p>
+<p>Example: <code>Trigger "^insert\b\s*(.+)$" with params ["g1"]: saying "insert TODO:" inserts "TODO:" exactly, no leading space.</code></p>
 <h4 id="insert-text">Insert text</h4>
 <p>Action name: <code>insert_text</code>. The Pattern Manager lists it under Basic actions.</p>
 <p>Inserts text at the cursor with intelligent spacing and capitalization.</p>
@@ -293,9 +293,9 @@
 <p>Converts a spoken number to the digit followed by a period, for numbered lists.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
-<li><code>number</code> (number) -- The number as a word (one) or digits (1); usually the capture group g1.</li>
+<li><code>number</code> (number) -- The number; usually the capture group g1.</li>
 </ul>
-<p>Example: <code>Trigger "^item (\d+)$" with params ["g1"]: saying "item 5" inserts "5.".</code></p>
+<p>Example: <code>Trigger "^item (\d+)$" with params ["g1"]: saying "item five" inserts "5.".</code></p>
 <h4 id="replace-matched-words-with-text">Replace matched words with text</h4>
 <p>Action name: <code>text</code>. The Pattern Manager lists it under Advanced actions, Text.</p>
 <p>The standard replacement action: inserts the given text with intelligent spacing, and an empty value silently discards the matched words.</p>
@@ -317,7 +317,7 @@
 <p>Converts a spoken number to its digits, with no period.</p>
 <p>Parameters, in the order a pattern passes them:</p>
 <ul>
-<li><code>number</code> (number) -- The number as words (twenty three) or digits (23); usually the capture group g1.</li>
+<li><code>number</code> (number) -- The number; usually the capture group g1.</li>
 </ul>
 <p>Example: <code>Trigger "^numeric (\d+)$" with params ["g1"]: saying "numeric twenty three" inserts "23".</code></p>
 <h4 id="transform-selected-text">Transform selected text</h4>
@@ -383,16 +383,16 @@
 <p>Switches listening off, as clicking the floating button or the tray icon does while it listens. In toggle mode, say the wake word to switch it back on; in push-to-talk mode the wake word ends only the idle pause, so hold the floating button again.</p>
 <p>Parameters: none.</p>
 <p>Example: <code>Trigger "^stop listening$": saying it by itself switches listening off.</code></p>
-<h4 id="teach-wheelhouse-your-voice">Teach WheelHouse your voice</h4>
-<p>Action name: <code>open_calibration</code>. The Pattern Manager lists it under Advanced actions, Wheelhouse.</p>
-<p>Opens the voice-teaching window, where WheelHouse learns how you sound so it stops missing short words. Only the Distil-Whisper speech engine uses it.</p>
-<p>Parameters: none.</p>
-<p>Example: <code>Trigger "^learn my voice$" with no params: saying "learn my voice" opens the voice-teaching window.</code></p>
 <h4 id="teach-word-to-speech-engine">Teach word to speech engine</h4>
 <p>Action name: <code>add_hint_to_stt</code>. The Pattern Manager's action list does not offer this action.</p>
 <p>Sends the clipboard text to the speech-recognition server as a vocabulary hint so it is transcribed correctly.</p>
 <p>Parameters: none.</p>
 <p>Example: <code>Trigger "^boost$": select a word, say "boost" by itself, and the word is copied and sent to the speech engine as a hint.</code></p>
+<h4 id="your-training-word">Your training word</h4>
+<p>Action name: <code>open_lead_word</code>. The Pattern Manager lists it under Advanced actions, Wheelhouse.</p>
+<p>Opens the training-word window, where you record the word 'hello' once so that WheelHouse keeps the first sound of a phrase after a pause. Only the Parakeet speech engine uses it.</p>
+<p>Parameters: none.</p>
+<p>Example: <code>Trigger "^record my training word$" with no params: saying "record my training word" opens the training-word window.</code></p>
 <h2 id="notice-reference">Notice Reference</h2>
 <p>The titles of the notices, message boxes, and windows that Wheelhouse shows, each written exactly as it appears on screen. Each row says when the title appears, what it means, and what to do. The words in parentheses after a title say what kind of notice or window it is.</p>
 <div class="table-scroll" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
@@ -508,14 +508,20 @@
 <td>If the message says "Speech environment is out of date", run the Wheelhouse installer again. For the Visual C++ runtime message, run the installer again and select Yes when Windows asks for permission. If you already did that, restart the computer.</td>
 </tr>
 <tr>
+<td><strong>Wheelhouse: Speech engine changed</strong> (Windows notification)</td>
+<td>You update Wheelhouse from a version that used a speech engine that Wheelhouse no longer includes, and Wheelhouse starts for the first time after the update. Wheelhouse shows the notice one time. It does not come back on a later start.</td>
+<td>The speech engine that you used is not part of Wheelhouse any more. Wheelhouse switched your speech engine setting to Parakeet. The notice says that the engine was removed from Wheelhouse, and then it says what happened when Wheelhouse started a speech engine. "Parakeet is now in use as your speech engine" means that Parakeet started. "Parakeet replaces it, but its speech model is not installed" means that Wheelhouse did not start Parakeet, because the speech model is missing. Wheelhouse also offers to install the model, and it starts another speech engine if one is available. "Parakeet could not start, so" followed by the name of an engine means that Parakeet did not start and that engine started instead. "No speech engine could start" means that no speech engine is running.</td>
+<td>If the notice says that Parakeet is now in use, nothing is required if speech works. If it says that the speech model is not installed, accept the offer to install the model, or run the Wheelhouse installer again and choose Parakeet when it asks for the speech engine. If it says that Parakeet could not start, or that no speech engine could start, run the Wheelhouse installer again and choose Parakeet when it asks for the speech engine. To use Google Cloud instead, pick it from Speech-to-Text Provider in the right-click menu.</td>
+</tr>
+<tr>
 <td><strong>Wheelhouse: STT Choice Not Saved</strong> (Windows notification)</td>
-<td>You picked a speech engine from STT Provider in the right-click menu. The settings file could not record the choice.</td>
+<td>You picked a speech engine from Speech-to-Text Provider in the right-click menu. The settings file could not record the choice.</td>
 <td>Wheelhouse already stopped the old engine and started the new one, so the new engine is running now. The settings file was not changed. It has a plain value where its stt section belongs, so it cannot store the choice. The next time Wheelhouse starts, it will not remember this choice.</td>
-<td>Select Exit in the menu to close Wheelhouse. Open the settings file, %LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml, in Notepad. Find the line that sets stt to one value, such as stt = "whisper", and delete it. Or copy config.toml.example over config.toml to restore every default. Then start Wheelhouse and pick the engine again from STT Provider.</td>
+<td>Select Exit in the menu to close Wheelhouse. Open the settings file, %LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml, in Notepad. Find the line that sets stt to one value, such as stt = "parakeet", and delete it. Or copy config.toml.example over config.toml to restore every default. Then start Wheelhouse and pick the engine again from Speech-to-Text Provider.</td>
 </tr>
 <tr>
 <td><strong>Windows is blocking your microphone</strong> (notice in the corner of the screen)</td>
-<td>A speech engine starts, and Windows refuses it the microphone because "Let desktop apps access your microphone" is off. Parakeet, Distil-Whisper, and Google Cloud all report this. A Windows notification near the clock also appears and closes itself after a few seconds.</td>
+<td>A speech engine starts, and Windows refuses it the microphone because "Let desktop apps access your microphone" is off. Parakeet and Google Cloud both report this. A Windows notification near the clock also appears and closes itself after a few seconds.</td>
 <td>Wheelhouse cannot hear you, so dictation and voice commands do not work. The notice reads "WheelHouse cannot use your microphone. Windows is blocking it." and then names the Windows setting to change. The notice has only a close button and stays on the screen until you close it.</td>
 <td>Open Settings &gt; Privacy and security &gt; Microphone and turn on "Let desktop apps access your microphone". Then start Wheelhouse again. Click the close button to close the notice.</td>
 </tr>
@@ -552,10 +558,11 @@
 <p><strong>LOG_FILE</strong> <em>(default: <code>""</code>)</em> -- Has no effect. No part of Wheelhouse reads this setting. Wheelhouse always writes its activity log to wheelhouse.log in its install folder, %LOCALAPPDATA%\Wheelhouse\app.</p>
 <p><strong>LOG_LEVEL</strong> <em>(default: <code>"INFO"</code>)</em> -- How detailed the activity log is. Change only when a support conversation asks you to.</p>
 <p><strong>LOG_TRANSCRIPTS</strong> <em>(default: <code>false</code>)</em> -- A privacy setting: false keeps the words you dictate and your clipboard contents out of the log files (only text lengths are noted). Set true only while troubleshooting recognition, then turn it back off; while on, everything you dictate, including passwords, accumulates in the logs.</p>
+<p><strong>SAVE_ENGINE_AUDIO</strong> <em>(default: <code>false</code>)</em> -- A privacy setting for diagnosing a missing first sound: when true, the Parakeet v3 speech engine saves one sound file for every phrase you say, in the folder %LOCALAPPDATA%\WheelHouse\engine-audio. While the Parakeet v3 engine runs, it deletes each of these files that is more than 2 days old, at engine start and once an hour; while the engine does not run, the files stay. Uninstalling Wheelhouse deletes the folder, also when you keep your personal data. The files stay on this computer. Set true only while a support conversation or a bug investigation asks for the sound files, then turn it back off; while on, the files hold everything you say. A change takes effect when the speech engine next starts, which an engine switch or a Wheelhouse restart does.</p>
 <p><strong>CHECK_FOR_UPDATES</strong> <em>(default: <code>true</code>)</em> -- Whether Wheelhouse asks api.github.com once a day if a newer release exists. When one exists, a notice offers to install it. Set false to stop the update check. Wheelhouse then makes no update request. Without this key, the check is on.</p>
 <p><strong>SIDE_OFFSET</strong> <em>(default: <code>10</code>)</em> -- Width in pixels of the left-edge screen zone where the mouse thumb wheel adjusts brightness instead of volume. Raise it if the brightness zone is hard to hit.</p>
 <p><strong>BRIGHTNESS_INCREMENT</strong> <em>(default: <code>1.0</code>)</em> -- The size of each thumb-wheel brightness adjustment step. Raise for faster, coarser changes; lower for finer control.</p>
-<p><strong>VOLUME_INCREMENT</strong> <em>(default: <code>0.5</code>)</em> -- The size of each thumb-wheel volume adjustment step. Raise for faster, coarser changes; lower for finer control.</p>
+<p><strong>VOLUME_INCREMENT</strong> <em>(default: <code>1</code>)</em> -- The size of each thumb-wheel volume adjustment step. Raise for faster, coarser changes; lower for finer control. Use a whole number when the volume goes to a Sonos speaker, because the Sonos speaker drops the fraction.</p>
 <p><strong>THUMB_WHEEL_DEAD_ZONE_TICKS</strong> <em>(default: <code>3</code>)</em> -- How many thumb-wheel ticks a gesture must reach before the brightness or volume zone acts. Ticks below this are held; the batch that reaches it releases them, and every later tick in the same gesture acts at once. Raise if the wheel still reacts to an accidental touch; set to 1 to make every tick act at once.</p>
 <p><strong>THUMB_WHEEL_GESTURE_GAP_MS</strong> <em>(default: <code>500</code>)</em> -- The pause, in milliseconds, that ends a thumb-wheel gesture. After a longer pause the next touch starts in the dead zone again and any held ticks are forgotten. Raise if a slow, deliberate roll keeps stopping early; lower if a stray tick still adds up with the next touch.</p>
 <p><strong>THUMB_WHEEL_MAX_TICKS_PER_BATCH</strong> <em>(default: <code>3</code>)</em> -- The most thumb-wheel ticks one 50 ms batch may apply to brightness or volume. Ticks above this in a single batch are discarded, so a fast flick moves at most this many ticks per batch. Raise for larger changes from a fast roll; lower if a flick still jumps too far.</p>
@@ -569,7 +576,7 @@
 <p><strong>SPATIAL_SOUND_EXEC</strong> <em>(default: <code>""</code>)</em> -- Path to the small free NirSoft helper tool used for voice switching of Dolby Atmos spatial sound; empty means the feature is off. Fill in the tool path only if you use Dolby Atmos and have that tool installed; everyone else can ignore it.</p>
 <p><strong>SPATIAL_SOUND_FORMAT</strong> <em>(default: <code>"Dolby Atmos for home theater"</code>)</em> -- The spatial sound format name passed to the helper tool. Only matters if SPATIAL_SOUND_EXEC is set.</p>
 <h3 id="brightness_coordinator">[brightness_coordinator]</h3>
-<p><strong>software_dimmer</strong> <em>(default: <code>"gamma_dimmer"</code>)</em> -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens through the graphics card), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.</p>
+<p><strong>software_dimmer</strong> <em>(default: <code>"gamma_dimmer"</code>)</em> -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens the screen image, including the mouse pointer, through the Windows display brightness curve), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.</p>
 <p><strong>unwinding_threshold</strong> <em>(default: <code>10</code>)</em> -- Currently has no effect -- Wheelhouse hands control back to the hardware only once software dimming is fully undone, whatever this is set to.</p>
 <h3 id="pluginsinternal_panel">[plugins.internal_panel]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the Internal Panel plugin on or off; it controls a laptop's built-in screen brightness from the brightness scroll zone. On a desktop PC with no built-in panel it does nothing and is safe to leave enabled.</p>
@@ -579,7 +586,7 @@
 <h3 id="pluginssystem_volume">[plugins.system_volume]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the System Volume plugin on or off; it controls the normal Windows volume from the volume scroll zone and quiets system audio during push-to-talk holds.</p>
 <p><strong>device_type</strong> <em>(default: <code>"default"</code>)</em> -- Which audio device to control. Valid values: "default" (the usual choice) or "communications".</p>
-<p><strong>volume_step_db</strong> <em>(default: <code>1.5</code>)</em> -- Loudness change, in decibels, for each unit of VOLUME_INCREMENT. One wheel step sends VOLUME_INCREMENT units, so with the defaults (1.5 and 0.5) one step changes the loudness by 0.75 dB.</p>
+<p><strong>volume_step_db</strong> <em>(default: <code>0.75</code>)</em> -- Loudness change, in decibels, for each unit of VOLUME_INCREMENT. One wheel step sends VOLUME_INCREMENT units, so with the defaults (0.75 and 1) one step changes the loudness by 0.75 dB.</p>
 <p><strong>min_volume_db</strong> <em>(default: <code>-96.0</code>)</em> -- The volume floor, in decibels.</p>
 <p><strong>max_volume_db</strong> <em>(default: <code>0.0</code>)</em> -- The volume ceiling, in decibels.</p>
 <h3 id="pluginsbravia">[plugins.bravia]</h3>
@@ -599,10 +606,10 @@
 <p><strong>ignore_window_titles</strong> <em>(default: <code>["Program Manager", "Task Switching", "SoftwareDimmerOverlay_AlphaBlend_v12", "MainWindow"]</code>)</em> -- Window titles that should never trigger a move.</p>
 <p><strong>ignore_window_classes</strong> <em>(default: <code>["Shell_TrayWnd", "Progman"]</code>)</em> -- Window classes that should never trigger a move.</p>
 <h3 id="wake_word">[wake_word]</h3>
-<p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns wake-word listening on or off; in toggle mode, whenever listening is off, for any reason, saying the wake word out loud turns it back on; in push-to-talk mode it ends only the idle pause.</p>
+<p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns wake-word listening on or off. In toggle mode, saying the wake word out loud turns listening back on: with the mode key at its default, "idle_recovery", whenever listening is off, except while a program holds the speaker in exclusive mode; with mode = "push_to_talk", only after the idle pause, the sound pause, or the Sonos pause. In push-to-talk mode it ends only the idle pause, whatever the mode value. While a program holds the speaker in exclusive mode, the wake word does not end the pause, whatever the mode value.</p>
 <p><strong>keyword</strong> <em>(default: <code>"computer"</code>)</em> -- The wake word.</p>
 <p><strong>sensitivity</strong> <em>(default: <code>0.5</code>)</em> -- Wake-word detection sensitivity, range 0-1. Lower it if saying the wake word often fails to wake Wheelhouse; raise it if ordinary conversation keeps waking it by accident.</p>
-<p><strong>mode</strong> <em>(default: <code>"idle_recovery"</code>)</em> -- What the wake word is used for -- in toggle mode, turning listening back on whenever it is off; in push-to-talk mode, ending only the idle pause, after which the next hold of the floating button is the way back. Valid values: "idle_recovery" or "push_to_talk"; any other value turns the wake word off for every pause, and the log gives no warning about it.</p>
+<p><strong>mode</strong> <em>(default: <code>"idle_recovery"</code>)</em> -- Which pauses Wheelhouse listens for the wake word in. The value works the same in either interaction mode. "idle_recovery" listens whenever listening is off: the idle pause, the sound pause, the Sonos pause, a start with listening off, and listening you turned off yourself, for example with "stop listening". "push_to_talk" listens only during the idle pause, the sound pause, and the Sonos pause, so the wake word cannot undo "stop listening" or a start with listening off. What the wake word then does depends on the interaction mode: in toggle mode it turns listening on; in push-to-talk mode it ends only the idle pause, after which the next hold of the floating button is the way back. Neither value ends the pause while a program holds the speaker in exclusive mode; that pause ignores the wake word. Valid values: "idle_recovery" or "push_to_talk"; any other value turns the wake word off for every pause, and the log gives no warning about it.</p>
 <p><strong>model_dir</strong> <em>(default: <code>"../shared/data/wake_words"</code>)</em> -- Where the wake-word listening model lives on disk; set by the installer, do not change it.</p>
 <h3 id="ui_actionstiming">[ui_actions.timing]</h3>
 <p><strong>clipboard_verification_timeout_ms</strong> <em>(default: <code>250</code>)</em> -- How long, in milliseconds, to wait for the clipboard to verify during text insertion. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
@@ -610,6 +617,7 @@
 <p><strong>selection_clear_delay_ms</strong> <em>(default: <code>20</code>)</em> -- Delay, in milliseconds, after clearing a selection during text insertion. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
 <p><strong>context_gather_delay_ms</strong> <em>(default: <code>10</code>)</em> -- Delay, in milliseconds, before gathering the text context around the caret. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
 <p><strong>post_paste_delay_ms</strong> <em>(default: <code>30</code>)</em> -- Delay, in milliseconds, after pasting text into the target application. On older or heavily loaded machines, raising this can fix text that arrives garbled, half-pasted, or out of order.</p>
+<p><strong>paste_landing_wait_ms</strong> <em>(default: <code>500</code>)</em> -- How long, in milliseconds after a paste into Notepad, Wheelhouse waits for the dictated text to appear. If the text does not appear in that time, Wheelhouse pastes once more. On a heavily loaded machine, raise this if Notepad sometimes shows a dictated word twice. A higher value makes a lost word arrive later.</p>
 <p><strong>utterance_clipboard_timeout_seconds</strong> <em>(default: <code>60.0</code>)</em> -- A safety limit, in seconds. Wheelhouse puts dictated text on the clipboard to paste it, and restores your own clipboard contents when the utterance ends. If the signal that the utterance has ended never arrives, Wheelhouse ends it after this long and restores your clipboard.</p>
 <h3 id="ui_actionsverified_unicode">[ui_actions.verified_unicode]</h3>
 <p><strong>max_chars</strong> <em>(default: <code>50</code>)</em> -- Dictations up to this length are typed directly, character by character, avoiding your clipboard; longer ones go through the clipboard. Lower it if a particular app mishandles direct typing; raise it to have more dictations bypass the clipboard.</p>
@@ -626,7 +634,7 @@
 <p><strong>ptt_safety_timeout_seconds</strong> <em>(default: <code>30</code>)</em> -- In push-to-talk mode, automatically releases the microphone if a hold gets stuck. Raise it if you routinely dictate longer than 30 seconds in one hold.</p>
 <p><strong>notify_on_revision</strong> <em>(default: <code>false</code>)</em> -- Show a small notice when the speech engine revises its guess at what you said.</p>
 <h3 id="stt">[stt]</h3>
-<p><strong>last_provider</strong> <em>(default: <code>"parakeet_tdt"</code>)</em> -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the menu on the floating button or the tray icon, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account), "distil_medium_en" (local, runs on an NVIDIA graphics card), or "google_stt" (Google Cloud; needs an account, sends audio to Google).</p>
+<p><strong>last_provider</strong> <em>(default: <code>"parakeet_tdt"</code>)</em> -- Which speech-to-text engine Wheelhouse uses; you normally switch engines from the menu on the floating button or the tray icon, and Wheelhouse writes your choice here for you, which is why it is called the last provider. Valid values: "parakeet_tdt" (local, offline, no account) or "google_stt" (Google Cloud; needs an account, sends audio to Google).</p>
 <h3 id="sttgoogle">[stt.google]</h3>
 <p><strong>credentials_file</strong> <em>(default: <code>""</code>)</em> -- Full path to the Google service-account key file (the JSON file downloaded during Google Cloud setup). Type the path here yourself, doubling each backslash, and restart Wheelhouse; when this is empty, the GOOGLE_APPLICATION_CREDENTIALS environment variable is used instead.</p>
 <h3 id="ai_1">[ai]</h3>
@@ -642,8 +650,7 @@
 <p><strong>model_path</strong> <em>(default: <code>""</code>)</em> -- The full path to the model file Wheelhouse loads. The installer writes this. Point it at a different model file to change which model answers. Nothing else has to change.</p>
 <p><strong>binary_dir</strong> <em>(default: <code>""</code>)</em> -- The folder holding llama-server.exe, the program that runs the model. The installer writes this. Change it if you moved the llama.cpp build, or to use a build made for different graphics hardware.</p>
 <p><strong>context_size</strong> <em>(default: <code>8192</code>)</em> -- How much text the model can consider at once, counted in tokens. Raise it if you correct or rewrite long passages and the reply comes back cut short. A larger value uses more memory.</p>
-<p><strong>gpu_layers</strong> <em>(default: <code>99</code>)</em> -- How much of the model to place on the graphics card. Valid values: 99 places the whole model on the graphics card; 0 runs it entirely on the processor, which the installer chooses for a machine with enough system memory but no suitable graphics card. Values in between split it. Lower it if the server fails to start because the graphics card is out of memory.</p>
-<p><strong>startup_timeout_seconds</strong> <em>(default: <code>90</code>)</em> -- How long Wheelhouse waits for the model server it starts to report itself ready before it stops that attempt. The AI features stay off until a later attempt succeeds: Wheelhouse checks the server every 60 seconds and when an AI command needs it, and the first check after the timeout starts the server again. After each failed start, the wait before the next start doubles, from 120 seconds to at most 600 seconds. After a start that succeeds, the next start waits at least 60 seconds. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.</p>
+<p><strong>startup_timeout_seconds</strong> <em>(default: <code>90</code>)</em> -- How long Wheelhouse waits for the model server it starts to report itself ready before it stops that attempt. The AI features stay off until a later attempt succeeds: Wheelhouse checks the server every 60 seconds, and again when an AI request fails while the AI features are on, and the first check after the timeout starts the server again. An AI command spoken while the AI features are off does not start a check. After each failed start, the wait before the next start doubles, from 120 seconds to at most 600 seconds. After a start that succeeds, the next start waits at least 60 seconds. Raise it if a large model on a slow disk is still loading when Wheelhouse stops waiting.</p>
 <h3 id="aihelp">[ai.help]</h3>
 <p><strong>assistant_url</strong> <em>(default: <code>"https://notebook.google.com/notebook/da51a404-67ec-4804-9ebe-83605df3e9cf/preview"</code>)</em> -- The web address that Help on the menu, and the spoken command "help", open in your browser; if you blank it out, both show a notice that online help is not configured. Release 1.2.1 and earlier named this setting gem_url; updating with the installer renames it to assistant_url and replaces an old assistant address with the current one.</p>
 <p><strong>explain_before_open</strong> <em>(default: <code>true</code>)</em> -- Whether a window explaining the Wheelhouse Assistant appears before your browser opens; the window's "Do not show this again" check box sets this to false, and setting it back to true brings the window back. While it is false and the file help_explainer_notebook_shown.toml is missing from the data folder next to the settings file, the window appears at every Help with the box already ticked. Only the Assistant button writes that file, so after Cancel the window appears again at the next Help; select Assistant with the box still ticked to keep the window off.</p>
@@ -656,6 +663,7 @@
 <p><strong>overlay_badge_font_pt</strong> <em>(default: <code>8</code>)</em> -- The size of the painted overlay numbers. Raise it if the numbers are hard to read.</p>
 <p><strong>overlay_badge_shadow</strong> <em>(default: <code>false</code>)</em> -- Whether each overlay number casts a drop shadow. Off by default; the bubble's border already separates it from the background. Turn it on if the numbers blend into busy screen content.</p>
 <p><strong>overlay_badge_theme</strong> <em>(default: <code>"auto"</code>)</em> -- The color of the numbered overlay's speech bubbles. The value names the bubble's own color, not the system theme: light is a white bubble with a black number, dark is a near-black bubble with a white number, and auto picks the opposite of the Windows theme so the bubbles stand out. Valid values: "auto" (follow the Windows theme, inverted for contrast), "light" (white bubble), or "dark" (near-black bubble). Pin it to light or dark if the automatic choice blends into the apps you use most.</p>
+<p><strong>overlay_keep_numbers</strong> <em>(default: <code>false</code>)</em> -- What the numbered overlay does after a click or a window change. Off by default, which copies Windows Voice Access: a successful click on a number removes all the numbers, and a change of the front window removes them too. On keeps the numbers up: Wheelhouse shows new numbers after a click and after every window or menu change. Saying "hide numbers" removes them either way, and a change saved in the Settings window applies to the next click or window change with no restart. Turn it on if you click several numbered controls in a row and want the numbers to stay.</p>
 <p><strong>response_timeout_ms</strong> <em>(default: <code>3000</code>)</em> -- How long, in milliseconds, Wheelhouse waits for a click command's search before giving up. Raise it on a slow machine if clicks time out in complex windows.</p>
 <p><strong>walk_deadline_ms</strong> <em>(default: <code>2500</code>)</em> -- How long, in milliseconds, Wheelhouse searches a window for the control a spoken click names before giving up. Raise it on a slow machine if clicks time out in complex windows. Keep it more than 250 below response_timeout_ms: a value that is not switches voice clicking off, and the log names this key.</p>
 <p><strong>screen_read_timeout_ms</strong> <em>(default: <code>10000</code>)</em> -- How long, in milliseconds, Wheelhouse waits for a read of the window's clickable things (show numbers, the refresh after a focus change, and the re-read after a click) before giving up. Separate from response_timeout_ms, which limits a click reply. Raise it if the numbered overlay reports that it could not draw the numbers in windows that take several seconds to answer.</p>
@@ -676,7 +684,7 @@
       <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
       <a href="#top">Back to top ↑</a>
     </nav>
-    <p class="fine-print">Documentation for Wheelhouse 1.3.0. Speech recognition runs on your computer by default; cloud options are optional.</p>
+    <p class="fine-print">Documentation for Wheelhouse 1.4.0.</p>
   </footer>
 </body>
 </html>

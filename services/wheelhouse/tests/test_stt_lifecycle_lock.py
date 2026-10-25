@@ -206,6 +206,9 @@ async def test_a_queued_switch_stops_the_provider_the_first_switch_started():
     """
     from main import LogicController
 
+    # Three distinct engine names are needed so the second switch is not
+    # an early return for "already running"; the launcher is a mock, so
+    # "third_stt" stands in for a third engine and need not ship.
     controller, record = _recording_controller(current_provider="google_stt")
     order, first_stop_reached, release_first_stop = _order_recorder(controller)
 
@@ -215,7 +218,7 @@ async def test_a_queued_switch_stops_the_provider_the_first_switch_started():
     await asyncio.wait_for(first_stop_reached.wait(), timeout=5)
 
     second = asyncio.ensure_future(
-        LogicController._switch_stt_provider(controller, "distil_medium_en")
+        LogicController._switch_stt_provider(controller, "third_stt")
     )
     # Long enough for an unserialized second switch to run its whole
     # remote branch: nothing in that branch awaits except the stop,
@@ -229,9 +232,9 @@ async def test_a_queued_switch_stops_the_provider_the_first_switch_started():
         "stop:google_stt",
         "start:parakeet_tdt",
         "stop:parakeet_tdt",
-        "start:distil_medium_en",
+        "start:third_stt",
     ]
-    assert record["provider"] == "distil_medium_en"
+    assert record["provider"] == "third_stt"
 
 
 @pytest.mark.asyncio

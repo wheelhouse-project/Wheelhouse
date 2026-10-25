@@ -5,6 +5,37 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-24
+
+### Added
+
+- The Parakeet speech engine can now use a training word: a short recording of you saying "hello". It helps the engine keep the first sound of the first word after a pause. When the training word is on, the engine puts the recording in front of what you say and removes the extra "hello" from the result, so nothing extra is typed. To record it, say "record my training word", choose "Your training word..." under "Speech-to-Text Provider" in the tray menu or the floating button's right-click menu, or select "Training word..." in the Settings window. Select "Record" and say the word hello once. Wheelhouse checks the take and tells you why a take is not usable, for example "Too quiet" or "More than one word heard". Background noise does not refuse a take. When the word is less than 30 dB (the default) above the background noise, the window also says "The background noise is high. Wheelhouse works better in a quieter place or with a better microphone." The setting `lead_word_noise_advice_db` in the `[engine]` section of the Parakeet engine's own `config.toml` sets this limit. "Keep new recording" turns the training word on at once, with no restart. A line above the buttons says what the new recording replaces. While a new recording waits, the two choices are "Keep new recording" and "Discard", and the window shows no "Close" button. If you close the window with the X in the title bar or the Escape key, Wheelhouse deletes the new recording. The window can also play a recording, go back to the previous recording, and turn the training word off or on. The training word stays off until you keep a recording. The recordings stay on your computer, in `%LOCALAPPDATA%\WheelHouse\lead-word`. An update keeps the training word.
+- Wheelhouse now pauses all listening while a program has sole control of the speaker. Kodi does this when audio passthrough is on. Before, Wheelhouse heard the program's sound, and the playback could stutter. During the pause, Wheelhouse types nothing and runs no command, and neither the wake word nor push-to-talk ends it. Listening resumes about two seconds after the program releases the speaker.
+- The floating button hides while a program has sole control of the speaker, and comes back when the program releases it. This does not change the "Show Floating Button" setting.
+- The new setting `SAVE_ENGINE_AUDIO` in `config.toml` saves the sound that the Parakeet speech engine hears, one file for each phrase, in `%LOCALAPPDATA%\WheelHouse\engine-audio`. It is off by default and is meant for reporting a first sound that is missing from a transcript. The files hold everything you say. They stay on your computer. While the Parakeet engine runs, it deletes the files that are more than 2 days old. Uninstalling Wheelhouse deletes the folder, also when you keep your personal data.
+
+### Changed
+
+- The Distil-Whisper speech engine is removed from Wheelhouse. The installer and the setup wizard no longer offer it and no longer ask about an NVIDIA graphics card. An update from a Distil-Whisper install sets up Parakeet instead. At the next start, one notice, "Wheelhouse: Speech engine changed", says that Parakeet is now your speech engine, or what to do if Parakeet could not start. The voice-teaching session ("learn my voice" and "Teach WheelHouse your voice..."), which only Distil-Whisper used, is removed too. The help documents and the website no longer mention a graphics card.
+- The "STT Provider" submenu in the tray menu and the floating button's right-click menu is now "Speech-to-Text Provider". Its two choices are now "Google Cloud" and "Parakeet V3 (Local)". The Settings window uses the same names. The Parakeet choice no longer names its CPU or GPU mode.
+- After "show numbers", a click on a number now removes all the numbers, and so does a change of the front window, as in Windows Voice Access. Say "show numbers" to see them again. To keep the numbers on as before, select the new check box "Keep numbers on after a click or window change" in the Settings window, or set `overlay_keep_numbers = true` in the `[click]` section of `config.toml`. The change takes effect at once.
+- The Parakeet speech engine now uses much less processor time. In one measurement, its processor time fell to about one ninth. A dollar sign after a word now keeps the space before it, as in "It costs $5.".
+- The default thumb-wheel volume step, `VOLUME_INCREMENT`, is now 1, because a Sonos speaker ignores a fraction and the old default of 0.5 did not change its volume. Each Windows volume step stays 0.75 dB. An update keeps the value in your `config.toml`. To get the new behaviour, set `VOLUME_INCREMENT = 1` near the top of the file, before the first section heading, and set `volume_step_db = 0.75` under `[plugins.system_volume]`.
+- The help guide, the command reference, and the website now write spoken examples as number words, for example "click five". The mouse grid text no longer uses the term "current cell".
+- The help documents now describe the Samsung TV plugin: how to pair the TV and the three settings of `[plugins.samsung]`. `config.toml.example` has a commented `[plugins.samsung]` section.
+- The website home page has new, shorter text with two step-by-step examples. The header of every website page no longer has a period after "Wheelhouse".
+
+### Fixed
+
+- With the Parakeet speech engine, the first sound of the first word after a silence now reaches the engine at the same volume as the rest of the word. Before, that sound could be much quieter, and the engine could miss it.
+- Dictated words are no longer lost in Notepad, also when the processor is fully loaded. If Notepad ignores a paste, Wheelhouse pastes once more after `paste_landing_wait_ms` (default 500 ms). When another program holds the clipboard, Wheelhouse tries again for about 3 seconds.
+- Wheelhouse no longer loses the text you copied when another program, such as a clipboard manager, holds the clipboard. Before, the clipboard could keep a dictated word in place of your text.
+- Four commands now work when the speech engine writes a number as a word. "press control two" presses Ctrl+2. "go right twenty three" moves 23 characters. "click seven button" finds a control named "7". "go up three" and "go down three" press the arrow key three times.
+- "go up" and "go down" now work in "then" chains, for example "go up three then go left two". Before, the whole chain was typed as text.
+- Dictated words that start with "insert" or "press" are now typed as you say them. Before, "inserted the rows" typed only "ed the rows".
+- Starting Notepad by voice no longer fails with the error "Microsoft.UI.Windowing.Core.dll was not found". The same applies to other Microsoft Store programs, such as Paint.
+- The About Wheelhouse window opened from the tray icon menu now closes with its button and with the X. Before, it did not close.
+
 ## [1.3.0] - 2026-10-11
 
 ### Added

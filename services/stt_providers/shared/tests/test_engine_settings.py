@@ -20,11 +20,11 @@ from shared_stt.engine_settings import (
 
 
 FIXTURE = """\
-# Distil-Whisper Medium.en STT (GPU)
+# Example STT provider config (GPU)
 # Top-of-file comment that must survive the write.
 
 [model]
-model_size_or_path = "Systran/faster-distil-whisper-medium.en"
+model_size_or_path = "example/model-name"
 device = "cuda"
 
 [engine]

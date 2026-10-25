@@ -182,7 +182,9 @@ def identity_matches(
     )
 
 
-def map_foreground_event(*, hwnd: int) -> OverlayEvent:
+def map_foreground_event(
+    *, hwnd: int, dismisses_numbers: bool = False
+) -> OverlayEvent:
     """Map a raw ``EVENT_SYSTEM_FOREGROUND`` event to a ``FOCUS_CHANGE`` event.
 
     Phase 1.5 ``FOCUS_CHANGE`` carries no generation (the machine reads its own
@@ -190,8 +192,17 @@ def map_foreground_event(*, hwnd: int) -> OverlayEvent:
     mapping and so the integration can record the new tracked window alongside
     feeding the event; it is not stamped on the event (the machine does not
     consume it).
+
+    ``dismisses_numbers`` (wh-numbers-stay-setting) is True when the caller
+    decided that the user moved to another application window. The decision
+    needs Win32 reads and Logic's process list, so it lives in
+    ``LogicController._foreground_change_dismisses_numbers``; this mapper only
+    carries the answer. The menu mapper, the Pattern Manager decision and the
+    browser timer never set it.
     """
-    return OverlayEvent(kind=OverlayEventKind.FOCUS_CHANGE)
+    return OverlayEvent(
+        kind=OverlayEventKind.FOCUS_CHANGE, dismisses_numbers=dismisses_numbers,
+    )
 
 
 def map_menu_popup_event(*, event_id: int) -> Optional[OverlayEvent]:

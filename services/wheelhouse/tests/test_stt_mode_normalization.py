@@ -262,6 +262,10 @@ def _startup_controller(config):
     services = controller.service_manager
     services.speech_handler.speech_processor.start = AsyncMock()
     services.start_services.side_effect = _StopStartup()
+    # LogicController.main awaits the exclusive-speaker detector's first
+    # answer before it starts the STT provider
+    # (wh-kodi-playback-echo-stutter.1.1); a MagicMock cannot be awaited.
+    services.exclusive_speaker_monitor.wait_first_answer = AsyncMock(return_value=True)
     return controller
 
 

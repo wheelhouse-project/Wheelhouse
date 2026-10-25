@@ -1,8 +1,10 @@
 """Tests for bare-number click routing (wh-click-number-dictation).
 
-Distil-Whisper drops the word "click" from short "click N" finals: the
-FINAL hypothesis is a bare number ('6', '70'), which matches no command
-pattern and falls through to dictation, so the spoken click never fires.
+The rule was added for the Distil-Whisper engine (since removed), which
+dropped the word "click" from short "click N" finals: the FINAL
+hypothesis was a bare number ('6', '70'), which matches no command
+pattern and falls through to dictation, so the spoken click never fired.
+The rule stays in place.
 
 The fix: while the overlay is showing badges (state painted or
 refresh_in_flight), a FINAL utterance that is JUST a number 1..999 is

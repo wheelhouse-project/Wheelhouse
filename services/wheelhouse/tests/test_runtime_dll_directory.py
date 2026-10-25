@@ -27,7 +27,7 @@ from services.runtime_dll_directory import (
 
 SERVICES = Path(__file__).resolve().parents[3] / "services"
 
-# The eleven entry points and the three spawn target modules. A spawn target's
+# The entry points and the spawn target modules. A spawn target's
 # MODULE is listed, not its function: Windows multiprocessing re-imports the
 # module in the child and runs its import block there, so the call has to sit
 # at the top of the file that defines the target.
@@ -40,8 +40,6 @@ GUARDED_FILES = (
     "stt_providers/sherpa_offline_parakeet_stt_server/launcher.py",
     "stt_providers/google_stt_server/main.py",
     "stt_providers/google_stt_server/launcher.py",
-    "stt_providers/distil_medium_en/main.py",
-    "stt_providers/distil_medium_en/launcher.py",
     "syscheck/syscheck.py",
     "installer/components/detector.py",
     "stt_providers/evaluation/run_benchmark.py",

@@ -44,6 +44,28 @@ from typing import Callable, Optional
 from shared_stt.redact import redact_transcript
 
 
+# The seven commands of the training-word window (wh-first-sound-lost.23).
+# Each carries only a request_id; no command names a path.
+LEAD_WORD_COMMANDS = frozenset({
+    "lead_word_status",
+    "lead_word_record",
+    "lead_word_keep",
+    "lead_word_discard",
+    "lead_word_restore",
+    "lead_word_off",
+    "lead_word_on",
+})
+# The stages of a lead_word_result frame. key_path travels with the first
+# group only, the state fields (loaded, recorded, microphone, previous_exists,
+# current_exists) with the second.
+LEAD_WORD_STAGES = frozenset({
+    "status", "listening", "checking", "passed", "refused", "kept",
+    "restored", "off", "on", "failed",
+})
+_LEAD_WORD_KEY_STAGES = frozenset({"status", "passed"})
+_LEAD_WORD_STATE_STAGES = frozenset({"status", "kept", "restored", "off", "on"})
+
+
 def generate_trace_id() -> str:
     """Generate a trace ID from the current time (decisecond precision).
 
@@ -70,15 +92,13 @@ class WSForwarder:
         shutdown_callback: Optional[Callable[[], None]] = None,
         set_interim_results_callback: Optional[Callable[[bool], None]] = None,
         set_log_level_callback: Optional[Callable[[str], None]] = None,
-        set_calibration_mode_callback: Optional[Callable[[bool], None]] = None,
-        apply_engine_settings_callback: Optional[
-            Callable[[dict, Optional[str]], None]
-        ] = None,
         wake_word_activate_callback: Optional[Callable] = None,
         debug: bool = False,
         log_func: Optional[Callable[[str], None]] = None,
         provider_name: str = "",
         emits_eos: bool = False,
+        lead_word_callback: Optional[Callable[[str, str], None]] = None,
+        lead_word_capabilities: Optional[Callable[[], dict]] = None,
     ):
         """Initialize the WebSocket forwarder.
 
@@ -93,19 +113,6 @@ class WSForwarder:
             shutdown_callback: Called when server sends shutdown command
             set_interim_results_callback: Called when server sends set_interim_results command
             set_log_level_callback: Called when server sends set_log_level command
-            set_calibration_mode_callback: Called with the enabled bool when
-                the server sends set_calibration_mode (wh-7ou.7.1.2). Also
-                called with False whenever an established connection is
-                lost -- the safety reset that keeps a crashed Logic process
-                from leaving the hallucination filter disabled
-            apply_engine_settings_callback: Called with the settings dict
-                (every key except "type" and "apply_id") and the command's
-                apply_id (None when absent) when the server sends
-                apply_engine_settings (wh-7ou.7.1.3). The provider validates
-                keys and values, writes its config, and replies via
-                send_engine_settings_result, echoing the apply_id so the
-                reply can be correlated to the exact apply it answers
-                (wh-7ou.7.6.9)
             wake_word_activate_callback: Called with reason when transcription status changes
                 (reason string when disabled with reason, None when enabled or disabled without reason)
             debug: Enable debug logging
@@ -115,6 +122,17 @@ class WSForwarder:
             emits_eos: Whether this provider emits the eos lifecycle event;
                 announced in the capabilities frame and consumed by
                 WheelHouse's EOS_NOT_RECEIVED warning gate
+            lead_word_callback: Called with (command name, request_id) when
+                the server sends one of the seven lead_word_* commands of
+                the training-word window (wh-first-sound-lost.23). Only the
+                Parakeet provider passes it. The callback runs on this
+                forwarder's event-loop thread, as the other command
+                callbacks do. The provider answers with send_lead_word_result.
+            lead_word_capabilities: Called when the capabilities frame is
+                built, on every (re)connect. Returns the dict that becomes
+                the frame's lead_word field. None leaves the field out, so
+                a provider that passes nothing sends a frame identical to
+                the one before this feature.
         """
         self.uri = f"ws://{host}:{port}"
         self.debug = debug
@@ -126,9 +144,9 @@ class WSForwarder:
         self.shutdown_callback = shutdown_callback
         self.set_interim_results_callback = set_interim_results_callback
         self.set_log_level_callback = set_log_level_callback
-        self.set_calibration_mode_callback = set_calibration_mode_callback
-        self.apply_engine_settings_callback = apply_engine_settings_callback
         self.wake_word_activate_callback = wake_word_activate_callback
+        self.lead_word_callback = lead_word_callback
+        self.lead_word_capabilities = lead_word_capabilities
         self.provider_name = provider_name
         self.emits_eos = emits_eos
         # Whether this provider's wake-word detector loaded, announced in
@@ -139,8 +157,8 @@ class WSForwarder:
         # when the import fails or the model is missing.
         #
         # Not a constructor argument, and read when the frame is sent
-        # rather than here: the parakeet and distil servers build this
-        # forwarder BEFORE they build their detector, so they cannot know
+        # rather than here: the parakeet server builds this
+        # forwarder BEFORE it builds its detector, so it cannot know
         # the value yet. They assign this attribute once the detector
         # exists. False is the safe default -- a provider that never sets
         # it declares no wake word.
@@ -208,23 +226,6 @@ class WSForwarder:
         assert self._loop is not None
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._sender_loop())
-
-    def _reset_calibration_mode_on_disconnect(self):
-        """wh-7ou.7.1.2 safety: force calibration mode off on connection loss.
-
-        The mode can only have been enabled by a command over the connection
-        that just dropped, and its peer (the Logic process) may have crashed
-        mid-session -- so the hallucination filter must never stay bypassed
-        past the disconnect. Called from both disconnect paths of
-        _sender_loop, only after an established connection is lost (initial
-        connection failures cannot have enabled the mode).
-        """
-        if self.set_calibration_mode_callback:
-            try:
-                self.set_calibration_mode_callback(False)
-            except Exception as cb_err:
-                if self.debug:
-                    self._log(f"[ws] calibration mode reset error: {cb_err}")
 
     async def _clear_queue(self):
         """Drop the stale frames after a disconnect, but keep the log frames.
@@ -335,6 +336,15 @@ class WSForwarder:
                         capabilities["applies_hints"] = bool(
                             self.applies_hints
                         )
+                    if self.lead_word_capabilities is not None:
+                        # Parakeet only (wh-first-sound-lost.23). A failing
+                        # callable leaves the field out; the handshake goes on.
+                        try:
+                            capabilities["lead_word"] = (
+                                self.lead_word_capabilities())
+                        except Exception as lw_err:
+                            self._log(
+                                f"[ws] lead_word capabilities error: {lw_err}")
                     try:
                         await ws.send(json.dumps(capabilities))
                         if self.debug:
@@ -444,6 +454,11 @@ class WSForwarder:
                                     "type": msg_type,
                                     "device": msg_data.get("device", ""),
                                 }
+                            elif msg_type == "lead_word_result":
+                                # Reply to a lead_word_* command
+                                # (wh-first-sound-lost.23). The full frame was
+                                # built by send_lead_word_result.
+                                payload = dict(msg_data.get("payload", {}))
                             elif msg_type == "log":
                                 # Log messages for centralized logging
                                 payload = {
@@ -463,20 +478,6 @@ class WSForwarder:
                                     "keyword": msg_data.get("keyword", ""),
                                     "utterance_id": utt_id,
                                     "is_partial": is_partial
-                                }
-                            elif msg_type == "engine_settings_result":
-                                # Reply to apply_engine_settings
-                                # (wh-7ou.7.1.3, contract A.4). Exactly the
-                                # contract keys -- this is a command
-                                # outcome, not a transcript, so it carries
-                                # no text/utterance fields. The apply_id
-                                # echoes the command's correlation id
-                                # (wh-7ou.7.6.9).
-                                payload = {
-                                    "type": msg_type,
-                                    "ok": msg_data.get("ok", False),
-                                    "error": msg_data.get("error"),
-                                    "apply_id": msg_data.get("apply_id"),
                                 }
                             elif msg_type == "eos":
                                 # End-of-single-utterance signal from Google STT.
@@ -503,12 +504,6 @@ class WSForwarder:
                                 final_reason = msg_data.get("final_reason")
                                 if final_reason is not None:
                                     payload["final_reason"] = final_reason
-                                # Optional confidence measurement block on final
-                                # messages (wh-7ou.7.1.1) -- omitted when absent
-                                # so non-Whisper providers stay payload-clean.
-                                confidence = msg_data.get("confidence")
-                                if confidence is not None:
-                                    payload["confidence"] = confidence
 
                             await ws.send(json.dumps(payload))
                             if self.debug:
@@ -544,8 +539,6 @@ class WSForwarder:
                     was_disconnected = True  # Track for reconnect callback
                     self._log("[ws] Wheelhouse connection closed")
 
-                    self._reset_calibration_mode_on_disconnect()
-
                     if self.on_disconnect_callback:
                         try:
                             self.on_disconnect_callback()
@@ -564,8 +557,6 @@ class WSForwarder:
                     self._ws_connected = False
                     was_disconnected = True  # Track for reconnect callback
                     self._log("[ws] Wheelhouse connection lost")
-
-                    self._reset_calibration_mode_on_disconnect()
 
                     if self.on_disconnect_callback:
                         try:
@@ -663,48 +654,24 @@ class WSForwarder:
                         else:
                             self._log("[ws] Received set_interim_results command but no callback registered")
 
-                    elif msg_type == "set_calibration_mode":
-                        # wh-7ou.7.1.2 (contract A.2): toggles the engine's
-                        # hallucination-suppression bypass for the voice
-                        # calibration session.
-                        enabled = data.get("enabled", False)
-                        self._log(f"[ws] Received command: SET CALIBRATION MODE enabled={enabled}")
-                        if self.set_calibration_mode_callback:
+                    elif msg_type in LEAD_WORD_COMMANDS:
+                        # The training-word window's commands
+                        # (wh-first-sound-lost.23). Only the name and the
+                        # request_id are read; a command carries nothing else.
+                        request_id = data.get("request_id", "")
+                        if not isinstance(request_id, str):
+                            request_id = ""
+                        self._log(f"[ws] Received command: {msg_type.upper()}")
+                        if self.lead_word_callback:
                             if self._loop:
                                 self._loop.call_soon_threadsafe(
-                                    self.set_calibration_mode_callback, bool(enabled)
+                                    self.lead_word_callback,
+                                    msg_type, request_id,
                                 )
                         else:
-                            self._log("[ws] Received set_calibration_mode command but no callback registered")
-
-                    elif msg_type == "apply_engine_settings":
-                        # wh-7ou.7.1.3 (contract A.3): calibrated single-word
-                        # rescue thresholds to write into the provider's
-                        # config. Only "type" and "apply_id" are stripped
-                        # here -- key and value validation belongs to the
-                        # provider handler, so illegal keys must arrive
-                        # intact for it to reject. The apply_id is transport
-                        # correlation, not a setting: it travels alongside
-                        # and is echoed in the reply (wh-7ou.7.6.9). Log
-                        # keys only: values in a malformed command could be
-                        # arbitrary text.
-                        apply_id = data.get("apply_id")
-                        settings = {
-                            k: v for k, v in data.items()
-                            if k not in ("type", "apply_id")
-                        }
-                        self._log(
-                            "[ws] Received command: APPLY ENGINE SETTINGS "
-                            f"keys={sorted(settings.keys())}"
-                        )
-                        if self.apply_engine_settings_callback:
-                            if self._loop:
-                                self._loop.call_soon_threadsafe(
-                                    self.apply_engine_settings_callback,
-                                    settings, apply_id,
-                                )
-                        else:
-                            self._log("[ws] Received apply_engine_settings command but no callback registered")
+                            self._log(
+                                f"[ws] Received {msg_type} command but "
+                                "no callback registered")
 
                     elif msg_type == "set_log_level":
                         level = data.get("level", "INFO")
@@ -758,7 +725,6 @@ class WSForwarder:
         utterance_id: int = 0,
         trace_id: str = "",
         final_reason: Optional[str] = None,
-        confidence: Optional[dict] = None,
     ):
         """Send final transcript - signals utterance end with complete text.
 
@@ -774,13 +740,6 @@ class WSForwarder:
                 "GOOGLE_SILENCE_2S", "EOS_FALLBACK", "NO_TEXT_TIMEOUT". Omitted
                 from the payload when None so non-Google providers send no
                 extra bytes.
-            confidence: Optional measurement block from the Whisper engine
-                (wh-7ou.7.1.1): {"min_word_probability": float|None,
-                "max_no_speech_prob": float|None, "peak_avg_logprob":
-                float|None, "word_count": int, "suppressed": bool,
-                "rescued": bool}. Attached to every Whisper final for
-                diagnostics and voice calibration; omitted from the payload
-                when None so other providers send no extra bytes.
         """
         if not self._loop or not self._queue:
             return
@@ -794,8 +753,6 @@ class WSForwarder:
         }
         if final_reason is not None:
             msg_data["final_reason"] = final_reason
-        if confidence is not None:
-            msg_data["confidence"] = confidence
 
         try:
             asyncio.run_coroutine_threadsafe(self._queue.put(msg_data), self._loop)
@@ -859,38 +816,59 @@ class WSForwarder:
         except Exception:
             pass
 
-    def send_engine_settings_result(
-        self, ok: bool, error: Optional[str] = None,
-        apply_id: Optional[str] = None,
-    ):
-        """Send the apply_engine_settings outcome back to WheelHouse.
+    def send_lead_word_result(
+        self,
+        request_id: str,
+        stage: str,
+        reason: str = "",
+        measures: Optional[dict] = None,
+        key_path: str = "",
+        loaded: bool = False,
+        recorded: str = "",
+        microphone: str = "",
+        previous_exists: bool = False,
+        current_exists: bool = False,
+        noise_advice: bool = False,
+    ) -> None:
+        """Answer a lead_word_* command (wh-first-sound-lost.23).
 
-        Contract A.4 (wh-7ou.7.1.3): {"type": "engine_settings_result",
-        "ok": true|false, "error": str|null, "apply_id": str|null}. Sent
-        BEFORE the provider's hard restart on success; on a validation or
-        write failure it carries the exact error text (shown verbatim
-        under the calibration window's "Show details") and the provider
-        does not restart.
+        Builds the lead_word_result frame of the contract: request_id, stage,
+        reason, measures, then key_path for the stages status and passed, and
+        loaded, recorded, microphone, previous_exists and current_exists for
+        the stages status, kept, restored, off and on. current_exists is True
+        when hello.wav exists, also when its recorded date is empty (a
+        restored earlier file). The stage passed also carries noise_advice,
+        True when the provider found the background noise high
+        (wh-training-word-noisy-reject). Arguments that do not belong to the
+        stage are left out of the frame. Safe to call from any thread.
 
-        Args:
-            ok: Whether the settings were validated and written
-            error: Exact failure text, or None on success
-            apply_id: The correlation id echoed from the
-                apply_engine_settings command (wh-7ou.7.6.9) -- WheelHouse
-                accepts the reply only when it echoes the id of the apply
-                actually in flight, so a delayed reply from an abandoned
-                apply cannot be read as the current one's answer
+        Raises:
+            ValueError: for a stage that is not in LEAD_WORD_STAGES.
         """
+        if stage not in LEAD_WORD_STAGES:
+            raise ValueError(f"unknown lead_word_result stage: {stage!r}")
         if not self._loop or not self._queue:
             return
 
-        msg_data = {
-            "type": "engine_settings_result",
-            "ok": bool(ok),
-            "error": error,
-            "apply_id": apply_id,
+        payload = {
+            "type": "lead_word_result",
+            "request_id": request_id,
+            "stage": stage,
+            "reason": reason,
+            "measures": dict(measures or {}),
         }
+        if stage in _LEAD_WORD_KEY_STAGES:
+            payload["key_path"] = key_path
+        if stage in _LEAD_WORD_STATE_STAGES:
+            payload["loaded"] = bool(loaded)
+            payload["recorded"] = recorded
+            payload["microphone"] = microphone
+            payload["previous_exists"] = bool(previous_exists)
+            payload["current_exists"] = bool(current_exists)
+        if stage == "passed":
+            payload["noise_advice"] = bool(noise_advice)
 
+        msg_data = {"type": "lead_word_result", "payload": payload}
         try:
             asyncio.run_coroutine_threadsafe(self._queue.put(msg_data), self._loop)
         except Exception:
@@ -965,6 +943,15 @@ class WSForwarder:
         except Exception:
             pass
 
+    @property
+    def microphone_device(self) -> str:
+        """The last microphone name given to send_microphone ("" if none).
+
+        The training-word recording stores this name with the word
+        (wh-first-sound-lost.23).
+        """
+        return self._microphone_device or ""
+
     def send_microphone(self, device: str) -> None:
         """Tell WheelHouse which microphone the provider has open.
 
@@ -1036,11 +1023,9 @@ class WSForwarder:
 
         Before signalling the sender loop to exit, give already-queued
         outbound frames a bounded chance to deliver (wh-7ou.7.6.10): the
-        apply_engine_settings success reply -- and the notifications
-        queued just before a restart -- are enqueued moments before
-        shutdown begins, and setting the stop event with frames still
-        queued abandons them, stranding the calibration session in
-        restart_slow with the typing gate held. The drain only runs when
+        notifications queued just before a restart are enqueued moments
+        before shutdown begins, and setting the stop event with frames
+        still queued abandons them. The drain only runs when
         a connection is live (undeliverable frames would stall
         standalone shutdown for the full timeout) and never on the
         forwarder's own thread (sleeping there would block the sender

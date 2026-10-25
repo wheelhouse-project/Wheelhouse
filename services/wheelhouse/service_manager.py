@@ -52,6 +52,7 @@ from services.wheelhouse.utils.screen import get_screen_size
 from services.wheelhouse.integrations.bravia_control import BraviaControl
 from services.wheelhouse.handlers.software_dimmer import SoftwareDimmer
 from services.wheelhouse.handlers.audio_monitor import AudioMonitor
+from services.wheelhouse.handlers.exclusive_speaker_monitor import ExclusiveSpeakerMonitor
 from services.wheelhouse.speech.speech_handler import SpeechHandler
 from services.wheelhouse.plugins.registry import PluginRegistry
 from services.wheelhouse.coordinators.brightness_coordinator import BrightnessCoordinator
@@ -59,6 +60,16 @@ from services.wheelhouse.stt.remote_stt_launcher import RemoteSTTLauncher
 from stt.provider_env_check import (
     check_provider_environments,
     notify_provider_environment_mismatches,
+)
+from stt import parakeet_model
+from stt.removed_providers import (
+    OUTCOME_MODEL_MISSING,
+    OUTCOME_NO_ENGINE_STARTED,
+    OUTCOME_OTHER_ENGINE_STARTED,
+    OUTCOME_REPLACEMENT_STARTED,
+    migrate_removed_provider,
+    notify_removed_provider,
+    save_removed_provider_switch,
 )
 from services.runtime_dll_directory import runtime_version_notice
 from services.wheelhouse.ai.service import AIService
@@ -130,6 +141,7 @@ class ServiceManager:
         self.bravia_control: Optional[BraviaControl] = None
         self.software_dimmer: Optional[Any] = None  # SoftwareDimmer or GammaDimmer
         self.audio_monitor: Optional[AudioMonitor] = None
+        self.exclusive_speaker_monitor: Optional[ExclusiveSpeakerMonitor] = None
         self.mouse_handler: Optional[MouseHandler] = None
         self.speech_handler: Optional[SpeechHandler] = None
         
@@ -183,7 +195,11 @@ class ServiceManager:
             self.software_dimmer = GammaDimmer(self.loop)
             log.info("Using GammaDimmer (native gamma ramp)")
         self.audio_monitor = AudioMonitor(self.loop, self.config_service, self.event_bus)
-        
+        # Built whatever ENABLE_AUDIO_SUPPRESSION says: StateManager's setting
+        # gate ignores the event when the setting is false, so the detector
+        # needs no setting (wh-kodi-playback-echo-stutter, item 3).
+        self.exclusive_speaker_monitor = ExclusiveSpeakerMonitor(self.loop, self.event_bus)
+
         # Initialize brightness coordinator (before MouseHandler, after EventBus and SoftwareDimmer)
         log.info("Initializing brightness coordinator...")
         self.brightness_coordinator = BrightnessCoordinator(
@@ -342,7 +358,11 @@ class ServiceManager:
             tasks.extend(self.mouse_handler.start())
         if self.audio_monitor:
             tasks.append(self.audio_monitor.start())
-        
+        if self.exclusive_speaker_monitor:
+            # No task is appended: the detector runs on a daemon thread, and
+            # nothing may wait for it at exit (wh-logic-exit-hang).
+            self.exclusive_speaker_monitor.start()
+
         # Start plugin system
         if self.plugin_registry:
             tasks.append(self.loop.create_task(self._start_plugins()))
@@ -412,9 +432,65 @@ class ServiceManager:
             log.warning("RemoteSTTLauncher not initialized - cannot start remote STT")
             return False
 
-        # Get last selected provider from config
-        last_provider = self.config_service.get("stt.last_provider", None)
+        # A removed engine (Distil-Whisper) in the settings becomes the
+        # default engine before any provider is chosen, whether or not its
+        # folder still exists, so the missing-folder fallback below never
+        # sees it and cannot add a second, silent switch.
+        removed_engine = migrate_removed_provider(self.config_service)
+        if not removed_engine:
+            # Get last selected provider from config
+            last_provider = self.config_service.get("stt.last_provider", None)
+            return self._start_chosen_remote_stt(last_provider) is not None
+
+        # The replacement cannot start without its speech model, and a
+        # failed start is no reason to try it again in the fallback. So on
+        # this path the replacement is tried once, and only when its model is
+        # complete; the notice follows the start decision and names the
+        # engine that actually started.
+        model_missing = not parakeet_model.parakeet_model_complete()
+        last_provider = None if model_missing else DEFAULT_STT_PROVIDER
+        started = self._start_chosen_remote_stt(last_provider, exclude=DEFAULT_STT_PROVIDER)
+        other_engine = None
+        if model_missing:
+            outcome = OUTCOME_MODEL_MISSING
+            self._offer_parakeet_model()
+        elif started is None:
+            outcome = OUTCOME_NO_ENGINE_STARTED
+        elif started[0] == DEFAULT_STT_PROVIDER:
+            outcome = OUTCOME_REPLACEMENT_STARTED
+        else:
+            outcome = OUTCOME_OTHER_ENGINE_STARTED
+            other_engine = started[1]
+        self._announce_removed_provider(removed_engine, outcome, other_engine)
+        return started is not None
+
+    def _offer_parakeet_model(self) -> None:
+        """Send the model offer to the GUI, as _switch_stt_provider does.
+
+        Nothing here may stop the startup: the offer is a convenience and the
+        sender never raises, but the installer locator is called here too.
+        """
+        try:
+            plan = parakeet_model.locate_installer()
+            parakeet_model.send_parakeet_model_offer(self.state_manager, plan)
+        except Exception as e:
+            log.warning(f"Could not send the Parakeet model offer: {e}")
+
+    def _start_chosen_remote_stt(self, last_provider: Optional[str],
+                                 exclude: Optional[str] = None) -> Optional[tuple]:
+        """Start last_provider, else a fallback.
+
+        ``exclude`` names a provider the fallback must not pick. Returns the
+        started provider as (name, display name), or None when no provider
+        started.
+        """
         providers = self.remote_stt_launcher.discover_providers()
+
+        def started_as(name):
+            # Compared by equality, not looked up in a dict: a hand-edited
+            # stt.last_provider can hold a list, which is not hashable.
+            display = next((p.get("display_name") for p in providers if p["name"] == name), None)
+            return name, display or name
 
         if not self._provider_environments_checked:
             self._provider_environments_checked = True
@@ -442,14 +518,14 @@ class ServiceManager:
             # configured provider (wh-remote-stt-robustness.2.1).
             self.state_manager.set_remote_stt_stopped()
             self.state_manager.send_state_update()
-            return False
+            return None
 
         # Try to start last selected provider
         if last_provider:
             if self.remote_stt_launcher.start_provider(last_provider):
                 self.state_manager.set_running_remote_stt_provider(last_provider)
                 log.info(f"Started remote STT provider: {last_provider}")
-                return True
+                return started_as(last_provider)
             else:
                 log.warning(f"Failed to start last provider '{last_provider}', falling back to first available")
 
@@ -457,12 +533,14 @@ class ServiceManager:
         # is unsorted filesystem iteration, so providers[0] can be an engine
         # that needs credentials this machine does not have), unless the
         # default is the provider that just failed; otherwise first available.
-        provider_names = [p["name"] for p in providers]
+        provider_names = [p["name"] for p in providers if p["name"] != exclude]
         if DEFAULT_STT_PROVIDER in provider_names and DEFAULT_STT_PROVIDER != last_provider:
             fallback_provider = DEFAULT_STT_PROVIDER
-        else:
+        elif provider_names:
             fallback_provider = provider_names[0]
-        if self.remote_stt_launcher.start_provider(fallback_provider):
+        else:
+            fallback_provider = None
+        if fallback_provider and self.remote_stt_launcher.start_provider(fallback_provider):
             # The runtime record keeps the GUI truthful even when the config
             # repair below fails: _get_current_stt_provider prefers it over
             # the (possibly unrepaired) stored value.
@@ -488,14 +566,36 @@ class ServiceManager:
             # Outside the try so a failed config repair still updates the GUI.
             self.state_manager.send_state_update()
             log.info(f"Started remote STT provider (fallback): {fallback_provider}")
-            return True
+            return started_as(fallback_provider)
 
         log.error("Failed to start any remote STT provider")
         # No engine is running, so the tray must not show one as selected
         # (wh-remote-stt-robustness).
         self.state_manager.set_remote_stt_stopped()
         self.state_manager.send_state_update()
-        return False
+        return None
+
+    def _announce_removed_provider(self, display_name: str, outcome: str,
+                                   other_engine: Optional[str] = None) -> None:
+        """Show the one notice and save the move off a removed engine.
+
+        The settings were already changed in memory by
+        migrate_removed_provider. Nothing here may stop the startup: the
+        engine start was decided before this runs, and it stands whether or
+        not the notice or the save works. ``outcome`` says what that start did
+        (see removed_providers.removed_provider_message).
+        """
+        log.warning(
+            f"The speech engine {display_name} was removed from Wheelhouse "
+            f"({outcome})"
+        )
+        notify_removed_provider(display_name, outcome, other_engine)
+        save = save_removed_provider_switch(self.config_service, display_name)
+        try:
+            self.loop.create_task(save)
+        except Exception as e:
+            save.close()
+            log.warning(f"Could not schedule the save of the switch from {display_name}: {e}")
 
     async def _save_repaired_last_provider(self, provider: str) -> None:
         """Persist the fallback provider chosen by start_remote_stt."""
@@ -563,6 +663,14 @@ class ServiceManager:
                 log.info("Local model server stopped")
             except Exception as e:
                 log.error(f"Error stopping the local model server: {e}", exc_info=True)
+
+        if self.exclusive_speaker_monitor:
+            try:
+                # Not through a worker thread: stop() only sets a flag and
+                # returns at once.
+                self.exclusive_speaker_monitor.stop()
+            except Exception as e:
+                log.error(f"Error stopping ExclusiveSpeakerMonitor: {e}", exc_info=True)
 
         if self.mouse_handler:
             await asyncio.to_thread(self.mouse_handler.stop_listeners)

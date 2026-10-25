@@ -33,6 +33,7 @@ Coverage:
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -1562,3 +1563,81 @@ class TestFocusReadFailure:
         parsed = RetryDictationByTokenResponse.from_dict(msg)
         assert parsed.status == STATUS_TOKEN_EXPIRED
         assert parsed.reason == "target_window_gone"
+
+
+# ---------------------------------------------------------------------------
+# Copy budget (wh-dictation-paste-loss-load.1.9, item a)
+# ---------------------------------------------------------------------------
+
+
+class TestReplayOpensTheCopyBudget:
+    """Both replay branches paste inside one copy budget.
+
+    The normal dictation path wraps its attempts in
+    ``clipboard.copy_retry_budget()``. Outside that block ``_safe_copy``
+    makes one attempt of about 0.5 s; inside it retries for about 3 s.
+    A replay that skips the budget loses the word to a clipboard that
+    another program holds for one second.
+    """
+
+    @staticmethod
+    def _install_budget(handler):
+        depth = [0]
+        opened = []
+
+        @contextmanager
+        def budget():
+            opened.append(depth[0])
+            depth[0] += 1
+            try:
+                yield
+            finally:
+                depth[0] -= 1
+
+        handler.clipboard.copy_retry_budget = budget
+        depth_at_insert = []
+
+        def insert(*_args, **_kwargs):
+            depth_at_insert.append(depth[0])
+            return InsertionResult(
+                success=True, clipboard_dirty=True, retry_outcome="verified",
+            )
+
+        handler.clipboard_only_strategy.insert = MagicMock(side_effect=insert)
+        return opened, depth_at_insert
+
+    def _replay(self, handler, *, in_utterance):
+        token = _new_token()
+        handler.rejection_text_cache.put(
+            token, "hello", target_hwnd=0x12345, target_root=0x12345,
+            target_tag=7,
+        )
+        handler.utterance_manager.is_in_utterance.return_value = in_utterance
+        with patch(f"{_MOD}.clipboard_context"), \
+             patch(f"{_MOD}.capture_context") as mock_capture:
+            mock_capture.return_value = MagicMock(focused_control=MagicMock())
+            handler.retry_dictation_by_token(
+                correlation_token=token,
+                override_strategy=OVERRIDE_CLIPBOARD_ONLY,
+                request_id="req-1",
+            )
+
+    def test_the_active_utterance_branch_inserts_inside_the_budget(
+        self, handler,
+    ):
+        opened, depth_at_insert = self._install_budget(handler)
+
+        self._replay(handler, in_utterance=True)
+
+        assert opened == [0]
+        assert depth_at_insert == [1]
+
+    def test_the_clipboard_context_branch_inserts_inside_the_budget(
+        self, handler,
+    ):
+        opened, depth_at_insert = self._install_budget(handler)
+
+        self._replay(handler, in_utterance=False)
+
+        assert opened == [0]
+        assert depth_at_insert == [1]

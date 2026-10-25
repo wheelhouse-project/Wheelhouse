@@ -47,6 +47,23 @@ def _no_real_wait_for_a_started_store_window(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_app_paths_read(monkeypatch):
+    """Keep the real App Paths registry out of every launch in this file.
+
+    wh-notepad-app-paths-launch: a bare .exe name now passes through
+    utils.installed_programs.store_alias_launch_target, which reads App
+    Paths. On a machine where notepad.exe points into WindowsApps, the
+    "notepad.exe" assertions would then depend on the machine.
+    """
+    from utils import installed_programs
+
+    monkeypatch.setattr(
+        installed_programs, "_read_app_path_entry", lambda hive, name: None,
+        raising=False,
+    )
+
+
 def _program(name, target=None):
     p = MagicMock()
     p.name = name
@@ -157,6 +174,39 @@ class TestNothingMatchedAndNothingStarts:
     def test_an_exe_that_cannot_start_answers_and_shows_none(self, monkeypatch):
         run = _Run(monkeypatch, "notepad.exe", startfile_fails=True)
         _assert_refusal(run.exactly_one(), "Could not start notepad.exe.")
+        assert run.notices == []
+
+    def test_a_failed_awaited_exe_launch_refuses_under_the_spoken_name(
+        self, monkeypatch
+    ):
+        """wh-notepad-app-paths-launch: the refusal keeps the spoken name.
+
+        App Paths is replaced so the launch starts the execution alias;
+        the refusal must still name notepad.exe, not the alias path.
+        """
+        from utils import installed_programs
+
+        alias = (
+            "C:\\Users\\Test\\AppData\\Local\\Microsoft\\WindowsApps\\notepad.exe"
+        )
+        packaged = (
+            "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_1.0_x64"
+            "__8wekyb3d8bbwe\\Notepad\\Notepad.exe"
+        )
+        monkeypatch.setenv("ProgramFiles", "C:\\Program Files")
+        monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\Test\\AppData\\Local")
+        monkeypatch.setattr(
+            installed_programs, "_read_app_path_entry",
+            lambda hive, name: (packaged, 1) if hive == "HKCU" else None,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            installed_programs, "_alias_exists", lambda path: path == alias,
+            raising=False,
+        )
+        run = _Run(monkeypatch, "notepad.exe", startfile_fails=True)
+        _assert_refusal(run.exactly_one(), "Could not start notepad.exe.")
+        assert run.startfile_calls == [alias]
         assert run.notices == []
 
     def test_a_spoken_program_that_cannot_start_answers_and_shows_none(

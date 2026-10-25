@@ -24,6 +24,7 @@ tests/test_ui/test_phase1_soft_fallback.py uses.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -258,6 +259,55 @@ class TestTheRetryHappensAtMostOnce:
         assert handler.clipboard_only_strategy.insert.call_count == 2
         handler.response.send_error.assert_called_once()
         handler.response.send_success.assert_not_called()
+
+
+class TestTheRetryKeepsTheWordsCopyBudget:
+    """wh-dictation-paste-loss-load.1.7: one copy budget per word.
+
+    copy_retry_budget resets the time spent and the give-up mark when it
+    opens at depth 0. A budget that opens inside each attempt therefore
+    gives the second attempt a new 3 s window, and a clipboard that
+    another program holds costs about 7 s for one word, not about 3 s.
+    """
+
+    def test_both_attempts_spend_one_copy_budget(self, handler):
+        opened = []
+        depth = [0]
+
+        @contextmanager
+        def budget():
+            opened.append(depth[0])
+            depth[0] += 1
+            try:
+                yield
+            finally:
+                depth[0] -= 1
+
+        handler.clipboard.copy_retry_budget = budget
+        results = [_clipboard_only_failure(window_gone=True), _DELIVERED]
+        depth_at_insert = []
+
+        def insert(*_args, **_kwargs):
+            depth_at_insert.append(depth[0])
+            return results.pop(0)
+
+        handler.clipboard_only_strategy.insert = MagicMock(side_effect=insert)
+        captures = [
+            _context("brave.exe", 0x1111),
+            _context("brave.exe", 0x2222),
+        ]
+
+        with patch(f"{_MOD}.capture_context", side_effect=captures):
+            delivered = handler._execute_insert_with_ack(
+                "hello", request_id="r1",
+            )
+
+        assert delivered is True
+        # Both attempts ran inside a budget, and only one budget opened
+        # at depth 0, so the second attempt cannot reset the first one's
+        # time.
+        assert depth_at_insert == [1, 1]
+        assert opened == [0]
 
 
 class TestTheWordStaysInsideItsOwnApplication:

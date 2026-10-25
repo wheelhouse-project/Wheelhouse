@@ -108,7 +108,7 @@ class TestProviderSelection:
        ConfigService.get reads through it as a missing key, so Wheelhouse
        starts and transcribes normally.
     2. Start Wheelhouse and say "switch to parakeet" (or pick another
-       engine from the tray's STT Provider menu).
+       engine from the tray's Speech-to-Text Provider menu).
     3. LogicController._switch_stt_provider reaches
        config_service.set("stt.last_provider", "parakeet_tdt").
        ConfigService.set walks the key, finds the string "whisper" where

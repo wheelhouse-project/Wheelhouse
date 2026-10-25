@@ -2,7 +2,7 @@
 
 Wheelhouse is a free, open-source voice control application for Windows. It supports dictation, keyboard and mouse actions, window management, and clicking on-screen controls by name or number.
 
-It is designed for hands-free computer use, including by people who find using a keyboard or mouse difficult or impossible. Speech recognition runs locally by default, with optional GPU and cloud engines. The default setup needs no account or subscription.
+It is designed for hands-free computer use, including by people who find using a keyboard or mouse difficult or impossible. Speech recognition runs locally by default, with an optional cloud engine. The default setup needs no account or subscription.
 
 [Installation](https://github.com/wheelhouse-project/Wheelhouse/blob/main/INSTALL.md) · [User guide](https://wheelhouse-project.org/guide.html) · [Command list](https://wheelhouse-project.org/guide.html#voice-commands) · [Settings reference](https://wheelhouse-project.org/reference.html) · [Releases](https://github.com/wheelhouse-project/Wheelhouse/releases)
 
@@ -44,10 +44,9 @@ For command-line installation, optional AI setup, updates, removal, and troubles
 | Engine | Processing | Requirements |
 | --- | --- | --- |
 | Parakeet (default) | Local CPU | Model download during installation; no account required |
-| Distil-Whisper | Local NVIDIA GPU | NVIDIA GPU with at least 4 GB of dedicated video memory; the model downloads the first time the engine starts |
 | Google Cloud Speech-to-Text | Google Cloud | Internet connection, a Google Cloud account, and credentials; Google charges for use beyond its free tier |
 
-The local engines keep speech audio and transcripts on the computer. Google Cloud Speech-to-Text sends audio to Google for recognition. Engine setup and switching are covered in the installation guide.
+The local engine, Parakeet, keeps speech audio and transcripts on the computer. Google Cloud Speech-to-Text sends audio to Google for recognition. Engine setup and switching are covered in the installation guide.
 
 ## Privacy
 

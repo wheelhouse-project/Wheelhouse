@@ -280,3 +280,140 @@ class TestSpokenCountsAboveTen:
         assert NavigationParser.parse("go right 0000 characters") is None, (
             "zero is not a cursor count"
         )
+
+
+class TestMultiWordCounts:
+    """A count of two or more words reads as one number
+    (wh-number-words-command-failures part B).
+
+    The user cannot choose whether the speech engine writes "23" or
+    "twenty three", so both forms must give the same move. _try_relative
+    read one count token, so "go right twenty three" and the chained
+    forms were dictated.
+    """
+
+    @pytest.mark.parametrize("words, digits", [
+        ("go right twenty three", "go right 23"),
+        ("go left twenty one", "go left 21"),
+        ("go right twenty three characters", "go right 23 characters"),
+        ("grab left twenty three", "grab left 23"),
+        ("grab right twenty two words", "grab right 22 words"),
+    ])
+    def test_words_and_digits_give_the_same_move(self, words, digits):
+        expected = NavigationParser.parse(digits)
+        assert expected is not None, digits
+        assert NavigationParser.parse(words) == expected
+
+    def test_a_chain_with_multi_word_counts(self):
+        cmds = NavigationParser.parse(
+            "go right twenty three then grab left twenty one words")
+        assert cmds == [
+            NavigationCommand(verb="go", kind="relative", direction="right",
+                              count=23, unit="character"),
+            NavigationCommand(verb="grab", kind="relative", direction="left",
+                              count=21, unit="word"),
+        ]
+
+    def test_a_multi_word_count_still_clamps(self):
+        cmds = NavigationParser.parse("go right forty five words")
+        assert cmds is not None
+        assert cmds[0].count == 30
+
+    @pytest.mark.parametrize("utterance", [
+        "go right 2 3",
+        "go right twenty three emails",
+        "go right one two three four",
+        "go right three words more",
+        "go right twenty words three",
+    ])
+    def test_words_that_are_not_one_count_are_still_unparseable(self, utterance):
+        """Words after the unit, or a phrase that is not one number, stay
+        dictation."""
+        assert NavigationParser.parse(utterance) is None
+
+
+class TestUpAndDownInChains:
+    """A "then" chain accepts "go up" and "go down" parts
+    (wh-voice-chain-up-down).
+
+    The parser knew only right and left, so one up or down part made it
+    refuse the whole chain, and the chain was typed as text. The single
+    forms in patterns.toml (nav-up-times, nav-up-lines, nav-up-paragraphs
+    and their down twins) set what each part must press: no unit word or
+    "times" after a count is the arrow key, "lines" is the arrow key, and
+    "paragraphs" is Ctrl with the arrow key. No single form takes "words"
+    or "characters" with up or down, and "grab up" and "grab down" are not
+    built (Boss ruling 20:10, Q2 = 1), so those parts stay refused.
+    """
+
+    @pytest.mark.parametrize("utterance, direction, count, unit", [
+        ("go up", "up", 1, "line"),
+        ("go down", "down", 1, "line"),
+        ("go up three", "up", 3, "line"),
+        ("go up 3", "up", 3, "line"),
+        ("go down three times", "down", 3, "line"),
+        ("go up one time", "up", 1, "line"),
+        ("go down four lines", "down", 4, "line"),
+        ("go up one line", "up", 1, "line"),
+        ("go up two paragraphs", "up", 2, "paragraph"),
+        ("go down one paragraph", "down", 1, "paragraph"),
+        ("go up twenty three", "up", 23, "line"),
+        ("go up forty", "up", 30, "line"),
+    ])
+    def test_an_up_or_down_part_is_read(self, utterance, direction, count, unit):
+        assert NavigationParser.parse(utterance) == [NavigationCommand(
+            verb="go", kind="relative", direction=direction, count=count,
+            unit=unit)]
+
+    def test_the_parts_keep_the_spoken_order(self):
+        cmds = NavigationParser.parse(
+            "go down two then go left one word then go up three times")
+        assert cmds == [
+            NavigationCommand(verb="go", kind="relative", direction="down",
+                              count=2, unit="line"),
+            NavigationCommand(verb="go", kind="relative", direction="left",
+                              count=1, unit="word"),
+            NavigationCommand(verb="go", kind="relative", direction="up",
+                              count=3, unit="line"),
+        ]
+
+    @pytest.mark.parametrize("utterance", [
+        "go up two words",
+        "go down three characters",
+        "go up times",
+        "go up three times lines",
+        "go up 0",
+        "go up zero",
+        "go up 1000",
+        "grab up three",
+        "grab down two lines",
+        "go up two words then go left one",
+        "go up the stairs then go left",
+    ])
+    def test_an_up_or_down_part_without_a_single_form_is_refused(self, utterance):
+        assert NavigationParser.parse(utterance) is None
+
+    @pytest.mark.parametrize("utterance", [
+        "go left three times",
+        "go right two lines",
+        "go right one line",
+        "grab left two times",
+    ])
+    def test_right_and_left_still_refuse_lines_and_times(self, utterance):
+        """"lines" and "times" are up and down words only. A right or
+        left utterance with them stays typed text, as at origin/dev."""
+        assert NavigationParser.parse(utterance) is None
+
+    @pytest.mark.parametrize("utterance, keys, repeat", [
+        ("go up three", ["up"], 3),
+        ("go down four lines", ["down"], 4),
+        ("go up two paragraphs", ["ctrl", "up"], 2),
+        ("go down one paragraph", ["ctrl", "down"], 1),
+        ("go up forty", ["up"], 30),
+    ])
+    def test_the_keys_are_the_keys_of_the_single_form(self, utterance, keys, repeat):
+        from speech.navigation.executor import NavigationExecutor
+
+        assert NavigationExecutor.to_actions(NavigationParser.parse(utterance)) == [
+            {"action": "hotkey_action", "params": {"keys": keys, "repeat": repeat}}
+        ]

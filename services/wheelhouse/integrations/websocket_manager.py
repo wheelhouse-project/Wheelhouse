@@ -49,7 +49,6 @@ import json
 import logging
 import struct
 import sys
-import uuid
 from datetime import datetime
 from typing import Set, Dict, Any, Callable, Optional
 import websockets
@@ -65,15 +64,6 @@ logger = logging.getLogger(__name__)
 # Everything else (type, flags, log levels, ids) stays verbatim so the
 # payload remains diagnosable with redaction on (wh-797.17.3).
 _CONTENT_KEYS = frozenset({"hint", "text", "word", "words", "message", "transcript"})
-
-# Per-target bound on a calibration mode-off send (wh-7ou.7.6.14). A
-# stalled client's send can block on backpressure indefinitely, and the
-# mode-off fan-out consumes its binding set before sending -- nothing
-# ever retries a target this call abandons -- so a stall must cost at
-# most this long, not forever. Generous next to a healthy send (which
-# completes in milliseconds) and far below the 600-second engine-side
-# lazy timeout that backstops an undelivered off.
-_CAL_MODE_OFF_SEND_TIMEOUT_S = 2.0
 
 # Notification kinds that are exempt from the startup-toast
 # suppression: a real failure is the only signal the engine is not
@@ -205,30 +195,6 @@ class WebSocketManager:
         # launch is only a guess until the connection says which
         # provider it is (wh-launch-generation.1.2).
         self._stt_client_provisional: "set[Any]" = set()
-        # The client the last apply_engine_settings was sent to, and
-        # that command's correlation id. The reply is accepted only from
-        # that client (even if a newer connect has promoted another
-        # client in the meantime, wh-7ou.7.6.6 round 4) AND only when it
-        # echoes this id -- client identity alone cannot distinguish two
-        # applies on the same live connection, so a delayed reply from
-        # an abandoned apply must not be read as the current one's
-        # answer (wh-7ou.7.6.9). Both cleared when the reply is
-        # consumed or the send fails.
-        self._engine_settings_reply_client: Optional[Any] = None
-        self._engine_settings_reply_id: Optional[str] = None
-        # Every client that received set_calibration_mode enabled=true
-        # since the last off -- the providers whose suppression bypass is
-        # on. A session-ending mode-off targets these clients, not "the
-        # active client": on a provider-switch end, add_client has
-        # already promoted the NEW client before the controller ends the
-        # session, and the off must follow the bypass (wh-7ou.7.6.11). A
-        # set, not the most recent client: a same-provider reconnect
-        # mid-capture enables the bypass on the new client while the old
-        # one is still live, and the off must reach both
-        # (wh-7ou.7.6.12). Consumed when an off is sent; a disconnecting
-        # client is discarded (its engine clears the bypass itself on
-        # disconnect).
-        self._calibration_mode_clients: set = set()
         # Threshold for the one-shot EOS_NOT_RECEIVED warning. Three is
         # enough to skip a single anomalous startup utterance.
         self._eos_missing_warning_threshold: int = 3
@@ -651,6 +617,15 @@ class WebSocketManager:
             )
             self._set_provider_applies_hints(declared_applies_hints)
 
+        # wh-first-sound-lost.23: whether the provider can record and use a
+        # training word. An absent field means not supported; only a
+        # literal True counts. The window reads only 'supported' from here.
+        declared_lead_word = data.get("lead_word")
+        self._set_lead_word_supported(
+            isinstance(declared_lead_word, dict)
+            and declared_lead_word.get("supported") is True
+        )
+
     def _apply_microphone(self, websocket: Any, data: dict) -> None:
         """Record the name of the microphone the provider has open.
 
@@ -801,67 +776,33 @@ class WebSocketManager:
             logger.exception("Launch currency check failed")
             return True
 
-    def _calibration_controller(self) -> Optional[Any]:
-        """Return the voice-calibration session controller, or None.
+    def _lead_word_controller(self) -> Optional[Any]:
+        """Return the lead-word window controller, or None.
 
-        wh-7ou.7.2.3: the controller lives on the LogicController
-        (_get_calibration_controller), reached through the speech_handler
-        reference main.py wires in after startup. Every failure in the
-        lookup degrades to None -- gate inert, transcripts flow -- because
-        silently blocking all dictation would be a worse failure for this
-        accessibility-first system than a missed calibration measurement.
+        wh-first-sound-lost.23. Reached through the speech_handler
+        reference main.py wires in after startup. A failed lookup degrades
+        to None, and the provider's lead_word_result is then dropped, which
+        costs one window update and never a transcript.
         """
         logic = getattr(self.speech_handler, "logic_controller", None)
-        getter = getattr(logic, "_get_calibration_controller", None)
+        getter = getattr(logic, "_get_lead_word_controller", None)
         if getter is None:
             return None
         try:
             return getter()
         except Exception:
-            logger.exception("Calibration controller lookup failed")
+            logger.exception("Lead-word controller lookup failed")
             return None
 
-    def _calibration_session_active(self) -> bool:
-        """True from the intro screen through the apply wait.
-
-        The stable/interim side of the typing gate (spec Section 6.2):
-        while a session is active -- not merely while a capture stage
-        runs -- provisional transcript text must not reach the speech
-        pipeline (wh-7ou.7.6.3: the session promises measurement-only
-        speech from start to finish, and click commands fire from
-        finals, so dropping stables costs nothing). Finals go through
-        _divert_final_to_calibration instead, so the controller itself
-        makes the consumption decision.
-        """
-        controller = self._calibration_controller()
-        return controller is not None and bool(controller.session_active)
-
-    def _divert_final_to_calibration(
-        self, text: str, confidence: Optional[dict],
-    ) -> bool:
-        """Offer a final transcript to the calibration session.
-
-        Returns True when the controller consumed it -- a measurement in
-        the word/noise stages, swallowed on any other active screen
-        (wh-7ou.7.6.3); the caller must then forward nothing into the
-        speech pipeline. Returns False -- the final flows normally --
-        when no session is active, for voice-click utterances ("click
-        <target>", the allowlisted channel that keeps every screen's
-        buttons hands-free, spec Section 3.7), and on any hand-off
-        failure (fail-open: dictation must survive a broken calibration
-        session).
-        """
-        controller = self._calibration_controller()
+    def _set_lead_word_supported(self, supported: bool) -> None:
+        """Tell the lead-word controller what the active provider declared."""
+        controller = self._lead_word_controller()
         if controller is None:
-            return False
+            return
         try:
-            consumed = controller.handle_final(text, confidence)
+            controller.set_supported(supported)
         except Exception:
-            logger.exception(
-                "Calibration final hand-off failed; forwarding final normally"
-            )
-            return False
-        return bool(consumed)
+            logger.exception("Lead-word capability handling failed")
 
     def _log_forwarded(
         self, level: int, message: str, source_iso: str
@@ -965,33 +906,6 @@ class WebSocketManager:
                     utterance_id = data.get("utterance_id", 0)
                     trace_id = data.get("trace_id", "")
                     set_trace(trace_id)
-
-                    # Sender binding while a calibration session is
-                    # active (wh-7ou.7.6.6): a transcript or lifecycle
-                    # frame from a client that is not the active stream
-                    # -- a superseded or orphaned provider delivering
-                    # queued frames -- must not become a measurement,
-                    # type, touch the shared watchdog or activity state,
-                    # steer the retraction policy, or publish a wake
-                    # event. Dropped here, before ANY side effect. With
-                    # no session, stale frames keep their pre-existing
-                    # behavior. notification / capabilities /
-                    # engine_settings_result keep their own
-                    # unconditional active-client gates below.
-                    if (
-                        msg_type in (
-                            "vad_start", "eos", "stable",
-                            "final", "wake_word_detected",
-                        )
-                        and self._calibration_session_active()
-                        and websocket is not self._active_stt_client
-                    ):
-                        logger.info(
-                            f"[CALIBRATION] dropping {msg_type} from "
-                            "non-active STT client "
-                            f"{getattr(websocket, 'remote_address', None)}"
-                        )
-                        continue
 
                     # The provider's open microphone (wh-show-microphone-name.3).
                     if msg_type == "microphone":
@@ -1165,10 +1079,9 @@ class WebSocketManager:
                         # completed the launch, closed the working dialog, and never
                         # reached the user -- and so did a failed hint save whose
                         # word contained "ready". The condition the wh-v0q follow-up
-                        # named for its removal is now met: all three shipped
-                        # providers send kind="ready"
+                        # named for its removal is now met: every shipped
+                        # provider sends kind="ready"
                         # (google_stt_server/main.py:198 and 215,
-                        # distil_medium_en/main.py:535,
                         # sherpa_offline_parakeet_stt_server/main.py:596). A
                         # provider that sends no kind now completes no launch by
                         # any route: the structured branch is the only one left.
@@ -1349,65 +1262,27 @@ class WebSocketManager:
                         self._apply_capabilities(websocket, data)
                         continue
 
-                    # The provider's answer to apply_engine_settings
-                    # (wh-7ou.7.2.3, calibration message contract). Routed
-                    # to the calibration controller, which ignores it
-                    # outside the applying stage. While an apply is in
-                    # flight the reply belongs to the client the apply was
-                    # SENT to, active or not (wh-7ou.7.6.6 round 4: an
-                    # orphan connect can promote a new client between the
-                    # send and the reply, and dropping the reply as
-                    # non-active strands the session in the applying
-                    # state). With no apply in flight, the active-client
-                    # gate applies as for notifications: a superseded
-                    # provider's late frames describe an old generation,
-                    # not the save the user is waiting on.
-                    if msg_type == "engine_settings_result":
-                        expected = self._engine_settings_reply_client
-                        if expected is not None:
-                            if websocket is not expected:
-                                logger.info(
-                                    "[CALIBRATION] ignoring engine_settings_result "
-                                    "from a client the apply was not sent to "
-                                    f"{getattr(websocket, 'remote_address', None)}"
-                                )
-                                continue
-                            if data.get("apply_id") != self._engine_settings_reply_id:
-                                # A delayed reply from an EARLIER apply on
-                                # the same connection -- a cancelled
-                                # session's apply, or a provider write
-                                # that hung and answered late. Client
-                                # identity cannot tell two applies apart;
-                                # only the echoed id can (wh-7ou.7.6.9).
-                                # Keep waiting for the current apply's
-                                # reply.
-                                logger.info(
-                                    "[CALIBRATION] ignoring engine_settings_result "
-                                    "echoing a different apply than the one "
-                                    "in flight"
-                                )
-                                continue
-                            self._engine_settings_reply_client = None
-                            self._engine_settings_reply_id = None
-                        elif (
-                            self._active_stt_client is not None
-                            and websocket is not self._active_stt_client
-                        ):
+                    # The provider's answer to a lead_word_* command
+                    # (wh-first-sound-lost.23). Only the ACTIVE client may
+                    # answer: a superseded provider describes an old stream.
+                    # The controller ignores a result whose request ID is
+                    # not the current one.
+                    if msg_type == "lead_word_result":
+                        if websocket is not self._active_stt_client:
                             logger.info(
-                                "[CALIBRATION] ignoring engine_settings_result "
-                                "from non-active STT client "
+                                "Ignoring lead_word_result from non-active "
+                                "STT client "
                                 f"{getattr(websocket, 'remote_address', None)}"
                             )
                             continue
-                        ok = data.get("ok") is True
-                        controller = self._calibration_controller()
-                        if controller is None:
+                        lead_word_controller = self._lead_word_controller()
+                        if lead_word_controller is None:
                             logger.warning(
-                                "engine_settings_result received but no "
-                                "calibration controller is available; dropped"
+                                "lead_word_result received but no lead-word "
+                                "controller is available; dropped"
                             )
                             continue
-                        controller.on_engine_settings_result(ok, data.get("error"))
+                        lead_word_controller.on_result(data)
                         continue
 
 
@@ -1457,21 +1332,6 @@ class WebSocketManager:
                         # Proof of ongoing speech -- slide the watchdog forward
                         # so long utterances with pauses do not trip it.
                         self._arm_idle_watchdog(utterance_id)
-
-                        # wh-7ou.7.2.3 typing gate (spec Section 6.2): while
-                        # a calibration session is ACTIVE -- any screen, not
-                        # only the capture stages (wh-7ou.7.6.3) --
-                        # provisional text must not type or claim 'settling'.
-                        # Drop it here; the final carries the measurement or
-                        # the allowlisted click command to the controller.
-                        # Status messages (vad_start, wake word) keep
-                        # flowing normally.
-                        if self._calibration_session_active():
-                            logger.debug(
-                                f"[CALIBRATION] UTT-{utterance_id}: stable "
-                                "diverted during calibration session"
-                            )
-                            continue
 
                         # Extract delta (new words since last stable)
                         delta = self._extract_delta(text, utterance_id)
@@ -1541,37 +1401,6 @@ class WebSocketManager:
                             + (f" (final_reason={final_reason})" if final_reason else "")
                         )
 
-                        # wh-7ou.7.6.13: a bypassed final from a client
-                        # that is NOT the active stream must not touch
-                        # shared pipeline state at all. The session-
-                        # scoped sender gate at the top of the loop
-                        # stops running the moment the session ends,
-                        # and utterance ids are per-provider counters,
-                        # so this stale final's id can collide with the
-                        # ACTIVE stream's live utterance -- the verdict
-                        # cleanup below would close the wrong stream's
-                        # utterance and reset its delta state, and the
-                        # 'confirmed' flash / watchdog cancel would
-                        # misreport a stream that produced nothing.
-                        # Dropped before every side effect; only the
-                        # bypassed shape (suppressed=true WITH text) is
-                        # touched -- clean non-active finals keep their
-                        # pre-existing flow.
-                        _stale_conf = data.get("confidence")
-                        if (
-                            text
-                            and isinstance(_stale_conf, dict)
-                            and _stale_conf.get("suppressed") is True
-                            and websocket is not self._active_stt_client
-                        ):
-                            logger.info(
-                                f"[CALIBRATION] UTT-{utterance_id}: "
-                                "dropping bypassed final from non-active "
-                                "STT client "
-                                f"{getattr(websocket, 'remote_address', None)}"
-                            )
-                            continue
-
                         # Stream-level diagnostic: warn once if a Google STT
                         # provider produces several utterances with finals and
                         # never an eos. Indicates a downgraded or older STT
@@ -1600,79 +1429,6 @@ class WebSocketManager:
                         # Signal GUI to show confirmed state (green flash)
                         self._write_activity_state('confirmed', utterance_id)
                         self._cancel_idle_watchdog()
-
-                        # wh-7ou.7.2.3 typing gate (spec Section 6.2): every
-                        # final is offered to the calibration controller
-                        # first, which consumes it -- a measurement in the
-                        # word/noise stages, swallowed on any other active
-                        # screen -- unless it is an allowlisted voice-click
-                        # utterance, which flows normally so the window's
-                        # buttons stay hands-free on every screen (spec
-                        # Section 3.7, wh-7ou.7.6.3). The 'confirmed' flash
-                        # and watchdog cancel above already ran: status
-                        # stays live. Stale-client finals never get here
-                        # during a session -- the sender-binding gate at
-                        # the top of the loop dropped them before any
-                        # side effect (wh-7ou.7.6.6).
-                        if self._divert_final_to_calibration(text, data.get("confidence")):
-                            if utterance_id == self.current_utterance_id:
-                                # Capture began mid-utterance: stables had
-                                # already queued words downstream, so close
-                                # the open utterance with an end marker
-                                # (never the diverted text) and reset delta
-                                # tracking, mirroring the normal final path.
-                                end_marker = WordEvent(
-                                    word="",
-                                    start_of_utterance=False,
-                                    end_of_utterance=True,
-                                    utterance_id=utterance_id,
-                                    is_utterance_end_marker=True,
-                                    trace_id=trace_id,
-                                )
-                                await self.word_queue.put(end_marker)
-                                self._processed_word_count = 0
-                                self._last_stable_utterance_id = None
-                                self._sent_stable_text = ""
-                            continue
-
-                        # wh-7ou.7.6.11 verdict gate: a final carrying the
-                        # provider filter's own suppressed=true verdict
-                        # WITH text present can only be a calibration-
-                        # bypass final -- outside the bypass the provider
-                        # empties the transcript before sending. Reaching
-                        # here means no session consumed it (the session
-                        # just ended and mode-off is still in flight, or a
-                        # stale provider never received mode-off), so
-                        # apply the verdict at this boundary: the text
-                        # must not type or execute. Runs AFTER the divert
-                        # above -- during capture these finals ARE the
-                        # noise measurements. Same open-utterance closure
-                        # as the diverted path.
-                        _final_conf = data.get("confidence")
-                        if (
-                            text
-                            and isinstance(_final_conf, dict)
-                            and _final_conf.get("suppressed") is True
-                        ):
-                            logger.info(
-                                f"[CALIBRATION] UTT-{utterance_id}: dropping "
-                                "bypassed final carrying a suppressed verdict "
-                                "with no session to consume it"
-                            )
-                            if utterance_id == self.current_utterance_id:
-                                end_marker = WordEvent(
-                                    word="",
-                                    start_of_utterance=False,
-                                    end_of_utterance=True,
-                                    utterance_id=utterance_id,
-                                    is_utterance_end_marker=True,
-                                    trace_id=trace_id,
-                                )
-                                await self.word_queue.put(end_marker)
-                                self._processed_word_count = 0
-                                self._last_stable_utterance_id = None
-                                self._sent_stable_text = ""
-                            continue
 
                         # Extract any remaining delta (words not sent via stables)
                         delta = self._extract_delta(text, utterance_id) if text else ""
@@ -1892,21 +1648,9 @@ class WebSocketManager:
         self._stt_client_generations[websocket] = self._current_launch_generation()
         self._stt_client_provisional.add(websocket)
 
-        # A provider (re)connect matters to a live calibration session
-        # (wh-7ou.7.2.3): mid-capture it means the provider reset
-        # calibration mode on disconnect and must be told to turn it
-        # back on (spec Section 5.2); post-apply it means the settings
-        # restart completed. The controller ignores the call in every
-        # other state. Guarded so a controller failure can never break
-        # client registration.
-        controller = self._calibration_controller()
-        if controller is not None:
-            try:
-                controller.on_provider_connected()
-            except Exception:
-                logger.exception(
-                    "Calibration provider-connect handling failed"
-                )
+        # The new stream has not declared lead-word support yet; its
+        # capabilities frame does (wh-first-sound-lost.23).
+        self._set_lead_word_supported(False)
 
         # Disable existing clients (but keep them connected)
         if existing_clients:
@@ -1929,11 +1673,6 @@ class WebSocketManager:
         if websocket in self._clients:
             logger.info(f"STT client disconnected: {websocket.remote_address}")
             self._clients.remove(websocket)
-
-            # Its engine clears the suppression bypass itself on
-            # disconnect; a dangling binding would misdirect a later
-            # session's mode-off (wh-7ou.7.6.11).
-            self._calibration_mode_clients.discard(websocket)
 
             # If the active client left, no client is active until the next
             # add_client -- a lingering DISABLED client must not become able
@@ -1965,6 +1704,9 @@ class WebSocketManager:
                     self.state_manager, "set_microphone_name"
                 ):
                     self.state_manager.set_microphone_name("")
+                # The departed stream's lead-word support left with it
+                # (wh-first-sound-lost.23).
+                self._set_lead_word_supported(False)
 
             # Only when the removed client was the LAST one do we touch the
             # active stream's state. add_client DISABLES older clients but keeps
@@ -2103,101 +1845,19 @@ class WebSocketManager:
 
         add_client keeps superseded providers connected in DISABLED
         state, so send_command_to_stt's broadcast would also reach them.
-        Calibration commands (set_calibration_mode /
-        apply_engine_settings) concern exactly one provider generation
-        -- a stale whisper provider honoring them would act on a session
-        that is not its own -- so they target the active stream. Returns
-        True when the command was sent, False when there was no active
-        client or the send failed; the apply path turns False into an
-        ok=false settings result so the window never waits on a command
-        that never left this process (wh-7ou.7.6.7).
+        The lead_word_* commands (wh-first-sound-lost.23) concern exactly
+        one provider generation, so they target the active stream.
+        Returns True when the command was sent, False when there was no
+        active client or the send failed.
         """
         client = self._active_stt_client
-        if command_type == "set_calibration_mode" and not params.get("enabled"):
-            # Mode-off must reach every provider whose suppression
-            # bypass is actually on. On a provider-switch session end,
-            # add_client has already promoted the NEW client by the time
-            # the controller ends the session, so "active" would aim the
-            # off at a provider that never had mode on and leave the old
-            # one bypassing its filter until disconnect or the 10-minute
-            # lazy timeout (wh-7ou.7.6.11); a same-provider reconnect
-            # mid-capture leaves TWO live enabled clients, so the off
-            # fans out to all of them (wh-7ou.7.6.12). The bindings are
-            # consumed before any send and whether or not the sends
-            # succeed -- on failure the provider's own disconnect reset
-            # and lazy timeout are the backstops, same as before the
-            # binding existed. When no bound client is still connected,
-            # fall through to the active client (an idempotent no-op
-            # there).
-            bound = {c for c in self._calibration_mode_clients
-                     if c in self._clients}
-            self._calibration_mode_clients.clear()
-            if bound:
-                message_json = json.dumps({"type": command_type, **params})
-                logger.info(
-                    f"Sending command to {len(bound)} calibration-enabled "
-                    f"STT client(s): {command_type} "
-                    f"with params: {_redact_content_fields(params)}"
-                )
-
-                # Concurrent and bounded per target (wh-7ou.7.6.14): a
-                # serial unbounded loop let one stalled client's
-                # backpressured send starve every later target -- with
-                # the set already consumed, the healthy active provider
-                # then stayed in calibration mode until its 600-second
-                # engine timeout. The cancel a timeout fires may break
-                # the stalled client's connection state; acceptable,
-                # its engine clears the bypass itself on disconnect.
-                async def _send_off(target):
-                    try:
-                        await asyncio.wait_for(
-                            target.send(message_json),
-                            timeout=_CAL_MODE_OFF_SEND_TIMEOUT_S,
-                        )
-                        return True
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to send {command_type} to STT client "
-                            f"{getattr(target, 'remote_address', None)}: {e}"
-                        )
-                        return False
-
-                results = await asyncio.gather(
-                    *(_send_off(target) for target in bound)
-                )
-                return all(results)
         if client is None:
             logger.warning(
                 f"No active STT client; dropping command: {command_type} "
                 f"with params: {_redact_content_fields(params)}"
             )
             return False
-        message = {"type": command_type, **params}
-        if command_type == "set_calibration_mode" and params.get("enabled"):
-            # Remember who is getting the bypass turned on, so the off
-            # can follow it after another client is promoted
-            # (wh-7ou.7.6.11). Accumulated, never overwritten: an
-            # earlier enabled client stays bound until an off consumes
-            # the set or it disconnects (wh-7ou.7.6.12). Recorded
-            # before the send for the same reason as the apply binding
-            # below; deliberately left in place when a send fails -- a
-            # failed 300-second REFRESH send means the bypass is still
-            # on from the earlier successful send, and a failed first
-            # send costs only a harmless idempotent off later.
-            self._calibration_mode_clients.add(client)
-        if command_type == "apply_engine_settings":
-            # Bind the reply to this client AND this operation BEFORE
-            # the send completes: the provider can answer while this
-            # coroutine is still suspended in send(), and a connect
-            # promoting another client in that window must not orphan
-            # the reply (wh-7ou.7.6.6 round 4). The id rides the
-            # command and comes back in the reply, so a delayed reply
-            # from an earlier apply on the same connection cannot be
-            # read as this one's answer (wh-7ou.7.6.9).
-            self._engine_settings_reply_client = client
-            self._engine_settings_reply_id = uuid.uuid4().hex
-            message["apply_id"] = self._engine_settings_reply_id
-        message_json = json.dumps(message)
+        message_json = json.dumps({"type": command_type, **params})
         logger.info(
             f"Sending command to active STT client: {command_type} "
             f"with params: {_redact_content_fields(params)}"
@@ -2205,9 +1865,6 @@ class WebSocketManager:
         try:
             await client.send(message_json)
         except Exception as e:
-            if command_type == "apply_engine_settings":
-                self._engine_settings_reply_client = None
-                self._engine_settings_reply_id = None
             logger.warning(
                 f"Failed to send {command_type} to active STT client "
                 f"{getattr(client, 'remote_address', None)}: {e}"

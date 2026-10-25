@@ -125,15 +125,6 @@ PARAKEET_MAIN = (
     / "main.py"
 )
 
-# The other provider whose ready notice had to start carrying a kind when
-# the substring fallback went away (wh-ready-connection-stamp.2.2.1).
-DISTIL_MAIN = (
-    SERVICE.parent
-    / "stt_providers"
-    / "distil_medium_en"
-    / "main.py"
-)
-
 RUN_TIMEOUT_S = 300
 
 # Every mutated file's original bytes, filled in before the first write.
@@ -314,11 +305,11 @@ MUTATIONS = [
         "file": SERVICE_MGR,
         "old": """        self.state_manager.set_remote_stt_stopped()
         self.state_manager.send_state_update()
-        return False
+        return None
 """,
         "new": """        pass
         self.state_manager.send_state_update()
-        return False
+        return None
 """,
         "selection": [STOP],
         "catchers": ["test_no_provider_starting_marks_the_engine_stopped"],
@@ -423,10 +414,10 @@ MUTATIONS = [
         "file": SERVICE_MGR,
         "old": """            self.state_manager.set_remote_stt_stopped()
             self.state_manager.send_state_update()
-            return False
+            return None
 """,
         "new": """            pass
-            return False
+            return None
 """,
         "selection": [STOP],
         "catchers": ["test_no_providers_discovered_marks_the_engine_stopped"],
@@ -2902,12 +2893,14 @@ MUTATIONS = [
         ],
     },
     # wh-ready-connection-stamp.2.2.1. The ready branch tests kind and
-    # nothing else. The six entries below pin that from both sides: the
-    # branch itself, and the kind the two providers that lacked one now
-    # send. Without the provider pair a mutation could strip kind="ready"
-    # from a provider and nothing here would notice, because this gate
-    # runs in the wheelhouse virtual environment and cannot run a
-    # provider's own suite.
+    # nothing else. The four entries below pin that from both sides: the
+    # branch itself, and the kind the Parakeet provider, which lacked
+    # one, now sends. (A pair of entries for the Distil-Whisper provider
+    # went with that provider, wh-distil-whisper-removal.) Without the
+    # provider entries a mutation could strip kind="ready" from a
+    # provider and nothing here would notice, because this gate runs in
+    # the wheelhouse virtual environment and cannot run a provider's own
+    # suite.
     {
         # The revert. The kind-less substring fallback returns, and with
         # it every notice it misread: "already" contains "ready".
@@ -2923,9 +2916,7 @@ MUTATIONS = [
         "selection": [WSN],
         "catchers": [
             "test_a_duplicate_hint_notice_is_not_a_ready[google]",
-            "test_a_duplicate_hint_notice_is_not_a_ready[distil]",
             "test_a_duplicate_hint_notice_is_not_a_ready[parakeet]",
-            "test_a_failed_hint_save_notice_is_not_a_ready[distil]",
             "test_a_failed_hint_save_notice_is_not_a_ready[parakeet]",
             "test_a_kind_less_notice_saying_ready_no_longer_signals",
         ],
@@ -2944,41 +2935,8 @@ MUTATIONS = [
         "selection": [WSN],
         "catchers": [
             "test_each_shipped_providers_ready_completes_its_launch[google]",
-            "test_each_shipped_providers_ready_completes_its_launch[distil]",
             "test_each_shipped_providers_ready_completes_its_launch[parakeet]",
             "test_ready_notification_signals_launcher",
-        ],
-    },
-    {
-        "name": "distil-sends-no-ready-kind",
-        "file": DISTIL_MAIN,
-        "old": """                    self.DISPLAY_NAME, "Transcription service ready",
-                    kind="ready",
-                    capture_backend=CAPTURE_BACKEND_NAME)
-""",
-        "new": """                    self.DISPLAY_NAME, "Transcription service ready",
-                    capture_backend=CAPTURE_BACKEND_NAME)
-""",
-        "selection": [LG],
-        "catchers": [
-            "test_the_ready_notice_declares_kind_ready[distil_medium_en]",
-        ],
-    },
-    {
-        # The input-level sibling: the kind is present but wrong, which
-        # is what drift actually looks like. A test asserting only that
-        # some kind exists would pass here.
-        "name": "distil-sends-the-wrong-ready-kind",
-        "file": DISTIL_MAIN,
-        "old": """                    kind="ready",
-                    capture_backend=CAPTURE_BACKEND_NAME)
-""",
-        "new": """                    kind="readied",
-                    capture_backend=CAPTURE_BACKEND_NAME)
-""",
-        "selection": [LG],
-        "catchers": [
-            "test_the_ready_notice_declares_kind_ready[distil_medium_en]",
         ],
     },
     {

@@ -651,7 +651,12 @@ def _va_range_fallbacks() -> set:
                 out.add(rf"^{widened[direction]}(?: (\d+))? {unit}$")
             else:
                 out.add(rf"^(?:go|move) {word}(?: (\d+))? {unit}$")
-        out.add(rf"^(?:go|move) {word}(?: (\d+) times?)?$")
+        if direction in ("up", "down"):
+            # "times" is optional for up and down: "go up three"
+            # (wh-number-words-command-failures part D).
+            out.add(rf"^(?:go|move) {word}(?: (\d+)(?: times?)?)?$")
+        else:
+            out.add(rf"^(?:go|move) {word}(?: (\d+) times?)?$")
         out.add(rf"^(?:go|move) slider {word}(?: (\d+) times?)?$")
     for verb in ["bold", "italicize", "underline", "capitalize",
                  "lower ?case", "upper ?case"]:
@@ -690,7 +695,7 @@ def _va_range_fallbacks() -> set:
     # phrase an optional group holding a count, the same shape that sends
     # the "go/move <direction> <n> times" rows above to the fallback, so
     # the Pattern Manager explains this row with the raw expression.
-    out.add(r"^press\s*(.+?)(?:\s+(\d+)\s+times?)?$")
+    out.add(r"^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$")
     return out
 
 

@@ -67,9 +67,30 @@ def test_construction_sends_the_refusal_and_exits_nonzero():
             _build_server()
 
     forwarder.send_notification.assert_called_once_with(
-        "Parakeet v3 (CPU)", REFUSAL, kind="startup_failed"
+        "Parakeet V3 (Local)", REFUSAL, kind="startup_failed"
     )
     assert exit_info.value.code != 0
+
+
+def test_gpu_mode_uses_the_same_engine_name():
+    """The notice names the engine "Parakeet V3 (Local)" in GPU mode too.
+
+    The name once carried the mode ("Parakeet v3 (GPU)"); David asked for
+    one name in every mode (wh-speech-provider-labels).
+    """
+    with patch("shared_audio.capture.factory.WINRT_AUDIO_AVAILABLE", False), \
+         patch.object(parakeet_main, "SherpaOfflineEngine"), \
+         patch.object(parakeet_main, "WSForwarder"), \
+         patch("shared_stt.startup_refusal.WSForwarder") as forwarder_class:
+        forwarder = forwarder_class.return_value
+        forwarder.is_connected = True
+
+        with pytest.raises(SystemExit):
+            _build_server(use_gpu=True)
+
+    forwarder.send_notification.assert_called_once_with(
+        "Parakeet V3 (Local)", REFUSAL, kind="startup_failed"
+    )
 
 
 def test_the_refusal_connection_declares_the_parakeet_provider():

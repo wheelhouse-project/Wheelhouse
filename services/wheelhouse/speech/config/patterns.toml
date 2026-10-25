@@ -681,7 +681,7 @@ actions = [
 # f 5" presses F5 and "press f 5 3 times" presses F5 three times; "press f 5
 # times" presses F five times (wh-press-f-number-function-key).
 [[pattern]]
-pattern = '''^press\s*(.+?)(?:\s+(\d+)\s+times?)?$'''
+pattern = '''^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$'''
 doc_id = "press-keys"
 actions = [
     { function = "press_keys", params = ["g1", "g2"] }
@@ -706,7 +706,7 @@ actions = [
 # sequence number check at fire time), so the previous slow-target race
 # the no-awaits_done choice exposed is no longer a concern.
 [[pattern]]
-pattern = '''^insert\s*(.+)$'''
+pattern = '''^insert\b\s*(.+)$'''
 doc_id = "insert-raw"
 actions = [
     { function = "insert_raw", params = ["g1"] }
@@ -1435,10 +1435,10 @@ actions = [
 # sentences into dictation, exactly the pre-branch behavior. Keep the
 # flag on any entry added to this family.
 # -----------------------------------------------------------------------
-# Vertical movement by line and paragraph. "up"/"down" are not directions
-# the navigation parser understands (it only knows left/right), so these
-# are unreachable today under any verb -- both "go" and "move" fall through
-# to dictation. Up = arrow/landmark toward the start of the buffer, down =
+# Vertical movement by line and paragraph. Up and down said alone match
+# these rows. A "go ... then ..." chain, and "go to up ..." or "go to down
+# ..." said without the safety word, reach cursor-navigate instead, whose
+# parser reads up and down since wh-voice-chain-up-down. Up = arrow/landmark toward the start of the buffer, down =
 # toward the end, matching the existing paragraph mapping in
 # speech/navigation/executor.py (_RELATIVE_KEYS: left/paragraph -> ctrl+up,
 # right/paragraph -> ctrl+down).
@@ -1531,12 +1531,17 @@ actions = [
 # cannot map a captured direction word to a key. They must stay ABOVE
 # cursor-navigate (^go (.+)), which otherwise captures the go forms.
 # Before this entry "go up" and "go down" were typed as text, because
-# NavigationParser rejects them; "go left" and "go right" reached
-# cursor-navigate and pressed the same key once.
+# NavigationParser rejected them at that time; "go left" and "go right"
+# reached cursor-navigate and pressed the same key once.
+# The up and down rows also take a count with no "times": "go up three"
+# presses Up three times, as "go up three lines" does. Before these rows
+# the words were typed as text, because the parser then had no up or down
+# (wh-number-words-command-failures). Left and right need no change:
+# "go left three" reaches cursor-navigate, which moves three characters.
 # -----------------------------------------------------------------------
 
 [[pattern]]
-pattern = '''^(?:go|move) up(?: (\d+) times?)?$'''
+pattern = '''^(?:go|move) up(?: (\d+)(?: times?)?)?$'''
 doc_id = "nav-up-times"
 whole_utterance_only = true
 actions = [
@@ -1544,7 +1549,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^(?:go|move) down(?: (\d+) times?)?$'''
+pattern = '''^(?:go|move) down(?: (\d+)(?: times?)?)?$'''
 doc_id = "nav-down-times"
 whole_utterance_only = true
 actions = [
@@ -2635,7 +2640,7 @@ actions = [
 
 # Voice Access "no space <words>" (wh-voice-access-parity.1.14): types the
 # words with every space removed, "no space hello world" -> "helloworld".
-# Same shape as insert-raw (^insert\s*(.+)$): no whole_utterance_only and
+# Same shape as insert-raw (^insert\b\s*(.+)$): no whole_utterance_only and
 # no awaits_done, for the reasons in the insert-raw comment.
 [[pattern]]
 pattern = '''^no space (.+)$'''
@@ -2798,18 +2803,18 @@ actions = [
 ]
 
 # =============================================================================
-# COMMANDS - Voice Teaching (wh-7ou.7)
+# COMMANDS - Training Word (wh-first-sound-lost.23)
 # =============================================================================
 
-# Opens the "Teach WheelHouse your voice" window (guided calibration of the
-# single-word rescue thresholds; Distil-Whisper provider only -- other
-# providers get the wrong-provider notice from the Logic process).
+# Opens the "Your training word" window (wh-first-sound-lost.23): the user
+# records the word that the Parakeet lead-word join uses. A whole utterance
+# only, so the phrase inside dictation stays text.
 [[pattern]]
-pattern = '''^(?:learn|calibrate) my voice$'''
-doc_id = "learn-my-voice"
+pattern = '''^record my training word$'''
+doc_id = "record-my-training-word"
 whole_utterance_only = true
 actions = [
-    { function = "open_calibration" }
+    { function = "open_lead_word" }
 ]
 
 # =============================================================================

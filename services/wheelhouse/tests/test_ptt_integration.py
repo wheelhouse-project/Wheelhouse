@@ -83,6 +83,9 @@ async def test_ptt_pending_settings_ack_keeps_hold_feedback(ptt_pending_manager,
     button.set_indeterminate(False)
     state = StateManager(config, EventBus(), asyncio.get_running_loop(), manager.state_from_logic_queue, None)
     controller = Mock(state_manager=state)
+    # wh-numbers-stay-setting: bind the real save-and-apply wrapper the handler calls.
+    controller._set_config_value_and_apply = (
+        lambda *a, **k: LogicController._set_config_value_and_apply(controller, *a, **k))
     tasks = []
     controller.create_task_with_error_handling.side_effect = lambda coro, name: tasks.append(coro)
     try:

@@ -32,7 +32,10 @@ param(
     # Speech engine, supplied by the graphical installer so its choice skips
     # the interactive question. Empty means "ask" (the one-liner path). The
     # ValidateSet rejects an unknown value at the command line; an unset
-    # default is exempt from validation.
+    # default is exempt from validation. distil_medium_en is a removed engine
+    # that stays in the set on purpose: the old app's "Update now" passes it,
+    # and without it parameter binding fails and the update aborts. It is
+    # mapped to parakeet_tdt (Select-SttProvider, Resolve-RemovedSttProvider).
     [ValidateSet("parakeet_tdt", "google_stt", "distil_medium_en")]
     [string]$SttProvider = "",
     # Install-flow answers the graphical installer supplies so its yes/no
@@ -103,7 +106,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.3.0"
+$AppVersion = "1.4.0"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -175,7 +178,9 @@ $PreviousModelDirName = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
 # 1.5 GB left free for the user's own work: 7.37 GB, just under this floor.
 # Raising the floor would refuse machines that install today, so it stays.
 # The floor above is the OFFLINE engine's need, so Test-Preflights applies it
-# only to parakeet_tdt and distil_medium_en (wh-installer-ram-floor-gap).
+# to every engine except google_stt (wh-installer-ram-floor-gap): today
+# Parakeet, and the removed distil_medium_en name that the old app can still
+# pass.
 #
 # The baseline floor below applies to EVERY engine, including google_stt. It
 # is what Windows and Wheelhouse itself need with the lightest engine, and
@@ -222,10 +227,6 @@ $CpuWarnCores = 4
 # so it is an upper bound and the upgrade peak is one too -- the safe
 # direction for a floor.
 $DiskFloorBytes = 10GB           # app + venvs + model download + staged copy
-
-# NVIDIA PCI vendor id, for the CUDA provider offer.
-$NvidiaVendorId = 4318
-$CudaMinVramBytes = 4GB
 
 # The lowest Microsoft C++ runtime version the speech engine's extension
 # modules can load. THE SOURCE OF TRUTH IS PYTHON: MINIMUM_SYSTEM_RUNTIME in
@@ -421,9 +422,9 @@ function Write-InstallFailure {
 # engine that was substituted for the one they picked, a requirement this machine
 # does not meet, a step that could not be completed. Write-Warn alone reaches the
 # PowerShell host, and the graphical installer runs this script hidden, so those
-# messages reached the setup log and nothing else -- a user whose Distil-Whisper
-# choice was swapped for Parakeet was told nothing at all
-# (wh-wizard-distil-fallback). The tagged copy goes to the real stdout stream the
+# messages reached the setup log and nothing else -- a user whose speech engine
+# was swapped for Parakeet was told nothing at all. The tagged copy goes to the
+# real stdout stream the
 # wizard reads, on the same one-line-per-message contract as FAILURE and FAILHINT:
 # the wizard cannot tell a wrapped message from a new one, so any newline in the
 # text is folded to a space before it is written.
@@ -1688,6 +1689,118 @@ function Restore-PreservedFiles {
     return $files.Count
 }
 
+# --- The lead_word_path key of the Parakeet provider (wh-first-sound-lost.23) ----
+# The 'Your training word' window writes the [engine] key lead_word_path in the
+# provider's config.toml at Keep. An update unpacks a fresh config.toml that
+# ships the key empty, and $PreservePaths cannot hold that file: it restores a
+# whole file, which would also freeze the shipped changes in the rest of it.
+# So the update copies this one value. Save-LeadWordPath puts the value in
+# staging, Restore-PreservedFiles carries it to the new app folder with the
+# other staged files, and Restore-LeadWordPath writes it into the new
+# config.toml and deletes the carrier file. Staging holds the value until the
+# staging folder is deleted, so a crash between the steps loses nothing.
+
+function Get-LeadWordPathFiles {
+    # The provider config.toml and the carrier file, relative to the app folder.
+    $config = "services\stt_providers\sherpa_offline_parakeet_stt_server\config.toml"
+    return @{ Config = $config; Carrier = "$config.lead_word_path" }
+}
+
+function Get-LeadWordValuePattern {
+    # A TOML string on one line: literal ('...') or basic ("..." with escapes).
+    return '(?<value>''[^'']*''|"(?:[^"\\]|\\.)*")'
+}
+
+function Get-LeadWordValueText {
+    param([string]$ConfigPath)
+    # The value of the [engine] key lead_word_path, exactly as the file writes
+    # it, quotes and escapes included. Copying the written form keeps a path
+    # with a single quote (which the window writes as a basic string with
+    # escapes) or a non-ASCII letter exactly as it is, with no decoding to get
+    # wrong. Returns an empty string when the file or the key is missing, the
+    # value is empty, or the value is not a one-line string.
+    # crewcut: a multi-line string value is not copied; the window never
+    # writes one. Parse the file with a TOML library to cover it.
+    if (-not (Test-Path -LiteralPath $ConfigPath)) { return "" }
+    $inEngine = $false
+    foreach ($text in [System.IO.File]::ReadAllLines($ConfigPath)) {
+        if ($text -cmatch '^\s*\[\s*engine\s*\]\s*(#.*)?$') { $inEngine = $true; continue }
+        if ($text -cmatch '^\s*\[') { $inEngine = $false; continue }
+        if ($inEngine -and $text -cmatch ('^\s*lead_word_path\s*=\s*' + (Get-LeadWordValuePattern))) {
+            $value = $Matches['value']
+            if ($value -eq "''" -or $value -eq '""') { return "" }
+            return $value
+        }
+    }
+    return ""
+}
+
+function Save-LeadWordPath {
+    param([string]$StagingDir)
+    $files = Get-LeadWordPathFiles
+    $carrier = Join-Path $StagingDir $files.Carrier
+    # A carrier already in staging is a crash survivor: the live config is
+    # then the shipped one with an empty key, so it must not replace the
+    # staged value.
+    if (Test-Path -LiteralPath $carrier) { return }
+    $value = Get-LeadWordValueText -ConfigPath (Join-Path $AppDir $files.Config)
+    if (-not $value) { return }
+    New-Item -ItemType Directory -Force -Path (Split-Path $carrier -Parent) | Out-Null
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($carrier, $value, $encoding)
+}
+
+function Restore-LeadWordPath {
+    $files = Get-LeadWordPathFiles
+    $carrier = Join-Path $AppDir $files.Carrier
+    if (-not (Test-Path -LiteralPath $carrier)) { return }
+    $value = [System.IO.File]::ReadAllText($carrier).Trim()
+    Remove-Item -LiteralPath $carrier -Force
+    $config = Join-Path $AppDir $files.Config
+    if (-not $value -or -not (Test-Path -LiteralPath $config)) { return }
+
+    # Line by line, so every other line keeps its text and its terminator.
+    $raw = [System.IO.File]::ReadAllText($config)
+    $pieces = [regex]::Split($raw, '(?<=\n)')
+    $out = New-Object System.Collections.Generic.List[string]
+    $keyPattern = '^(?<lead>\s*lead_word_path\s*=\s*)' + (Get-LeadWordValuePattern) + '(?<tail>.*)$'
+    $inEngine = $false
+    $done = $false
+    $headerAt = -1
+    foreach ($piece in $pieces) {
+        $m = [regex]::Match($piece, '^(?<text>.*?)(?<end>\r?\n)?\z', 'Singleline')
+        $text = $m.Groups['text'].Value
+        $end = $m.Groups['end'].Value
+        if ($text -cmatch '^\s*\[\s*engine\s*\]\s*(#.*)?$') {
+            $inEngine = $true
+            $headerAt = $out.Count
+        } elseif ($text -cmatch '^\s*\[') {
+            $inEngine = $false
+        } elseif ($inEngine -and -not $done) {
+            $k = [regex]::Match($text, $keyPattern)
+            if ($k.Success) {
+                $text = $k.Groups['lead'].Value + $value + $k.Groups['tail'].Value
+                $done = $true
+            }
+        }
+        $out.Add($text + $end)
+    }
+    if (-not $done) {
+        # The shipped file always holds the key; if a later release drops it,
+        # add the line under [engine] instead of losing the setting.
+        if ($headerAt -lt 0) {
+            Write-Warn "Could not keep your training word setting: the new provider config.toml has no [engine] section."
+            return
+        }
+        $newLine = if ($raw.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $out.Insert($headerAt + 1, "lead_word_path = $value$newLine")
+        if (-not $out[$headerAt].EndsWith("`n")) { $out[$headerAt] += $newLine }
+    }
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($config, ($out -join ''), $encoding)
+    Write-Status "Kept your training word setting."
+}
+
 function Install-AppArchive {
     param([string]$Url, [string]$Sha256)
 
@@ -1704,6 +1817,7 @@ function Install-AppArchive {
         Initialize-UpdateStaging -StagingDir $staging -MarkerPath $marker
         New-Item -ItemType Directory -Force -Path $staging | Out-Null
         Save-PreservedFiles -StagingDir $staging | Out-Null
+        Save-LeadWordPath -StagingDir $staging
         # Re-check right before the destructive step: the earlier preflight
         # check ran minutes ago (downloads in between), and wiping a running
         # install fails half-way through on locked files. Verified or stop:
@@ -1743,6 +1857,7 @@ function Install-AppArchive {
     if ($restored -gt 0) {
         Write-Status "Restored $restored preserved file(s) from the previous install."
     }
+    Restore-LeadWordPath
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
     if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
 }
@@ -1816,16 +1931,15 @@ function Invoke-UvSync {
 
 function Get-HardwareSnapshot {
     param([string]$Uv)
-    # ONE syscheck run, answering two questions: whether to offer the CUDA
-    # speech engine, and where -- or whether -- the local AI model runs. Each
-    # run is a `uv run` that pays for interpreter startup and an environment
-    # check; a second one would spend several seconds of an install on data
-    # already in hand. syscheck's venv has its own dependencies that nothing
-    # else installs.
+    # ONE syscheck run, answering where -- or whether -- the local AI model
+    # runs. Each run is a `uv run` that pays for interpreter startup and an
+    # environment check; a second one would spend several seconds of an install
+    # on data already in hand. syscheck's venv has its own dependencies that
+    # nothing else installs.
     #
-    # Returns the parsed snapshot, or $null when it could not be produced. Both
-    # callers degrade on $null rather than failing the install: no CUDA offer,
-    # and no local AI model. The RAM/CPU floor already ran natively in the
+    # Returns the parsed snapshot, or $null when it could not be produced. The
+    # caller degrades on $null rather than failing the install: no local AI
+    # model. The RAM/CPU floor already ran natively in the
     # preflights, so nothing fatal depends on this.
     $serviceDir = Join-Path $AppDir "services\syscheck"
     $stackDepth = (Get-Location -Stack).Count
@@ -1840,7 +1954,7 @@ function Get-HardwareSnapshot {
         if (-not $json) { return $null }
         return ($json | ConvertFrom-Json)
     } catch {
-        Write-InstallNotice "Hardware detection failed ($($_.Exception.Message)); offering CPU and cloud speech engines only."
+        Write-InstallNotice "Hardware detection failed ($($_.Exception.Message))."
         return $null
     } finally {
         # Same rule as Invoke-UvSync: 5.1 pushes the stack entry BEFORE
@@ -1849,20 +1963,6 @@ function Get-HardwareSnapshot {
         # user's own session. Restore to the depth this call found.
         while ((Get-Location -Stack).Count -gt $stackDepth) { Pop-Location }
     }
-}
-
-function Test-CudaCapable {
-    param($Snapshot)
-    # A capable NVIDIA card is what makes the Distil-Whisper offer honest.
-    # No snapshot means no offer.
-    if ($null -eq $Snapshot) { return $false }
-    foreach ($gpu in $Snapshot.gpu) {
-        if ($gpu.software) { continue }
-        if ($gpu.vendor_id -eq $NvidiaVendorId -and $gpu.dedicated_vram_bytes -ge $CudaMinVramBytes) {
-            return $true
-        }
-    }
-    return $false
 }
 
 function Get-LocalAiDecision {
@@ -1908,50 +2008,35 @@ function Get-CurrentProvider {
 }
 
 function Select-SttProvider {
-    param([bool]$CudaCapable, [string]$CurrentProvider = "", [string]$SttProvider = "")
+    param([string]$CurrentProvider = "", [string]$SttProvider = "")
     $names = @{
         "parakeet_tdt" = "Parakeet"
         "google_stt" = "Google Cloud"
-        "distil_medium_en" = "Distil-Whisper"
     }
     # Non-interactive path: the graphical installer supplies the engine
     # directly, so the speech-engine question is skipped entirely. An unknown
     # value is a caller bug and stops rather than installing a nonexistent
-    # engine; Distil-Whisper asked for without a capable NVIDIA card falls
-    # back to Parakeet, mirroring the interactive path that never offers it
-    # there.
+    # engine. distil_medium_en is the one legacy value that is not unknown: the
+    # old app's "Update now" passes it, and it comes back as Parakeet here so
+    # that nothing downstream ever installs it. Resolve-RemovedSttProvider, run
+    # next, is what records the removal and tells the user.
     if ($SttProvider) {
+        if ($SttProvider -eq "distil_medium_en") { return "parakeet_tdt" }
         if (-not $names.ContainsKey($SttProvider)) {
-            throw "Unknown speech engine '$SttProvider'. Valid values: parakeet_tdt, google_stt, distil_medium_en."
-        }
-        if ($SttProvider -eq "distil_medium_en" -and -not $CudaCapable) {
-            Write-InstallNotice "Distil-Whisper needs an NVIDIA graphics card, which was not detected; using Parakeet instead."
-            return "parakeet_tdt"
+            throw "Unknown speech engine '$SttProvider'. Valid values: parakeet_tdt, google_stt."
         }
         return $SttProvider
     }
-    # On an update, pressing Enter keeps the engine the user already has --
-    # as long as it is still offerable on this hardware.
+    # On an update, pressing Enter keeps the engine the user already has. A
+    # current engine that is not on the list (the removed distil_medium_en)
+    # keeps the Parakeet default; Resolve-RemovedSttProvider reports it.
     $default = "parakeet_tdt"
     if ($CurrentProvider -eq "google_stt") { $default = "google_stt" }
-    if ($CurrentProvider -eq "distil_medium_en" -and $CudaCapable) {
-        $default = "distil_medium_en"
-    }
-
-    # Honesty over silence: if the engine the user already runs is no
-    # longer offerable on this hardware, say so before the prompt instead
-    # of letting Enter quietly switch it.
-    if ($CurrentProvider -and $names.ContainsKey($CurrentProvider) -and $default -ne $CurrentProvider) {
-        Write-InstallNotice "Your current speech engine ($($names[$CurrentProvider])) is not available on this computer (it needs an NVIDIA graphics card, which was not detected), so the default has changed to $($names[$default])."
-    }
 
     Write-Host ""
     Write-Host "Which speech engine would you like?" -ForegroundColor Cyan
     Write-Host "  1. Parakeet (recommended) - runs on this computer, no account needed, works offline"
     Write-Host "  2. Google Cloud - runs in the cloud; needs a Google Cloud account and internet (advanced)"
-    if ($CudaCapable) {
-        Write-Host "  3. Distil-Whisper - runs on your NVIDIA graphics card (advanced)"
-    }
     if ($default -ne "parakeet_tdt" -or $CurrentProvider -eq "parakeet_tdt") {
         $prompt = "Enter a number and press Enter (default: keep your current engine, $($names[$default]))"
     } else {
@@ -1960,8 +2045,56 @@ function Select-SttProvider {
     $answer = Read-Host $prompt
     if ($answer -eq "1") { return "parakeet_tdt" }
     if ($answer -eq "2") { return "google_stt" }
-    if ($CudaCapable -and $answer -eq "3") { return "distil_medium_en" }
     return $default
+}
+
+function Resolve-RemovedSttProvider {
+    # Distil-Whisper was removed from Wheelhouse (wh-distil-whisper-removal).
+    # The name stays accepted, because the OLD app's "Update now" passes
+    # -SttProvider distil_medium_en to the installer it downloads, and a
+    # ValidateSet that dropped it would abort that update at parameter binding.
+    # Every install action maps it to Parakeet. Write-UserConfig has already
+    # replaced last_provider by the time the app starts, so the app cannot see
+    # the old name there; RemovedProvider is the marker it reads instead.
+    #
+    # The marker is set when the chosen engine is Distil-Whisper, and when it
+    # is Parakeet while the user asked for, or already had, Distil-Whisper. A
+    # user who picks Google keeps Google and gets no marker: the notice says
+    # Parakeet is now in use.
+    param([string]$Provider, [string]$CurrentProvider = "", [string]$RequestedProvider = "")
+    $removed = "distil_medium_en"
+    $result = [pscustomobject]@{ Provider = $Provider; RemovedProvider = "" }
+    $wasRemoved = ($Provider -eq $removed) -or
+        ($Provider -eq "parakeet_tdt" -and
+            ($RequestedProvider -eq $removed -or $CurrentProvider -eq $removed))
+    if ($wasRemoved) {
+        $result.Provider = "parakeet_tdt"
+        $result.RemovedProvider = $removed
+        Write-InstallNotice "Distil-Whisper was removed from Wheelhouse. Parakeet is now your speech engine."
+    }
+    return $result
+}
+
+function Sync-SttProviders {
+    param([string]$Uv, [string]$Provider, [hashtable]$ProviderDirs)
+    # The chosen provider must set up (fatal); the other one is also set up as a
+    # switchable alternative (best effort). Returns the names that synced. A
+    # function rather than inline code in Invoke-MainInstall, because the test
+    # harness cannot run Invoke-MainInstall and a source-structure test cannot
+    # fail when the choice of the fatal provider breaks.
+    $synced = @()
+    foreach ($engine in @("parakeet_tdt", "google_stt")) {
+        if ($engine -eq $Provider) {
+            Invoke-UvSync -Uv $Uv -ServiceRelPath $ProviderDirs[$engine] -Fatal | Out-Null
+            $synced += $engine
+        } else {
+            $ok = Invoke-UvSync -Uv $Uv -ServiceRelPath $ProviderDirs[$engine]
+            if ($ok) { $synced += $engine }
+        }
+    }
+    # No leading comma: the caller wraps the call in @(), which gathers the
+    # names emitted here into one flat array, a single name included.
+    return $synced
 }
 
 # --- Model download + extraction (step e) -------------------------------------------
@@ -2511,7 +2644,10 @@ function Set-TomlProviderDisabled {
 }
 
 function Write-UserConfig {
-    param([string]$Provider)
+    # RemovedProvider, when given, is written as stt.removed_provider: the
+    # app's only record that the user's engine was removed (see
+    # Resolve-RemovedSttProvider). The app clears it after its one notice.
+    param([string]$Provider, [string]$RemovedProvider = "")
     $wheelhouseDir = Join-Path $AppDir "services\wheelhouse"
     $example = Join-Path $wheelhouseDir "config.toml.example"
     $config = Join-Path $wheelhouseDir "config.toml"
@@ -2547,6 +2683,17 @@ function Write-UserConfig {
                 $content += $newLine
             }
             $content += "[stt]$newLine$keyLine$newLine"
+        }
+    }
+    if ($RemovedProvider) {
+        # last_provider is in [stt] now (replaced or inserted above), so the
+        # marker goes on the line after it. A second run replaces the marker
+        # in place instead of adding a duplicate key, which TOML rejects.
+        $markerLine = "removed_provider = `"$RemovedProvider`""
+        if ($content -match '(?m)^removed_provider\b\s*=') {
+            $content = $content -replace '(?m)^removed_provider\b\s*=[^\r\n]*', $markerLine
+        } else {
+            $content = $content -replace '(?m)^(last_provider\b\s*=[^\r\n]*)', "`$1$newLine$markerLine"
         }
     }
     $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -3180,8 +3327,8 @@ function Disable-ParakeetWithoutModel {
     param([string]$ConfigPath, [string[]]$SyncedProviders)
     # Parakeet's environment is set up on EVERY install, chosen or not, so
     # the loop that disables providers -- which only reaches ones that did
-    # not sync -- leaves Parakeet enabled on a Google Cloud or
-    # Distil-Whisper install. The model, though, downloads only for the
+    # not sync -- leaves Parakeet enabled on a Google Cloud
+    # install. The model, though, downloads only for the
     # engine the user chose. Such a machine offered Parakeet in the engine
     # menu and then failed at startup with "Model directory not found".
     # David ruled on 2026-09-07 (QUESTIONS item 103) that it offers no
@@ -3207,10 +3354,9 @@ function Disable-ParakeetWithoutModel {
     # Write-InstallNotice, not Write-Status: the graphical wizard runs
     # this script hidden and only a NOTICE line reaches its finish page.
     # A [+] host line would leave a wizard user with Parakeet gone from
-    # the engine menu and no way to learn how to get it back -- the same
-    # harm as wh-wizard-distil-fallback. The two comparable provider
-    # instructions (Google Cloud credentials, the Distil-Whisper
-    # first-launch download) already go out on this tag.
+    # the engine menu and no way to learn how to get it back. The comparable
+    # provider instruction (Google Cloud credentials) already goes out on
+    # this tag.
     Write-InstallNotice "Parakeet has no speech model on this computer, so it is turned off. Run the installer again and choose Parakeet to install its model."
 }
 
@@ -3329,6 +3475,13 @@ function Invoke-Uninstall {
         $saved = @(Save-PreservedFiles -StagingDir $keepDir -OverwriteFromLive)
         if (Test-Path -LiteralPath $AppDir) { Remove-Item -LiteralPath $AppDir -Recurse -Force }
         if (Test-Path -LiteralPath $DownloadsDir) { Remove-Item -LiteralPath $DownloadsDir -Recurse -Force }
+        # SAVE_ENGINE_AUDIO sound files hold everything the user said. Only a
+        # running speech engine deletes them, so after an uninstall nothing
+        # else would (wh-first-sound-lost.1, David 2026-10-20). Built from
+        # $LocalRoot here, not a script-level variable, so the uninstall test
+        # harness, which sets only the folder variables above, covers it.
+        $engineAudioDir = Join-Path $LocalRoot "engine-audio"
+        if (Test-Path -LiteralPath $engineAudioDir) { Remove-Item -LiteralPath $engineAudioDir -Recurse -Force }
         Write-Status "Your personal data was kept at: $keepDir (and your speech model at $ModelsDir)."
         Write-Host "    Re-running the installer later will offer a fresh install; copy files back from there if you want them."
     } else {
@@ -3393,42 +3546,28 @@ function Invoke-MainInstall {
     Invoke-UvSync -Uv $uv -ServiceRelPath "services\wheelhouse" -Fatal | Out-Null
     $syscheckOk = Invoke-UvSync -Uv $uv -ServiceRelPath "services\syscheck"
 
-    # One hardware snapshot, two answers: the CUDA speech-engine offer here and
-    # the local-AI decision in the AI block below.
+    # One hardware snapshot, read by the local-AI decision in the AI block
+    # below.
     $snapshot = $null
     if ($syscheckOk) { $snapshot = Get-HardwareSnapshot -Uv $uv }
-    $cudaCapable = Test-CudaCapable -Snapshot $snapshot
 
     $currentProvider = Get-CurrentProvider
-    $provider = Select-SttProvider -CudaCapable $cudaCapable -CurrentProvider $currentProvider -SttProvider $SttProvider
+    $provider = Select-SttProvider -CurrentProvider $currentProvider -SttProvider $SttProvider
+    $resolved = Resolve-RemovedSttProvider -Provider $provider -CurrentProvider $currentProvider -RequestedProvider $SttProvider
+    $provider = $resolved.Provider
+    $removedProvider = $resolved.RemovedProvider
 
     $providerDirs = @{
         "parakeet_tdt" = "services\stt_providers\sherpa_offline_parakeet_stt_server"
         "google_stt" = "services\stt_providers\google_stt_server"
-        "distil_medium_en" = "services\stt_providers\distil_medium_en"
     }
 
     # The chosen provider must set up (fatal); Parakeet and Google are also
-    # set up as switchable alternatives when not chosen (best effort). The
-    # CUDA provider is set up only when chosen -- its torch stack is large
-    # and only useful on NVIDIA hardware. Anything not set up is disabled in
-    # its config.
+    # set up as switchable alternatives when not chosen (best effort). Anything
+    # not set up is disabled in its config.
     Write-InstallProgress 55 "Setting up speech engines"
     Write-InstallHeartbeat "Setting up the speech engine (this can take several minutes)"
-    $syncedProviders = @()
-    foreach ($name in @("parakeet_tdt", "google_stt", "distil_medium_en")) {
-        $shouldSync = $false
-        if ($name -eq $provider) { $shouldSync = $true }
-        elseif ($name -eq "parakeet_tdt" -or $name -eq "google_stt") { $shouldSync = $true }
-        if (-not $shouldSync) { continue }
-        if ($name -eq $provider) {
-            Invoke-UvSync -Uv $uv -ServiceRelPath $providerDirs[$name] -Fatal | Out-Null
-            $syncedProviders += $name
-        } else {
-            $ok = Invoke-UvSync -Uv $uv -ServiceRelPath $providerDirs[$name]
-            if ($ok) { $syncedProviders += $name }
-        }
-    }
+    $syncedProviders = @(Sync-SttProviders -Uv $uv -Provider $provider -ProviderDirs $providerDirs)
     foreach ($name in $providerDirs.Keys) {
         if ($syncedProviders -notcontains $name) {
             Set-TomlProviderDisabled -ConfigPath (Join-Path $AppDir (Join-Path $providerDirs[$name] "config.toml"))
@@ -3459,7 +3598,7 @@ function Invoke-MainInstall {
     # Write-UserConfig, which creates it from config.toml.example on a fresh
     # install. So $configPreexisted true == re-run/update, false == first install.
     $configPreexisted = Test-Path -LiteralPath (Join-Path $AppDir "services\wheelhouse\config.toml")
-    Write-UserConfig -Provider $provider
+    Write-UserConfig -Provider $provider -RemovedProvider $removedProvider
     # Update only: a fresh config is a copy of config.toml.example and already
     # holds the current key and address. Guarded like the AI block below: the
     # help address is secondary, so a failure here only warns.
@@ -3599,9 +3738,6 @@ function Invoke-MainInstall {
 
     if ($provider -eq "google_stt") {
         Write-InstallNotice "The Google Cloud engine needs credentials before it can hear you. See the Google Cloud section of INSTALL.md in the install folder: $AppDir"
-    }
-    if ($provider -eq "distil_medium_en") {
-        Write-InstallNotice "The Distil-Whisper engine downloads its own model on first start; the first launch will take a few minutes."
     }
 
     Write-InstallProgress 95 "Finishing up"

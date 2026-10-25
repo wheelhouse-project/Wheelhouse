@@ -216,6 +216,40 @@ class TestRequestPayloadShape:
         assert params.get("override_strategy") == OVERRIDE_CLIPBOARD_ONLY
 
 
+class TestRequestWaitAndDeliveryBudgets:
+    """wh-dictation-paste-loss-load.1.9 (d).
+
+    The replay can take about 3.5 s under the copy budget, so Logic waits
+    up to 10 s for the true answer. A replay that waited more than 5 s
+    for delivery must still expire, so it never pastes late into a window
+    that has changed.
+    """
+
+    def _call_kwargs(self):
+        from main import LogicController
+
+        controller = _make_controller()
+        controller.app.send_request.return_value = {
+            "status": STATUS_SUCCESS,
+            "retry_outcome": RETRY_OUTCOME_VERIFIED,
+            "reason": "",
+        }
+        forward = LogicController.forward_retry_dictation_by_token.__get__(
+            controller
+        )
+        asyncio.run(forward(correlation_token=_TOKEN))
+        return controller.app.send_request.await_args.kwargs
+
+    def test_the_wait_is_ten_seconds(self):
+        assert self._call_kwargs().get("timeout_s") == 10.0
+
+    def test_the_delivery_budget_is_five_seconds(self):
+        assert self._call_kwargs().get("delivery_ttl_s") == 5.0
+
+    def test_no_other_keyword_is_passed(self):
+        assert set(self._call_kwargs()) == {"timeout_s", "delivery_ttl_s"}
+
+
 # ---------------------------------------------------------------------------
 # Privacy property
 # ---------------------------------------------------------------------------

@@ -22,9 +22,10 @@ WHAT IT DEFENDS, in the four groups criterion B6 names:
      present; only the active client's declaration counts.
   3. The value each provider reports. The forwarder sends the key only
      when the value is not None, and sends False as False; Google reports
-     True before its forwarder starts; Distil-Whisper reports its startup
-     [hotwords] enabled flag; Parakeet's applies_hints_value covers four
-     cases and main wires it from engine.hotwords_status.
+     True before its forwarder starts; Parakeet's applies_hints_value
+     covers four cases and main wires it from engine.hotwords_status.
+     (The Distil-Whisper provider and its two mutations were removed
+     with the provider, wh-distil-whisper-removal.)
   4. The engine switch. The value is pushed WebSocketManager ->
      SpeechHandler -> SpeechProcessor -> router and TextParser, and every
      forwarding step between the matcher's entry points is broken once.
@@ -35,20 +36,21 @@ WHAT IT DEFENDS, in the four groups criterion B6 names:
      derived from no actions; and each main.py handler (pm_test_phrase,
      pm_test_draft) drops parser.hint_engine.
 
-SIX SUITES, SIX INTERPRETERS. The Logic process, the shared STT package,
+FIVE SUITES, FIVE INTERPRETERS. The Logic process, the shared STT package,
 each provider and the release scripts have their own virtual
 environment. Each suite runs under its own interpreter, from its own
 directory. The default is the suite's own .venv in this tree; an
 environment variable overrides it:
 
     BOOST_GATE_PYTHON_LOGIC, BOOST_GATE_PYTHON_SHARED,
-    BOOST_GATE_PYTHON_DISTIL, BOOST_GATE_PYTHON_GOOGLE,
-    BOOST_GATE_PYTHON_PARAKEET, BOOST_GATE_PYTHON_RELEASE
+    BOOST_GATE_PYTHON_GOOGLE, BOOST_GATE_PYTHON_PARAKEET,
+    BOOST_GATE_PYTHON_RELEASE
 
 THE TEST SET is every test file that imports or patches a module this
 branch changes, as impact-brief.py --list-tests listed it on 2026-09-21
 (base d54220d3, head ddf5b013): 109 Logic files, 7 shared, 2 Parakeet,
-1 each for Distil-Whisper and Google, and the release test_helpdoc_ci.py,
+1 for Google (and 1 for Distil-Whisper, removed with that provider), and
+the release test_helpdoc_ci.py,
 which runs the real matcher and catalog and so runs for every mutation
 of those two files. The boost test files come FIRST and pytest runs with
 -x, so a caught mutant stops at its first failure in seconds and only a
@@ -139,7 +141,6 @@ _LOGIC_TESTS = (
     "tests/test_ai/test_text_transform_helper.py",
     "tests/test_apply_hotword.py",
     "tests/test_audio_suppression_controls_removed.py",
-    "tests/test_calibration_trigger.py",
     "tests/test_click_flow.py",
     "tests/test_command_engine_gaps.py",
     "tests/test_command_engine_replacement_editor_routing.py",
@@ -254,12 +255,6 @@ SUITES = {
                   "tests/test_transcript_redaction.py"),
         "path": (PROVIDERS / "shared",),
     },
-    "distil": {
-        "dir": PROVIDERS / "distil_medium_en",
-        "env": "BOOST_GATE_PYTHON_DISTIL",
-        "tests": ("tests/test_applies_hints.py",),
-        "path": (PROVIDERS / "distil_medium_en",),
-    },
     "google": {
         "dir": PROVIDERS / "google_stt_server",
         "env": "BOOST_GATE_PYTHON_GOOGLE",
@@ -301,7 +296,6 @@ TESTER = WH_DIR / "speech" / "pattern_tester.py"
 MAIN = WH_DIR / "main.py"
 MANAGER = WH_DIR / "integrations" / "websocket_manager.py"
 FORWARDER = PROVIDERS / "shared" / "shared_stt" / "ws_forwarder.py"
-DISTIL = PROVIDERS / "distil_medium_en" / "main.py"
 GOOGLE = PROVIDERS / "google_stt_server" / "main.py"
 PARAKEET = PROVIDERS / "sherpa_offline_parakeet_stt_server" / "main.py"
 
@@ -316,7 +310,6 @@ TARGETS = {
     MAIN: ("logic", "main"),
     MANAGER: ("logic", "integrations.websocket_manager"),
     FORWARDER: ("shared", "shared_stt.ws_forwarder"),
-    DISTIL: ("distil", "main"),
     GOOGLE: ("google", "main"),
     PARAKEET: ("parakeet", "main"),
 }
@@ -621,15 +614,6 @@ MUTATIONS = [
        "            forwarder.start()\n"
        "            forwarder.applies_hints = True\n",
        ["test_main_declares_hints_before_the_forwarder_starts"]),
-    _m("distil-reports-true-always", "distil", DISTIL,
-       "        self.forwarder.applies_hints = bool(hotwords_enabled)\n",
-       "        self.forwarder.applies_hints = True\n",
-       ["test_declares_its_startup_hotwords_flag",
-        "test_default_construction_declares_no_hints"]),
-    _m("distil-reads-the-hint-string", "distil", DISTIL,
-       "        self.forwarder.applies_hints = bool(hotwords_enabled)\n",
-       "        self.forwarder.applies_hints = bool(hotwords)\n",
-       ["test_enabled_with_no_hint_yet_still_declares_hints"]),
     _m("parakeet-ignores-the-status", "parakeet", PARAKEET,
        '    if getattr(status, "requested", False) is True:\n',
        "    if False:\n",

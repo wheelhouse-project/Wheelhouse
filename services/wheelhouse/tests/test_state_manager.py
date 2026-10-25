@@ -128,6 +128,10 @@ class TestSettingsAcknowledgement:
         from main import LogicController
         controller = MagicMock(spec=LogicController)
         controller.state_manager = sm
+        # wh-numbers-stay-setting: the handler routes through the controller's own
+        # save-and-apply wrapper, which a spec'd mock replaces; bind the real one.
+        controller._set_config_value_and_apply = (
+            lambda *a, **k: LogicController._set_config_value_and_apply(controller, *a, **k))
         tasks = []
         controller.create_task_with_error_handling.side_effect = lambda coro, name: tasks.append(coro)
         mock_config.save.return_value = True
@@ -396,6 +400,7 @@ class TestSendStateUpdate:
         state = mock_gui_queue.put_nowait.call_args[0][0]
         expected_keys = {
             "action", "speech_enabled", "button_visible",
+            "button_hidden_for_exclusive_speaker",
             "FLOATING_BUTTON_SIZE", "FLOATING_BUTTON_POS",
             "SHOW_SPEECH_PULSE",
             "settings_persisted", "stt_provider",

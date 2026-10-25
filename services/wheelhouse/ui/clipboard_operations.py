@@ -8,13 +8,19 @@ This module provides clipboard interaction methods including:
 
 All operations handle timing-dependent Windows clipboard behavior.
 """
+import contextlib
 import logging
+import threading
 from _ctypes import COMError
 
 from utils.redact import redact_transcript
 import time
+# The copy retry reads its own clock names, not ``time.*``, so a test that
+# replaces this module's ``time`` for the paste timing leaves them real.
+from time import monotonic as _copy_monotonic, sleep as _copy_sleep
 import unicodedata
 import pyperclip
+from pyperclip import PyperclipWindowsException
 import win32gui
 from typing import Dict, Any, Optional
 # wh-review-pattern-fixes.36: every non-Flutter state-changing send in
@@ -26,6 +32,13 @@ from typing import Dict, Any, Optional
 # modifier that a short chord can leave physically held (wh-eolas.2.5).
 from utils.win_input_sender import _send_modifier_keyups, verified_press_keys
 from ui.clipboard_sequence import get_sequence_number, wait_for_clipboard_write
+from ui.paste_landing import (
+    PasteCheck,
+    focused_control_hwnd,
+    max_growth_of_one_paste,
+    prepare_paste_check,
+    wait_for_length_change,
+)
 from ui.hwnd_utils import (
     normalize_hwnd_for_foreground_compare,
     process_identity_for_hwnd,
@@ -46,6 +59,28 @@ from services.wheelhouse.shared.grapheme import (
 )
 
 logger = logging.getLogger(__name__)
+
+# wh-dictation-paste-loss-load.2: how long one word keeps retrying a copy
+# while another program holds the clipboard open. ArsClip.exe held it
+# 2.4 s under load, and pyperclip's own 0.5 s loop gave up first, so the
+# word was lost. pyperclip's 0.5 s counts toward this total, and the last
+# pyperclip call can end up to 0.5 s past it.
+COPY_RETRY_SECONDS = 3.0
+# Pause between two pyperclip calls. pyperclip already polls every 10 ms
+# inside a call, so this only keeps the retry from spinning back to back.
+_COPY_RETRY_PAUSE = 0.05
+# The message pyperclip's clipboard() context manager raises when
+# OpenClipboard keeps failing for its whole 0.5 s. Its other
+# PyperclipWindowsException messages (SetClipboardData and others) are
+# not a held clipboard and are not retried.
+_OPEN_CLIPBOARD_FAILURE = "Error calling OpenClipboard"
+
+
+def _is_open_clipboard_failure(error: Exception) -> bool:
+    return (
+        isinstance(error, PyperclipWindowsException)
+        and _OPEN_CLIPBOARD_FAILURE in str(error)
+    )
 
 
 def captured_hwnd_survives_stale_focus(
@@ -132,6 +167,21 @@ class ClipboardOperations:
         self.post_paste_delay = (
             timing_config.get("post_paste_delay_ms", 30) / 1000.0
         )
+        # wh-dictation-paste-loss-load: how long, from the Ctrl+V, a
+        # RichEditD2DPT control may take to show the pasted text before
+        # verified_paste sends Ctrl+V once more. A Ctrl+V still waiting in
+        # the target's input queue looks the same as a lost one, so this
+        # must cover the slowest landed paste under load. The wait costs
+        # time only for a word that did not arrive.
+        # crewcut: 500 ms is a first value; the load session measures the
+        # time from Ctrl+V to the length change for landed words and sets
+        # this default from the measured maximum plus a margin.
+        self.paste_landing_wait = (
+            timing_config.get("paste_landing_wait_ms", 500) / 1000.0
+        )
+        # The utterance the Input process is typing, for log lines.
+        # UIActionHandler.start_utterance sets it.
+        self.current_utterance_id = None
 
         # wh-fc1x.2: resolve the same-process browser list from config.
         # Canonical entries live in
@@ -220,14 +270,82 @@ class ClipboardOperations:
         # ClipboardOperations instance.
         self.last_clipboard_write_seq: Optional[int] = None
 
+        # wh-dictation-paste-loss-load.2: the copy-retry budget of the
+        # word being inserted. ``copy_retry_budget`` opens it; while it is
+        # open, every _safe_copy on the opening thread draws on the same
+        # COPY_RETRY_SECONDS. Closed (depth 0) is the default, and then
+        # each _safe_copy gets the whole window to itself.
+        self._copy_budget_depth = 0
+        self._copy_budget_owner: Optional[int] = None
+        self._copy_budget_spent = 0.0
+        # True after a copy in the open budget gave up on a held
+        # clipboard. Later copies of the same word then skip pyperclip.
+        self._copy_budget_gave_up = False
+        # True when the latest _safe_copy returned False without calling
+        # pyperclip because an earlier copy of the word gave up.
+        self._last_copy_skipped = False
+        # wh-clipboard-save-lost-restore: seconds already spent before the
+        # next budget opens (the clipboard save at utterance start).
+        self._copy_budget_charge = 0.0
+
         logger.debug("ClipboardOperations initialized with timing configuration")
 
     # ========================================================================
     # SAFE CLIPBOARD WRAPPERS
     # ========================================================================
 
-    def _safe_copy(self, text: str) -> bool:
+    @contextlib.contextmanager
+    def copy_retry_budget(self):
+        """Make every copy for one word share one COPY_RETRY_SECONDS.
+
+        wh-dictation-paste-loss-load.2. A word can reach _safe_copy
+        several times: ShadowBufferStrategy copies it, and when that
+        fails the clipboard fallback copies a sentinel and the word
+        again. Each call retrying for the full window would hold a
+        single word for a multiple of it. Inside this block the time
+        every retrying copy spends counts against one window. A copy that
+        starts after the window is spent makes one attempt only. Once a
+        copy gives up on a held clipboard, later copies return False at
+        once without calling pyperclip. Nesting keeps the outermost budget.
+        """
+        if self._copy_budget_depth == 0:
+            self._copy_budget_owner = threading.get_ident()
+            self._copy_budget_spent = self._copy_budget_charge
+            self._copy_budget_charge = 0.0
+            self._copy_budget_gave_up = False
+        self._copy_budget_depth += 1
+        try:
+            yield
+        finally:
+            self._copy_budget_depth -= 1
+            if self._copy_budget_depth == 0:
+                self._copy_budget_owner = None
+
+    def charge_next_copy_budget(self, seconds: float) -> None:
+        """Start the next copy_retry_budget with ``seconds`` already spent.
+
+        wh-clipboard-save-lost-restore (boss ruling 2026-10-20 20:36,
+        option 1). The clipboard save at utterance start retries for up to
+        COPY_RETRY_SECONDS too, and Logic's 5.0 s wait for the first word
+        includes it. The handler charges the save time here, so the save
+        and the first word's copies share one window. The first copy still
+        makes one attempt. The charge applies to one budget only, and each
+        utterance start replaces it.
+        """
+        self._copy_budget_charge = max(0.0, seconds)
+
+    def _safe_copy(self, text: str, *, retry: bool = True) -> bool:
         """Safely copy text to clipboard with error handling.
+
+        wh-dictation-paste-loss-load.2: while another program holds the
+        clipboard open, pyperclip.copy raises after its own 0.5 s loop.
+        This method calls it again until COPY_RETRY_SECONDS have passed
+        since the first attempt (pyperclip's 0.5 s counts), pausing
+        briefly between calls. Only that failure is retried; any other
+        exception returns False at once. It retries only inside
+        ``copy_retry_budget`` on the thread that opened it, and there the
+        window is shared with the rest of the word. Outside that block, or
+        with ``retry=False``, it makes one attempt, as it did before.
 
         wh-fz7j.2: captures the post-write Win32 clipboard sequence number
         on success so the deferred-restore ownership check can use the
@@ -243,17 +361,70 @@ class ClipboardOperations:
         Returns:
             bool: True if copy succeeded, False if it failed
         """
+        self._last_copy_skipped = False
+        in_budget = (
+            retry
+            and self._copy_budget_depth > 0
+            and self._copy_budget_owner == threading.get_ident()
+        )
+        # Boss ruling 01:35: only a dictated word retries. A copy outside
+        # the word's budget (the selection sentinels of transform_selection,
+        # wrap_or_insert, capture_selected_text, replace_selected_text)
+        # makes one attempt, so two of them stay far below the 5.0 s
+        # send_request timeout and the 6.0 s dispatch stall report.
+        retry = in_budget
+        remaining = COPY_RETRY_SECONDS
+        if in_budget:
+            if self._copy_budget_gave_up:
+                self._last_copy_skipped = True
+                logger.debug(
+                    "Clipboard copy skipped: an earlier copy for this word "
+                    "gave up on a held clipboard"
+                )
+                return False
+            # A copy that succeeded late can spend the whole window. The
+            # next copy still makes one attempt (verifier finding D1).
+            remaining = max(0.0, remaining - self._copy_budget_spent)
+
+        started = _copy_monotonic()
+        deadline = started + remaining
         try:
-            pyperclip.copy(text)
-            try:
-                self.last_clipboard_write_seq = get_sequence_number()
-            except Exception as seq_e:
-                logger.warning(f"Could not capture clipboard sequence: {seq_e}")
-                self.last_clipboard_write_seq = None
-            return True
-        except Exception as e:
-            logger.error(f"Clipboard copy failed: {e}")
-            return False
+            while True:
+                try:
+                    pyperclip.copy(text)
+                    try:
+                        self.last_clipboard_write_seq = get_sequence_number()
+                    except Exception as seq_e:
+                        logger.warning(
+                            f"Could not capture clipboard sequence: {seq_e}"
+                        )
+                        self.last_clipboard_write_seq = None
+                    return True
+                except Exception as e:
+                    now = _copy_monotonic()
+                    if (
+                        not retry
+                        or not _is_open_clipboard_failure(e)
+                        or now >= deadline
+                    ):
+                        if in_budget:
+                            if _is_open_clipboard_failure(e):
+                                self._copy_budget_gave_up = True
+                            logger.error(
+                                "Clipboard copy failed after %.1f s "
+                                "(utterance=%s): %s",
+                                now - started, self.current_utterance_id, e,
+                            )
+                        else:
+                            logger.error(
+                                f"Clipboard copy failed after "
+                                f"{now - started:.1f} s: {e}"
+                            )
+                        return False
+                    _copy_sleep(min(_COPY_RETRY_PAUSE, deadline - now))
+        finally:
+            if in_budget:
+                self._copy_budget_spent += _copy_monotonic() - started
 
     def _safe_paste(self) -> Optional[str]:
         """Safely read text from clipboard with error handling.
@@ -723,10 +894,22 @@ class ClipboardOperations:
 
         t_start = time.perf_counter()
         if not self._safe_copy(text):
-            logger.error(
-                "clipboard copy outcome: failed (text_len=%d), aborting paste",
-                len(text),
-            )
+            if self._last_copy_skipped:
+                # An earlier copy for this same word gave up on a held
+                # clipboard, and _safe_copy logged that give-up at ERROR
+                # with the utterance number.
+                logger.debug(
+                    "clipboard copy outcome: skipped, the retry window for "
+                    "this word is spent (utterance=%s, text_len=%d), "
+                    "aborting paste",
+                    self.current_utterance_id, len(text),
+                )
+            else:
+                logger.error(
+                    "clipboard copy outcome: failed (utterance=%s, "
+                    "text_len=%d), aborting paste",
+                    self.current_utterance_id, len(text),
+                )
             return False
         logger.info("clipboard copy outcome: success (text_len=%d)", len(text))
         t_after_copy = time.perf_counter()
@@ -767,7 +950,10 @@ class ClipboardOperations:
             # Content mismatch: another process overwrote clipboard
             saw_wrong_content = True
             if recopy_budget > 0:
-                if not self._safe_copy(text):
+                # retry=False: this runs inside a 10 ms polling loop
+                # with its own timeout, and the first copy above
+                # already succeeded.
+                if not self._safe_copy(text, retry=False):
                     recopy_failures += 1
                 recopy_budget -= 1
                 recopy_attempts += 1
@@ -803,6 +989,10 @@ class ClipboardOperations:
 
         t_after_verify = time.perf_counter()
 
+        # The top-level window the paste goes to, for the paste check
+        # (wh-dictation-paste-loss-load). Stays None on the Flutter path.
+        check_root_hwnd = None
+
         # Restore focus before pasting
         # Flutter optimization: Skip focus restoration (already has focus)
         if not flutter_control:
@@ -830,6 +1020,7 @@ class ClipboardOperations:
                         hwnd = top_level_hwnd_from_control(target_control)
                 else:
                     hwnd, resolved_control = window_manager.get_target_window(None)
+                check_root_hwnd = hwnd
 
                 if has_captured_target:
                     # wh-review-pattern-fixes.41: fail closed. The return
@@ -934,6 +1125,20 @@ class ClipboardOperations:
             logger.error("verified_paste: captured target changed during preparation; refusing to send")
             return False
 
+        # wh-dictation-paste-loss-load: read the target control's text
+        # length before the Ctrl+V (RichEditD2DPT only), and the clipboard
+        # sequence number, so the check after the Ctrl+V can tell whether
+        # the word arrived and whether the clipboard still holds it.
+        if use_flutter:
+            paste_check, check_reason = None, "flutter"
+        else:
+            paste_check, check_reason = prepare_paste_check(
+                check_root_hwnd, target_class_name,
+            )
+        if paste_check is None and check_reason != "class_out_of_scope":
+            logger.info("paste check: none (%s)", check_reason)
+        sequence_before_send = get_sequence_number()
+
         # Record that the paste keystroke is about to fire. Must sit before
         # the Flutter-vs-non-Flutter dispatch so BOTH branches flip the flag
         # true (wh-d43oi). Selection-restore reads this to decide whether a
@@ -1031,11 +1236,25 @@ class ClipboardOperations:
                 )
                 return False
 
+        # wh-dictation-paste-loss-load: confirm the word arrived, and paste
+        # once more when it did not. The answer is how many copies of the
+        # word the target holds now.
+        copies_typed = 1
+        if paste_check is not None:
+            copies_typed = self._confirm_paste_landed(
+                paste_check, text, t_after_sendkeys, sequence_before_send,
+                target_identity,
+            )
+
         # Track characters pasted for retraction support. Routed
         # through credit_paste_chars so the counter, the grapheme-unsafe
         # flag, and the Qt-target flag stay in lockstep with
         # VerifiedUnicodeStrategy (wh-pkhrp.3.6, wh-pkhrp.2).
-        self.credit_paste_chars(text, target_class_name=target_class_name)
+        # A word that did not arrive gets no credit, so "scratch that"
+        # does not delete text before the utterance; a word typed twice
+        # gets two.
+        for _ in range(copies_typed):
+            self.credit_paste_chars(text, target_class_name=target_class_name)
 
         if flutter_control:
             logger.info(f"[FLUTTER PASTE TIMING] copy:{(t_after_copy-t_start)*1000:.1f}ms "
@@ -1046,6 +1265,165 @@ class ClipboardOperations:
                        f"total:{(t_after_sleep-t_start)*1000:.1f}ms")
 
         return True
+
+    def _check_window_is_foreground(self, check: PasteCheck) -> bool:
+        """True when the foreground window's root is the check's window.
+
+        wh-dictation-paste-loss-load: used when verified_paste has no
+        captured target identity, so nothing else proves the foreground
+        before the second Ctrl+V. A read that fails means False.
+
+        The roots must be equal. This does not call
+        ``_foreground_matches_target``: that helper logs its own WARNING,
+        and the caller logs the one WARNING line for the word. Its
+        same-process browser fallback cannot apply here, because the
+        paste check covers RichEditD2DPT only.
+        """
+        try:
+            foreground = win32gui.GetForegroundWindow()
+        except Exception as exc:
+            logger.debug("paste check: GetForegroundWindow failed: %s", exc)
+            return False
+        check_root = normalize_hwnd_for_foreground_compare(check.root_hwnd)
+        foreground_root = normalize_hwnd_for_foreground_compare(foreground)
+        logger.debug(
+            "paste check: checked root=%s, foreground root=%s (from hwnd=%s)",
+            check_root, foreground_root, foreground,
+        )
+        return check_root is not None and check_root == foreground_root
+
+    def _confirm_paste_landed(
+        self,
+        check: PasteCheck,
+        text: str,
+        t_sent: float,
+        sequence_before_send: int,
+        target_identity: Optional[TargetIdentity],
+    ) -> int:
+        """Return how many copies of ``text`` the checked control holds now.
+
+        wh-dictation-paste-loss-load (boss ruling 2026-10-19 21:35): wait
+        for the control's text length to change after the Ctrl+V. If it
+        does not change before ``paste_landing_wait`` (counted from the
+        Ctrl+V), send Ctrl+V once more and wait again. Any answer this
+        method cannot trust (a query with no answer, a clipboard that
+        changed, a target that changed, a foreground window that is not
+        the checked window when there is no captured target identity, a
+        focused control that is not the watched one or cannot be read)
+        means no second paste.
+
+        Returns 1 when the word arrived or the answer is unknown (the
+        behaviour before this check), 0 when it did not arrive, and 2 when
+        the first Ctrl+V arrived late, after the second one was sent.
+        """
+        utterance = self.current_utterance_id
+        wait_s = max(0.0, self.paste_landing_wait - (time.perf_counter() - t_sent))
+        first = wait_for_length_change(
+            check.hwnd, check.length_before, wait_s=wait_s,
+        )
+        since_send_ms = (time.perf_counter() - t_sent) * 1000
+        if first.status == "changed":
+            logger.info(
+                "paste check: length changed %d -> %d, %.0f ms after Ctrl+V",
+                check.length_before, first.length, since_send_ms,
+            )
+            return 1
+        if first.status == "query_failed":
+            logger.warning(
+                "paste check: the target did not answer the length query "
+                "after Ctrl+V (utterance=%s); no second paste.", utterance,
+            )
+            return 1
+
+        if get_sequence_number() != sequence_before_send:
+            logger.warning(
+                "paste check: word not typed %.0f ms after Ctrl+V and the "
+                "clipboard changed since the copy (utterance=%s, "
+                "text_len=%d); no second paste.",
+                since_send_ms, utterance, len(text),
+            )
+            return 0
+        if not self._captured_identity_is_current(target_identity):
+            logger.warning(
+                "paste check: word not typed %.0f ms after Ctrl+V and the "
+                "target changed (utterance=%s, text_len=%d); no second paste.",
+                since_send_ms, utterance, len(text),
+            )
+            return 0
+        if target_identity is None and not self._check_window_is_foreground(check):
+            logger.warning(
+                "paste check: word not typed %.0f ms after Ctrl+V and the "
+                "foreground window is not the checked window, with no "
+                "captured target identity to prove it otherwise "
+                "(utterance=%s, text_len=%d); no second paste.",
+                since_send_ms, utterance, len(text),
+            )
+            return 0
+
+        # The second Ctrl+V goes to whichever control holds focus now. It
+        # must still be the control whose length was watched.
+        focused = focused_control_hwnd(check.root_hwnd)
+        if not focused:
+            logger.warning(
+                "paste check: word not typed %.0f ms after Ctrl+V and the "
+                "focused control could not be read (utterance=%s, "
+                "text_len=%d); no second paste.",
+                since_send_ms, utterance, len(text),
+            )
+            return 0
+        if focused != check.hwnd:
+            logger.warning(
+                "paste check: word not typed %.0f ms after Ctrl+V and the "
+                "focus moved from control %s to control %s (utterance=%s, "
+                "text_len=%d); no second paste.",
+                since_send_ms, check.hwnd, focused, utterance, len(text),
+            )
+            return 0
+
+        logger.warning(
+            "paste check: no text change %.0f ms after Ctrl+V; pasting "
+            "again (utterance=%s, text_len=%d).",
+            since_send_ms, utterance, len(text),
+        )
+        ok, accepted, expected = verified_press_keys('ctrl', 'v')
+        if not ok:
+            _send_modifier_keyups(('ctrl',))
+            logger.warning(
+                "paste check: second Ctrl+V SendInput short delivery (sent "
+                "%d/%d); word not typed (utterance=%s, text_len=%d).",
+                accepted, expected, utterance, len(text),
+            )
+            return 0
+        t_second = time.perf_counter()
+
+        second = wait_for_length_change(
+            check.hwnd, check.length_before, wait_s=self.paste_landing_wait,
+        )
+        second_ms = (time.perf_counter() - t_second) * 1000
+        if second.status == "query_failed":
+            logger.warning(
+                "paste check: the target did not answer the length query "
+                "after the second Ctrl+V (utterance=%s).", utterance,
+            )
+            return 1
+        if second.status == "unchanged":
+            logger.warning(
+                "paste check: word not typed after a second Ctrl+V "
+                "(utterance=%s, text_len=%d).", utterance, len(text),
+            )
+            return 0
+        if second.length - check.length_before >= 2 * max_growth_of_one_paste(text):
+            logger.warning(
+                "paste check: the first Ctrl+V arrived late; the word is "
+                "typed twice (utterance=%s, length %d -> %d).",
+                utterance, check.length_before, second.length,
+            )
+            return 2
+        logger.info(
+            "paste check: second Ctrl+V typed the word, length %d -> %d, "
+            "%.0f ms after it.", check.length_before, second.length, second_ms,
+        )
+        return 1
 
     # ========================================================================
     # SELECTION MANAGEMENT

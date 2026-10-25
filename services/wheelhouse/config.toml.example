@@ -78,6 +78,21 @@ LOG_LEVEL = "INFO"
 # dictate (including passwords) accumulates in the rotated log files.
 LOG_TRANSCRIPTS = false
 
+# Evidence for the bug where the first sound of an utterance is missing from
+# the transcript. When true, the Parakeet v3 speech engine saves one sound
+# file (WAV) for every utterance: the sound the engine received, after
+# Wheelhouse processed it. The files go to the folder
+# %LOCALAPPDATA%\WheelHouse\engine-audio. While the Parakeet v3 engine runs,
+# it deletes each of these files that is more than 2 days old: at engine
+# start, and once an hour. While it does not run, the files stay. The Google
+# engine saves no sound files. Uninstalling Wheelhouse deletes the folder,
+# also when you keep your personal data.
+# Privacy cost: the files hold everything you say, as sound. They stay on this
+# computer, and nothing is sent anywhere. Turn it back off after you finish.
+# A change takes effect when the speech engine next starts. An engine switch
+# or a Wheelhouse restart starts it.
+SAVE_ENGINE_AUDIO = false
+
 # Update check: when true (the default), Wheelhouse asks api.github.com once
 # a day whether a newer public release exists. The first request is sent at
 # least 60 seconds after start. The request carries no user data, only a
@@ -95,8 +110,10 @@ SIDE_OFFSET = 10
 # ticks make one step, so a slow roll gives finer control.
 BRIGHTNESS_INCREMENT = 1.0
 # How much each wheel tick changes the volume. There is no per-command
-# cap for volume because a Sonos round trip is about 40 ms.
-VOLUME_INCREMENT = 0.5
+# cap for volume because a Sonos round trip is about 40 ms. Use a whole
+# number: a Sonos speaker drops the fraction, so a step of 0.5 does not
+# raise its volume.
+VOLUME_INCREMENT = 1
 
 # Thumb wheel feel (wh-mouse-wheel-sensitivity). The wheel's raw reports
 # are batched into 50 ms windows; these three keys decide how much of each
@@ -165,7 +182,7 @@ polling_interval = 2
 [plugins.system_volume]
 enabled = true
 device_type = "default"
-volume_step_db = 1.5
+volume_step_db = 0.75
 min_volume_db = -96.0
 max_volume_db = 0.0
 
@@ -176,6 +193,15 @@ enabled = false
 ip_address = ""
 psk = ""
 device_name = "SONY TV"
+
+# Samsung TV brightness. Commented out because the plugin cannot start until
+# the TV is paired: run scripts/pair_samsung_tv.py first (see the Samsung TV
+# part of the Plugins help), then remove the leading "# " from the four lines
+# below and fill in the values. Use forward slashes in the path.
+# [plugins.samsung]
+# enabled = true
+# ip_address = "192.168.1.50"
+# credential_file = "C:/Users/you/WheelhousePairing/samsung-tv.dat"
 
 [plugins.idle_monitor]
 enabled = true
@@ -202,7 +228,10 @@ ignore_window_classes = [
 ]
 
 [wake_word]
-# In toggle mode, say this word to turn listening back on, whatever turned it off.
+# In toggle mode, say this word to turn listening back on. With mode = "idle_recovery",
+# this works whatever turned listening off; with mode = "push_to_talk", it ends only
+# the idle, sound, and Sonos pauses. The wake word never ends the pause while a
+# program holds the speaker in exclusive mode.
 # In push-to-talk mode it ends only the idle pause; hold the floating button to talk again.
 enabled = true
 keyword = "computer"
@@ -216,6 +245,7 @@ clipboard_operation_delay_ms = 50
 selection_clear_delay_ms = 20
 context_gather_delay_ms = 10
 post_paste_delay_ms = 30
+paste_landing_wait_ms = 500
 utterance_clipboard_timeout_seconds = 60.0
 
 [ui_actions.verified_unicode]
@@ -358,6 +388,15 @@ overlay_badge_shadow = false
 # per paint from the Windows app theme: system dark theme -> light bubble,
 # system light theme -> dark bubble.
 overlay_badge_theme = "auto"
+# What the numbers do after "show numbers". false (the default) copies Windows
+# Voice Access: a successful click on a number removes all the numbers, and a
+# change of the foreground window removes them too. true keeps the numbers on:
+# after a click and after every change of window or menu, Wheelhouse shows new
+# numbers. "hide numbers" removes them either way. The Settings window's
+# "Keep numbers on after a click or window change" check box saves this key,
+# and a saved change applies to the next click or window change with no
+# restart.
+overlay_keep_numbers = false
 
 # Mouse grid ("show grid"). Cell side length in physical pixels
 # below which a spoken number stops narrowing the grid -- a cell that small

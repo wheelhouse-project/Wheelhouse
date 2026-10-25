@@ -287,10 +287,10 @@ class TestRemoteProviderSwitching:
 
         from main import LogicController as LC
 
-        await LC._switch_stt_provider(controller, "distil_medium_en")
+        await LC._switch_stt_provider(controller, "parakeet_tdt")
 
         remote_launcher.stop_provider.assert_called_once_with("google_stt")
-        remote_launcher.start_provider.assert_called_once_with("distil_medium_en")
+        remote_launcher.start_provider.assert_called_once_with("parakeet_tdt")
 
     @pytest.mark.asyncio
     async def test_an_undiscovered_provider_reports_a_failed_start(

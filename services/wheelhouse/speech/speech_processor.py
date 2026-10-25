@@ -641,10 +641,12 @@ class SpeechProcessor:
         # BARE_NUMBER (wh-click-number-dictation): a bare-number
         #   candidate held while the overlay is showing badges, until
         #   we know whether the number is the WHOLE utterance.
-        #   Distil-Whisper drops the word "click" from short "click N"
-        #   finals, so the final arrives as a bare number; a
-        #   whole-utterance number with badges on screen is consumed at
-        #   the utterance-end marker as the click command "click N".
+        #   The rule was added for the Distil-Whisper engine (removed),
+        #   which dropped the word "click" from short "click N" finals,
+        #   so the final arrived as a bare number; the rule stays in
+        #   place. A whole-utterance number with badges on screen is
+        #   consumed at the utterance-end marker as the click command
+        #   "click N".
         #   See the bare-number section for the lifecycle.
         # REPLACEMENT_PREFIX (wh-trailing-question-mark-words): a
         #   replacement buffer that finalized as plain dictation, held
@@ -2511,13 +2513,15 @@ class SpeechProcessor:
     # BARE-NUMBER CLICKS (wh-click-number-dictation)
     # ========================================================================
     #
-    # Distil-Whisper drops the word "click" from short "click N" finals
+    # The rule was added for the Distil-Whisper engine (since removed),
+    # which dropped the word "click" from short "click N" finals
     # (live evidence 2026-08-08: segments oscillate ' click six.' / ' 6.'
-    # and the FINAL keeps only the number). The bare number matches no
-    # command pattern and would dictate. While the overlay is showing
-    # badges, a FINAL utterance that is JUST a number 1..999 is almost
-    # certainly a badge pick, so it is held back from dictation and, at
-    # the utterance-end marker, executed as the click command "click N".
+    # and the FINAL keeps only the number); it stays in place. The bare
+    # number matches no command pattern and would dictate. While the
+    # overlay is showing badges, a FINAL utterance that is JUST a number
+    # 1..999 is almost certainly a badge pick, so it is held back from
+    # dictation and, at the utterance-end marker, executed as the click
+    # command "click N".
     #
     # The lifecycle:
     #   - held only when the word opened its utterance, parses as a
@@ -2979,13 +2983,13 @@ class SpeechProcessor:
         words the outgoing engine has already sent
         (wh-provider-switch-stale-hold.1.2). The switch drops the hold as
         soon as the new engine is launched, but the old process keeps its
-        socket until it exits, and outside a calibration session
-        WebSocketManager does not filter transcript frames by client, so
+        socket until it exits, and WebSocketManager does not
+        filter transcript frames by client, so
         an old-engine word can still reach the queue afterwards and open
         a fresh hold or click a badge of its own. Removing the limit
         means giving those frames an identity the processor can reject --
-        extending the active-client gate in websocket_manager.py beyond
-        calibration, or draining the queue at the switch -- neither of
+        adding an active-client gate in websocket_manager.py, or
+        draining the queue at the switch -- neither of
         which belongs to a change scoped to the hold.
 
         crewcut: the switch's proof of the exit is a bounded wait, so

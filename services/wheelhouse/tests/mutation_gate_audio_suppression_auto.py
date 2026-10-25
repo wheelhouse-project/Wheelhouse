@@ -497,7 +497,11 @@ MUTATIONS = [
         ["test_startup_applies_the_decision_before_services_start"]),
     mutation(
         "startup-passes-true-in-place-of-auto", STARTUP_TESTS, MAIN_PY,
+        "            audio_suppression_active = await decide_audio_suppression(\n"
+        "                self.config_service.get(\n"
         "                    AUDIO_SUPPRESSION_SETTING, AUDIO_SUPPRESSION_DEFAULT\n",
+        "            audio_suppression_active = await decide_audio_suppression(\n"
+        "                self.config_service.get(\n"
         "                    AUDIO_SUPPRESSION_SETTING, True\n",
         ["test_startup_passes_the_setting_with_the_auto_default"]),
 
@@ -711,14 +715,14 @@ pattern = '''^click to talk mode$'''
         ["test_a_stable_reaches_the_pipeline_when_the_manager_reports_a_window"]),
     mutation(
         "the-final-transcript-gate-comes-back", RETRACTION_TESTS, WEBSOCKET,
-        "                        # wh-7ou.7.6.11 verdict gate: a final carrying the\n",
+        "                        # Extract any remaining delta (words not sent via stables)\n",
         """\
                         if getattr(
                             self.state_manager, "audio_recovery_window_open", False
                         ) is True:
                             continue
 
-                        # wh-7ou.7.6.11 verdict gate: a final carrying the
+                        # Extract any remaining delta (words not sent via stables)
 """,
         ["test_a_final_reaches_the_pipeline_when_the_manager_reports_a_window"]),
     # Replaced "idle-recovery-arms-on-audio-again": boss ruling R2 made

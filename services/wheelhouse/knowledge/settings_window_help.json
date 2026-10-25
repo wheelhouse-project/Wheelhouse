@@ -22,7 +22,7 @@
       "text": "Select this check box to write more detail into the log files. Clear it to write the usual detail. Keep it clear unless you must find or report a problem. This choice lasts until WheelHouse restarts."
     },
     {
-      "label": "STT Provider",
+      "label": "Speech-to-Text Provider",
       "text": "Select a radio button to choose the speech engine. The list shows only the engines that are set up on this computer. WheelHouse keeps your choice after a restart. An engine whose speech model is not installed shows as a button. Click that button to see an offer to download the model."
     },
     {
@@ -51,7 +51,11 @@
     },
     {
       "label": "Wake word",
-      "text": "Select this check box to let the wake word turn listening on again. In toggle mode, when listening is off for any reason, say the wake word to turn listening on. In push-to-talk mode, the wake word ends only the pause that starts when you step away. If the wake word is off and you turn speech off, only the keyboard or mouse can turn speech on again. The change takes effect after a restart."
+      "text": "Select this check box to let the wake word turn listening on again. In toggle mode, with the default wake-word mode in the settings file, say the wake word to turn listening on when it is off, except while a program holds the speaker in exclusive mode. With the wake-word mode set to push-to-talk there, the wake word ends only the idle, sound, and Sonos pauses, so it cannot undo \"stop listening\" or a start with listening off. In push-to-talk mode, the wake word ends only the pause that starts when you step away. While a program holds the speaker in exclusive mode, the wake word does not end the pause, whatever the mode. If the wake word is off and you turn speech off, only the keyboard or mouse can turn speech on again. The change takes effect after a restart."
+    },
+    {
+      "label": "Keep numbers on after a click or window change",
+      "text": "Select this check box to keep the numbers on the screen. After you click a number, and after you change the front window or open or close a menu, WheelHouse then shows new numbers. Clear it to copy Windows Voice Access. After you click a number, or change the front window, the numbers go away. You say show numbers to see them again. The change takes effect at once, with no restart."
     }
   ]
 }

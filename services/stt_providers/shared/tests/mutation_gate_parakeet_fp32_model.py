@@ -379,7 +379,7 @@ MUTATIONS = [
     },
     {
         # QUESTIONS item 103: the disable itself, gone. A Google Cloud
-        # or Distil-Whisper install then keeps offering Parakeet as a
+        # install then keeps offering Parakeet as a
         # switchable engine with no model behind it, which is the
         # startup failure ("Model directory not found") the ruling
         # exists to end.

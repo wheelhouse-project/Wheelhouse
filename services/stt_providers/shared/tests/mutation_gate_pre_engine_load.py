@@ -16,7 +16,6 @@ GOOGLE = SHARED.parent / 'google_stt_server/main.py'
 PROCEDURE = SHARED.parents[2] / 'docs/testing/stt-cpu-load-test-procedure.md'
 TESTS = 'tests/test_pre_engine_load.py'
 SHERPA = SHARED.parent / 'sherpa_offline_parakeet_stt_server'
-DISTIL = SHARED.parent / 'distil_medium_en'
 WIRING_TESTS = 'tests/test_load_diagnostics_wiring.py'
 GOOGLE_SERVICE = GOOGLE.parent
 CONFIG_KEY_TESTS = 'tests/test_load_diagnostics_config_key.py'
@@ -154,20 +153,6 @@ MUTATIONS = [
                       '                log_load_diagnostics=log_load_diagnostics,\n',
                       '                sensitivity=wake_word_sensitivity,\n',
                       'test_the_flag_reaches_the_wake_word_detector'),
-    provider_mutation('distil-processor-setting-unwired', DISTIL,
-                      '            # line is off unless [debug] log_load_diagnostics turns it on.\n'
-                      '            log_load_diagnostics=log_load_diagnostics,\n',
-                      '            # line is off unless [debug] log_load_diagnostics turns it on.\n',
-                      'test_the_flag_reaches_the_processor'),
-    provider_mutation('distil-wake-setting-unwired', DISTIL,
-                      '                sensitivity=wake_word_sensitivity,\n'
-                      '                log_load_diagnostics=log_load_diagnostics,\n',
-                      '                sensitivity=wake_word_sensitivity,\n',
-                      'test_the_flag_reaches_the_wake_word_detector'),
-    provider_mutation('distil-setting-read-from-the-wrong-section', DISTIL,
-                      '    return bool(config.get("debug", {}).get("log_load_diagnostics", False))',
-                      '    return bool(config.get("dbg", {}).get("log_load_diagnostics", False))',
-                      'test_the_reader_follows_the_debug_section'),
     # wh-codex-merge-audit.13.1.1: the Google provider must declare the key
     # its own main.py reads. Without the line in the tracked config.toml the
     # operator has nothing to edit and the setting stays at the dataclass
@@ -179,7 +164,7 @@ MUTATIONS = [
              '# ten-second [load-diag] work_scope=wake_word line the wake-word detector\n'
              '# writes while it is listening. This provider builds no AudioProcessor, so\n'
              '# it writes no work_scope=silence line. Turn it on for a load test, off\n'
-             '# afterwards. Same key as the Parakeet and distil providers\n'
+             '# afterwards. Same key as the Parakeet provider\n'
              '# (wh-codex-merge-audit.13.1.1).\n'
              'log_load_diagnostics = false\n',
          new='', service=GOOGLE_SERVICE, test_file=CONFIG_KEY_TESTS,

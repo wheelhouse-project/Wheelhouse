@@ -92,19 +92,29 @@ def write_docx(path: Path, paragraphs: list[str]) -> Path:
 
 
 def list_handles(window_class: str) -> set[int]:
-    """Every top-level window of this class open right now.
+    """Every visible top-level window of this class open right now.
+
+    A minimized window counts: it keeps WS_VISIBLE. A hidden window does
+    not. Measured 2026-10-19 (wh-dictation-paste-loss-load): the UI
+    Automation root children, which this function walked before, did not
+    list David's minimized Notepad, so a probe could not protect a window
+    it did not know about. EnumWindows lists it.
 
     A window can close while this walk runs, and the class-name read then
-    raises a COM error. Skip that window rather than fail the whole walk.
+    raises an error. Skip that window rather than fail the whole walk.
     """
     handles = set()
-    root = auto.GetRootControl()
-    for child in root.GetChildren():
+
+    def collect(hwnd, _extra):
         try:
-            if child.ClassName == window_class:
-                handles.add(child.NativeWindowHandle)
-        except Exception:
-            continue
+            if (win32gui.IsWindowVisible(hwnd)
+                    and win32gui.GetClassName(hwnd) == window_class):
+                handles.add(hwnd)
+        except win32gui.error:
+            pass
+        return True
+
+    win32gui.EnumWindows(collect, None)
     return handles
 
 
@@ -134,10 +144,21 @@ def open_notepad(before: set[int]) -> bool:
     The caller must then treat the focused document as somebody else's
     and refuse to type.
     """
-    subprocess.Popen(["notepad.exe"])
-    return _wait_for_new_window(
+    return open_notepad_process(before) is not None
+
+
+def open_notepad_process(before: set[int]) -> int | None:
+    """Launch Notepad. The launched process ID when a new window appeared.
+
+    None means the launch attached to a window that was already open, as
+    for open_notepad.
+    """
+    process = subprocess.Popen(["notepad.exe"])
+    if not _wait_for_new_window(
         NOTEPAD_WINDOW_CLASS, before, NOTEPAD_SETTLE_SECONDS
-    )
+    ):
+        return None
+    return process.pid
 
 
 def open_word(document: Path, before: set[int]) -> bool:
@@ -164,7 +185,13 @@ def close_new_windows(window_class: str, before: set[int]) -> tuple[int, int]:
 
 
 def _click_discard(handle: int) -> bool:
-    """Click the discard button of a save prompt, wherever it is."""
+    """Click the discard button of this window's save prompt.
+
+    The prompt is inside the window, or a top-level dialog that the
+    window owns. wh-dictation-paste-loss-load.1.10: a save prompt of any
+    other window is never answered, because David can be answering it.
+    False then makes close_window report a refusal.
+    """
     window = auto.ControlFromHandle(handle)
     if window:
         for label in DISCARD_LABELS:
@@ -174,6 +201,14 @@ def _click_discard(handle: int) -> bool:
                 return True
     root = auto.GetRootControl()
     for child in root.GetChildren():
+        try:
+            owner = win32gui.GetWindow(
+                child.NativeWindowHandle, win32con.GW_OWNER
+            )
+        except win32gui.error:
+            continue
+        if owner != handle:
+            continue
         for label in DISCARD_LABELS:
             button = child.ButtonControl(Name=label, searchDepth=6)
             if button.Exists(0, 0):

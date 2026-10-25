@@ -433,8 +433,8 @@ MUTATIONS = [
                 _foreground_window() if candidate.app_id else None
             )
 """, ""),
-            ("""                os.startfile(candidate.launch_target)
-""", """                os.startfile(candidate.launch_target)
+            ("""                os.startfile(store_alias_launch_target(candidate.launch_target))
+""", """                os.startfile(store_alias_launch_target(candidate.launch_target))
                 foreground_at_start = (
                     _foreground_window() if candidate.app_id else None
                 )

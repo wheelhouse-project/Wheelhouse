@@ -58,6 +58,10 @@ INSTALLER_ASSET_NAME = parakeet_model.INSTALLER_FILENAME
 # PowerShell file, so this process cannot import the list. A test holds the
 # two lists together. Remove the copy by having the installer keep the
 # current engine when -SttProvider is left out.
+# distil_medium_en is a legacy value: the engine was removed, and the installer
+# maps it to parakeet_tdt. It stays here so -SttProvider is still passed for it;
+# a name dropped from this tuple is left out of the arguments and the installer
+# would ask at its prompt instead.
 VALID_STT_PROVIDERS = ("parakeet_tdt", "google_stt", "distil_medium_en")
 
 # The config key that holds the speech engine of the current install.

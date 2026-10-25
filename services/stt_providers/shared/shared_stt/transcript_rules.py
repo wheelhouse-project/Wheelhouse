@@ -4,9 +4,9 @@ Canonical extraction of the parakeet engine's `_normalize_text` (see
 services/stt_providers/sherpa_offline_parakeet_stt_server/sherpa_engine.py)
 so other sherpa providers do not add a third hand-maintained copy.
 
-crewcut: the parakeet engine and shared_stt/whisper_engine.py still carry
-their own inline copies of these rules; migrating them to this module is
-the way to remove the duplication once their test suites are re-pointed.
+crewcut: the parakeet engine still carries its own inline copy of these
+rules; migrating it to this module is the way to remove the duplication
+once its test suite is re-pointed.
 """
 from __future__ import annotations
 

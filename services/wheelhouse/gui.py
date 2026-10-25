@@ -1314,6 +1314,12 @@ class GuiManager(QObject):
         # Authoritative state received from LogicController
         self.speech_enabled = False
         self.button_visible = True
+        # True while a program has sole control of the speaker and the Logic
+        # process has told this process to hide the button for it
+        # (wh-kodi-pause-hide-button). The saved setting above stays what the
+        # menus and the settings window show; only the button's own
+        # visibility reads this.
+        self.button_hidden_for_exclusive_speaker = False
         self.show_speech_pulse = True  # Config option to enable/disable pulse animation
         self.initial_state_received = False
         self.stt_provider = None  # Current STT provider name
@@ -1980,6 +1986,9 @@ class GuiManager(QObject):
 
                     self.speech_enabled = message.get('speech_enabled', False)
                     self.button_visible = message.get('button_visible', True)
+                    self._set_button_hidden_for_exclusive_speaker(
+                        bool(message.get('button_hidden_for_exclusive_speaker', False))
+                    )
                     self.show_speech_pulse = message.get('SHOW_SPEECH_PULSE', True)
                     self.stt_provider = message.get('stt_provider')
                     self.stt_providers_available = message.get('stt_providers_available', [])
@@ -2036,6 +2045,7 @@ class GuiManager(QObject):
                         self.button.set_ready_for_gestures(True)
 
                     self.update_ui_state()
+                    self._refresh_lead_word_environment()
                 elif action in ('config_write_result', 'config_values_result'):
                     # The settings window reads its own reply, or learns the
                     # outcome of its own save, before the shared handler
@@ -2212,6 +2222,16 @@ class GuiManager(QObject):
                     # and the tray item arrive here (the tray callback runs
                     # on pystray's thread and only queues the request).
                     self._open_settings_window()
+                elif action == "show_about_dialog":
+                    # wh-about-window-close: the tray item queues this from
+                    # pystray's thread. The box is modal, so it starts from
+                    # the event loop and not inside this timer callback.
+                    QTimer.singleShot(0, self.show_about_dialog)
+                elif action == "toggle_ptt_mode":
+                    # wh-tray-ptt-toggle-thread: the tray item and the tray
+                    # double-click queue this from pystray's thread, because
+                    # the mode change updates Qt widgets.
+                    self._toggle_ptt_mode()
                 elif action == "open_help_explainer":
                     # The Logic process decided the user needs the
                     # explanation before the browser opens. It holds the
@@ -2231,15 +2251,19 @@ class GuiManager(QObject):
                         self._first_run_notice_held = True
                     else:
                         self._open_first_run_notice()
-                elif action == "open_calibration":
-                    # wh-7ou.7.3.1: voice-command path ("learn my voice").
-                    # Logic asks the GUI to open the voice-teaching window.
-                    self._open_calibration()
-                elif action == "cal_state":
-                    # wh-7ou.7.3.1: the window renders whatever screen the
-                    # latest cal_state names; it holds no session logic.
-                    if hasattr(self, '_cal_dialog') and self._cal_dialog is not None:
-                        self._cal_dialog.handle_state(message.get("state") or {})
+                elif action == "open_lead_word":
+                    # wh-first-sound-lost.23: the spoken command "record my
+                    # training word" and the tray item both land here.
+                    self._open_lead_word()
+                elif action == "lw_state":
+                    lw_dialog = getattr(self, '_lw_dialog', None)
+                    if lw_dialog is not None:
+                        lw_dialog.handle_state(message.get("state") or {})
+                elif action == "lw_play_go":
+                    # Logic has turned transcription off; start the sound.
+                    lw_dialog = getattr(self, '_lw_dialog', None)
+                    if lw_dialog is not None:
+                        lw_dialog.play_now(message.get("which"))
                 elif action and action.startswith("pm_"):
                     if hasattr(self, '_pm_dialog') and self._pm_dialog is not None:
                         self._pm_dialog.handle_response(message)
@@ -3743,9 +3767,30 @@ class GuiManager(QObject):
         """
         self.button.set_state(self.speech_enabled and self._ptt_feedback not in ("pending", "refused"))
         self.button.set_ptt_mode(self.speech_interaction_mode == "push_to_talk")
-        self.button.setVisible(self.button_visible)
+        self.button.setVisible(
+            bool(self.button_visible and not self.button_hidden_for_exclusive_speaker)
+        )
         self.update_tray_menu()
         self._refresh_settings_window()
+
+    def _set_button_hidden_for_exclusive_speaker(self, hidden: bool) -> None:
+        """Record the Logic process's hide request and log each change once.
+
+        Only the value is stored here. update_ui_state, which the caller runs
+        next on the Qt thread, is what shows or hides the widget
+        (wh-tray-ptt-toggle-thread).
+        """
+        if hidden == self.button_hidden_for_exclusive_speaker:
+            return
+        self.button_hidden_for_exclusive_speaker = hidden
+        if hidden:
+            logger.info(
+                "floating button hidden while a program has sole control of the speaker"
+            )
+        else:
+            logger.info(
+                "floating button no longer hidden for the exclusive-speaker pause"
+            )
 
     def send_command(self, command: dict):
         """:flow: GUI State Synchronization
@@ -4369,10 +4414,9 @@ class GuiManager(QObject):
         self.button.set_state(False)
         self.button.set_ptt_mode(new_mode == "push_to_talk")
         self.update_tray_menu()
-        # The settings window is not refreshed here: the tray menu calls this
-        # method on pystray's thread, and Qt widgets may change only on the Qt
-        # thread. The state update that Logic sends after the mode change
-        # refreshes the window (update_ui_state).
+        # The settings window is not refreshed here: the state update that
+        # Logic sends after the mode change refreshes the window
+        # (update_ui_state).
 
     def _on_button_press(self):
         """Handle floating button mouse-down for PTT detection."""
@@ -4575,10 +4619,12 @@ class GuiManager(QObject):
         if not self.initial_state_received:
             return
         if self._tray_click_timer and self._tray_click_timer.is_alive():
-            # Second click within window -- double-click
+            # Second click within window -- double-click. This runs on
+            # pystray's thread, so it queues the mode change for the Qt
+            # thread (wh-tray-ptt-toggle-thread).
             self._tray_click_timer.cancel()
             self._tray_click_timer = None
-            self._toggle_ptt_mode()
+            self.state_from_logic_queue.put({"action": "toggle_ptt_mode"})
         else:
             # First click -- defer to allow double-click detection
             self._tray_click_timer = threading.Timer(
@@ -4952,7 +4998,7 @@ class GuiManager(QObject):
         """Open the settings window (wh-voice-settings-window).
 
         Built once; every later call shows the same window again. The saved
-        settings (8 to 13 in the window) are asked of the Logic process on
+        settings (8 to 14 in the window) are asked of the Logic process on
         every open, so the window never shows a value from before an edit
         of config.toml.
         """
@@ -4973,10 +5019,13 @@ class GuiManager(QObject):
             dialog.debug_toggle_requested.connect(
                 lambda: self.send_command({'action': 'toggle_log_level'})
             )
-            # Settings 8 to 13 are saved by the Logic process, which owns
+            # Settings 8 to 14 are saved by the Logic process, which owns
             # config.toml; this process never writes it.
             dialog.setting_changed.connect(self._save_settings_window_value)
             dialog.restart_requested.connect(self.request_restart)
+            # The 'Training word...' button opens the window that the tray
+            # item and the spoken command open (wh-first-sound-lost.23).
+            dialog.training_word_requested.connect(self._open_lead_word)
         dialog.apply_live_state(self._settings_window_live_state())
         self._sw_read_request_id = uuid.uuid4().hex
         self.send_command({
@@ -5151,35 +5200,63 @@ class GuiManager(QObject):
             "source": "first_run_notice",
         })
 
-    def _open_calibration(self):
-        """Open the voice-teaching (calibration) window (wh-7ou.7.3.1)."""
-        from calibration_dialog import CalibrationDialog
-        if not hasattr(self, '_cal_dialog') or self._cal_dialog is None:
-            self._cal_dialog = CalibrationDialog(parent=None)
-            self._cal_dialog.calibration_action.connect(self._send_cal_command)
-        # Blank the window and re-arm its one-shot cancel; Logic answers
-        # cal_session_open with the first cal_state to render.
-        self._cal_dialog.reset_session()
-        self.commands_to_logic_queue.put_nowait({"action": "cal_session_open"})
-        self._cal_dialog.show()
-        self._cal_dialog.raise_()
-        self._cal_dialog.activateWindow()
-        # wh-calibration-window-front: 'learn my voice' arrives by the
-        # Logic-to-GUI queue, so this process holds no foreground right and
-        # Windows would only flash the taskbar button. _steal_foreground is
-        # the terminal editor's AttachThreadInput bypass; it catches its own
-        # Win32 failures, and this guard keeps an import or handle failure
-        # out of the caller.
+    def _open_lead_word(self):
+        """Open the 'Your training word' window (wh-first-sound-lost.23).
+
+        One window only. Every way of opening it comes here: the tray item,
+        the Settings window button and the spoken command. When the window
+        is already open, it comes to the front and its session carries on.
+        """
+        from lead_word_dialog import LeadWordDialog
+        dialog = getattr(self, '_lw_dialog', None)
+        if dialog is None:
+            dialog = LeadWordDialog(parent=None)
+            self._lw_dialog = dialog
+            dialog.lead_word_action.connect(self._send_lead_word_command)
+        if not dialog.isVisible():
+            # A new opening: blank the view and ask Logic for the status.
+            dialog.begin_session()
+            self._refresh_lead_word_environment()
+            self.commands_to_logic_queue.put_nowait({"action": "lw_open"})
+        state = dialog.windowState()
+        if state & Qt.WindowState.WindowMinimized:
+            dialog.setWindowState(
+                (state & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        # Opened from the Logic-to-GUI queue by voice, so this process
+        # holds no foreground right and Windows would only flash the
+        # taskbar button. _steal_foreground is the terminal editor's
+        # AttachThreadInput bypass; it catches its own Win32 failures, and
+        # this guard keeps an import or handle failure out of the caller.
         try:
             from terminal_editor_window import _steal_foreground
 
-            _steal_foreground(int(self._cal_dialog.winId()))
+            _steal_foreground(int(dialog.winId()))
         except Exception as exc:
-            logger.debug("Calibration window foreground request failed: %s", exc)
+            logger.debug("Training word window foreground request failed: %s", exc)
 
-    def _send_cal_command(self, command: dict):
-        """Forward voice-teaching commands to Logic process."""
+    def _send_lead_word_command(self, command: dict):
+        """Forward a training-word window command to the Logic process."""
         self.commands_to_logic_queue.put_nowait(command)
+
+    def _refresh_lead_word_environment(self):
+        """Give the open window the facts only this process knows."""
+        dialog = getattr(self, '_lw_dialog', None)
+        if dialog is None:
+            return
+        try:
+            dialog.set_environment(
+                speech_enabled=bool(self.speech_enabled),
+                push_to_talk=self.speech_interaction_mode == "push_to_talk",
+                provider=self.stt_provider,
+                microphone=self.microphone_name or "",
+            )
+        except Exception:
+            logger.exception("Training word window environment refresh failed")
 
     def _create_menu(self, is_tray_menu=True):
         # Resolve the dynamic state to static booleans once.
@@ -5235,9 +5312,12 @@ class GuiManager(QObject):
                     checked=lambda item: interim_results_checked,
                     enabled=is_ready
                 ),
+                # pystray runs this callback on its own thread, and the mode
+                # change updates Qt widgets, so the item queues the request
+                # like About does (wh-tray-ptt-toggle-thread).
                 pystray.MenuItem(
                     "Push-to-Talk Mode",
-                    self._toggle_ptt_mode,
+                    lambda: self.state_from_logic_queue.put({"action": "toggle_ptt_mode"}),
                     checked=lambda item: self.speech_interaction_mode == "push_to_talk",
                     enabled=is_ready,
                 ),
@@ -5249,7 +5329,7 @@ class GuiManager(QObject):
                 pystray.MenuItem(listening_on_label, lambda: None, enabled=False)
             )
 
-            # Add STT Provider submenu if providers available
+            # Add Speech-to-Text Provider submenu if providers available
             if self.stt_providers_available:
                 current_provider = self.stt_provider
                 provider_items = []
@@ -5275,10 +5355,7 @@ class GuiManager(QObject):
                 # built only when at least one engine can run. With none,
                 # the entry is not offered. Remove the limit by building
                 # the submenu when either list is non-empty, in both
-                # branches. That also shows the voice-teaching entry with
-                # no engine (test_gui.py
-                # TestVoiceTeachingSitsInTheSttProviderSubmenu), so decide
-                # that entry's place in the same change.
+                # branches.
                 for provider, label in self.stt_providers_not_installed.items():
                     provider_items.append(
                         pystray.MenuItem(
@@ -5287,20 +5364,20 @@ class GuiManager(QObject):
                             enabled=is_ready
                         )
                     )
-                # Voice teaching sits with the engine list, because it
-                # teaches one engine (wh-voice-teaching-stt-submenu). It
-                # marshals to the Qt thread via the state queue, like the
-                # Pattern Manager (wh-7ou.7.3.1).
+                # The Parakeet training word (wh-first-sound-lost.23) sits
+                # with the engine list, below the engine choices, because it
+                # belongs to one engine. It marshals to the Qt thread via
+                # the state queue, like the Pattern Manager.
                 provider_items.append(pystray.Menu.SEPARATOR)
                 provider_items.append(
                     pystray.MenuItem(
-                        "Teach WheelHouse your voice...",
-                        lambda: self.state_from_logic_queue.put({"action": "open_calibration"}),
+                        "Your training word...",
+                        lambda: self.state_from_logic_queue.put({"action": "open_lead_word"}),
                         enabled=is_ready
                     )
                 )
                 menu_items.append(
-                    pystray.MenuItem("STT Provider", pystray.Menu(*provider_items))
+                    pystray.MenuItem("Speech-to-Text Provider", pystray.Menu(*provider_items))
                 )
 
             # Add AI Model submenu if models available
@@ -5377,7 +5454,14 @@ class GuiManager(QObject):
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Help", self.request_help_online, enabled=is_ready),
-                pystray.MenuItem("About Wheelhouse", self.show_about_dialog),
+                # The About box is modal and must open on the Qt thread, but
+                # pystray runs this callback on its own thread, so the item
+                # queues the request like Pattern Manager and Settings do
+                # (wh-about-window-close).
+                pystray.MenuItem(
+                    "About Wheelhouse",
+                    lambda: self.state_from_logic_queue.put({"action": "show_about_dialog"}),
+                ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Restart Wheelhouse", self.request_restart, enabled=is_ready),
                 pystray.MenuItem("Exit", self.exit_app, enabled=is_ready)
@@ -5444,9 +5528,9 @@ class GuiManager(QObject):
             )
             menu.addAction(listening_on_action)
 
-            # STT Provider submenu (only if providers available)
+            # Speech-to-Text Provider submenu (only if providers available)
             if self.stt_providers_available:
-                stt_submenu = QMenu("STT Provider", menu)
+                stt_submenu = QMenu("Speech-to-Text Provider", menu)
                 stt_submenu.setToolTipsVisible(True)
                 # The hover comment belongs on the action that OPENS the
                 # submenu, because that is the action the parent menu lists.
@@ -5484,16 +5568,17 @@ class GuiManager(QObject):
                         lambda checked, p=provider: self.switch_stt_provider(p)
                     )
                     stt_submenu.addAction(action)
-                # Voice teaching sits with the engine list, because it
-                # teaches one engine (wh-voice-teaching-stt-submenu;
-                # wh-7ou.7.3.1 for the handler).
+                # The Parakeet training word (wh-first-sound-lost.23) sits
+                # with the engine list, below the engine choices, because it
+                # belongs to one engine.
                 stt_submenu.addSeparator()
-                cal_action = stt_submenu.addAction("Teach WheelHouse your voice...")
-                cal_action.setEnabled(is_ready)
-                cal_action.setToolTip(
-                    "Open the voice-teaching session for the Distil-Whisper engine."
+                lw_action = stt_submenu.addAction("Your training word...")
+                lw_action.setEnabled(is_ready)
+                lw_action.setToolTip(
+                    "Record the word that the Parakeet engine puts in front"
+                    " of what you say."
                 )
-                cal_action.triggered.connect(self._open_calibration)
+                lw_action.triggered.connect(self._open_lead_word)
                 menu.addMenu(stt_submenu)
 
             # AI Model submenu (only if models available)

@@ -33,13 +33,22 @@ def deliver(manager, state):
     """Use the production dispatcher and GUI queue consumer, without live IPC."""
     from main import LogicController
     controller = Mock(state_manager=state)
-    while True:
-        try:
-            command = manager.commands_to_logic_queue.get_nowait()
-        except Empty:
-            break
-        LogicController._build_gui_handler_map(controller, command)[command["action"]]()
-    manager._check_queues_and_events()
+    # The tray routes queue {"action": "toggle_ptt_mode"} for the Qt thread, and
+    # only _check_queues_and_events turns it into a Logic command, so repeat
+    # until both queues are empty (wh-tray-ptt-toggle-thread). The bound stops
+    # a defect that keeps refilling a queue from hanging the test.
+    for _ in range(10):
+        while True:
+            try:
+                command = manager.commands_to_logic_queue.get_nowait()
+            except Empty:
+                break
+            LogicController._build_gui_handler_map(controller, command)[command["action"]]()
+        manager._check_queues_and_events()
+        if (manager.commands_to_logic_queue.empty()
+                and manager.state_from_logic_queue.empty()):
+            return
+    raise AssertionError("deliver(): the GUI and Logic queues never became empty")
 
 
 def menu_action(manager, label, backend):

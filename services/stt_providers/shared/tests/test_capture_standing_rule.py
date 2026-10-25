@@ -18,7 +18,6 @@ CAPTURE = PROVIDERS / "shared" / "shared_audio" / "capture"
 SHIPPED_PROVIDERS = (
     "google_stt_server",
     "sherpa_offline_parakeet_stt_server",
-    "distil_medium_en",
 )
 
 

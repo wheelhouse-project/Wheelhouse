@@ -6,13 +6,12 @@
 // expected".
 //
 // The wizard runs the installation engine hidden, so anything the engine prints
-// that is not a failure used to reach the setup log and nothing else. The
-// wizard offers Distil-Whisper on every machine, because it builds its pages
-// before the hardware check has anything to run on; on a machine with no
-// suitable NVIDIA graphics card the engine installs Parakeet instead, and the
-// person at the screen was never told which engine they actually got
-// (wh-wizard-distil-fallback). The same silence covered every requirement the
-// machine did not meet. Those messages now arrive on the NOTICE tag and are
+// that is not a failure used to reach the setup log and nothing else. When the
+// engine installs a different speech engine from the one the person had (an
+// update from the removed Distil-Whisper engine installs Parakeet), the person
+// at the screen was never told which engine they actually got. The same silence
+// covered every requirement the machine did not meet. Those messages now arrive
+// on the NOTICE tag and are
 // collected here, by functions that take everything they need as arguments, so
 // the harness in scripts/release/tests/test_wizard.py can run them over each
 // case rather than read them.

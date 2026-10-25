@@ -87,7 +87,7 @@ All providers share a common audio and transport layer in `services/stt_provider
 
 ### 2.3 How Local Providers Work (Chunked Re-inference)
 
-The local providers (sherpa-onnx Parakeet on CPU by default; Distil-Whisper via faster-whisper on CUDA as an opt-in) share a chunked re-inference streaming engine. See `stt-and-ai.md` for provider selection and model delivery.
+The local provider (sherpa-onnx Parakeet on CPU) uses a chunked re-inference streaming engine. See `stt-and-ai.md` for provider selection and model delivery.
 
 ```
 Audio chunks (16 kHz float32)

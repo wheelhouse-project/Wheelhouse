@@ -605,39 +605,13 @@ class TestStreamLifecycleBoundsState:
 class TestEosWarningGatedByProvider:
     """The EOS_NOT_RECEIVED warning fires only for providers that emit eos.
 
-    Local providers (distil_medium_en, sherpa_offline_parakeet_stt_server)
-    finalize via their own VAD and never emit eos. The warning would
-    otherwise fire on every stream after the third final and tell the user
-    to "verify STT provider is updated", which is misleading. Since wh-nvyh
-    the gate reads the provider's own capabilities declaration (emits_eos
-    false for the local providers) instead of a hardcoded name set.
+    The local provider (sherpa_offline_parakeet_stt_server) finalizes via
+    its own VAD and never emits eos. The warning would otherwise fire on
+    every stream after the third final and tell the user to "verify STT
+    provider is updated", which is misleading. Since wh-nvyh the gate reads
+    the provider's own capabilities declaration (emits_eos false for the
+    local provider) instead of a hardcoded name set.
     """
-
-    @pytest.mark.asyncio
-    async def test_warning_skipped_for_distil_medium_en(self, manager, caplog):
-        ws = FakeWebsocket([
-            capabilities_message("distil_medium_en", False),
-            stable_message("a", 1),
-            final_message("a", 1),
-            stable_message("b", 2),
-            final_message("b", 2),
-            stable_message("c", 3),
-            final_message("c", 3),
-            stable_message("d", 4),
-            final_message("d", 4),
-        ])
-
-        with caplog.at_level(logging.WARNING, logger="integrations.websocket_manager"):
-            await manager.handle_connection(ws)
-
-        warnings = [
-            rec for rec in caplog.records
-            if "EOS_NOT_RECEIVED" in rec.message
-        ]
-        assert warnings == [], (
-            "EOS_NOT_RECEIVED warning fired for a local provider that is not "
-            "expected to emit eos"
-        )
 
     @pytest.mark.asyncio
     async def test_warning_skipped_for_parakeet(self, manager, caplog):
@@ -732,7 +706,7 @@ class TestCapabilitiesHandshake:
         self, manager, caplog
     ):
         ws = FakeWebsocket(
-            [capabilities_message("distil_medium_en", False)]
+            [capabilities_message("parakeet_tdt", False)]
             + _three_finals_no_eos()
         )
         with caplog.at_level(logging.WARNING, logger="integrations.websocket_manager"):

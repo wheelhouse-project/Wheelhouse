@@ -6,7 +6,7 @@ action follows the Pattern Manager precedent: ``open_settings_window`` sends
 GUI process opens the window.
 
 These tests load the real shipped patterns.toml, like
-test_pattern_manager_trigger.py and test_calibration_trigger.py.
+test_pattern_manager_trigger.py.
 """
 import asyncio
 import re

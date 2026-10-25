@@ -97,6 +97,8 @@ def _make_processor(capture_stats=None, engine=None,
     processor.agc = Mock()
     processor.agc.process = Mock(side_effect=lambda pcm, is_speech: pcm)
     processor.agc.on_stt_outcome = Mock()
+    # wh-first-sound-lost.9: the lead-in flush calls apply_last_gain.
+    processor.agc.apply_last_gain = Mock(side_effect=lambda pcm: pcm)
     processor.lead_in_buffer = Mock()
     processor.lead_in_buffer.get_lead_in = Mock(return_value=b'')
     processor.lead_in_buffer.clear = Mock()
@@ -3349,12 +3351,11 @@ class TestTheUnreadableCaptureReasonIsVisible:
             self, caplog):
         """Found by deepseek as wh-capture-load-gaps.1.1.
 
-        distil_medium_en builds its AudioProcessor with no capture_stats
-        (services/stt_providers/distil_medium_en/main.py), which is
-        deliberate and correct for that provider, and it attaches its log
-        handler to shared_stt.audio_processor, the parent of the
-        loadmetrics logger -- so this line does reach wheelhouse.log
-        there, provided it is said after start() has attached that
+        The removed Distil-Whisper provider built its AudioProcessor with no
+        capture_stats, which was deliberate and correct for that provider,
+        and it attached its log handler to shared_stt.audio_processor, the
+        parent of the loadmetrics logger -- so this line reached
+        wheelhouse.log there, provided it is said after start() has attached that
         handler, which is what wh-capture-load-gaps.2.1 fixed and
         TestTheMissingReaderLineOutlivesTheConstructor pins.
         self._capture_stats is assigned once at __init__ and never
@@ -3418,7 +3419,7 @@ class TestTheUnreadableCaptureReasonIsVisible:
 
 
 def _attach_like_a_provider_start(handler):
-    """Attach to shared_stt.audio_processor, as distil's start() does.
+    """Attach to shared_stt.audio_processor, as a provider's start() does.
 
     Returns a callable that puts the logging state back. The level and the
     propagate flag are saved and restored because other tests in this file
@@ -3448,20 +3449,20 @@ def _attach_like_a_provider_start(handler):
 class TestTheMissingReaderLineOutlivesTheConstructor:
     """The one no-reader line must be said where wheelhouse.log can hear it.
 
-    Found by codex as wh-capture-load-gaps.2.1. Both providers build the
-    AudioProcessor inside their own __init__ and attach the handler that
+    Found by codex as wh-capture-load-gaps.2.1. A provider builds the
+    AudioProcessor inside its own __init__ and attaches the handler that
     carries provider records to wheelhouse.log later, inside start():
-    distil_medium_en/main.py attaches to shared_stt.audio_processor, the
-    parent of the loadmetrics logger, and the Parakeet server attaches to
-    LOAD_METRICS_LOGGER_NAME itself. AudioProcessor.__init__ takes a capture
+    the removed Distil-Whisper provider attached to
+    shared_stt.audio_processor, the parent of the loadmetrics logger, and
+    the Parakeet server attaches to LOAD_METRICS_LOGGER_NAME itself. AudioProcessor.__init__ takes a capture
     reading of its own through _seed_capture_history.
 
     So a no-reader report made from the constructor reaches the provider's
     stdout and nothing else, and the latch that holds the line to one per
     process then suppresses every later reading. wheelhouse.log ends up with
-    no [load-diag-capture] line at all -- on distil_medium_en, the one
-    provider whose deliberate configuration this line exists to explain, and
-    the one the procedure document now tells operators to read it on.
+    no [load-diag-capture] line at all -- on the removed Distil-Whisper
+    provider, the one provider whose deliberate configuration this line
+    existed to explain.
 
     The reading these tests take is the direct _read_capture_stats() call the
     rest of this file uses. That the two per-chunk paths reach it is pinned
@@ -4074,7 +4075,7 @@ class TestTheUnreadableWindowNamesItsCause:
         """The twin of wh-capture-load-gaps.1.1 in this class. No shipped
         provider builds a reporter without a reader today -- Parakeet's
         main.py always passes capture_stats=self.audio_capture.get_stats
-        and distil builds no reporter at all -- but the field is assigned
+        -- but the field is assigned
         once here too, so the shape that floods the log is the same one.
         Fixed together so the two readers cannot drift apart.
         """

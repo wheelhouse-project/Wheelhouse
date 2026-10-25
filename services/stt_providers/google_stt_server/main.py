@@ -230,9 +230,9 @@ def startup_notification(error):
     to treat the provider start as failed rather than suppress the
     notice as startup noise (wh-google-creds-file-picker.1.5)."""
     if error is None:
-        return ("Google STT", "Transcription service ready", "ready")
+        return ("Google Cloud", "Transcription service ready", "ready")
     return (
-        "Google STT",
+        "Google Cloud",
         "Google credentials problem - transcription will not work: "
         + error,
         "startup_failed",
@@ -264,7 +264,7 @@ def capture_failure_notification(detail):
     on, and every other detail keeps the "Failed to start" prefix and an
     empty cause (wh-blocked-mic-message)."""
     message, cause = capture_failure_message(detail)
-    return ("Google STT", message, "startup_failed", cause)
+    return ("Google Cloud", message, "startup_failed", cause)
 
 
 def capture_handshake(startup_error, mic):
@@ -398,7 +398,7 @@ def send_startup_notification(forwarder, startup_error, mic, shutting_down,
     return statement. It is required and positional for the same reason
     as ready and notification_lock: a default would let a future call
     site drop the whole mechanism in silence, and the provider would go
-    back to running deaf. parakeet and distil need no event -- their
+    back to running deaf. parakeet needs no event -- its
     announcement is a method and writes self.running directly -- but
     main() keeps its run state in a LOCAL that no other thread can
     assign to, so the answer has to travel as an object.
@@ -506,7 +506,7 @@ def report_streamer_start_failure(forwarder, exc, already_notified):
     if forwarder is None or already_notified:
         return already_notified
     forwarder.send_notification(
-        "Google STT",
+        "Google Cloud",
         "Speech engine error - transcription is not working: "
         f"{type(exc).__name__}: {exc}",
         kind="error",
@@ -1528,7 +1528,7 @@ def main(argv=None):
     # can tell the user (wh-mic-loss-notice). The forwarder is built well
     # below this line, and stays None when forwarding is off, so the
     # notifier reads it at each call and does nothing while there is none.
-    outage_notifier = MicOutageNotifier("Google STT", lambda: forwarder)
+    outage_notifier = MicOutageNotifier("Google Cloud", lambda: forwarder)
     try:
         mic = get_audio_provider(config=audio_config,
                                  overflow_callback=on_overflow_detected,
@@ -1569,7 +1569,7 @@ def main(argv=None):
             print(str(exc), file=sys.stderr)
             return 1
         send_startup_failed_notice(
-            "Google STT",
+            "Google Cloud",
             str(exc),
             cfg.ws_host,
             cfg.ws_port,
@@ -1674,10 +1674,10 @@ def main(argv=None):
             # Declared in the capabilities frame on every connect
             # (wh-audio-suppression-control C3). Set before start(), which
             # is what spawns the thread that sends the frame. An attribute
-            # rather than a constructor argument because the parakeet and
-            # distil servers build their forwarder before their detector
+            # rather than a constructor argument because the parakeet
+            # server builds its forwarder before its detector
             # exists; this provider builds the detector first and assigns
-            # the same way for one shape across the three.
+            # the same way for one shape across providers.
             forwarder.wake_word_available = bool(
                 wake_word_detector and wake_word_detector.is_loaded
             )
@@ -1711,8 +1711,7 @@ def main(argv=None):
             # set_log_level("WARNING") command silently stop forwarding the
             # overflow summary. Attach to the specific overflow logger, not a
             # broad parent, to avoid catching shared_stt.ws_forwarder's own
-            # "sent log" records and creating a feedback loop (see
-            # distil_medium_en for the same pattern).
+            # "sent log" records and creating a feedback loop.
             overflow_log_handler = WebSocketLogHandler(forwarder, source="Google STT")
             overflow_log_handler.setLevel(logging.INFO)
             logging.getLogger("shared_audio.overflow_monitor").addHandler(overflow_log_handler)
@@ -1908,9 +1907,9 @@ def main(argv=None):
     notification_lock = threading.Lock()
     # The announcement thread's only route back to the loop below
     # (wh-capture-winrt-required A9). `stop` is a local of this
-    # function, so a daemon thread cannot assign to it; parakeet and
-    # distil write self.running instead, which is the same answer
-    # through an object they both already have.
+    # function, so a daemon thread cannot assign to it; parakeet
+    # writes self.running instead, which is the same answer
+    # through an object it already has.
     #
     # Without this the loop kept turning on a capture that will never
     # produce a chunk: the notice went out, the process stayed up, and

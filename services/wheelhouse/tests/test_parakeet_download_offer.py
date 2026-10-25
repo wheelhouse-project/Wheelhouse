@@ -9,7 +9,7 @@ that cannot load. The parts covered here:
     out, and its callers choose the startup engine and the fallback, so its
     answer must not change (boss ruling B1, condition). A separate query,
     which only the tray-menu builder calls, reports a disabled Parakeet
-    whose model is incomplete as "Parakeet (model not installed)".
+    whose model is incomplete as "Parakeet V3 (Local) - model not installed".
   * The Logic check in _switch_stt_provider (A1, A2 Not now, A4).
   * Download now: the installer launch, then the ordinary shutdown (A2).
   * The GUI side: the two ruled notices, Copy command, Not now.
@@ -39,7 +39,7 @@ from stt import parakeet_model as pm  # noqa: E402
 # marker in test_gui_grant_prompt.py (wh-pytest-flaky-segfault).
 pytestmark = pytest.mark.usefixtures("qapp", "mock_editor_window")
 
-MENU_LABEL = "Parakeet (model not installed)"
+MENU_LABEL = "Parakeet V3 (Local) - model not installed"
 SCRIPT = Path(r"C:\Users\someone\AppData\Local\WheelhouseSetup\install-wheelhouse.ps1")
 
 OFFER_TITLE = "Parakeet speech model not installed"
@@ -227,7 +227,9 @@ class TestTheMenuQuery:
     def test_a_disabled_provider_other_than_parakeet_is_not_listed(
         self, stt_tree
     ):
-        _write_provider(stt_tree["services"], "distil_medium_en", "distil_medium_en",
+        # A stand-in name that discovery never reports, so the test still
+        # fails when the query lists every disabled engine it did not find.
+        _write_provider(stt_tree["services"], "other_stt_server", "other_stt",
                         enabled=False)
         launcher = _launcher(stt_tree)
         names = [p["name"] for p in launcher.get_not_installed_providers()]
@@ -242,7 +244,7 @@ class TestTheMenuQuery:
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
         services = tmp_path / "stt_providers"
         services.mkdir()
-        _write_provider(services, "distil_medium_en", "distil_medium_en",
+        _write_provider(services, "google_stt_server", "google_stt",
                         enabled=False)
         launcher = _launcher({"services": services, "tmp_path": tmp_path})
 
@@ -290,7 +292,7 @@ class TestRunningProviderPids:
         alive.poll.return_value = None
         exited = MagicMock(pid=6)
         exited.poll.return_value = 0
-        launcher._subprocesses = {"google_stt": alive, "distil_medium_en": exited}
+        launcher._subprocesses = {"google_stt": alive, "parakeet_tdt": exited}
         (launcher.app_data_dir / "google_stt.pid").write_text(str(os.getpid()))
 
         assert launcher.running_provider_pids() == [5, os.getpid()]
@@ -569,13 +571,13 @@ class TestTheLogicCheck:
 
     @pytest.mark.asyncio
     async def test_another_engine_never_checks_the_parakeet_model(self):
-        controller = _controller()
+        controller = _controller(current="parakeet_tdt")
         check = MagicMock(side_effect=AssertionError("checked"))
         with patch.object(pm, "parakeet_model_complete", check):
-            await _switch(controller, "distil_medium_en")
+            await _switch(controller, "google_stt")
         check.assert_not_called()
         controller.service_manager.remote_stt_launcher.start_provider.assert_called_once_with(
-            "distil_medium_en")
+            "google_stt")
 
     @pytest.mark.asyncio
     async def test_the_running_engine_returns_before_the_check(self):

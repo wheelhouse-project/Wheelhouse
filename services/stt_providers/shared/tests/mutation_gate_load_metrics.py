@@ -3257,9 +3257,9 @@ MUTATIONS = [
     # ---------------------------------------------------------------
     # wh-capture-load-gaps.1.1: a missing reader is a fact about how the
     # provider was built, not a reading that failed. Reported once per
-    # instance in both readers. Before this, distil_medium_en -- which
-    # ships with no capture reader on purpose -- wrote the line every
-    # five seconds for the life of the process.
+    # instance in both readers. Before this, the Distil-Whisper provider
+    # (since removed), which shipped with no capture reader on purpose,
+    # wrote the line every five seconds for the life of the process.
     # ---------------------------------------------------------------
     {
         # The guard read but never obeyed, which is the flood itself.

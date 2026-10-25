@@ -315,6 +315,10 @@ class TestFunctionKeySpokenAsFAndANumber:
             ("shift 5", ["shift", "5"]),
             # No key named f0, so "f" and "0" stay two keys.
             ("f 0", ["f", "0"]),
+            # "zero" is the key name "0" (wh-number-words-command-failures).
+            ("f zero", ["f", "0"]),
+            ("control two", ["ctrl", "2"]),
+            ("shift five", ["shift", "5"]),
         ],
         ids=_spoken_ids,
     )
@@ -323,16 +327,17 @@ class TestFunctionKeySpokenAsFAndANumber:
         assert result["params"] == {"keys": keys, "repeat": 1}
 
     @pytest.mark.parametrize(
-        "sequence", ["f 13", "f thirteen", "f zero"], ids=_spoken_ids
+        "sequence", ["f 13", "f thirteen"], ids=_spoken_ids
     )
     def test_f_and_a_number_with_no_function_key_still_fails(
         self, action_funcs, sequence
     ):
-        """No key named f13 or f0: a number word stays an unknown key name.
+        """No key named f13: "f" and a number above nine is not a key.
 
-        A digit is itself a key name ("f 0" presses F and 0), but a number
-        word such as "thirteen" or "zero" is not, so the command fails as
-        it did before and the words go to dictation.
+        The digits 0 through 9 and the words zero through nine are key
+        names ("f 0" and "f zero" press F and 0), but 13 and "thirteen"
+        are not, so the command fails as it did before and the words go
+        to dictation.
         """
         with pytest.raises(ActionFailed):
             action_funcs.press_keys(sequence)
@@ -355,6 +360,18 @@ class TestFunctionKeySpokenAsFAndANumber:
             ("press control 2", ["ctrl", "2"], 1),
             ("press shift 5", ["shift", "5"], 1),
             ("press f 0", ["f", "0"], 1),
+            # Number words are the digit keys (wh-number-words-command-failures).
+            ("press control two", ["ctrl", "2"], 1),
+            ("press f zero", ["f", "0"], 1),
+            ("press shift five", ["shift", "5"], 1),
+            ("press control two times", ["ctrl"], 2),
+            # Unchanged: the count group takes the longest number phrase,
+            # and the number reader reads "two three" as 23, so this presses
+            # Ctrl 23 times, as before. With digits, "2 3" is not one number,
+            # so "press control 2 3 times" presses Ctrl+2 three times. Making
+            # "two" the key here would also change "press tab two three
+            # times", which presses Tab 23 times today.
+            ("press control two three times", ["ctrl"], 23),
             # A3: a count after the function key.
             ("press f 5 3 times", ["f5"], 3),
             ("press f 12 two times", ["f12"], 2),

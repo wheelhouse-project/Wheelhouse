@@ -27,6 +27,7 @@ design table does not state the None case, and treating None as a match would
 let a bare substring query click the wrong control (wh-9f3t.2.1).
 """
 
+from speech.number_word_parser import parse_number_word
 from ui.element_types import ElementMatch, ElementQuery
 from ui.uia_walker import NAME_TO_CONTROL_TYPE_ID
 
@@ -39,8 +40,47 @@ _SCORE_INVOKE = 0.1
 _SCORE_ENABLED = 0.1
 
 
+def names_are_same_number(query_name: str, match_name: str) -> bool:
+    """True when both names read as the same number, such as "seven" and "7".
+
+    The user cannot choose whether the speech engine writes "7" or "seven",
+    and a control's own name can be either form (a calculator key), so
+    "click seven button" must find a control named "7"
+    (wh-number-words-command-failures). Sound-alikes are off: a control
+    named "4" is not "for".
+    """
+    query_number = _number_value(query_name)
+    if query_number is None:
+        return False
+    return _number_value(match_name) == query_number
+
+
+def _number_value(name: str) -> int | None:
+    """The number that a name is, or None when the name is not only a number.
+
+    Digits read with int(), because parse_number_word returns None for "0".
+    A name that starts with "number" is not a number here: parse_number_word
+    drops that word for "click number three", but a control named "Number 7"
+    is not the control named "7". A name with the word "oh" is not a number
+    here either: parse_number_word reads "one oh" as 10, but "oh" is a
+    sound-alike, and sound-alikes are off. The check splits on hyphens
+    too, because parse_number_word reads "one-oh" as "one oh".
+    """
+    text = name.strip()
+    if text.isascii() and text.isdigit():
+        return int(text)
+    words = text.casefold().split()
+    if not words or words[0] in ("number", "numbers"):
+        return None
+    if "oh" in text.casefold().replace("-", " ").split():
+        return None
+    return parse_number_word(text, zero=True)
+
+
 def _name_exact(query_name: str, match_name: str) -> bool:
-    return query_name == match_name
+    return query_name == match_name or names_are_same_number(
+        query_name, match_name
+    )
 
 
 def _name_starts_with(query_name: str, match_name: str) -> bool:

@@ -1722,3 +1722,182 @@ launcher = "launcher.py"
 
         assert result is True
         mock_ws_manager.send_command_to_stt.assert_called_once_with("shutdown")
+
+
+class TestSaveEngineAudioEnvironment:
+    """wh-first-sound-lost.1, ruling R1: the Wheelhouse config.toml key
+    SAVE_ENGINE_AUDIO becomes WHEELHOUSE_SAVE_ENGINE_AUDIO in the environment
+    of every provider process, read again at EACH provider start.
+
+    The value is "1" only when the key holds the boolean true. A missing
+    file, malformed TOML, a missing key, or any other value (a string, a
+    number) gives "0": the feature is off unless the user clearly turned it
+    on. The parent process environment is never the source: a stale
+    WHEELHOUSE_SAVE_ENGINE_AUDIO there must not leak into the provider.
+
+    config_path is the test seam. Production passes nothing and the launcher
+    reads services/wheelhouse/config.toml, the file ConfigService loads.
+    """
+
+    ENV_NAME = "WHEELHOUSE_SAVE_ENGINE_AUDIO"
+
+    @pytest.fixture
+    def services_dir(self, tmp_path):
+        google_dir = tmp_path / "google_stt_server"
+        google_dir.mkdir()
+        (google_dir / "config.toml").write_text(
+            '[provider]\nname = "google_stt"\n'
+            'display_name = "Google Cloud STT"\nlauncher = "launcher.py"\n'
+        )
+        (google_dir / "launcher.py").write_text("# launcher stub")
+        return tmp_path
+
+    @pytest.fixture
+    def app_data_dir(self, tmp_path):
+        app_data = tmp_path / "appdata"
+        app_data.mkdir()
+        return app_data
+
+    @pytest.fixture
+    def config_file(self, tmp_path):
+        return tmp_path / "wheelhouse_config.toml"
+
+    def _launcher(self, services_dir, app_data_dir, config_file):
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        return RemoteSTTLauncher(
+            services_dir=services_dir,
+            app_data_dir=app_data_dir,
+            ws_port=5500,
+            config_path=config_file,
+        )
+
+    def _spawn_env(self, launcher):
+        """Start google_stt with Popen mocked and return the child's env."""
+        with patch("subprocess.Popen") as mock_popen:
+            process = MagicMock(pid=12345)
+            process.poll.return_value = 0
+            mock_popen.return_value = process
+            assert launcher.start_provider("google_stt") is True
+        mock_popen.assert_called_once()
+        return mock_popen.call_args.kwargs["env"]
+
+    def test_true_gives_one(self, services_dir, app_data_dir, config_file):
+        config_file.write_text("SAVE_ENGINE_AUDIO = true\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "1"
+
+    def test_false_gives_zero(self, services_dir, app_data_dir, config_file):
+        config_file.write_text("SAVE_ENGINE_AUDIO = false\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_a_missing_key_gives_zero(self, services_dir, app_data_dir, config_file):
+        config_file.write_text("LOG_TRANSCRIPTS = true\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_a_missing_file_gives_zero(self, services_dir, app_data_dir, config_file):
+        assert not config_file.exists()
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_malformed_toml_gives_zero(self, services_dir, app_data_dir, config_file):
+        config_file.write_text("SAVE_ENGINE_AUDIO = true\n[[[ not toml\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_a_file_that_is_not_utf8_gives_zero(
+            self, services_dir, app_data_dir, config_file):
+        config_file.write_bytes(
+            "SAVE_ENGINE_AUDIO = true\n".encode("utf-16"))
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    @pytest.mark.parametrize("line", [
+        'SAVE_ENGINE_AUDIO = "true"',
+        'SAVE_ENGINE_AUDIO = "1"',
+        "SAVE_ENGINE_AUDIO = 1",
+        "SAVE_ENGINE_AUDIO = 1.0",
+        "SAVE_ENGINE_AUDIO = [true]",
+        "SAVE_ENGINE_AUDIO = { value = true }",
+    ])
+    def test_anything_but_the_boolean_true_gives_zero(
+            self, services_dir, app_data_dir, config_file, line):
+        config_file.write_text(line + "\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_a_key_inside_a_table_is_not_the_top_level_key(
+            self, services_dir, app_data_dir, config_file):
+        config_file.write_text("[other]\nSAVE_ENGINE_AUDIO = true\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_the_file_is_read_at_each_start_not_at_construction(
+            self, services_dir, app_data_dir, config_file):
+        config_file.write_text("SAVE_ENGINE_AUDIO = false\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        config_file.write_text("SAVE_ENGINE_AUDIO = true\n")
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "1"
+
+    def test_a_change_between_two_starts_reaches_the_second_start(
+            self, services_dir, app_data_dir, config_file):
+        config_file.write_text("SAVE_ENGINE_AUDIO = false\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+        config_file.write_text("SAVE_ENGINE_AUDIO = true\n")
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "1"
+
+        config_file.write_text("SAVE_ENGINE_AUDIO = false\n")
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_a_stale_value_in_the_parent_environment_does_not_leak(
+            self, services_dir, app_data_dir, config_file, monkeypatch):
+        monkeypatch.setenv(self.ENV_NAME, "1")
+        config_file.write_text("SAVE_ENGINE_AUDIO = false\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        assert self._spawn_env(launcher)[self.ENV_NAME] == "0"
+
+    def test_the_parent_environment_is_left_alone(
+            self, services_dir, app_data_dir, config_file, monkeypatch):
+        monkeypatch.delenv(self.ENV_NAME, raising=False)
+        config_file.write_text("SAVE_ENGINE_AUDIO = true\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        self._spawn_env(launcher)
+        assert self.ENV_NAME not in os.environ
+
+    def test_the_rest_of_the_child_environment_is_kept(
+            self, services_dir, app_data_dir, config_file, monkeypatch):
+        monkeypatch.setenv("WHEELHOUSE_SENTINEL_FOR_TEST", "kept")
+        config_file.write_text("SAVE_ENGINE_AUDIO = true\n")
+        launcher = self._launcher(services_dir, app_data_dir, config_file)
+        env = self._spawn_env(launcher)
+        assert env["WHEELHOUSE_SENTINEL_FOR_TEST"] == "kept"
+        assert "VIRTUAL_ENV" not in env
+
+    def test_the_default_config_path_is_the_wheelhouse_config_toml(
+            self, services_dir, app_data_dir):
+        """Production passes no config_path. The launcher must then read
+        services/wheelhouse/config.toml, the file ConfigService loads."""
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir, ws_port=5500)
+        expected = Path(__file__).resolve().parent.parent / "config.toml"
+        assert Path(launcher.config_path).resolve() == expected
+
+    def test_the_example_config_ships_the_key_off(self):
+        """config.toml.example holds the key with the shipped value off
+        (acceptance item 2) and a comment that says what it does."""
+        import tomllib
+
+        example = Path(__file__).resolve().parent.parent / "config.toml.example"
+        text = example.read_text(encoding="utf-8")
+        assert tomllib.loads(text)["SAVE_ENGINE_AUDIO"] is False
+        lines = text.splitlines()
+        index = next(i for i, line in enumerate(lines)
+                     if line.startswith("SAVE_ENGINE_AUDIO"))
+        assert lines[index - 1].lstrip().startswith("#"), (
+            "the key needs a comment directly above it")

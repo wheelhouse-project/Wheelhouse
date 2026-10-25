@@ -1510,9 +1510,10 @@ class TestOnlyAReadyFrameCompletesStartup:
         This test asserted the opposite until
         wh-ready-connection-stamp.2.2.1, and its docstring said every
         provider except google_stt_server sends no kind. Both stopped
-        being true in the same commit: distil_medium_en and the sherpa
-        parakeet provider now send kind="ready", and the substring
-        fallback that read a kind-less notice is gone. The fallback also
+        being true in the same commit: the sherpa parakeet provider (and
+        the Distil-Whisper provider, since removed) sent kind="ready", and
+        the substring fallback that read a kind-less notice is gone. The
+        fallback also
         matched "already", so every provider's "Hint '<word>' already
         exists" notice completed the launch and never reached the user.
         """
@@ -1871,7 +1872,6 @@ class TestEveryProviderDeclaresTheNameItIsLaunchedUnder:
         "service",
         [
             "google_stt_server",
-            "distil_medium_en",
             "sherpa_offline_parakeet_stt_server",
         ],
     )
@@ -1933,7 +1933,6 @@ class TestEveryProviderClassifiesItsReadyNotice:
     @pytest.mark.parametrize(
         "service",
         [
-            "distil_medium_en",
             "sherpa_offline_parakeet_stt_server",
         ],
     )

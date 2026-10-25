@@ -15,10 +15,10 @@ an Increase button.
 IPC contract:
     - Emits the ``*_requested`` signals for settings 1 to 7 (the menu's own
       settings; the GUI manager calls the menu's callable for each).
-    - Emits ``setting_changed(key, value)`` for settings 8 to 13, which the
+    - Emits ``setting_changed(key, value)`` for settings 8 to 14, which the
       GUI manager saves through the Logic process.
     - Receives state via ``apply_live_state`` (settings 1 to 7) and
-      ``apply_config_values`` (settings 8 to 13), and the outcome of a save
+      ``apply_config_values`` (settings 8 to 14), and the outcome of a save
       via ``show_save_result``.
 """
 
@@ -65,6 +65,7 @@ REPLACEMENT_TIMEOUT_KEY = "REPLACEMENT_TIMEOUT_MS"
 COMMAND_TIMEOUT_KEY = "COMMAND_TIMEOUT_MS"
 AUDIO_SUPPRESSION_KEY = "ENABLE_AUDIO_SUPPRESSION"
 WAKE_WORD_KEY = "wake_word.enabled"
+OVERLAY_KEEP_NUMBERS_KEY = "click.overlay_keep_numbers"
 
 CONFIG_KEYS = (
     CHECK_FOR_UPDATES_KEY,
@@ -73,6 +74,7 @@ CONFIG_KEYS = (
     COMMAND_TIMEOUT_KEY,
     AUDIO_SUPPRESSION_KEY,
     WAKE_WORD_KEY,
+    OVERLAY_KEEP_NUMBERS_KEY,
 )
 
 # What a missing key means. CHECK_FOR_UPDATES and ENABLE_AUDIO_SUPPRESSION
@@ -80,10 +82,14 @@ CONFIG_KEYS = (
 # for a true boolean (launcher.py _read_transcript_logging_flag). The wake
 # word is off when the key is missing: service_manager.py reads
 # config_service.get("wake_word.enabled", False) inline, so there is no
-# constant to import.
+# constant to import. The numbers go away after a click or a window change
+# when click.overlay_keep_numbers is missing (it ships as false), so a missing
+# key shows its box unchecked.
 WAKE_WORD_ENABLED_DEFAULT = False
 
 RESTART_TEXT = "takes effect after restart"
+TRAINING_WORD_BUTTON = "Training word..."
+
 WAKE_WORD_SPEECH_WARNING = (
     "If the wake word is off and you turn speech off, only the keyboard or "
     "mouse can turn speech on again."
@@ -294,7 +300,7 @@ class SettingsWindowDialog(QDialog):
         stt_provider_requested(str), ai_provider_requested(str),
         debug_toggle_requested.
 
-    Settings 8 to 13 emit ``setting_changed(key, value)``; the GUI manager
+    Settings 8 to 14 emit ``setting_changed(key, value)``; the GUI manager
     saves each one through the Logic process.
 
     ``restart_requested`` asks the GUI manager to restart WheelHouse.
@@ -309,6 +315,9 @@ class SettingsWindowDialog(QDialog):
     debug_toggle_requested = Signal()
     setting_changed = Signal(str, object)
     restart_requested = Signal()
+    # The 'Training word...' button: GuiManager opens the same window as
+    # the tray item and the spoken command (wh-first-sound-lost.23).
+    training_word_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -325,13 +334,13 @@ class SettingsWindowDialog(QDialog):
         # Closing this window must not end the program.
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
 
-        # Stored values of settings 8 to 13, as the Logic process reported
+        # Stored values of settings 8 to 14, as the Logic process reported
         # them (None for a key the settings file does not hold).
         self._values: dict = {}
         self._loaded = False
         self._ready = False
         self._tab_widgets: list = []
-        # The 13 setting labels in window order, recorded where _build_ui
+        # The 14 setting labels in window order, recorded where _build_ui
         # creates each control (setting_labels).
         self._setting_labels: list[str] = []
         self._help_window = None
@@ -431,10 +440,10 @@ class SettingsWindowDialog(QDialog):
             lambda checked=False: self.debug_toggle_requested.emit(),
         )
 
-        self._setting_labels.append("STT Provider")
-        stt_layout = self._group_box(main, "STT Provider")
+        self._setting_labels.append("Speech-to-Text Provider")
+        stt_layout = self._group_box(main, "Speech-to-Text Provider")
         self._stt = _ProviderGroup(
-            self, stt_layout, "STT Provider", self.stt_provider_requested.emit
+            self, stt_layout, "Speech-to-Text Provider", self.stt_provider_requested.emit
         )
         self._setting_labels.append("AI Model")
         ai_layout = self._group_box(main, "AI Model")
@@ -442,7 +451,7 @@ class SettingsWindowDialog(QDialog):
             self, ai_layout, "AI Model", self.ai_provider_requested.emit
         )
 
-        # --- Settings 8 to 13: saved in config.toml through Logic ---
+        # --- Settings 8 to 14: saved in config.toml through Logic ---
         other_layout = self._group_box(main, "Other settings")
 
         self._updates_box, _ = self._check_box(
@@ -489,6 +498,27 @@ class SettingsWindowDialog(QDialog):
         )
         self._add_restart_note(layout, WAKE_WORD_KEY)
         layout.addWidget(self._note(WAKE_WORD_SPEECH_WARNING), 1)
+
+        # No restart note: the Logic process applies a saved value to the
+        # next click or window change (the updates box is the other box
+        # without a note).
+        self._keep_numbers_box, _ = self._check_box(
+            other_layout, "Keep numbers on after a click or window change",
+            lambda checked=False: self._on_check(
+                OVERLAY_KEEP_NUMBERS_KEY, self._keep_numbers_box),
+        )
+
+        # Not a setting: it opens the 'Your training word' window of the
+        # Parakeet engine (wh-first-sound-lost.23). A push button, so it
+        # is not one of the 14 setting labels.
+        row, layout = self._row(other_layout)
+        self._training_word_btn = QPushButton(TRAINING_WORD_BUTTON)
+        self._training_word_btn.setAccessibleName(TRAINING_WORD_BUTTON)
+        self._training_word_btn.clicked.connect(
+            lambda checked=False: self.training_word_requested.emit()
+        )
+        layout.addWidget(self._training_word_btn)
+        layout.addStretch(1)
 
         main.addStretch(1)
 
@@ -597,12 +627,13 @@ class SettingsWindowDialog(QDialog):
             order += [self._timeouts[key]["decrease"],
                       self._timeouts[key]["increase"]]
         order += [self._audio_radios[c] for c in ("auto", "on", "off")]
-        order += [self._wake_box, self._help_btn, self._restart_btn,
-                  self._close_btn]
+        order += [self._wake_box, self._keep_numbers_box,
+                  self._training_word_btn, self._help_btn,
+                  self._restart_btn, self._close_btn]
         return order
 
     def setting_labels(self) -> list:
-        """The 13 setting labels, in the order the window shows them."""
+        """The 14 setting labels, in the order the window shows them."""
         return list(self._setting_labels)
 
     def _apply_tab_order(self) -> None:
@@ -624,6 +655,7 @@ class SettingsWindowDialog(QDialog):
         selectable)], ai_current, ai_absent_label.
         """
         self._ready = bool(state.get("ready"))
+        self._training_word_btn.setEnabled(self._ready)
         for box, key in (
             (self._speech_box, "speech_enabled"),
             (self._button_box, "button_visible"),
@@ -652,7 +684,7 @@ class SettingsWindowDialog(QDialog):
             self._apply_tab_order()
 
     # ------------------------------------------------------------------ #
-    #  Settings 8 to 13: stored values
+    #  Settings 8 to 14: stored values
     # ------------------------------------------------------------------ #
 
     def apply_config_values(self, values: dict) -> None:
@@ -676,6 +708,8 @@ class SettingsWindowDialog(QDialog):
             return UPDATE_CHECK_DEFAULT if value is None else bool(value)
         if key == LOG_TRANSCRIPTS_KEY:
             return value is True
+        if key == OVERLAY_KEEP_NUMBERS_KEY:
+            return value is True
         return WAKE_WORD_ENABLED_DEFAULT if value is None else bool(value)
 
     def _refresh_config_controls(self) -> None:
@@ -683,6 +717,7 @@ class SettingsWindowDialog(QDialog):
             (CHECK_FOR_UPDATES_KEY, self._updates_box),
             (LOG_TRANSCRIPTS_KEY, self._transcripts_box),
             (WAKE_WORD_KEY, self._wake_box),
+            (OVERLAY_KEEP_NUMBERS_KEY, self._keep_numbers_box),
         ):
             _set_checked_quietly(box, self._effective_bool(key))
             box.setEnabled(self._loaded)
@@ -702,7 +737,7 @@ class SettingsWindowDialog(QDialog):
         self._status.setText("Saved" if saved else "Not saved")
 
     # ------------------------------------------------------------------ #
-    #  User actions on settings 8 to 13
+    #  User actions on settings 8 to 14
     # ------------------------------------------------------------------ #
 
     def _on_check(self, key, box) -> None:

@@ -611,9 +611,11 @@ class TestStartRemoteStt:
     def test_falls_back_to_first_provider_when_default_absent(self, service_manager):
         """Falls back to discovery order when the default provider is not discovered."""
         mock_launcher = MagicMock()
+        # Two non-default names (other_stt is a stand-in), so the test fails
+        # when the fallback takes any entry but the first.
         mock_launcher.discover_providers.return_value = [
             {"name": "google_stt"},
-            {"name": "distil_medium_en"},
+            {"name": "other_stt"},
         ]
         mock_launcher.start_provider.side_effect = [False, True]
         service_manager.remote_stt_launcher = mock_launcher

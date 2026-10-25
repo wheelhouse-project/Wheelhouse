@@ -28,13 +28,13 @@ class TestEveryQtMenuEntryHasAHoverComment:
     Qt 6.11.0 in this checkout's venv:
 
         QAction("Speech Enabled").toolTip()                 -> 'Speech Enabled'
-        QAction("Teach WheelHouse your voice...").toolTip()  -> 'Teach WheelHouse your voice'
+        QAction("Pattern Manager...").toolTip()             -> 'Pattern Manager'
         QAction("&Help").toolTip()                           -> 'Help'
 
     So the default is the text with "..." removed, "&" removed, and the
     result trimmed -- which also means a test asserting only
-    ``toolTip() != text()`` would pass today on the ellipsis entry and prove
-    nothing about it. Each assertion below compares against the default Qt
+    ``toolTip() != text()`` would pass on any entry whose text ends in "..." and
+    prove nothing about it. Each assertion below compares against the default Qt
     itself produces for that exact text, asked of a throwaway QAction rather
     than copied from Qt's rule, so a later Qt change cannot make the test
     lenient without being noticed.
@@ -74,13 +74,13 @@ class TestEveryQtMenuEntryHasAHoverComment:
     def test_every_submenu_entry_explains_itself(self, menu_manager):
         menu = menu_manager._create_menu(is_tray_menu=False)
         submenus = self._submenus(menu)
-        assert sorted(submenus) == ["AI Model", "STT Provider"], sorted(submenus)
+        assert sorted(submenus) == ["AI Model", "Speech-to-Text Provider"], sorted(submenus)
         missing = {}
         for title, submenu in submenus.items():
             entries = self._entries(submenu)
             assert entries, f"guard: {title} built no children"
             missing[title] = self._without_hover_comments(entries)
-        assert missing == {"STT Provider": [], "AI Model": []}
+        assert missing == {"Speech-to-Text Provider": [], "AI Model": []}
 
     def test_the_menus_let_the_hover_comments_be_seen(self, menu_manager):
         """A tooltip nobody can see is not a hover comment.
@@ -92,12 +92,12 @@ class TestEveryQtMenuEntryHasAHoverComment:
         """
         menu = menu_manager._create_menu(is_tray_menu=False)
         submenus = self._submenus(menu)
-        assert sorted(submenus) == ["AI Model", "STT Provider"], sorted(submenus)
+        assert sorted(submenus) == ["AI Model", "Speech-to-Text Provider"], sorted(submenus)
         visible = {"the menu itself": menu.toolTipsVisible()}
         for title, submenu in submenus.items():
             visible[title] = submenu.toolTipsVisible()
         assert visible == {"the menu itself": True,
-                           "STT Provider": True, "AI Model": True}
+                           "Speech-to-Text Provider": True, "AI Model": True}
 
 
 class TestTheAiModelEntriesNoOtherTestBuilds:

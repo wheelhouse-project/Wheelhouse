@@ -14,6 +14,7 @@ import os
 import re
 import struct
 import sys
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,89 @@ logger = logging.getLogger(__name__)
 # the model's own tokens. It sits beside the ONNX files in the model
 # directory and is NOT tokens.txt (wh-parakeet-hotword-vocab).
 BPE_VOCAB_FILENAME = "bpe.vocab"
+
+# ONNX Runtime settings for the CPU path, passed as "cpu:<path>"
+# (wh-parakeet-spinning-upgrade). The file turns off the worker-thread
+# wait loop. The path is absolute because _load_model can change the
+# working directory to the model directory.
+CPU_PROVIDER_CONFIG = Path(__file__).resolve().parent / "onnxruntime_cpu.conf"
+
+
+def cpu_provider_string() -> str:
+    """The sherpa-onnx provider string for the CPU path.
+
+    sherpa-onnx ends the whole process when it cannot open the conf file,
+    so a missing file gives plain "cpu": the provider still works, with
+    the worker threads busy while it decodes."""
+    if CPU_PROVIDER_CONFIG.is_file():
+        return f"cpu:{CPU_PROVIDER_CONFIG}"
+    logger.warning(
+        f"ONNX Runtime conf file not found at {CPU_PROVIDER_CONFIG}; "
+        "using provider 'cpu' with its default settings"
+    )
+    return "cpu"
+
+
+# The word the lead-word file holds (wh-first-sound-lost.22). The removal
+# rule below looks for this word at the start of the decoded text.
+LEAD_WORD = "hello"
+
+_LEAD_WORD_RUN = r"[A-Za-z']+"
+
+
+class LeadWordError(Exception):
+    """The lead-word file cannot be used. The message says why."""
+
+
+# Marks an utterance that has not copied the lead-word reference yet. None
+# cannot serve, because None is a real value: the join is off.
+_NOT_COPIED = object()
+
+
+def remove_lead_word(text: str | None, lead_word: str) -> tuple[str, bool]:
+    """Remove the lead word from the start of the raw decoded text.
+
+    Returns (text, True) when the first run of letters and apostrophes
+    equals `lead_word` (case ignored). The text after that run loses every
+    leading character that is not a letter or a digit. It removes one word
+    and does not change the case of the next word. Otherwise it returns
+    the text unchanged and False. This is the rule that the offline tests
+    of wh-first-sound-lost.20 used, word for word.
+    """
+    m = re.search(_LEAD_WORD_RUN, text or "")
+    if m and m.group().lower() == lead_word:
+        return re.sub(r"^[^A-Za-z0-9]+", "", text[m.end():]), True
+    return text or "", False
+
+
+def load_lead_word_audio(path: str, sample_rate: int) -> np.ndarray:
+    """Read the lead-word file as a read-only float32 array.
+
+    Accepts only a WAV file with `sample_rate`, one channel, 16-bit PCM,
+    and at least one sample. The file is used as it is: no cut, no pad, no
+    gain change. Raises LeadWordError for any other file.
+    """
+    try:
+        with wave.open(os.fspath(path), "rb") as w:
+            rate = w.getframerate()
+            channels = w.getnchannels()
+            width = w.getsampwidth()
+            frames = w.getnframes()
+            raw = w.readframes(frames)
+    except (OSError, wave.Error, EOFError, RuntimeError, TypeError, ValueError) as e:
+        raise LeadWordError(f"cannot read it ({type(e).__name__}: {e})") from e
+    if rate != sample_rate or channels != 1 or width != 2:
+        raise LeadWordError(
+            f"its format is {rate} Hz, {channels} channel(s), {width * 8}-bit; "
+            f"only {sample_rate} Hz, 1 channel, 16-bit is accepted"
+        )
+    if frames < 1 or len(raw) != frames * 2:
+        raise LeadWordError(
+            "it holds no samples" if frames < 1 else "its data is cut off"
+        )
+    audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / np.float32(32768.0)
+    audio.flags.writeable = False
+    return audio
 
 
 @dataclass(frozen=True)
@@ -397,9 +481,16 @@ class SherpaOfflineEngine:
         num_threads: int = 4,
         hotwords_file: str | None = None,
         hotwords_score: float = 2.0,
+        lead_word_path: str = "",
     ):
         self._sample_rate = sample_rate
         self._recognizer = None
+
+        # Read once, before _load_model can change the working directory.
+        # None means the join is off (wh-first-sound-lost.22).
+        self._lead_audio: np.ndarray | None = None
+        self._utterance_lead = _NOT_COPIED
+        self.set_lead_word(self._load_lead_audio(lead_word_path))
 
         # Timing thresholds (converted to sample counts)
         self._re_inference_interval_samples = int(sample_rate * re_inference_interval_ms / 1000)
@@ -432,6 +523,50 @@ class SherpaOfflineEngine:
         self._has_new_result: bool = False
         self._finalized: bool = False
         self.last_result: str = ""
+        # The user's float32 audio for the final decode, or None. With the
+        # lead-word join on, the recognizer gets this array with the lead
+        # word in front, but this attribute never holds the word.
+        # AudioProcessor passes it to the opt-in engine-audio saver
+        # (wh-first-sound-lost.1). A partial decode never sets it.
+        self.last_final_audio: np.ndarray | None = None
+
+    def set_lead_word(self, audio: np.ndarray | None) -> None:
+        """Set the lead-word reference: a read-only float32 array from
+        load_lead_word_audio, or None for the join off.
+
+        The start-time load, Keep, restore, turn on, and turn off call this
+        method (wh-first-sound-lost.23). It is one attribute assignment, so
+        a decode on the audio thread sees the old array or the new one,
+        never a part of one. A caller on another thread may call it at any
+        time. An utterance in progress keeps the reference it copied at its
+        first pass; the next utterance uses the new one.
+        """
+        self._lead_audio = audio
+
+    def has_lead_word(self) -> bool:
+        """True when the engine holds a lead word now (the join is on)."""
+        return self._lead_audio is not None
+
+    def _load_lead_audio(self, lead_word_path: str) -> np.ndarray | None:
+        """The lead-word array, or None when the join is off.
+
+        An empty path is the normal "off". A file that cannot be used
+        writes one warning line and leaves the join off; it never stops
+        the provider.
+        """
+        if lead_word_path == "":
+            return None
+        try:
+            audio = load_lead_word_audio(lead_word_path, self._sample_rate)
+        except LeadWordError as e:
+            logger.warning(
+                f"Lead-word join is off: lead_word_path {lead_word_path}: {e}"
+            )
+            return None
+        logger.info(
+            f"Lead-word join is on: {len(audio)} samples from {lead_word_path}"
+        )
+        return audio
 
     def _load_model(
         self,
@@ -515,7 +650,7 @@ class SherpaOfflineEngine:
                 os.chdir(str(model_dir))
                 logger.info("Changed to model directory for external weights resolution")
 
-            provider = "cuda" if use_gpu else "cpu"
+            provider = "cuda" if use_gpu else cpu_provider_string()
             self._recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
                 tokens=str(tokens),
                 encoder=str(encoder),
@@ -622,6 +757,8 @@ class SherpaOfflineEngine:
         self._has_new_result = False
         self._finalized = False
         self.last_result = ""
+        self.last_final_audio = None
+        self._utterance_lead = _NOT_COPIED
 
     # ------------------------------------------------------------------
     # Internal methods
@@ -637,12 +774,38 @@ class SherpaOfflineEngine:
             self._trailing_silence_samples += len(samples)
 
     def _recognize(self, audio: np.ndarray) -> str:
-        """Run sherpa-onnx offline recognition on audio buffer."""
+        """Run sherpa-onnx offline recognition on the user's audio.
+
+        With the lead-word join on, the decoder gets the lead word in
+        front of the audio, with no pause. The removal rule runs on the
+        raw text. When it finds no lead word, this decodes the user's
+        audio again without the word and returns that text.
+        """
+        # The first pass of an utterance copies the reference, and every
+        # pass until reset() uses that copy, so one utterance never joins
+        # two different words (wh-first-sound-lost.23).
+        if self._utterance_lead is _NOT_COPIED:
+            self._utterance_lead = self._lead_audio
+        lead = self._utterance_lead
+        if lead is None:
+            return self._decode_plain(audio)
+        text, found = remove_lead_word(
+            self._decode_plain(np.concatenate((lead, audio))), LEAD_WORD
+        )
+        if found:
+            return text
+        return self._decode_plain(audio)
+
+    def _decode_plain(self, audio: np.ndarray) -> str:
+        """Decode `audio` as it is and return the raw token text."""
         assert self._recognizer is not None
         stream = self._recognizer.create_stream()
         stream.accept_waveform(self._sample_rate, audio)
         self._recognizer.decode_stream(stream)
-        return stream.result.text.strip()
+        # From sherpa-onnx 1.13.4, result.text loses the space before every
+        # ASCII punctuation character ("It costs$5."), with no option to
+        # keep it. result.tokens keeps the space (wh-parakeet-spinning-upgrade).
+        return "".join(stream.result.tokens).strip()
 
     def _run_inference(self) -> None:
         """Run periodic inference and update stability."""
@@ -664,6 +827,7 @@ class SherpaOfflineEngine:
     def _run_final_inference(self) -> None:
         """Run final inference and promote all words."""
         audio = np.concatenate(self._audio_buffer)
+        self.last_final_audio = audio
 
         text = self._recognize(audio)
         # Same stage order as _run_inference above.

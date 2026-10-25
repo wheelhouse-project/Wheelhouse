@@ -434,6 +434,11 @@ DEBOUNCE = (
     "            )\n"
     '            self._arm_overlay_settle_refire("pattern manager tree change")\n'
     "            return\n"
+    "        event = decision.event\n"
+    "        # As in ``_on_overlay_menu_popup_change``: settle a coalesced\n"
+    "        # foreground event into this event before the cancel drops it.\n"
+    "        if self._consume_pending_foreground_dismissal():\n"
+    "            event = dataclasses.replace(event, dismisses_numbers=True)\n"
     "        self._cancel_overlay_settle_refire()\n"
 )
 

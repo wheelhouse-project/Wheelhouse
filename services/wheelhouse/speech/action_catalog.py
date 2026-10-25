@@ -151,7 +151,7 @@ ACTION_CATALOG = (
         ],
         "example": (
             'Trigger "^undo\\s*(\\d+)?$" with params ["ctrl", "z", "g1"]: '
-            'saying "undo 3" presses Ctrl+Z three times.'
+            'saying "undo three" presses Ctrl+Z three times.'
         ),
         "audience": "basic",
         "group": "Keyboard",
@@ -182,7 +182,7 @@ ACTION_CATALOG = (
         ],
         "example": (
             'Trigger "^scroll down\\s*(\\d+)?$" with params ["down", "g1"]: '
-            'saying "scroll down 3" turns the wheel three notches down.'
+            'saying "scroll down three" turns the wheel three notches down.'
         ),
         "audience": "advanced",
         "group": "Scrolling",
@@ -319,15 +319,15 @@ ACTION_CATALOG = (
             {
                 "name": "repeat",
                 "summary": (
-                    "Optional repeat count as digits or a number word "
-                    "(capped at 50); often a capture group like g1."
+                    "Optional repeat count (capped at 50); often a "
+                    "capture group like g1."
                 ),
                 "kind": "number",
             },
         ],
         "example": (
             'Trigger "^delete\\s*(\\d+)?$" with params ["del", "g1"]: '
-            'saying "delete 3" presses the Delete key three times.'
+            'saying "delete three" presses the Delete key three times.'
         ),
         "audience": "advanced",
         "group": "Keyboard",
@@ -353,17 +353,16 @@ ACTION_CATALOG = (
             {
                 "name": "repeat",
                 "summary": (
-                    "Optional repeat count as digits or a number word "
-                    "(capped at 30); the capture group g2 in "
-                    '"press tab 3 times".'
+                    "Optional repeat count (capped at 30); the "
+                    'capture group g2 in "press tab three times".'
                 ),
                 "kind": "number",
             },
         ],
         "example": (
-            'Trigger "^press\\s*(.+?)(?:\\s+(\\d+)\\s+times?)?$" with params '
+            'Trigger "^press\\b\\s*(.+?)(?:\\s+(\\d+)\\s+times?)?$" with params '
             '["g1", "g2"]: saying "press control alt delete" presses '
-            'Ctrl+Alt+Delete, and "press tab 3 times" presses Tab three '
+            'Ctrl+Alt+Delete, and "press tab three times" presses Tab three '
             "times."
         ),
         "audience": "advanced",
@@ -434,7 +433,7 @@ ACTION_CATALOG = (
             },
         ],
         "example": (
-            'Trigger "^insert\\s*(.+)$" with params ["g1"]: saying '
+            'Trigger "^insert\\b\\s*(.+)$" with params ["g1"]: saying '
             '"insert TODO:" inserts "TODO:" exactly, no leading space.'
         ),
         "audience": "advanced",
@@ -498,15 +497,14 @@ ACTION_CATALOG = (
             {
                 "name": "count",
                 "summary": (
-                    "How many newlines to insert, as digits or a number "
-                    "word; capped at 50."
+                    "How many newlines to insert; capped at 50."
                 ),
                 "kind": "number",
             },
         ],
         "example": (
             'Trigger "^blank lines (\\d+)$" with params ["g1"]: saying '
-            '"blank lines 3" inserts three newlines.'
+            '"blank lines three" inserts three newlines.'
         ),
         "audience": "advanced",
         "group": "Text",
@@ -572,14 +570,13 @@ ACTION_CATALOG = (
             {
                 "name": "number",
                 "summary": (
-                    "The number as a word (one) or digits (1); usually the "
-                    "capture group g1."
+                    "The number; usually the capture group g1."
                 ),
                 "kind": "number",
             },
         ],
         "example": (
-            'Trigger "^item (\\d+)$" with params ["g1"]: saying "item 5" '
+            'Trigger "^item (\\d+)$" with params ["g1"]: saying "item five" '
             'inserts "5.".'
         ),
         "audience": "advanced",
@@ -593,8 +590,8 @@ ACTION_CATALOG = (
             {
                 "name": "number",
                 "summary": (
-                    "The number as words (twenty three) or digits (23); "
-                    "usually the capture group g1."
+                    "The number; usually the capture "
+                    "group g1."
                 ),
                 "kind": "number",
             },
@@ -704,7 +701,7 @@ ACTION_CATALOG = (
         "example": (
             'Trigger "^(?:show numbers|apply numbers|show numbers here)$" with no '
             'params: saying '
-            "\"show numbers\" shows the badges; then \"click 4\" "
+            "\"show numbers\" shows the badges; then \"click four\" "
             "clicks control number 4. \"apply numbers\" and \"show numbers "
             "here\" do the same."
         ),
@@ -764,7 +761,7 @@ ACTION_CATALOG = (
         "params": [],
         "example": (
             'Trigger "^(?:show|apply) grid$" with no params: saying '
-            '"show grid" or "apply grid" paints the grid; "5" then "click" clicks the '
+            '"show grid" or "apply grid" paints the grid; "five" then "click" clicks the '
             "center."
         ),
         "audience": "advanced",
@@ -802,7 +799,8 @@ ACTION_CATALOG = (
         "label": "Mouse-grid action word",
         "summary": (
             "Runs one grid-only action word (mark, drag, or move_here) at "
-            "the grid's current cell; with the grid closed the word types "
+            "the center of the grid that is on the screen; with the grid "
+            "closed the word types "
             "as normal dictation."
         ),
         "params": [
@@ -834,7 +832,7 @@ ACTION_CATALOG = (
         "name": "grid_number_command",
         "label": "Mouse-grid number",
         "summary": (
-            "Narrows the open mouse grid to the spoken cell (1-9). With "
+            "Narrows the open mouse grid to the spoken cell (one to nine). With "
             "the grid closed and the numbered overlay showing, the number "
             "clicks the control with that label; with neither showing, "
             "the number types as normal dictation."
@@ -870,7 +868,8 @@ ACTION_CATALOG = (
         "name": "grid_click_command",
         "label": "Mouse-grid bare click",
         "summary": (
-            "Clicks at the open mouse grid's current cell center (click, "
+            "Clicks at the center of the open mouse grid on the screen "
+            "(click, "
             "tap, right click, double click, or triple click); with the "
             "grid closed it clicks at the current pointer position. The "
             "words type as dictation only when voice clicking is turned "
@@ -1191,17 +1190,17 @@ ACTION_CATALOG = (
         "group": "Wheelhouse",
     },
     {
-        "name": "open_calibration",
-        "label": "Teach WheelHouse your voice",
+        "name": "open_lead_word",
+        "label": "Your training word",
         "summary": (
-            "Opens the voice-teaching window, where WheelHouse learns "
-            "how you sound so it stops missing short words. Only the "
-            "Distil-Whisper speech engine uses it."
+            "Opens the training-word window, where you record the word "
+            "'hello' once so that WheelHouse keeps the first sound of a "
+            "phrase after a pause. Only the Parakeet speech engine uses it."
         ),
         "params": [],
         "example": (
-            'Trigger "^learn my voice$" with no params: saying "learn '
-            'my voice" opens the voice-teaching window.'
+            'Trigger "^record my training word$" with no params: saying '
+            '"record my training word" opens the training-word window.'
         ),
         "audience": "advanced",
         "group": "Wheelhouse",

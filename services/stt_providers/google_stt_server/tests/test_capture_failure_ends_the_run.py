@@ -15,9 +15,9 @@ with nothing that could reach main()'s loop, so `while not stop:` kept
 turning on a capture that will never produce a chunk and the provider
 ran deaf for as long as the machine stayed up.
 
-Google's mechanism differs from the other two providers, and this is
-where that difference lives. Parakeet and distil keep the run state on
-the server object, so their announcement writes self.running and their
+Google's mechanism differs from the other provider, and this is
+where that difference lives. Parakeet keeps the run state on
+the server object, so its announcement writes self.running and its
 own loop reads it. Google has no server object: main() keeps `stop` as
 a LOCAL, and the announcement is a module-level function on a daemon
 thread, which cannot assign to it. So the answer travels back as a

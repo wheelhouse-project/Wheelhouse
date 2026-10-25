@@ -32,8 +32,8 @@ dependencies = [
     # winrt_capture.py) is the only capture path any provider may use, so
     # winsdk is a dependency of the shared package rather than of each
     # provider (wh-capture-winrt-required). It used to be pinned in the
-    # Parakeet and Google pyprojects and absent from Distil-Whisper, which
-    # is why that provider could never take the WinRT path at all.
+    # Parakeet and Google pyprojects and absent from the removed
+    # Distil-Whisper provider, which could never take the WinRT path at all.
     # Windows-only by nature, and pinned exactly because every published
     # winsdk version is a pre-release: there is no stable release to float
     # to (checked on PyPI 2026-09-03, latest 1.0.0b10). The exact pin is

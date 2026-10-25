@@ -13,7 +13,7 @@ table in memory and never read the shipped file.
 
 What is read here is therefore the TRACKED file on disk rather than a
 fixture, which is the only thing that can catch the key being absent from it.
-The sherpa and distil suites pin the same binding for their own providers, in
+The sherpa suite pins the same binding for its own provider, in
 tests/test_load_diagnostics_wiring.py.
 """
 from __future__ import annotations

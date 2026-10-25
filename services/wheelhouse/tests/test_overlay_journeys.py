@@ -676,6 +676,16 @@ async def test_journey_rig_starts_with_no_declined_or_pending_state(journey_rig)
     assert controller.click_counter.snapshot_entries() == []
 
 
+async def test_journey_rig_starts_with_no_window_change_pending_and_numbers_removed_by_default(journey_rig):
+    """wh-numbers-stay-setting: a freshly built controller has no foreground
+    event waiting for the settle refire, and the shipped example config
+    (``overlay_keep_numbers = false``) gives a machine that removes numbers."""
+
+    controller = journey_rig.controller
+    assert controller._overlay_settle_refire_foreground is False
+    assert controller.click_overlay_state.keep_numbers is False
+
+
 # ---------------------------------------------------------------------------
 # Journey 1 -- two numbers spoken close together
 # ---------------------------------------------------------------------------

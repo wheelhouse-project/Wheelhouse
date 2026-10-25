@@ -1707,3 +1707,128 @@ class TestEveryPreSendPasteRefusalProvesItDeliveredNothing:
         result = strategy.insert("hello", _context("brave.exe", 0x1111))
 
         assert result.delivered_nothing is False
+
+
+# --- wh-dictation-paste-loss-load.2: one word, one copy budget --------------
+
+
+class _WordClock:
+    """A clock that moves only when the code under test waits.
+
+    Each failed ``pyperclip.copy`` spends 0.5 s, the length of
+    pyperclip's own OpenClipboard loop, so no test sleeps for real.
+    """
+
+    def __init__(self):
+        self.now = 1000.0
+        self.copy_calls = 0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    @property
+    def elapsed(self):
+        return self.now - 1000.0
+
+    def failing_copy(self, _text):
+        from pyperclip import PyperclipWindowsException
+
+        self.copy_calls += 1
+        self.now += 0.5
+        raise PyperclipWindowsException("Error calling OpenClipboard")
+
+
+class TestOneWordWaitsAboutThreeSecondsForTheClipboard:
+    """The shadow attempt and the fallback share one copy budget.
+
+    A held clipboard used to cost 3 s per attempt, so a word that went
+    through ShadowBufferStrategy and then the clipboard fallback waited
+    twice. The handler opens one budget around ``strategy.insert``.
+    """
+
+    @pytest.mark.parametrize("text_pattern", [True, False])
+    def test_the_word_waits_about_three_seconds_and_types_nothing(
+        self, handler, text_pattern,
+    ):
+        from ui.clipboard_operations import ClipboardOperations
+        from ui.strategies import specific
+
+        clock = _WordClock()
+        clipboard = ClipboardOperations(_CONFIG)
+        handler.clipboard = clipboard
+        strategy = _standard_strategy_with_a_valid_buffer(clipboard)
+        _route_to(handler, strategy)
+        uia = (
+            {"preceding_chars": "", "has_selection": False}
+            if text_pattern else None
+        )
+
+        with patch("ui.clipboard_operations.pyperclip") as pyperclip_mock, \
+             patch(
+                 "ui.clipboard_operations.verified_press_keys",
+                 return_value=(True, 6, 6),
+             ) as keys, \
+             patch("ui.clipboard_operations._copy_monotonic", clock.monotonic), \
+             patch("ui.clipboard_operations._copy_sleep", clock.sleep), \
+             patch.object(
+                 specific, "read_context_via_text_pattern", return_value=uia,
+             ), \
+             patch(f"{_MOD}.capture_context", return_value=_context(
+                 "notepad.exe", 0x1111,
+             )):
+            pyperclip_mock.copy.side_effect = clock.failing_copy
+            delivered = handler._execute_insert_with_ack(
+                "hello", request_id="r1",
+            )
+
+        assert delivered is False
+        assert 3.0 <= clock.elapsed <= 3.6, (
+            f"one word waited {clock.elapsed:.2f} s for the clipboard"
+        )
+        keys.assert_not_called()
+        assert clipboard.last_paste_was_sent is False
+
+    def test_the_budget_is_closed_when_the_insert_ends(self, handler):
+        from ui.clipboard_operations import ClipboardOperations
+
+        clipboard = ClipboardOperations(_CONFIG)
+        handler.clipboard = clipboard
+        seen = []
+
+        class _Probe:
+            def insert(self, text, context, request_id=None, options=None):
+                seen.append(clipboard._copy_budget_depth)
+                return InsertionResult(success=True, clipboard_dirty=False)
+
+        _route_to(handler, _Probe())
+        with patch(f"{_MOD}.capture_context", return_value=_context(
+            "notepad.exe", 0x1111,
+        )):
+            handler._execute_insert_with_ack("hello", request_id="r1")
+
+        assert seen == [1]
+        assert clipboard._copy_budget_depth == 0
+
+    def test_a_raw_insert_opens_the_same_budget(self, handler):
+        from ui.clipboard_operations import ClipboardOperations
+
+        clipboard = ClipboardOperations(_CONFIG)
+        handler.clipboard = clipboard
+        seen = []
+
+        class _Probe:
+            def insert(self, text, context, request_id=None, options=None):
+                seen.append(clipboard._copy_budget_depth)
+                return InsertionResult(success=True, clipboard_dirty=False)
+
+        _route_to(handler, _Probe())
+        with patch(f"{_MOD}.capture_context", return_value=_context(
+            "notepad.exe", 0x1111,
+        )):
+            handler.raw_insert_text("hello")
+
+        assert seen == [1]
+        assert clipboard._copy_budget_depth == 0

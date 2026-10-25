@@ -30,7 +30,7 @@ What should have happened instead.
 
 **Speech engine**
 
-Parakeet (default) / Distil-Whisper / Google Cloud STT
+Parakeet (default) / Google Cloud STT
 
 **Environment**
 

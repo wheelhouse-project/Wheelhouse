@@ -16,24 +16,14 @@ so the class also carries two tests that must stay GREEN under every mutation
 here, proving the fixture opens the STT-provider gate the credentials item
 used to sit behind.
 
-The gate holds six mutations today. The first four are the original set,
-one per label per builder, because gui.py builds the tray menu (pystray) and
-the floating-button menu (Qt) from separate code:
+The gate holds four mutations, one per label per builder, because gui.py
+builds the tray menu (pystray) and the floating-button menu (Qt) from
+separate code:
 
     tray-restart-item-restored     -> the tray test must fail
     button-restart-item-restored   -> the button test must fail
     tray-credentials-item-restored -> the tray test must fail
     button-credentials-item-restored -> the button test must fail
-
-Two more came with the move of "Teach WheelHouse your voice..." into the STT
-Provider submenu (wh-voice-teaching-stt-submenu). One per branch, because
-each branch holds its own copy of the entry, and a move done in one branch
-only is the mistake a two-branch builder invites:
-
-    qt-voice-teaching-not-in-submenu       -> the Qt submenu loses the entry
-    tray-voice-teaching-callback-does-nothing -> the tray entry stops asking
-                                                 the Qt thread to open the
-                                                 session
 
 Each mutation restores only the LABEL, with an inert callback.  Wiring the
 old callbacks back would be a false catch in the language of the
@@ -60,14 +50,10 @@ sys.stdout.reconfigure(line_buffering=True)  # type: ignore[union-attr]
 
 SERVICE_ROOT = Path(__file__).resolve().parent.parent
 TARGET = SERVICE_ROOT / "gui.py"
-# The two voice-teaching mutations below have catchers in two classes beside
-# TestRemovedMenuItems, and the expected-name check refuses to start on a name
-# pytest never collects.
 SELECTION = [
     "tests/test_gui.py",
     "-k",
-    "TestRemovedMenuItems or TestTheTwoMenusOfferTheSameEntries"
-    " or TestVoiceTeachingSitsInTheSttProviderSubmenu",
+    "TestRemovedMenuItems or TestTheTwoMenusOfferTheSameEntries",
 ]
 
 # Every mutation must leave these two passing.  They are the evidence that the
@@ -84,45 +70,13 @@ _TRAY_RESTART_ANCHOR = (
 
 _TRAY_PROVIDER_ANCHOR = (
     "                menu_items.append(\n"
-    '                    pystray.MenuItem("STT Provider", pystray.Menu(*provider_items))\n'
+    '                    pystray.MenuItem("Speech-to-Text Provider", pystray.Menu(*provider_items))\n'
     "                )"
 )
 
 _BUTTON_RESTART_ANCHOR = '            restart_action = QAction("Restart Wheelhouse", self)'
 
 _BUTTON_PROVIDER_ANCHOR = "                menu.addMenu(stt_submenu)"
-
-# The whole Qt voice-teaching block, separator included, and it is replaced
-# by ``pass`` rather than by nothing, for two reasons. The block is the only
-# statement after the provider loop inside ``if self.stt_providers_available:``
-# that is not the ``menu.addMenu`` call, so deleting it alone would still
-# compile -- but removing the first line alone would not: the four lines
-# below it name ``cal_action``, and a NameError while the menu is built would
-# fail every test that builds a menu, which is a false catch in the language
-# of the mutation-gate skill. Taking the whole block keeps the mutant honest:
-# the Qt submenu loses the entry and nothing else changes. The identifier
-# ``cal_action`` appears nowhere else in gui.py, so the anchor cannot match a
-# second place.
-_BUTTON_VOICE_TEACHING_ANCHOR = (
-    "                stt_submenu.addSeparator()\n"
-    '                cal_action = stt_submenu.addAction("Teach WheelHouse your voice...")\n'
-    "                cal_action.setEnabled(is_ready)\n"
-    "                cal_action.setToolTip(\n"
-    '                    "Open the voice-teaching session for the Distil-Whisper engine."\n'
-    "                )\n"
-    "                cal_action.triggered.connect(self._open_calibration)"
-)
-
-# The tray callback, and only the callback. The label, the readiness gate and
-# the separator above it all stay, so the mutant builds a menu that looks
-# right and does nothing, which is what a disconnected handler is. The
-# replacement is a lambda of the same shape, so pystray still has something
-# callable to hold and the catcher fails on the queue it never received
-# rather than on a crash.
-_TRAY_VOICE_TEACHING_CALLBACK_ANCHOR = (
-    '                        lambda: self.state_from_logic_queue.put('
-    '{"action": "open_calibration"}),'
-)
 
 MUTATIONS = [
     {
@@ -172,27 +126,6 @@ MUTATIONS = [
             "                    creds_action.setEnabled(is_ready)"
         ),
         "expect": ["test_the_button_menu_has_no_google_cloud_credentials"],
-    },
-    {
-        "name": "qt-voice-teaching-not-in-submenu",
-        "old": _BUTTON_VOICE_TEACHING_ANCHOR,
-        "new": "                pass",
-        # The second name is the point of the mutation. The move has to
-        # happen in both branches, and the shared comparison is what refuses
-        # a move done in one of them; the first name only proves the Qt
-        # branch itself lost the entry.
-        "expect": [
-            "test_the_window_submenu_lists_the_engines_then_the_entry",
-            "test_the_two_menus_list_the_same_submenu_entries",
-        ],
-    },
-    {
-        "name": "tray-voice-teaching-callback-does-nothing",
-        "old": _TRAY_VOICE_TEACHING_CALLBACK_ANCHOR,
-        "new": "                        lambda: None,",
-        "expect": [
-            "test_the_tray_entry_asks_the_qt_thread_to_open_the_session",
-        ],
     },
 ]
 

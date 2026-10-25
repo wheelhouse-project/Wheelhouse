@@ -36,7 +36,25 @@ _UNITS = {
 # a parser where "write" works in some shapes and not others.
 # "write" is the only navigation homophone the fragment defines; the other
 # seven blocks in it are punctuation and delete/copy range commands.
-_DIRECTIONS = {"right": "right", "write": "right", "left": "left"}
+#
+# "up" and "down" are here so that a "then" chain can move up or down
+# (wh-voice-chain-up-down). A single "go up three" never reaches this
+# parser: the whole_utterance_only blocks nav-up-times, nav-up-lines and
+# nav-up-paragraphs (and their down twins) sit above cursor-navigate in
+# patterns.toml. A chain reaches only cursor-navigate, so an up or down
+# part must read the same words those blocks read and press the same keys.
+_DIRECTIONS = {"right": "right", "write": "right", "left": "left",
+               "up": "up", "down": "down"}
+
+# The unit words of an up or down part: the single forms take "lines" and
+# "paragraphs", and "times" after a count, but never "words" or
+# "characters". No unit word is one line, as in nav-up-times.
+_VERTICAL = {"up", "down"}
+_VERTICAL_UNITS = {
+    "line": "line", "lines": "line",
+    "paragraph": "paragraph", "paragraphs": "paragraph",
+}
+_TIMES = {"time", "times"}
 
 _SIMPLE_LANDMARKS = {"home", "end", "top", "bottom"}
 _COMPOUND_PREFIXES = {"start", "beginning", "end"}
@@ -134,26 +152,39 @@ class NavigationParser:
             return None
         pos += 1
 
+        vertical = direction in _VERTICAL
+        # "grab up" and "grab down" are not built: no single form selects
+        # up or down (Boss ruling 2026-10-20 20:10, Q2 = 1).
+        if vertical and verb == "grab":
+            return None
+
         count = 1
-        unit = "character"
+        unit = "line" if vertical else "character"
 
-        # Optional count
-        if pos < len(tokens):
-            n = NavigationParser._parse_count(tokens[pos])
-            if n is not None:
-                count = n
-                pos += 1
-
-        # Optional unit
-        if pos < len(tokens):
-            u = _UNITS.get(tokens[pos])
+        # Optional unit: only the last token can be one.
+        end = len(tokens)
+        if end > pos:
+            last = tokens[end - 1]
+            if vertical:
+                u = _VERTICAL_UNITS.get(last)
+                # "times" needs a count before it, as in nav-up-times.
+                if u is None and last in _TIMES and end - 1 > pos:
+                    u = "line"
+            else:
+                u = _UNITS.get(last)
             if u is not None:
                 unit = u
-                pos += 1
+                end -= 1
 
-        # Trailing tokens = invalid
-        if pos < len(tokens):
-            return None
+        # Optional count: every token between the direction and the unit
+        # is one number, so "twenty three" reads as 23, the same as "23"
+        # (wh-number-words-command-failures). Tokens that are not one
+        # number, such as "three emails", make the segment invalid.
+        if end > pos:
+            n = NavigationParser._parse_count(" ".join(tokens[pos:end]))
+            if n is None:
+                return None
+            count = n
 
         return NavigationCommand(verb=verb, kind="relative", direction=direction, count=count, unit=unit)
 
@@ -184,11 +215,9 @@ class NavigationParser:
         change is recorded for the user's decision on
         wh-number-words-one-parser.
 
-        crewcut: this reads ONE token, so a multi-word count ("go right
-        twenty three characters") is still unparseable here even though
-        the parser can read it. The caller walks the tokens one at a time
-        and would need to try the longest phrase first; that walk belongs
-        with the cursor-navigation work, not with the count fix.
+        The text can be more than one word: the caller passes every token
+        between the direction and the unit, so "twenty three" reads as 23
+        (wh-number-words-command-failures).
         """
         n = parse_number_word(text, aliases=True)
         if n is None:

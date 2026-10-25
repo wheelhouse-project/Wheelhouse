@@ -2824,3 +2824,140 @@ def test_settling_mic_pause_resume_does_not_repaint_the_old_badges():
 
     assert EffectKind.DISPATCH_PAINT not in effect_kinds(r)
     assert m.state is OverlayState.CLOSED
+
+
+# ---------------------------------------------------------------------------
+# wh-numbers-stay-setting: keep_numbers off removes the numbers
+# ---------------------------------------------------------------------------
+
+def dismissing(kind: OverlayEventKind) -> OverlayEvent:
+    return OverlayEvent(kind, dismisses_numbers=True)
+
+
+def hide_numbers_effects(machine_factory) -> list[EffectKind]:
+    """The effect kinds a plain "hide numbers" gives from the painted state."""
+    m = machine_factory()
+    drive_to_painted(m)
+    return effect_kinds(m.apply(OverlayEvent(OverlayEventKind.HIDE_NUMBERS)))
+
+
+def test_keep_numbers_defaults_to_true_on_a_bare_machine():
+    assert ClickOverlayStateMachine().keep_numbers is True
+
+
+def test_non_dismissing_click_complete_still_refreshes_when_keep_numbers_off():
+    m = ClickOverlayStateMachine(keep_numbers=False)
+    drive_to_painted(m)
+
+    r = m.apply(OverlayEvent(OverlayEventKind.CLICK_COMPLETE))
+
+    assert m.state is OverlayState.REFRESH_IN_FLIGHT
+    assert EffectKind.DISPATCH_BUILD in effect_kinds(r)
+
+
+def test_settle_after_click_still_settles_a_non_dismissing_click_when_keep_numbers_off():
+    m = ClickOverlayStateMachine(keep_numbers=False, settle_after_click=True)
+    drive_to_painted(m)
+
+    m.apply(OverlayEvent(OverlayEventKind.CLICK_COMPLETE))
+
+    assert m.state is OverlayState.POST_CLICK_SETTLING
+
+
+def test_dismissing_focus_change_closes_in_painted_when_keep_numbers_off():
+    m = ClickOverlayStateMachine(keep_numbers=False)
+    drive_to_painted(m)
+
+    r = m.apply(dismissing(OverlayEventKind.FOCUS_CHANGE))
+
+    assert m.state is OverlayState.CLOSED
+    assert m.pinned_snapshot_id is None
+    assert effect_kinds(r) == hide_numbers_effects(
+        lambda: ClickOverlayStateMachine(keep_numbers=False)
+    )
+
+
+def test_non_dismissing_focus_change_still_refreshes_in_painted_when_keep_numbers_off():
+    m = ClickOverlayStateMachine(keep_numbers=False)
+    drive_to_painted(m)
+
+    m.apply(OverlayEvent(OverlayEventKind.FOCUS_CHANGE))
+
+    assert m.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_dismissing_focus_change_still_refreshes_in_painted_when_keep_numbers_on():
+    m = ClickOverlayStateMachine(keep_numbers=True)
+    drive_to_painted(m)
+
+    m.apply(dismissing(OverlayEventKind.FOCUS_CHANGE))
+
+    assert m.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def _drive_to(m: ClickOverlayStateMachine, state: OverlayState) -> None:
+    if state is OverlayState.WALK_IN_FLIGHT:
+        m.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+    elif state is OverlayState.PAINT_IN_FLIGHT:
+        m.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+        m.apply(gen_event(m, OverlayEventKind.BUILD_RESPONSE, snapshot_id="snap"))
+    elif state is OverlayState.REFRESH_IN_FLIGHT:
+        drive_to_painted(m)
+        m.apply(OverlayEvent(OverlayEventKind.FOCUS_CHANGE))
+    else:  # pragma: no cover - test helper misuse
+        raise AssertionError(state)
+    assert m.state is state
+
+
+def test_dismissing_focus_change_closes_in_refresh_in_flight_when_keep_numbers_off():
+    m = ClickOverlayStateMachine(keep_numbers=False)
+    _drive_to(m, OverlayState.REFRESH_IN_FLIGHT)
+
+    r = m.apply(dismissing(OverlayEventKind.FOCUS_CHANGE))
+
+    assert r.outcome is OverlayOutcome.ACCEPTED
+    assert m.state is OverlayState.CLOSED
+    assert m.pinned_snapshot_id is None
+    assert EffectKind.DISPATCH_CLEAR in effect_kinds(r)
+    assert EffectKind.DISPATCH_BUILD not in effect_kinds(r)
+
+    # Same effects as "hide numbers" from the same state.
+    ref = ClickOverlayStateMachine(keep_numbers=False)
+    _drive_to(ref, OverlayState.REFRESH_IN_FLIGHT)
+    assert effect_kinds(r) == effect_kinds(
+        ref.apply(OverlayEvent(OverlayEventKind.HIDE_NUMBERS))
+    )
+
+
+@pytest.mark.parametrize(
+    "state", [OverlayState.WALK_IN_FLIGHT, OverlayState.PAINT_IN_FLIGHT]
+)
+def test_dismissing_focus_change_restarts_the_first_walk_when_keep_numbers_off(state):
+    """Item 11: before any numbers appear, a foreground change keeps today's restart."""
+    m = ClickOverlayStateMachine(keep_numbers=False)
+    _drive_to(m, state)
+
+    r = m.apply(dismissing(OverlayEventKind.FOCUS_CHANGE))
+
+    assert m.state is OverlayState.WALK_IN_FLIGHT
+    assert EffectKind.DISPATCH_BUILD in effect_kinds(r)
+
+
+def test_dismissing_focus_change_still_supersedes_refresh_when_keep_numbers_on():
+    m = ClickOverlayStateMachine(keep_numbers=True)
+    _drive_to(m, OverlayState.REFRESH_IN_FLIGHT)
+
+    r = m.apply(dismissing(OverlayEventKind.FOCUS_CHANGE))
+
+    assert m.state is not OverlayState.CLOSED
+    assert EffectKind.DISPATCH_BUILD in effect_kinds(r)
+
+
+def test_click_complete_in_refresh_in_flight_stays_held_when_keep_numbers_off():
+    m = ClickOverlayStateMachine(keep_numbers=False)
+    _drive_to(m, OverlayState.REFRESH_IN_FLIGHT)
+
+    r = m.apply(OverlayEvent(OverlayEventKind.CLICK_COMPLETE))
+
+    assert r.outcome is OverlayOutcome.HELD
+    assert m.state is OverlayState.REFRESH_IN_FLIGHT

@@ -1189,6 +1189,7 @@ class WheelHouseApp:
         timeout_s: Optional[float] = None,
         on_late_response: Optional[Callable[[Dict[str, Any]], None]] = None,
         quiet_timeout: bool = False,
+        delivery_ttl_s: Optional[float] = None,
     ) -> Dict[str, Any]:
         """:flow: UI Action Execution
         :step: 2b
@@ -1230,6 +1231,17 @@ class WheelHouseApp:
         whose lookup or launch is slow is not a defect. The TimeoutError is
         still raised; the caller decides what the user sees. Only the
         awaited ``activate`` step sets it.
+
+        ``delivery_ttl_s`` (wh-dictation-paste-loss-load.1.9): optional
+        number of seconds the payload may wait in the send queue, set apart
+        from ``timeout_s``, which stays the time the caller waits for the
+        answer. None (the default) keeps the rule above: the delivery
+        deadline equals the effective timeout. A value replaces the
+        effective timeout in that rule for a stale-sensitive action. A
+        durable action keeps its long deadline: the value never shortens
+        it, and a value longer than it extends it. A value that is not
+        an exact finite int or float above zero raises ValueError before
+        anything is queued.
         """
         request_id = str(uuid.uuid4())
         effective_timeout = timeout_s if timeout_s is not None else self.response_timeout_s
@@ -1273,6 +1285,28 @@ class WheelHouseApp:
             raise ValueError(
                 f"send_request timeout must be a finite real number, got {detail}"
             )
+        # wh-dictation-paste-loss-load.1.9: same exact-type rule as the
+        # timeout above, applied before anything is registered or queued.
+        # A delivery budget of zero or less would expire the payload at
+        # once, so it is refused here instead of queued and dropped later.
+        if delivery_ttl_s is not None:
+            try:
+                ttl_is_valid = (
+                    (type(delivery_ttl_s) is int or type(delivery_ttl_s) is float)
+                    and math.isfinite(delivery_ttl_s)
+                    and delivery_ttl_s > 0
+                )
+            except OverflowError:
+                ttl_is_valid = False
+            if not ttl_is_valid:
+                if type(delivery_ttl_s) is int or type(delivery_ttl_s) is float:
+                    ttl_detail = repr(delivery_ttl_s)
+                else:
+                    ttl_detail = f"a {_safe_type_name(delivery_ttl_s)}"
+                raise ValueError(
+                    "send_request delivery_ttl_s must be a finite real "
+                    f"number above zero, got {ttl_detail}"
+                )
         # Delivery deadline = the caller's own timeout
         # (wh-overlay-slow-uia-stale-badges.5): the payload expires from the
         # send queue at the same moment the caller stops waiting, so a
@@ -1295,6 +1329,16 @@ class WheelHouseApp:
             if type(action) is str and action in _DURABLE_COMMAND_ACTIONS
             else effective_timeout
         )
+        # wh-dictation-paste-loss-load.1.9: an explicit delivery budget
+        # replaces the caller's timeout as the delivery deadline for a
+        # stale-sensitive action. A durable action keeps at least its
+        # long deadline, so the argument can never shorten it. The
+        # caller still waits effective_timeout in both cases.
+        if delivery_ttl_s is not None:
+            if type(action) is str and action in _DURABLE_COMMAND_ACTIONS:
+                delivery_ttl = max(delivery_ttl, delivery_ttl_s)
+            else:
+                delivery_ttl = delivery_ttl_s
         # .14.50: the sender's control metadata is inserted BEFORE
         # params, and each value is kept in a local. Pickling the live
         # envelope runs reducers over caller-controlled values, and a

@@ -228,6 +228,16 @@ class ClickConfig:
     # brings the numbers back. Child .1 alone leaves the user with no numbers
     # after every click.
     overlay_settle_after_click: bool = False
+    # wh-numbers-stay-setting: what the numbers do after "show numbers". False
+    # (the default) copies Windows Voice Access: a successful click on a number
+    # removes all numbers and shows no new ones, and a change of the foreground
+    # window removes them. True keeps the long-standing behaviour: after a
+    # successful click and after every change of window or menu the app shows
+    # new numbers. A click the app refuses because its saved position is stale,
+    # a menu that opens or closes, the browser refresh timer and the Pattern
+    # Manager tree change refresh the numbers under either value. Applied live:
+    # the Logic process re-reads this key when the settings window saves it.
+    overlay_keep_numbers: bool = False
     # -- Mouse-grid fields (wh-grid-state-machine) ---------------------------
     # The cell side length (physical pixels) below which the grid stops
     # refining: a spoken number is ignored once the current cell is under this
@@ -558,6 +568,7 @@ class ClickConfig:
                 overlay.overlay_browser_refresh_seconds
             ),
             overlay_settle_after_click=overlay.overlay_settle_after_click,
+            overlay_keep_numbers=overlay.overlay_keep_numbers,
             grid_min_cell_px=overlay.grid_min_cell_px,
             drag_duration_ms=overlay.drag_duration_ms,
             overlay_invalid_key=overlay.overlay_invalid_key,
@@ -796,6 +807,9 @@ _DEFAULTS: dict[str, Any] = {
     # wh-overlay-slow-uia-stale-badges.1. Do NOT flip this to True until
     # child .2 ships; see the field comment on ClickConfig.
     "overlay_settle_after_click": False,
+    # wh-numbers-stay-setting: False copies Windows Voice Access (David,
+    # 2026-10-22: the check box is off by default).
+    "overlay_keep_numbers": False,
     # -- Mouse-grid defaults (wh-grid-state-machine, grid spec Configuration) -
     "grid_min_cell_px": 24,
     "drag_duration_ms": 250,
@@ -834,6 +848,7 @@ _OVERLAY_VALIDATORS: dict[str, Any] = {
     # is 0, not 1.
     "overlay_browser_refresh_seconds": _is_int_in_range(0, 300),
     "overlay_settle_after_click": _is_bool,
+    "overlay_keep_numbers": _is_bool,
     # -- Mouse-grid keys (wh-grid-state-machine) -----------------------------
     # grid_min_cell_px floors at 1, not 0: a floor of 0 would ask the grid to
     # refine into cells with no pixels in them. The ceiling of 500 is well past
@@ -869,6 +884,7 @@ class _OverlayResult:
     snapshot_store_capacity: int
     overlay_browser_refresh_seconds: int
     overlay_settle_after_click: bool
+    overlay_keep_numbers: bool
     grid_min_cell_px: int
     drag_duration_ms: int
     overlay_invalid_key: tuple[str, ...]
@@ -950,6 +966,7 @@ def _validate_overlay(raw: dict[str, Any], defaults: dict[str, Any]) -> _Overlay
         snapshot_store_capacity=coerced["snapshot_store_capacity"],
         overlay_browser_refresh_seconds=coerced["overlay_browser_refresh_seconds"],
         overlay_settle_after_click=coerced["overlay_settle_after_click"],
+        overlay_keep_numbers=coerced["overlay_keep_numbers"],
         grid_min_cell_px=coerced["grid_min_cell_px"],
         drag_duration_ms=coerced["drag_duration_ms"],
         # Convert the mutable accumulator to an immutable tuple for the frozen
@@ -1008,6 +1025,7 @@ def _disabled(*, invalid_key: Optional[str]) -> ClickConfig:
             _DEFAULTS["overlay_browser_refresh_seconds"]
         ),
         overlay_settle_after_click=_DEFAULTS["overlay_settle_after_click"],
+        overlay_keep_numbers=_DEFAULTS["overlay_keep_numbers"],
         grid_min_cell_px=_DEFAULTS["grid_min_cell_px"],
         drag_duration_ms=_DEFAULTS["drag_duration_ms"],
         overlay_invalid_key=(),

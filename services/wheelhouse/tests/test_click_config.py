@@ -1337,6 +1337,47 @@ def test_overlay_settle_after_click_off_on_the_disabled_path():
     assert DISABLED_CLICK_CONFIG.overlay_settle_after_click is False
 
 
+# -- overlay_keep_numbers bool, default False --------------------------------
+# wh-numbers-stay-setting: False (the default) copies Windows Voice Access,
+# which removes the numbers after a click and after a change of window.
+# True keeps the long-standing behaviour of showing new numbers.
+
+
+def test_overlay_keep_numbers_defaults_to_false():
+    assert ClickConfig.from_raw(raw()).overlay_keep_numbers is False
+    assert ClickConfig.from_raw({}).overlay_keep_numbers is False
+
+
+def test_overlay_keep_numbers_round_trips():
+    for value in (True, False):
+        cfg = ClickConfig.from_raw(raw(overlay_keep_numbers=value))
+        assert cfg.overlay_enabled_effective is True
+        assert cfg.overlay_keep_numbers is value
+
+
+def test_overlay_keep_numbers_non_bool_disables_overlay_only():
+    _assert_overlay_disabled(
+        ClickConfig.from_raw(raw(overlay_keep_numbers=1)),
+        "overlay_keep_numbers",
+    )
+
+
+def test_overlay_keep_numbers_defaults_to_false_on_a_directly_built_config():
+    """A ClickConfig built field by field with the key left out takes False."""
+    template = ClickConfig.from_raw(raw(overlay_keep_numbers=True))
+    assert template.overlay_keep_numbers is True
+    kwargs = {
+        field.name: getattr(template, field.name)
+        for field in dataclasses.fields(template)
+        if field.init and field.name != "overlay_keep_numbers"
+    }
+    assert ClickConfig(**kwargs).overlay_keep_numbers is False
+
+
+def test_overlay_keep_numbers_off_on_the_disabled_path():
+    assert DISABLED_CLICK_CONFIG.overlay_keep_numbers is False
+
+
 # -- snapshot_store_capacity int [1, 64] -------------------------------------
 
 def test_snapshot_store_capacity_at_lower_bound_accepted():

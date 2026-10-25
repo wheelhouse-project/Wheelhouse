@@ -4125,3 +4125,32 @@ def test_constructor_default_toggle_and_select_fns_are_the_real_presses():
     )
     assert ex._toggle_fn is toggle_via_toggle_pattern
     assert ex._select_fn is select_via_selection_item_pattern
+
+
+@pytest.mark.parametrize("spoken, control_name", [("seven", "7"), ("7", "Seven")])
+def test_coord_eligible_number_word_matches_digit_name(spoken, control_name):
+    # wh-number-words-command-failures: no role in the query, so only the
+    # name leg can carry eligibility.
+    q = _coord_query(spoken, role=None)
+    m = _coord_match(name=control_name, role="Button", control_type_id=UIA_BUTTON_ID)
+    assert ClickExecutor._coord_eligible(m, q) is True
+
+
+def test_coord_eligible_sound_alike_is_not_a_number_match():
+    q = _coord_query("for", role=None)
+    m = _coord_match(name="4", role="Button", control_type_id=UIA_BUTTON_ID)
+    assert ClickExecutor._coord_eligible(m, q) is False
+
+
+@pytest.mark.parametrize("spoken, control_name", [
+    pytest.param("one oh", "10", id="one-oh-10"),
+    pytest.param("one oh five", "105", id="one-oh-five-105"),
+    pytest.param("10", "One Oh", id="10-One-Oh"),
+    pytest.param("one-oh-five", "105", id="hyphen-one-oh-five-105"),
+])
+def test_coord_eligible_oh_is_not_a_number_match(spoken, control_name):
+    # wh-number-words-command-failures.1.2: the sound-alike "oh" is not a
+    # number match, so the name leg cannot make the match eligible.
+    q = _coord_query(spoken, role=None)
+    m = _coord_match(name=control_name, role="Button", control_type_id=UIA_BUTTON_ID)
+    assert ClickExecutor._coord_eligible(m, q) is False

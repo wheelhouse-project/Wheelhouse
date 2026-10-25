@@ -8,7 +8,7 @@ covers a microphone object that was built and whose capture thread then
 failed, and a blocked microphone always takes that second path: the
 audio graph is built inside the capture thread, so the constructor has
 already succeeded when Windows refuses. David's measured notice proves
-it: "Parakeet v3 (CPU) - Failed to start - transcription will not work:
+it: "Parakeet V3 (Local) - Failed to start - transcription will not work:
 Microphone node failed: status=4".
 
 These tests drive the real handshake path, _announce_capture_outcome.

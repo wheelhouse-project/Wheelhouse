@@ -779,8 +779,8 @@ def main():
 
     # Where -- or whether -- the local AI model runs on this machine
     # (wh-ai-installer-local-mode). Carried in the snapshot rather than behind
-    # a second flag so the installer keeps making ONE `uv run` call: it already
-    # parses this document for the CUDA speech-engine offer. It also means a
+    # a second flag so the installer keeps making ONE `uv run` call for the
+    # hardware snapshot. It also means a
     # snapshot a user sends in says, in a sentence, why the AI features were or
     # were not installed, beside the hardware that decided it.
     #

@@ -217,6 +217,14 @@ def test_map_foreground_event_produces_focus_change():
     assert ev.kind is OverlayEventKind.FOCUS_CHANGE
 
 
+def test_map_foreground_event_does_not_dismiss_the_numbers_unless_told_to():
+    """wh-numbers-stay-setting: the flag defaults to False and carries True."""
+    assert map_foreground_event(hwnd=4242).dismisses_numbers is False
+    assert map_foreground_event(
+        hwnd=4242, dismisses_numbers=True,
+    ).dismisses_numbers is True
+
+
 def test_map_destroy_event_matches_tracked_hwnd():
     ev = map_destroy_event(destroyed_hwnd=777, tracked_hwnd=777)
     assert ev is not None

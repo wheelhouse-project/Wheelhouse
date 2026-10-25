@@ -219,7 +219,7 @@ class TestACountCommandWaitsForTheWholeCount:
     #: key is pressed. The flag is not added to
     #: press-keys: it has never carried it, and its fullmatch anchors
     #: already keep it out of a longer sentence.
-    GREEDY_BUFFER_COUNT_PATTERNS = [r"^press\s*(.+?)(?:\s+(\d+)\s+times?)?$"]
+    GREEDY_BUFFER_COUNT_PATTERNS = [r"^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$"]
 
     def test_the_greedy_buffer_exemptions_are_greedy(self):
         by_raw = {entry["raw_pattern"]: entry for entry in COUNT_ENTRIES}

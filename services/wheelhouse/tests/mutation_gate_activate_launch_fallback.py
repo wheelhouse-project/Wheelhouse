@@ -109,7 +109,7 @@ MUTATIONS = [
     {
         "name": "one-match-never-starts",
         "file": INPUT_PROC,
-        "old": "                os.startfile(candidate.launch_target)\n",
+        "old": "                os.startfile(store_alias_launch_target(candidate.launch_target))\n",
         "new": "                pass\n",
         # test_spoken_name_launch_invalidates_buffer was dropped from this
         # list when .1.7 moved the invalidation after the launch: a
@@ -127,7 +127,7 @@ MUTATIONS = [
         # defect this branch exists to fix.
         "name": "one-match-starts-the-spoken-words",
         "file": INPUT_PROC,
-        "old": "                os.startfile(candidate.launch_target)\n",
+        "old": "                os.startfile(store_alias_launch_target(candidate.launch_target))\n",
         "new": "                os.startfile(target)\n",
         "expect": [
             "test_one_match_starts_that_program",

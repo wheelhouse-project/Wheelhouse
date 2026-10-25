@@ -153,6 +153,23 @@ class TestNormalizeKey:
         assert _normalize_key("slash") == "/"
         assert _normalize_key("semicolon") == ";"
 
+    @pytest.mark.parametrize(
+        "word,digit",
+        [
+            ("zero", "0"), ("one", "1"), ("two", "2"), ("three", "3"),
+            ("four", "4"), ("five", "5"), ("six", "6"), ("seven", "7"),
+            ("eight", "8"), ("nine", "9"),
+        ],
+    )
+    def test_number_words_are_digit_keys(self, word, digit):
+        """The speech engine can write a digit key as a word ("control two")."""
+        assert _normalize_key(word) == digit
+
+    @pytest.mark.parametrize("word", ["to", "too", "for", "oh", "ten"])
+    def test_sound_alikes_and_ten_are_not_keys(self, word):
+        """No sound-alike is a key: "press control for" must not press Ctrl+4."""
+        assert _normalize_key(word) is None
+
 
 # ============================================================================
 # hotkey

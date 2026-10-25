@@ -1121,3 +1121,374 @@ class TestStoreReaderComLifetime:
         assert len(records) == 3
         # It never initialised COM, so it must not uninitialise it.
         assert "CoUninitialize" not in events
+
+
+_PACKAGED_NOTEPAD = (
+    "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0_x64"
+    "__8wekyb3d8bbwe\\Notepad\\Notepad.exe"
+)
+_NOTEPAD_ALIAS = (
+    "C:\\Users\\Test\\AppData\\Local\\Microsoft\\WindowsApps\\notepad.exe"
+)
+
+
+class TestStoreAliasLaunchTarget:
+    """A bare name that App Paths sends into WindowsApps starts the alias.
+
+    wh-notepad-app-paths-launch: HKCU App Paths\\notepad.exe points into
+    C:\\Program Files\\WindowsApps, and os.startfile("notepad.exe") then
+    starts that packaged file outside its package, which cannot load
+    Microsoft.UI.Windowing.Core.dll. The execution alias in the user's
+    WindowsApps folder starts the program inside its package.
+
+    Every test injects the registry reader and the file check, so none of
+    them reads the real registry or file system. The environment variables
+    the helper expands are set per test for the same reason.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _environment(self, monkeypatch):
+        monkeypatch.setenv("ProgramFiles", "C:\\Program Files")
+        monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\Test\\AppData\\Local")
+
+    @staticmethod
+    def _call(target, entries=None, aliases=(_NOTEPAD_ALIAS,), reads=None):
+        """Run the helper against fake HKCU/HKLM values.
+
+        ``entries`` maps a hive name to (value, registry type), or to an
+        exception to raise. ``reads`` collects (hive, name) per read.
+        """
+        from utils.installed_programs import store_alias_launch_target
+
+        entries = entries or {}
+        known = {a.casefold() for a in aliases}
+
+        def read_entry(hive, name):
+            if reads is not None:
+                reads.append((hive, name))
+            answer = entries.get(hive)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        return store_alias_launch_target(
+            target,
+            read_entry=read_entry,
+            alias_exists=lambda path: path.casefold() in known,
+        )
+
+    def test_a_windowsapps_entry_with_an_alias_gives_the_alias(self):
+        got = self._call("notepad.exe", {"HKCU": (_PACKAGED_NOTEPAD, 1)})
+        assert got == _NOTEPAD_ALIAS
+
+    def test_letter_case_quotes_and_an_expandable_value_still_match(self):
+        value = '"%ProgramFiles%\\windowsapps\\Microsoft.WindowsNotepad\\Notepad.exe"'
+        got = self._call("Notepad.EXE", {"HKCU": (value, 2)})
+        assert got == _NOTEPAD_ALIAS.replace("notepad.exe", "Notepad.EXE")
+
+    def test_the_entry_is_read_under_the_name_given(self):
+        reads = []
+        self._call("NOTEPAD.EXE", {"HKCU": (_PACKAGED_NOTEPAD, 1)}, reads=reads)
+        assert reads[:1] == [("HKCU", "NOTEPAD.EXE")]
+
+    def test_an_entry_outside_windowsapps_is_unchanged(self):
+        got = self._call(
+            "notepad.exe", {"HKCU": ("C:\\Windows\\System32\\notepad.exe", 1)}
+        )
+        assert got == "notepad.exe"
+
+    def test_a_folder_that_only_starts_with_windowsapps_is_unchanged(self):
+        got = self._call(
+            "notepad.exe",
+            {"HKCU": ("C:\\Program Files\\WindowsAppsX\\Notepad.exe", 1)},
+        )
+        assert got == "notepad.exe"
+
+    def test_no_entry_is_unchanged(self):
+        assert self._call("notepad.exe", {}) == "notepad.exe"
+
+    def test_a_windowsapps_entry_without_an_alias_is_unchanged(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="utils.installed_programs"):
+            got = self._call(
+                "notepad.exe", {"HKCU": (_PACKAGED_NOTEPAD, 1)}, aliases=()
+            )
+        assert got == "notepad.exe"
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "notepad.exe" in warnings[0].getMessage()
+
+    def test_a_registry_error_is_unchanged_and_never_raises(self):
+        got = self._call(
+            "notepad.exe",
+            {"HKCU": OSError("denied"), "HKLM": PermissionError("denied")},
+        )
+        assert got == "notepad.exe"
+
+    def test_a_missing_per_user_key_falls_through_to_the_machine_key(self):
+        got = self._call(
+            "notepad.exe",
+            {"HKCU": FileNotFoundError("none"), "HKLM": (_PACKAGED_NOTEPAD, 1)},
+        )
+        assert got == _NOTEPAD_ALIAS
+
+    def test_the_per_user_entry_wins_over_the_machine_entry(self):
+        got = self._call(
+            "notepad.exe",
+            {
+                "HKCU": ("C:\\Windows\\System32\\notepad.exe", 1),
+                "HKLM": (_PACKAGED_NOTEPAD, 1),
+            },
+        )
+        assert got == "notepad.exe"
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "C:\\Program Files\\Notepad++\\notepad++.exe",
+            "dir\\notepad.exe",
+            "dir/notepad.exe",
+            "C:notepad.exe",
+            "C:\\Start\\Notepad.lnk",
+            "shell:AppsFolder\\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+            "notepad",
+            "",
+        ],
+    )
+    def test_anything_but_a_bare_exe_name_is_unchanged_without_a_read(
+        self, target
+    ):
+        reads = []
+        got = self._call(target, {"HKCU": (_PACKAGED_NOTEPAD, 1)}, reads=reads)
+        assert got == target
+        assert reads == []
+
+    def test_an_unreadable_per_user_key_falls_through_to_the_machine_key(self):
+        got = self._call(
+            "notepad.exe",
+            {"HKCU": PermissionError("denied"), "HKLM": (_PACKAGED_NOTEPAD, 1)},
+        )
+        assert got == _NOTEPAD_ALIAS
+
+    @pytest.mark.parametrize(
+        "unusable",
+        [None, (), (b"bytes", 3), ("", 1)],
+        ids=["no-answer", "empty-answer", "non-string", "empty-string"],
+    )
+    def test_a_value_that_is_not_usable_passes_to_the_next_hive(self, unusable):
+        got = self._call(
+            "notepad.exe", {"HKCU": unusable, "HKLM": (_PACKAGED_NOTEPAD, 1)}
+        )
+        assert got == _NOTEPAD_ALIAS
+
+    def test_a_plain_string_value_is_not_expanded(self):
+        value = "%ProgramFiles%\\WindowsApps\\Microsoft.WindowsNotepad\\Notepad.exe"
+        assert self._call("notepad.exe", {"HKCU": (value, 1)}) == "notepad.exe"
+
+    def test_spaces_around_a_quoted_value_are_ignored(self):
+        value = ' "' + _PACKAGED_NOTEPAD + '" '
+        assert self._call("notepad.exe", {"HKCU": (value, 1)}) == _NOTEPAD_ALIAS
+
+    def test_a_value_that_climbs_out_of_windowsapps_is_unchanged(self):
+        value = "C:\\Program Files\\WindowsApps\\..\\..\\Windows\\notepad.exe"
+        assert self._call("notepad.exe", {"HKCU": (value, 1)}) == "notepad.exe"
+
+    def test_a_path_that_only_contains_the_windowsapps_folder_is_unchanged(self):
+        value = "D:\\copy\\C:\\Program Files\\WindowsApps\\Pkg\\notepad.exe"
+        assert self._call("notepad.exe", {"HKCU": (value, 1)}) == "notepad.exe"
+
+    def test_the_windowsapps_folder_is_taken_from_the_program_files_variable(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("ProgramFiles", "D:\\PF")
+        inside = "D:\\PF\\WindowsApps\\Pkg\\notepad.exe"
+        assert self._call("notepad.exe", {"HKCU": (inside, 1)}) == _NOTEPAD_ALIAS
+        elsewhere = "C:\\Program Files\\WindowsApps\\Pkg\\notepad.exe"
+        assert self._call("notepad.exe", {"HKCU": (elsewhere, 1)}) == "notepad.exe"
+
+    def test_a_missing_program_files_variable_means_the_default_folder(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("ProgramFiles", raising=False)
+        got = self._call("notepad.exe", {"HKCU": (_PACKAGED_NOTEPAD, 1)})
+        assert got == _NOTEPAD_ALIAS
+
+    # Second package volume: Windows keeps Store packages in a WindowsApps
+    # folder at the root of the drive named by Settings > Storage > "New
+    # apps will save to". Every stubbed value below is a made-up string.
+    _D_NOTEPAD = (
+        "D:\\WindowsApps\\Microsoft.WindowsNotepad_1.0.0.0_x64__8wekyb3d8bbwe"
+        "\\Notepad\\Notepad.exe"
+    )
+
+    def test_a_windowsapps_folder_at_a_drive_root_gives_the_alias(self):
+        got = self._call("notepad.exe", {"HKCU": (self._D_NOTEPAD, 1)})
+        assert got == _NOTEPAD_ALIAS
+
+    def test_the_drive_root_windowsapps_folder_matches_in_any_letter_case(self):
+        value = self._D_NOTEPAD.replace("D:\\WindowsApps", "d:\\WINDOWSAPPS")
+        assert value != self._D_NOTEPAD
+        assert self._call("notepad.exe", {"HKCU": (value, 1)}) == _NOTEPAD_ALIAS
+
+    def test_a_quoted_drive_root_windowsapps_value_gives_the_alias(self):
+        value = '"' + self._D_NOTEPAD + '"'
+        assert self._call("notepad.exe", {"HKCU": (value, 1)}) == _NOTEPAD_ALIAS
+
+    def test_an_expandable_drive_root_windowsapps_value_gives_the_alias(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("WH_TEST_PACKAGE_DRIVE", "D:")
+        value = "%WH_TEST_PACKAGE_DRIVE%\\WindowsApps\\Pkg\\Notepad.exe"
+        assert self._call("notepad.exe", {"HKCU": (value, 2)}) == _NOTEPAD_ALIAS
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\notepad.exe",
+            "D:\\Foo\\WindowsApps\\x\\Notepad.exe",
+            "D:\\WindowsAppsX\\x\\Notepad.exe",
+            "\\\\server\\share\\WindowsApps\\x\\Notepad.exe",
+            "1:\\WindowsApps\\x\\Notepad.exe",
+        ],
+        ids=[
+            "local-app-data",
+            "nested-folder",
+            "longer-name",
+            "network-share",
+            "digit-drive",
+        ],
+    )
+    def test_a_windowsapps_name_that_is_not_a_drive_root_folder_is_unchanged(
+        self, value
+    ):
+        asked = []
+
+        from utils.installed_programs import store_alias_launch_target
+
+        got = store_alias_launch_target(
+            "notepad.exe",
+            read_entry=lambda hive, name: (value, 1),
+            alias_exists=lambda path: asked.append(path) or True,
+        )
+        assert got == "notepad.exe"
+        assert asked == []
+
+    @pytest.mark.parametrize("local", [None, ""], ids=["unset", "empty"])
+    def test_no_local_app_data_means_no_alias_is_looked_for(
+        self, monkeypatch, caplog, local
+    ):
+        from utils.installed_programs import store_alias_launch_target
+
+        if local is None:
+            monkeypatch.delenv("LOCALAPPDATA", raising=False)
+        else:
+            monkeypatch.setenv("LOCALAPPDATA", local)
+        asked = []
+
+        def alias_exists(path):
+            asked.append(path)
+            return True
+
+        with caplog.at_level(logging.WARNING, logger="utils.installed_programs"):
+            got = store_alias_launch_target(
+                "notepad.exe",
+                read_entry=lambda hive, name: (_PACKAGED_NOTEPAD, 1),
+                alias_exists=alias_exists,
+            )
+        assert got == "notepad.exe"
+        assert asked == []
+        # The "no execution alias" warning, not the lookup-failed one.
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 1
+        assert "no execution alias" in messages[0]
+
+    def test_an_unexpected_error_in_the_lookup_is_logged_and_never_raises(
+        self, caplog
+    ):
+        raised = None
+        got = None
+        with caplog.at_level(logging.WARNING, logger="utils.installed_programs"):
+            try:
+                got = self._call(
+                    "notepad.exe", {"HKCU": ValueError("unexpected failure")}
+                )
+            except Exception as exc:
+                raised = exc
+        assert raised is None
+        assert got == "notepad.exe"
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 1
+        assert "notepad.exe" in messages[0]
+        assert "unexpected failure" in messages[0]
+
+    def test_the_default_alias_check_sees_a_file_that_exists(self, tmp_path):
+        """_alias_exists is the real check; the file here is a stand-in."""
+        from utils.installed_programs import _alias_exists
+
+        present = tmp_path / "notepad.exe"
+        present.write_bytes(b"")
+        assert _alias_exists(str(present)) is True
+        assert _alias_exists(str(tmp_path / "missing.exe")) is False
+
+    @pytest.mark.parametrize("hive", ["HKCU", "HKLM"])
+    def test_the_registry_is_opened_for_reading_only(self, monkeypatch, hive):
+        """The default reader asks for KEY_READ on the hive it was given.
+
+        The stand-in module has a distinct value for every access mask, so
+        a reader that asked for more than KEY_READ is seen as that value.
+        Its write functions record a call, and the test requires none.
+        """
+        from utils import installed_programs
+
+        opened = []
+        queried = []
+        writes = []
+
+        class Key:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        class Winreg:
+            HKEY_CURRENT_USER = "HKCU"
+            HKEY_LOCAL_MACHINE = "HKLM"
+            KEY_READ = 0x20019
+            KEY_WRITE = 0x20006
+            KEY_SET_VALUE = 0x2
+            KEY_ALL_ACCESS = 0xF003F
+
+            def OpenKey(self, root, sub_key, reserved, access):
+                opened.append((root, sub_key, reserved, access))
+                return Key()
+
+            def QueryValueEx(self, key, name):
+                queried.append(name)
+                return (_PACKAGED_NOTEPAD, 1)
+
+            def CreateKey(self, *args):
+                writes.append(("CreateKey", args))
+
+            def SetValueEx(self, *args):
+                writes.append(("SetValueEx", args))
+
+            def DeleteKey(self, *args):
+                writes.append(("DeleteKey", args))
+
+            def DeleteValue(self, *args):
+                writes.append(("DeleteValue", args))
+
+        monkeypatch.setitem(sys.modules, "winreg", Winreg())
+        value = installed_programs._read_app_path_entry(hive, "notepad.exe")
+        assert value == (_PACKAGED_NOTEPAD, 1)
+        assert opened == [
+            (
+                hive,
+                installed_programs._APP_PATHS_KEY + "\\notepad.exe",
+                0,
+                0x20019,
+            )
+        ]
+        # The (Default) value is the one with the empty name.
+        assert queried == [""]
+        assert writes == []

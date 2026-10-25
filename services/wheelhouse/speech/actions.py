@@ -496,6 +496,22 @@ SPOKEN_KEY_MAP = {
     "dollar sign": "$",
     "exclamation": "!",
     "bang": "!",
+
+    # Digit keys spoken as words. The user cannot choose whether the
+    # speech engine writes "2" or "two", so "press control two" must press
+    # Ctrl+2 the same as "press control 2" (wh-number-words-command-failures).
+    # No sound-alikes such as "to", "for" or "oh": with them, "press control
+    # for" would press Ctrl+4.
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
 }
 
 # Modifier keys that should be pressed first in key combinations
@@ -647,8 +663,8 @@ class ActionFunctions:
         self._functions["open_pattern_manager"] = self.open_pattern_manager
         # Settings window (wh-voice-settings-window)
         self._functions["open_settings_window"] = self.open_settings_window
-        # Voice calibration (wh-7ou.7.2.4)
-        self._functions["open_calibration"] = self.open_calibration
+        # 'Your training word' window (wh-first-sound-lost.23)
+        self._functions["open_lead_word"] = self.open_lead_word
         # Mode switching
         self._functions["set_speech_interaction_mode"] = self.set_speech_interaction_mode
         self._functions["stop_listening"] = self.stop_listening
@@ -2110,18 +2126,16 @@ class ActionFunctions:
         logger.info("Sent open_settings_window to GUI")
         return None
 
-    async def open_calibration(self):
-        """Open the Teach-WheelHouse-your-voice window via GUI IPC.
+    async def open_lead_word(self):
+        """Open the "Your training word" window via GUI IPC.
 
-        wh-7ou.7.2.4 (spec Sections 3.1, 6.4): the "learn my voice" /
-        "calibrate my voice" voice commands land here. The GUI opens the
-        calibration window and answers with cal_session_open; the
-        CalibrationController then decides the first screen (intro, or
-        the wrong-provider notice when the active STT provider is not
-        Distil-Whisper).
+        wh-first-sound-lost.23 (item 27): the "record my training word"
+        voice command lands here. The GUI opens the window and answers
+        with lw_open; the lead-word controller then asks the provider for
+        its status.
         """
-        self._send_gui_action({"action": "open_calibration"})
-        logger.info("Sent open_calibration to GUI")
+        self._send_gui_action({"action": "open_lead_word"})
+        logger.info("Sent open_lead_word to GUI")
         return None
 
     def set_speech_interaction_mode(self, mode: str):

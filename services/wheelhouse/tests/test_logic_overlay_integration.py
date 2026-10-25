@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any, Optional, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -439,6 +439,8 @@ def test_send_snapshot_item_click_late_rewalk_reason_feeds_refresh():
     feed.assert_called_once_with(
         overlay_dispatch_pair=(7, 3),
         trace_id="tr-late",
+        # wh-numbers-stay-setting: a refusal is not a successful click.
+        click_succeeded=False,
         trigger="click refused (bounds_invalid)",
         # wh-overlay-slow-uia-stale-badges.15: the pre-click snapshot id rides
         # along so a same-session generation bump can defer the clear instead
@@ -510,6 +512,8 @@ def test_send_snapshot_item_click_late_ok_with_pair_runs_success_bookkeeping():
         MagicMock, controller._feed_click_complete_refresh,
     ).assert_called_once_with(
         overlay_dispatch_pair=(7, 3), trace_id="tr-late",
+        # wh-numbers-stay-setting: a late ok is a successful click.
+        click_succeeded=True,
         # wh-overlay-slow-uia-stale-badges.15, as above.
         preclick_snapshot_id="snap",
         # wh-overlay-slow-uia-stale-badges.23.3: and this click's dispatch
@@ -601,6 +605,8 @@ def test_send_snapshot_item_click_late_suppressed_notice_still_feeds_refresh():
     feed.assert_called_once_with(
         overlay_dispatch_pair=(7, 3),
         trace_id="tr-late",
+        # wh-numbers-stay-setting: a refusal is not a successful click.
+        click_succeeded=False,
         trigger="click refused (bounds_invalid)",
         # wh-overlay-slow-uia-stale-badges.15: the pre-click snapshot id rides
         # along so a same-session generation bump can defer the clear instead
@@ -4090,6 +4096,7 @@ def test_older_late_reply_does_not_overwrite_a_newer_pending_clear():
 
         # Click 2's reply arrives first and arms the deferral.
         controller._feed_click_complete_refresh(
+            click_succeeded=True,
             overlay_dispatch_pair=(sid, gen + 1), trace_id="tr-23a-new",
             preclick_snapshot_id="snap-B", overlay_dispatch_ordinal=2,
         )
@@ -4098,6 +4105,7 @@ def test_older_late_reply_does_not_overwrite_a_newer_pending_clear():
         # Click 1's LATE reply arrives second, carrying the OLDER dispatch pair
         # and the OLDER pre-click id. This is the overwrite under test.
         controller._feed_click_complete_refresh(
+            click_succeeded=True,
             overlay_dispatch_pair=(sid, gen), trace_id="tr-23a-late",
             preclick_snapshot_id="snap-A", overlay_dispatch_ordinal=1,
         )
@@ -4186,6 +4194,7 @@ def test_an_equal_generation_older_click_cannot_steal_the_pending_clear():
 
         # Click 2's reply arrives first and arms the deferral.
         controller._feed_click_complete_refresh(
+            click_succeeded=True,
             overlay_dispatch_pair=(sid, gen + 1), trace_id="tr-23c-new",
             preclick_snapshot_id="snap-B", overlay_dispatch_ordinal=2,
         )
@@ -4195,6 +4204,7 @@ def test_an_equal_generation_older_click_cannot_steal_the_pending_clear():
         # generation, older click, older pre-click id. The overwrite under
         # test.
         controller._feed_click_complete_refresh(
+            click_succeeded=True,
             overlay_dispatch_pair=(sid, gen + 1), trace_id="tr-23c-late",
             preclick_snapshot_id="snap-A", overlay_dispatch_ordinal=1,
         )
@@ -4251,6 +4261,7 @@ def test_a_superseded_pending_refresh_still_clears_the_clicked_snapshot():
         assert machine.paint_generation == gen + 1
 
         controller._feed_click_complete_refresh(
+            click_succeeded=True,
             overlay_dispatch_pair=(sid, gen + 1), trace_id="tr-23d",
             preclick_snapshot_id="snap-A", overlay_dispatch_ordinal=1,
         )
@@ -4326,6 +4337,7 @@ def test_a_rolled_back_refresh_keeps_a_list_already_sent_to_the_display():
         # The click was dispatched against snap-A at the PRE-refresh pair, so
         # its reply takes the gate-1 mismatch arm and arms the deferred clear.
         controller._feed_click_complete_refresh(
+            click_succeeded=True,
             overlay_dispatch_pair=(sid, gen), trace_id="tr-23f",
             preclick_snapshot_id="snap-A", overlay_dispatch_ordinal=1,
         )
@@ -4429,6 +4441,7 @@ def test_a_confirmed_clear_and_resume_still_owes_the_post_click_clear():
         )
         assert machine.state is OverlayState.REFRESH_IN_FLIGHT
         controller._feed_click_complete_refresh(
+            click_succeeded=True,
             overlay_dispatch_pair=(sid, gen), trace_id="tr-23g",
             preclick_snapshot_id="snap-A", overlay_dispatch_ordinal=1,
         )
@@ -6340,9 +6353,14 @@ def _click_complete_effects_for(raw_click_config):
 
 
 def test_click_complete_effects_reach_the_performer_with_the_flag_off():
-    """The shipped path: a successful click dispatches a refresh build."""
+    """The settle-off path: a successful click dispatches a refresh build.
+
+    wh-numbers-stay-setting: the refresh after a click is now the behaviour of
+    ``overlay_keep_numbers`` true; the default (false) removes the numbers, and
+    the tests named ``test_overlay_keep_numbers_*`` cover that.
+    """
     machine, (sid, gen), effects = _click_complete_effects_for(
-        {"enabled": True}
+        {"enabled": True, "overlay_keep_numbers": True}
     )
 
     assert machine.state is OverlayState.REFRESH_IN_FLIGHT
@@ -6424,7 +6442,12 @@ def test_click_complete_effects_reach_the_performer_with_the_flag_on():
     by hand, which cannot catch a factory or feed that drops the flag.
     """
     machine, (sid, gen), effects = _click_complete_effects_for(
-        {"enabled": True, "overlay_settle_after_click": True}
+        {
+            "enabled": True,
+            "overlay_settle_after_click": True,
+            # wh-numbers-stay-setting: false (the default) wins over settle.
+            "overlay_keep_numbers": True,
+        }
     )
 
     assert machine.state is OverlayState.POST_CLICK_SETTLING
@@ -10839,3 +10862,1385 @@ def test_tree_change_after_the_auto_open_build_started_is_accepted():
     assert result["paints"] and result["paints"][-1] == "post-filter", (
         f"paints={result['paints']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# wh-numbers-stay-setting: [click] overlay_keep_numbers
+#
+# False (the default) copies Windows Voice Access: a successful click on a
+# number removes the numbers, and a change to another application window
+# removes them. True keeps the long-standing refresh. Every other trigger
+# (a stale-position refusal, a menu, the browser timer, the Pattern Manager)
+# refreshes under either value.
+# ---------------------------------------------------------------------------
+
+_NS_KEEP_OFF_RAW = {"enabled": True}
+_NS_KEEP_FALSE_RAW = {"enabled": True, "overlay_keep_numbers": False}
+_NS_KEEP_ON_RAW = {"enabled": True, "overlay_keep_numbers": True}
+
+
+def _ns_machine(raw):
+    from services.wheelhouse.main import make_click_overlay_state_machine
+    from services.wheelhouse.ui.click_config import ClickConfig
+
+    return make_click_overlay_state_machine(ClickConfig.from_raw(raw))
+
+
+def _ns_click(
+    raw, response, *, late=False, in_refresh=False, settle=False,
+    flip_keep_to=None,
+):
+    """Run one badge click through the real feed; return (machine, effects).
+
+    ``in_refresh`` dispatches the click while a refresh is in flight at the
+    click's own generation; ``settle`` then lets that refresh paint, which is
+    what consumes the deferred post-click replay. ``flip_keep_to`` sets
+    ``machine.keep_numbers`` after the click is sent and before its reply
+    arrives, as a settings save made by that same click does.
+    """
+    recorded: list = []
+
+    async def _run():
+        machine = _ns_machine(raw)
+        if in_refresh:
+            sid, gen = _drive_to_refresh_in_flight(machine, "snap-ns")
+        else:
+            sid, gen = _drive_to_painted(machine, "snap-ns")
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+
+        def _record(effects, *, trace_id):
+            recorded.extend(effects)
+            return None
+
+        controller._perform_overlay_effects = _record  # type: ignore[method-assign]
+        controller._forward_click_notice = MagicMock()  # type: ignore[method-assign]
+        controller._last_click_notice_trace_id = "tr-ns"
+        captured = None
+
+        def _flip():
+            if flip_keep_to is not None:
+                machine.keep_numbers = flip_keep_to
+
+        def _respond(a, p):
+            _flip()
+            return response
+
+        if late:
+            captured = _timeout_with_late_capture(controller)
+        else:
+            _wire_app(controller, _respond)
+        await controller._send_snapshot_item_click(
+            snapshot_id="snap-ns", item_id="snap-ns-item-2", trace_id="tr-ns",
+            overlay_dispatch_pair=(sid, gen),
+        )
+        if captured is not None:
+            _flip()
+            captured["on_late_response"](response)
+        await asyncio.sleep(0)
+        if settle:
+            controller._apply_overlay_event(
+                OverlayEvent(
+                    OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+                    paint_generation=gen, snapshot_id="snap-ns-2",
+                ),
+                source="test-build",
+            )
+            controller._apply_overlay_event(
+                OverlayEvent(
+                    OverlayEventKind.PAINT_ACK, overlay_session_id=sid,
+                    paint_generation=gen, paint_state=PaintAckState.PAINTED,
+                ),
+                source="test-paintack",
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        return machine
+
+    machine = asyncio.run(_run())
+    return machine, recorded
+
+
+def _ns_ok():
+    return _click_response("ok", trace_id="tr-ns")
+
+
+def _ns_refused():
+    return _click_response(
+        "execution_failed", reason="bounds_stale", trace_id="tr-ns",
+    )
+
+
+def _assert_numbers_removed(machine, effects):
+    assert machine.state is OverlayState.CLOSED
+    assert machine.pinned_snapshot_id is None
+    kinds = [e.kind for e in effects]
+    assert EffectKind.DISPATCH_CLEAR in kinds
+    assert EffectKind.DISPATCH_BUILD not in kinds
+
+
+def _assert_numbers_refreshed(machine, effects):
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+    assert EffectKind.DISPATCH_BUILD in [e.kind for e in effects]
+
+
+def test_overlay_keep_numbers_key_absent_removes_numbers_after_a_click():
+    machine, effects = _ns_click(_NS_KEEP_OFF_RAW, _ns_ok())
+    _assert_numbers_removed(machine, effects)
+
+
+def test_overlay_keep_numbers_false_removes_numbers_after_a_click():
+    machine, effects = _ns_click(_NS_KEEP_FALSE_RAW, _ns_ok())
+    _assert_numbers_removed(machine, effects)
+
+
+def test_overlay_keep_numbers_true_shows_new_numbers_after_a_click():
+    machine, effects = _ns_click(_NS_KEEP_ON_RAW, _ns_ok())
+    _assert_numbers_refreshed(machine, effects)
+
+
+def test_a_save_made_by_the_click_does_not_change_that_click_off_to_on():
+    """Acceptance item 4: the value applies from the NEXT click after the save.
+
+    A click on the settings check box saves the new value, and the save can
+    reach Logic before the click's own reply. That click still follows the
+    value it was sent under (off), so the numbers close.
+    """
+    machine, effects = _ns_click(_NS_KEEP_OFF_RAW, _ns_ok(), flip_keep_to=True)
+    assert machine.keep_numbers is True
+    _assert_numbers_removed(machine, effects)
+
+
+def test_a_save_made_by_the_click_does_not_change_that_click_on_to_off():
+    machine, effects = _ns_click(_NS_KEEP_ON_RAW, _ns_ok(), flip_keep_to=False)
+    assert machine.keep_numbers is False
+    _assert_numbers_refreshed(machine, effects)
+
+
+def test_a_save_made_by_the_click_does_not_change_that_late_click_off_to_on():
+    machine, effects = _ns_click(
+        _NS_KEEP_OFF_RAW, _ns_ok(), late=True, flip_keep_to=True,
+    )
+    _assert_numbers_removed(machine, effects)
+
+
+def test_a_save_made_by_the_click_does_not_change_that_late_click_on_to_off():
+    machine, effects = _ns_click(
+        _NS_KEEP_ON_RAW, _ns_ok(), late=True, flip_keep_to=False,
+    )
+    _assert_numbers_refreshed(machine, effects)
+
+
+def test_overlay_keep_numbers_false_late_success_removes_numbers():
+    machine, effects = _ns_click(_NS_KEEP_OFF_RAW, _ns_ok(), late=True)
+    _assert_numbers_removed(machine, effects)
+
+
+def test_overlay_keep_numbers_true_late_success_shows_new_numbers():
+    machine, effects = _ns_click(_NS_KEEP_ON_RAW, _ns_ok(), late=True)
+    _assert_numbers_refreshed(machine, effects)
+
+
+def test_overlay_keep_numbers_false_stale_refusal_shows_new_numbers():
+    machine, effects = _ns_click(_NS_KEEP_OFF_RAW, _ns_refused())
+    _assert_numbers_refreshed(machine, effects)
+
+
+def test_overlay_keep_numbers_false_late_stale_refusal_shows_new_numbers():
+    machine, effects = _ns_click(_NS_KEEP_OFF_RAW, _ns_refused(), late=True)
+    _assert_numbers_refreshed(machine, effects)
+
+
+def test_overlay_keep_numbers_false_success_during_a_refresh_closes_at_the_reply_not_after_it_settles():
+    """A success that arrives while a refresh is in flight removes the numbers.
+
+    The numbers close at once when the reply arrives, so the refresh that was
+    in flight has nothing left to paint: its build response and paint ack are
+    stale events for a closed session.
+    """
+    machine, effects = _ns_click(
+        _NS_KEEP_OFF_RAW, _ns_ok(), in_refresh=True, settle=True,
+    )
+    assert machine.state is OverlayState.CLOSED
+    assert machine.pinned_snapshot_id is None
+
+
+def test_overlay_keep_numbers_false_deferred_refusal_replay_shows_new_numbers():
+    machine, effects = _ns_click(
+        _NS_KEEP_OFF_RAW, _ns_refused(), in_refresh=True, settle=True,
+    )
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_overlay_keep_numbers_true_deferred_success_replay_shows_new_numbers():
+    machine, effects = _ns_click(
+        _NS_KEEP_ON_RAW, _ns_ok(), in_refresh=True, settle=True,
+    )
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_overlay_keep_numbers_false_wins_over_settle_after_click_end_to_end():
+    raw = {
+        "enabled": True,
+        "overlay_settle_after_click": True,
+        "overlay_keep_numbers": False,
+    }
+    machine, effects = _ns_click(raw, _ns_ok())
+    _assert_numbers_removed(machine, effects)
+
+
+# -- a refresh that starts between the click and its reply -------------------
+#
+# A same-session refresh (a menu closing, the browser timer, an owned dialog)
+# can start AFTER "click N" is sent and BEFORE the success reply arrives. The
+# refresh bumps the generation, so the reply no longer matches the pair the
+# click was dispatched at. A successful click with ``overlay_keep_numbers``
+# false must still remove the numbers (item 2a), under every one of those
+# interleaves and whatever ``overlay_settle_after_click`` says.
+
+
+def _ns_click_with_interleave(
+    raw, interleave, response, *, dispatch_session_offset=0, arm_hold=False,
+    held_timer_out=None,
+):
+    """Send one badge click; run ``interleave`` while the reply is outstanding.
+
+    Returns ``(machine, controller, effects)``.
+    """
+    recorded: list = []
+
+    async def _run():
+        machine = _ns_machine(raw)
+        sid, gen = _drive_to_painted(machine, "snap-ns")
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+
+        def _record(effects, *, trace_id):
+            recorded.extend(effects)
+            return None
+
+        controller._perform_overlay_effects = _record  # type: ignore[method-assign]
+        controller._forward_click_notice = MagicMock()  # type: ignore[method-assign]
+        controller._overlay_focus_debouncer.should_fire.return_value = True
+        if arm_hold:
+            controller._overlay_hold_timer = MagicMock()
+            controller._overlay_hold_armed = ((sid, gen), "click 5")
+            if held_timer_out is not None:
+                held_timer_out.append(controller._overlay_hold_timer)
+
+        def _responder(action, params):
+            interleave(controller, machine)
+            return response
+
+        _wire_app(controller, _responder)
+        await controller._send_snapshot_item_click(
+            snapshot_id="snap-ns", item_id="snap-ns-item-4", trace_id="tr-ns",
+            overlay_dispatch_pair=(sid + dispatch_session_offset, gen),
+        )
+        await asyncio.sleep(0)
+        return machine, controller
+
+    machine, controller = asyncio.run(_run())
+    return machine, controller, recorded
+
+
+def _assert_numbers_closed_after_race(machine, effects):
+    """Closed, cleared and unpinned; no build starts after the clear.
+
+    The refresh that started before the reply dispatched its own build, so
+    ``DISPATCH_BUILD`` appears earlier in the list; the success must end it.
+    """
+    assert machine.state is OverlayState.CLOSED
+    assert machine.pinned_snapshot_id is None
+    kinds = [e.kind for e in effects]
+    clear_at = kinds.index(EffectKind.DISPATCH_CLEAR)
+    assert EffectKind.DISPATCH_BUILD not in kinds[clear_at:]
+    assert EffectKind.UNPIN_SNAPSHOT in kinds[clear_at:]
+
+
+def _menu_close(controller, machine):
+    from services.wheelhouse.overlay_focus_hooks import (
+        EVENT_SYSTEM_MENUPOPUPEND,
+    )
+
+    controller._on_overlay_menu_popup_change(EVENT_SYSTEM_MENUPOPUPEND)
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def _browser_timer_refresh(controller, machine):
+    controller._apply_overlay_event(
+        OverlayEvent(OverlayEventKind.FOCUS_CHANGE), source="test-timer",
+    )
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_menu_close_starting_a_refresh_before_the_click_reply_still_closes_the_numbers():
+    """Numbers painted, key false, "click 4" sent, a menu closes and starts a
+    refresh, THEN the success reply arrives: the numbers are removed."""
+    machine, controller, effects = _ns_click_with_interleave(
+        _NS_KEEP_OFF_RAW, _menu_close, _ns_ok(),
+    )
+    _assert_numbers_closed_after_race(machine, effects)
+    assert controller._overlay_pending_postclick_refresh is None
+    assert controller._overlay_pending_postclick_clear is None
+
+
+def test_refresh_starting_before_the_click_reply_still_closes_the_numbers():
+    machine, controller, effects = _ns_click_with_interleave(
+        _NS_KEEP_OFF_RAW, _browser_timer_refresh, _ns_ok(),
+    )
+    _assert_numbers_closed_after_race(machine, effects)
+
+
+def test_refresh_before_the_click_reply_closes_the_numbers_with_settle_after_click_on():
+    raw = {
+        "enabled": True,
+        "overlay_settle_after_click": True,
+        "overlay_keep_numbers": False,
+    }
+    machine, controller, effects = _ns_click_with_interleave(
+        raw, _menu_close, _ns_ok(),
+    )
+    _assert_numbers_closed_after_race(machine, effects)
+    assert controller._overlay_pending_postclick_clear is None
+
+
+def test_refresh_before_the_click_reply_keeps_new_numbers_with_keep_numbers_true():
+    machine, controller, effects = _ns_click_with_interleave(
+        _NS_KEEP_ON_RAW, _menu_close, _ns_ok(),
+    )
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+    assert EffectKind.DISPATCH_CLEAR not in [e.kind for e in effects]
+
+
+def test_refresh_before_a_stale_position_refusal_keeps_new_numbers():
+    machine, controller, effects = _ns_click_with_interleave(
+        _NS_KEEP_OFF_RAW, _menu_close, _ns_refused(),
+    )
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+    assert EffectKind.DISPATCH_CLEAR not in [e.kind for e in effects]
+
+
+def test_a_success_for_another_overlay_session_does_not_close_the_numbers():
+    """A reply for a click dispatched against a different overlay session
+    keeps today's behaviour: the session the click belonged to is gone, so the
+    reply does nothing to the overlay that is on the screen now."""
+    machine, controller, effects = _ns_click_with_interleave(
+        _NS_KEEP_OFF_RAW, lambda c, m: None, _ns_ok(),
+        dispatch_session_offset=1,
+    )
+    assert machine.state is OverlayState.PAINTED
+    assert EffectKind.DISPATCH_CLEAR not in [e.kind for e in effects]
+
+
+def test_a_success_in_a_refresh_that_a_later_refresh_replaces_closes_at_once():
+    """The click is routed while a refresh is in flight. Its success removes
+    the numbers at once: no pending post-click record is left for a later
+    refresh to replace and drop, and that later refresh finds a closed
+    overlay."""
+    recorded: list = []
+
+    async def _run():
+        machine = _ns_machine(_NS_KEEP_OFF_RAW)
+        sid, gen = _drive_to_refresh_in_flight(machine, "snap-ns")
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._perform_overlay_effects = (  # type: ignore[method-assign]
+            lambda effects, *, trace_id: recorded.extend(effects)
+        )
+        controller._forward_click_notice = MagicMock()  # type: ignore[method-assign]
+        _wire_app(controller, lambda a, p: _ns_ok())
+        await controller._send_snapshot_item_click(
+            snapshot_id="snap-ns", item_id="snap-ns-item-2", trace_id="tr-ns",
+            overlay_dispatch_pair=(sid, gen),
+        )
+        closed_at_reply = machine.state is OverlayState.CLOSED
+        controller._apply_overlay_event(
+            OverlayEvent(OverlayEventKind.FOCUS_CHANGE), source="test-later",
+        )
+        await asyncio.sleep(0)
+        return machine, controller, closed_at_reply
+
+    machine, controller, closed_at_reply = asyncio.run(_run())
+    assert closed_at_reply
+    assert machine.state is OverlayState.CLOSED
+    assert controller._overlay_pending_postclick_refresh is None
+    assert controller._overlay_pending_postclick_clear is None
+
+
+def test_the_click_success_bookkeeping_still_runs_when_the_success_closes_the_numbers():
+    """Closing the numbers replaces only the overlay refresh. The held
+    'click N' is still cancelled with its numbers_updating notice, and the
+    in-flight marker is still cleared."""
+    held_timer: list = []
+    machine, controller, effects = _ns_click_with_interleave(
+        _NS_KEEP_OFF_RAW, _menu_close, _ns_ok(), arm_hold=True,
+        held_timer_out=held_timer,
+    )
+    held_timer = held_timer[0]
+    _assert_numbers_closed_after_race(machine, effects)
+    cast(MagicMock, held_timer).cancel.assert_called_once_with()
+    assert controller._overlay_hold_armed is None
+    notice = cast(MagicMock, controller._forward_click_notice)
+    assert notice.call_count == 1
+    assert notice.call_args.kwargs["reason"] == "numbers_updating"
+    assert controller._overlay_click_in_flight is None
+
+
+# -- a re-said "show numbers" after the click was sent (decision D5) -------
+
+
+def _ns_click_then_show_numbers(raw, *, late):
+    """Send "click 4", then apply the "show numbers" command, then the reply.
+
+    ``late``: the click times out, the user says "show numbers", and the
+    success arrives late. Otherwise "show numbers" is applied while the click
+    request is outstanding and the success arrives on time.
+    Returns ``(machine, effects)``.
+    """
+    recorded: list = []
+
+    async def _run():
+        machine = _ns_machine(raw)
+        sid, gen = _drive_to_painted(machine, "snap-ns")
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+
+        def _record(effects, *, trace_id):
+            recorded.extend(effects)
+            return None
+
+        controller._perform_overlay_effects = _record  # type: ignore[method-assign]
+        controller._forward_click_notice = MagicMock()  # type: ignore[method-assign]
+        controller._last_click_notice_trace_id = "tr-ns"
+
+        async def _quiescent(*, trace_id):
+            return True
+
+        controller._grid_pointer_channel_quiescent = _quiescent  # type: ignore[method-assign]
+        controller._close_grid_for_numbered_overlay = MagicMock()  # type: ignore[method-assign]
+        captured: dict = {}
+
+        async def _send_request(action, params=None, timeout_s=None,
+                                on_late_response=None):
+            captured["on_late_response"] = on_late_response
+            if late:
+                raise asyncio.TimeoutError()
+            await controller.handle_overlay_command("show", "tr-show")
+            return _ns_ok()
+
+        controller.app = MagicMock()
+        controller.app.send_request = _send_request
+        await controller._send_snapshot_item_click(
+            snapshot_id="snap-ns", item_id="snap-ns-item-4", trace_id="tr-ns",
+            overlay_dispatch_pair=(sid, gen),
+        )
+        if late:
+            await controller.handle_overlay_command("show", "tr-show")
+            captured["on_late_response"](_ns_ok())
+        await asyncio.sleep(0)
+        return machine
+
+    return asyncio.run(_run()), recorded
+
+
+def test_a_late_success_after_a_re_said_show_numbers_keeps_the_numbers():
+    """The user asked for numbers AFTER the click: the late success must not
+    remove them. The reply takes today's path."""
+    machine, effects = _ns_click_then_show_numbers(_NS_KEEP_OFF_RAW, late=True)
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+    assert EffectKind.DISPATCH_CLEAR not in [e.kind for e in effects]
+
+
+def test_an_on_time_success_after_a_re_said_show_numbers_keeps_the_numbers():
+    machine, effects = _ns_click_then_show_numbers(_NS_KEEP_OFF_RAW, late=False)
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+    assert EffectKind.DISPATCH_CLEAR not in [e.kind for e in effects]
+
+
+def test_a_show_numbers_before_the_click_does_not_cancel_the_success_close():
+    """Only a "show numbers" applied AFTER the click was sent counts."""
+    recorded: list = []
+
+    async def _run():
+        machine = _ns_machine(_NS_KEEP_OFF_RAW)
+        sid, gen = _drive_to_painted(machine, "snap-ns")
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._perform_overlay_effects = (  # type: ignore[method-assign]
+            lambda effects, *, trace_id: recorded.extend(effects)
+        )
+        controller._forward_click_notice = MagicMock()  # type: ignore[method-assign]
+
+        async def _quiescent(*, trace_id):
+            return True
+
+        controller._grid_pointer_channel_quiescent = _quiescent  # type: ignore[method-assign]
+        controller._close_grid_for_numbered_overlay = MagicMock()  # type: ignore[method-assign]
+        await controller.handle_overlay_command("show", "tr-show")
+        pair = (machine.overlay_session_id, machine.paint_generation)
+        _wire_app(controller, lambda a, p: _ns_ok())
+        await controller._send_snapshot_item_click(
+            snapshot_id="snap-ns", item_id="snap-ns-item-4", trace_id="tr-ns",
+            overlay_dispatch_pair=pair,
+        )
+        await asyncio.sleep(0)
+        return machine
+
+    machine = asyncio.run(_run())
+    assert machine.state is OverlayState.CLOSED
+
+
+# -- the window facts seam ----------------------------------------------------
+
+
+def test_overlay_window_facts_reads_the_top_level_window_not_the_owner(monkeypatch):
+    """G3: a dialog the numbered window owns has GA_ROOT = itself and
+    GA_ROOTOWNER = its owner. The facts must carry GA_ROOT."""
+    import sys
+    import types
+
+    import services.wheelhouse.main as main_module
+
+    GA_ROOT, GA_ROOTOWNER = 2, 3
+    dialog, owner = 900, 500
+    fake_con = types.SimpleNamespace(GA_ROOT=GA_ROOT, GA_ROOTOWNER=GA_ROOTOWNER)
+    fake_gui = types.SimpleNamespace(
+        IsWindow=lambda h: True,
+        GetClassName=lambda h: "#32770",
+        GetAncestor=lambda h, flag: h if flag == GA_ROOT else owner,
+    )
+    fake_process = types.SimpleNamespace(
+        GetWindowThreadProcessId=lambda h: (7, 4321),
+    )
+    monkeypatch.setitem(sys.modules, "win32con", fake_con)
+    monkeypatch.setitem(sys.modules, "win32gui", fake_gui)
+    monkeypatch.setitem(sys.modules, "win32process", fake_process)
+
+    facts = main_module._overlay_window_facts(dialog)
+
+    assert facts is not None
+    assert facts.root == dialog
+    assert facts.pid == 4321
+    assert facts.class_name == "#32770"
+
+
+# -- foreground changes -------------------------------------------------------
+
+
+def _ns_windows():
+    from services.wheelhouse.main import _OverlayWindowFacts as Facts
+
+    return {
+        # The window that has the numbers (its own top-level window).
+        500: Facts(class_name="Notepad", pid=9000, root=500),
+        # A child control of the numbered window.
+        501: Facts(class_name="Edit", pid=9000, root=500),
+        # A dialog the numbered window owns (an Open dialog from Ctrl+O): a
+        # top-level window of its own, owned by the numbered window.
+        900: Facts(class_name="#32770", pid=9000, root=900),
+        # Another application.
+        600: Facts(class_name="Chrome_WidgetWin_1", pid=9100, root=600),
+        # A tooltip of another application.
+        700: Facts(class_name="tooltips_class32", pid=9100, root=700),
+        # A window of a WheelHouse process (the GUI, pid 222).
+        800: Facts(class_name="Qt6QWindowIcon", pid=222, root=800),
+    }
+
+
+def _ns_foreground(raw, hwnd, monkeypatch, *, windows=None, state="painted"):
+    """Deliver one foreground change; return (machine, applied_events)."""
+    import services.wheelhouse.main as main_module
+    from services.wheelhouse.overlay_focus_hooks import ForegroundIdentity
+
+    table = _ns_windows() if windows is None else windows
+    monkeypatch.setattr(
+        main_module, "_overlay_window_facts", lambda h: table.get(h),
+    )
+    applied: list = []
+
+    async def _run():
+        machine = _ns_machine(raw)
+        if state == "painted":
+            _drive_to_painted(machine, "snap-ns")
+        elif state == "walk":
+            machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._perform_overlay_effects = (  # type: ignore[method-assign]
+            lambda effects, *, trace_id: None
+        )
+        controller._overlay_focus_debouncer.should_fire.return_value = True
+        controller._overlay_tracked_identity = ForegroundIdentity(
+            hwnd=500, pid=9000, process_name="notepad.exe",
+            window_creation_time=1,
+        )
+        controller._wheelhouse_process_ids = lambda: [111, 222]  # type: ignore[method-assign]
+        real_apply = controller._apply_overlay_event
+
+        def _spy(event, *, source):
+            applied.append(event)
+            return real_apply(event, source=source)
+
+        controller._apply_overlay_event = _spy  # type: ignore[method-assign]
+        controller._on_overlay_foreground_change(hwnd)
+        await asyncio.sleep(0)
+        return machine
+
+    return asyncio.run(_run()), applied
+
+
+def test_foreground_change_to_another_application_removes_numbers(monkeypatch):
+    machine, applied = _ns_foreground(_NS_KEEP_OFF_RAW, 600, monkeypatch)
+    assert applied[0].kind is OverlayEventKind.FOCUS_CHANGE
+    assert applied[0].dismisses_numbers is True
+    assert machine.state is OverlayState.CLOSED
+
+
+def test_foreground_change_with_keep_numbers_true_refreshes(monkeypatch):
+    machine, applied = _ns_foreground(_NS_KEEP_ON_RAW, 600, monkeypatch)
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_foreground_change_to_a_tooltip_refreshes(monkeypatch):
+    machine, applied = _ns_foreground(_NS_KEEP_OFF_RAW, 700, monkeypatch)
+    assert applied[0].dismisses_numbers is False
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_foreground_change_to_a_wheelhouse_window_refreshes(monkeypatch):
+    machine, applied = _ns_foreground(_NS_KEEP_OFF_RAW, 800, monkeypatch)
+    assert applied[0].dismisses_numbers is False
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_foreground_change_back_to_the_numbered_window_refreshes(monkeypatch):
+    machine, applied = _ns_foreground(_NS_KEEP_OFF_RAW, 500, monkeypatch)
+    assert applied[0].dismisses_numbers is False
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_foreground_change_to_a_control_inside_the_numbered_window_refreshes(monkeypatch):
+    machine, applied = _ns_foreground(_NS_KEEP_OFF_RAW, 501, monkeypatch)
+    assert applied[0].dismisses_numbers is False
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_foreground_change_to_a_dialog_the_numbered_window_owns_removes_numbers(monkeypatch):
+    """Ruling R-B option 1: only the numbered window itself keeps the refresh.
+    An Open dialog from Ctrl+O is another window, so the numbers go."""
+    machine, applied = _ns_foreground(_NS_KEEP_OFF_RAW, 900, monkeypatch)
+    assert applied[0].dismisses_numbers is True
+    assert machine.state is OverlayState.CLOSED
+
+
+def test_foreground_change_with_overlay_keep_numbers_written_false_removes_numbers(monkeypatch):
+    """The key written as false in the raw config, not left out."""
+    assert _NS_KEEP_FALSE_RAW["overlay_keep_numbers"] is False
+    machine, applied = _ns_foreground(_NS_KEEP_FALSE_RAW, 600, monkeypatch)
+    assert applied[0].dismisses_numbers is True
+    assert machine.state is OverlayState.CLOSED
+
+
+def test_foreground_change_back_to_the_numbered_window_makes_no_process_scan(monkeypatch):
+    """F4: the numbered window is checked before the WheelHouse-process list."""
+    import services.wheelhouse.main as main_module
+    from services.wheelhouse.overlay_focus_hooks import ForegroundIdentity
+
+    table = _ns_windows()
+    monkeypatch.setattr(
+        main_module, "_overlay_window_facts", lambda h: table.get(h),
+    )
+    machine = _ns_machine(_NS_KEEP_OFF_RAW)
+    _drive_to_painted(machine, "snap-ns")
+    controller = _controller(machine=machine)
+    controller._overlay_tracked_identity = ForegroundIdentity(
+        hwnd=500, pid=9000, process_name="notepad.exe", window_creation_time=1,
+    )
+    scan = MagicMock(return_value=[111, 222])
+    controller._wheelhouse_process_ids = scan  # type: ignore[method-assign]
+
+    assert controller._foreground_change_dismisses_numbers(500) is False
+    scan.assert_not_called()
+    # Another application still reaches the scan and then closes the numbers.
+    assert controller._foreground_change_dismisses_numbers(600) is True
+    scan.assert_called_once_with()
+
+
+def test_foreground_change_with_unreadable_window_facts_refreshes(monkeypatch):
+    machine, applied = _ns_foreground(
+        _NS_KEEP_OFF_RAW, 999, monkeypatch, windows={},
+    )
+    assert applied[0].dismisses_numbers is False
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_foreground_change_during_the_first_walk_restarts_the_walk(monkeypatch):
+    """Item 11: before any numbers appear, a change of window keeps today's walk."""
+    machine, applied = _ns_foreground(
+        _NS_KEEP_OFF_RAW, 600, monkeypatch, state="walk",
+    )
+    assert applied[0].dismisses_numbers is False
+    assert machine.state is OverlayState.WALK_IN_FLIGHT
+
+
+# -- the other refresh triggers keep today's behaviour -----------------------
+
+
+def test_menu_popup_change_still_refreshes_with_keep_numbers_off():
+    from services.wheelhouse.overlay_focus_hooks import (
+        EVENT_SYSTEM_MENUPOPUPEND,
+    )
+
+    machine = _ns_machine(_NS_KEEP_OFF_RAW)
+    _drive_to_painted(machine, "snap-ns")
+    controller = _controller(machine=machine)
+    controller._apply_overlay_event = MagicMock()  # type: ignore[method-assign]
+    controller._cancel_overlay_settle_refire = MagicMock()  # type: ignore[method-assign]
+    controller._overlay_focus_debouncer.should_fire.return_value = True
+
+    controller._on_overlay_menu_popup_change(EVENT_SYSTEM_MENUPOPUPEND)
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.dismisses_numbers is False
+    machine.apply(event)
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_browser_refresh_timer_still_refreshes_with_keep_numbers_off():
+    machine = _ns_machine(_NS_KEEP_OFF_RAW)
+    _drive_to_painted(machine, "snap-ns")
+    controller = _controller(machine=machine)
+    controller._apply_overlay_event = MagicMock()  # type: ignore[method-assign]
+    controller._overlay_browser_refresh_seconds = 1.0
+    controller._overlay_browser_refresh_backoff = 1
+    controller._overlay_browser_process_set = frozenset({"chrome.exe"})
+    controller._overlay_tracked_identity = MagicMock()
+    controller._overlay_tracked_identity.process_name = "chrome.exe"
+    controller._overlay_last_paint_monotonic = 0.0
+    controller._overlay_now_monotonic = lambda: 100.0  # type: ignore[method-assign]
+    controller._overlay_in_proactive_apply = False
+
+    controller._maybe_overlay_browser_refresh(machine)
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.dismisses_numbers is False
+    machine.apply(event)
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+def test_pattern_manager_tree_change_still_refreshes_with_keep_numbers_off():
+    from services.wheelhouse.overlay_focus_hooks import ForegroundIdentity
+
+    machine = _ns_machine(_NS_KEEP_OFF_RAW)
+    _drive_to_painted(machine, "snap-ns")
+    controller = _controller(machine=machine)
+    controller._apply_overlay_event = MagicMock()  # type: ignore[method-assign]
+    controller._cancel_overlay_settle_refire = MagicMock()  # type: ignore[method-assign]
+    controller._overlay_focus_debouncer.should_fire.return_value = True
+    controller._pm_tree_change_last_hwnd = 0
+    controller._pm_tree_change_last_sequence = 0
+    controller._overlay_tracked_identity = ForegroundIdentity(
+        hwnd=4242, pid=4321, process_name="python.exe", window_creation_time=7,
+    )
+
+    controller._on_pattern_manager_tree_change(4242, 1)
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.dismisses_numbers is False
+    machine.apply(event)
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+
+# -- the settle refire --------------------------------------------------------
+
+
+def _ns_refire_controller(raw, monkeypatch, *, current=0, state="painted"):
+    """A painted controller whose debounce coalesces every event.
+
+    ``current`` is the window the foreground seam reports when the settle
+    refire (or an immediate menu event) asks which window is in front now.
+    """
+    import services.wheelhouse.main as main_module
+    from services.wheelhouse.overlay_focus_hooks import ForegroundIdentity
+
+    table = _ns_windows()
+    monkeypatch.setattr(
+        main_module, "_overlay_window_facts", lambda h: table.get(h),
+    )
+    monkeypatch.setattr(
+        main_module, "_overlay_current_foreground_hwnd", lambda: current,
+        raising=False,
+    )
+    machine = _ns_machine(raw)
+    if state == "painted":
+        _drive_to_painted(machine, "snap-ns")
+    elif state == "walk":
+        machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+        assert machine.state is OverlayState.WALK_IN_FLIGHT
+    else:
+        assert state == "closed"
+    controller = _controller(machine=machine)
+    controller._apply_overlay_event = MagicMock()  # type: ignore[method-assign]
+    controller._arm_overlay_settle_refire = MagicMock()  # type: ignore[method-assign]
+    controller._overlay_tracked_identity = ForegroundIdentity(
+        hwnd=500, pid=9000, process_name="notepad.exe", window_creation_time=1,
+    )
+    controller._wheelhouse_process_ids = lambda: [111, 222]  # type: ignore[method-assign]
+    # Every event is coalesced by the debounce until the refire runs.
+    controller._overlay_focus_debouncer.should_fire.return_value = False
+    return controller
+
+
+def _ns_refire_event(controller):
+    controller._overlay_focus_debouncer.should_fire.return_value = True
+    controller._on_overlay_settle_refire("foreground change")
+    return cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+
+
+def test_settle_refire_reads_no_window_while_the_first_walk_runs(monkeypatch):
+    """Item 11: with no numbers on the screen, a set flag reads no window."""
+    import services.wheelhouse.main as main_module
+
+    controller = _ns_refire_controller(
+        _NS_KEEP_OFF_RAW, monkeypatch, current=600, state="walk",
+    )
+    seam = MagicMock(return_value=600)
+    monkeypatch.setattr(main_module, "_overlay_current_foreground_hwnd", seam)
+    controller._overlay_settle_refire_foreground = True
+
+    event = _ns_refire_event(controller)
+
+    seam.assert_not_called()
+    assert event.dismisses_numbers is False
+    assert controller._overlay_settle_refire_foreground is False
+
+
+def test_settle_refire_dismisses_when_the_burst_ended_on_another_application(monkeypatch):
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._on_overlay_foreground_change(600)
+
+    event = _ns_refire_event(controller)
+
+    assert event.kind is OverlayEventKind.FOCUS_CHANGE
+    assert event.dismisses_numbers is True
+
+
+def test_settle_refire_dismisses_when_a_menu_event_came_before_the_window_change(monkeypatch):
+    from services.wheelhouse.overlay_focus_hooks import (
+        EVENT_SYSTEM_MENUPOPUPEND,
+    )
+
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._on_overlay_menu_popup_change(EVENT_SYSTEM_MENUPOPUPEND)
+    controller._on_overlay_foreground_change(600)
+
+    assert _ns_refire_event(controller).dismisses_numbers is True
+
+
+def test_settle_refire_refreshes_when_the_burst_ended_back_on_the_numbered_window(monkeypatch):
+    """F3: another application was in front for a moment, then the user came
+    back. The refire judges the window that is in front NOW."""
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=500)
+    controller._on_overlay_foreground_change(600)
+    controller._on_overlay_foreground_change(500)
+
+    assert _ns_refire_event(controller).dismisses_numbers is False
+
+
+def test_settle_refire_dismisses_when_the_last_coalesced_event_named_the_numbered_window_but_another_is_in_front(monkeypatch):
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._on_overlay_foreground_change(500)
+
+    assert _ns_refire_event(controller).dismisses_numbers is True
+
+
+def test_settle_refire_does_not_dismiss_for_a_coalesced_menu_event_alone(monkeypatch):
+    from services.wheelhouse.overlay_focus_hooks import (
+        EVENT_SYSTEM_MENUPOPUPEND,
+    )
+
+    # Another application is in front, but no foreground event was coalesced:
+    # the refire is a menu refresh and keeps today's behaviour.
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._on_overlay_menu_popup_change(EVENT_SYSTEM_MENUPOPUPEND)
+
+    assert _ns_refire_event(controller).dismisses_numbers is False
+
+
+def test_settle_refire_does_not_dismiss_for_a_coalesced_tooltip(monkeypatch):
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=700)
+    controller._on_overlay_foreground_change(700)
+
+    assert _ns_refire_event(controller).dismisses_numbers is False
+
+
+def test_settle_refire_refreshes_when_the_foreground_window_cannot_be_read(monkeypatch):
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=0)
+    controller._on_overlay_foreground_change(600)
+
+    assert _ns_refire_event(controller).dismisses_numbers is False
+
+
+def test_settle_refire_clears_the_window_change_flag_after_it_runs(monkeypatch):
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._on_overlay_foreground_change(600)
+    assert _ns_refire_event(controller).dismisses_numbers is True
+
+    controller._on_overlay_settle_refire("foreground change")
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.dismisses_numbers is False
+
+
+def test_cancelling_the_settle_refire_clears_the_window_change_flag(monkeypatch):
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._on_overlay_foreground_change(600)
+
+    controller._cancel_overlay_settle_refire()
+
+    assert _ns_refire_event(controller).dismisses_numbers is False
+
+
+def test_a_foreground_event_coalesced_during_the_first_walk_is_not_judged_after_the_paint(monkeypatch):
+    """Item 11 and G1: the event was coalesced while the first walk ran, so
+    it belongs to the numbers-not-yet-showing period. The walk and paint end
+    before the refire; the refire must not close the numbers it finds."""
+    controller = _ns_refire_controller(
+        _NS_KEEP_OFF_RAW, monkeypatch, current=600, state="walk",
+    )
+    controller._on_overlay_foreground_change(600)
+    machine = controller.click_overlay_state
+    sid, gen = machine.overlay_session_id, machine.paint_generation
+    machine.apply(
+        OverlayEvent(
+            OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+            paint_generation=gen, snapshot_id="snap-ns",
+        )
+    )
+    machine.apply(
+        OverlayEvent(
+            OverlayEventKind.PAINT_ACK, overlay_session_id=sid,
+            paint_generation=gen, paint_state=PaintAckState.PAINTED,
+        )
+    )
+    assert machine.state is OverlayState.PAINTED
+
+    assert _ns_refire_event(controller).dismisses_numbers is False
+
+
+def test_a_foreground_event_coalesced_while_closed_does_not_leak_into_a_later_session(monkeypatch):
+    from services.wheelhouse.overlay_focus_hooks import (
+        EVENT_SYSTEM_MENUPOPUPEND,
+    )
+
+    controller = _ns_refire_controller(
+        _NS_KEEP_OFF_RAW, monkeypatch, current=600, state="closed",
+    )
+    controller._on_overlay_foreground_change(600)
+    # "show numbers", then the paint.
+    _drive_to_painted(controller.click_overlay_state, "snap-ns")
+    controller._overlay_focus_debouncer.should_fire.return_value = True
+
+    controller._on_overlay_menu_popup_change(EVENT_SYSTEM_MENUPOPUPEND)
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.dismisses_numbers is False
+
+
+def test_a_menu_event_that_fires_at_once_keeps_a_pending_window_change(monkeypatch):
+    """F3: a foreground change was coalesced and the refire is armed. A menu
+    event then fires at once (the debounce window just ended) and cancels the
+    refire. The event it applies must carry the pending window change."""
+    from services.wheelhouse.overlay_focus_hooks import (
+        EVENT_SYSTEM_MENUPOPUPEND,
+    )
+
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._on_overlay_foreground_change(600)
+    controller._overlay_focus_debouncer.should_fire.return_value = True
+
+    controller._on_overlay_menu_popup_change(EVENT_SYSTEM_MENUPOPUPEND)
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.kind is OverlayEventKind.FOCUS_CHANGE
+    assert event.dismisses_numbers is True
+
+
+def test_a_menu_event_that_fires_at_once_with_no_pending_window_change_refreshes(monkeypatch):
+    from services.wheelhouse.overlay_focus_hooks import (
+        EVENT_SYSTEM_MENUPOPUPEND,
+    )
+
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._overlay_focus_debouncer.should_fire.return_value = True
+
+    controller._on_overlay_menu_popup_change(EVENT_SYSTEM_MENUPOPUPEND)
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.dismisses_numbers is False
+
+
+def test_a_pattern_manager_event_that_fires_at_once_keeps_a_pending_window_change(monkeypatch):
+    from services.wheelhouse.overlay_focus_hooks import ForegroundIdentity
+
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=600)
+    controller._overlay_tracked_identity = ForegroundIdentity(
+        hwnd=4242, pid=4321, process_name="python.exe", window_creation_time=7,
+    )
+    controller._pm_tree_change_last_hwnd = 0
+    controller._pm_tree_change_last_sequence = 0
+    controller._on_overlay_foreground_change(600)
+    controller._overlay_focus_debouncer.should_fire.return_value = True
+
+    controller._on_pattern_manager_tree_change(4242, 1)
+
+    event = cast(MagicMock, controller._apply_overlay_event).call_args[0][0]
+    assert event.kind is OverlayEventKind.FOCUS_CHANGE
+    assert event.dismisses_numbers is True
+
+
+# -- applying a saved value with no restart ----------------------------------
+
+
+class _FakeConfigService:
+    def __init__(self, click):
+        self.click = click
+        self.reads: list[str] = []
+
+    def get(self, key, default=None):
+        self.reads.append(key)
+        if key == "click":
+            return self.click
+        return default
+
+
+def _ns_save_controller(*, saved=True, raw=None):
+    machine = _ns_machine(raw if raw is not None else _NS_KEEP_OFF_RAW)
+    controller = _controller(machine=machine)
+    controller.config_service = _FakeConfigService({"enabled": True})
+    controller.state_manager = MagicMock()
+    calls: list = []
+
+    async def _set_config_value(key, value, request_id=None):
+        calls.append(("one", key, value, request_id))
+        controller.config_service.click[key.split(".", 1)[1]] = value
+        return saved
+
+    async def _set_config_values(values, request_id=None):
+        calls.append(("many", dict(values), request_id))
+        for key, value in values.items():
+            if key.startswith("click."):
+                controller.config_service.click[key.split(".", 1)[1]] = value
+        return saved
+
+    controller.state_manager.set_config_value = _set_config_value
+    controller.state_manager.set_config_values = _set_config_values
+    return controller, machine, calls
+
+
+def test_saved_keep_numbers_value_reaches_the_machine_without_a_restart():
+    controller, machine, calls = _ns_save_controller()
+    assert machine.keep_numbers is False
+
+    result = asyncio.run(
+        controller._set_config_value_and_apply(
+            "click.overlay_keep_numbers", True, request_id="r1",
+        )
+    )
+    assert result is True
+    assert machine.keep_numbers is True
+    assert calls == [("one", "click.overlay_keep_numbers", True, "r1")]
+
+    asyncio.run(
+        controller._set_config_value_and_apply(
+            "click.overlay_keep_numbers", False, request_id="r2",
+        )
+    )
+    assert machine.keep_numbers is False
+
+
+def test_saved_keep_numbers_value_in_a_group_save_reaches_the_machine():
+    controller, machine, calls = _ns_save_controller()
+
+    result = asyncio.run(
+        controller._set_config_values_and_apply(
+            {"click.overlay_keep_numbers": True, "OTHER": 1}, request_id="g1",
+        )
+    )
+
+    assert result is True
+    assert machine.keep_numbers is True
+    assert calls[0][0] == "many"
+
+
+def test_failed_save_leaves_the_machine_unchanged_and_returns_false():
+    controller, machine, _calls = _ns_save_controller(saved=False)
+
+    result = asyncio.run(
+        controller._set_config_value_and_apply(
+            "click.overlay_keep_numbers", True, request_id="r1",
+        )
+    )
+
+    assert result is False
+    assert machine.keep_numbers is False
+
+
+def test_saving_an_unrelated_key_does_not_touch_the_machine():
+    controller, machine, _calls = _ns_save_controller(raw=_NS_KEEP_ON_RAW)
+    controller.config_service.click["x"] = 0
+    assert machine.keep_numbers is True
+
+    asyncio.run(controller._set_config_value_and_apply("click.x", 1))
+    asyncio.run(controller._set_config_values_and_apply({"STT": 2}))
+
+    assert machine.keep_numbers is True
+    assert controller.config_service.reads == []
+
+
+def test_next_click_after_a_save_follows_the_new_value():
+    controller, machine, _calls = _ns_save_controller()
+    effects: list = []
+
+    async def _run(expected_state):
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+
+        def _record(eff, *, trace_id):
+            effects.extend(eff)
+
+        controller._perform_overlay_effects = _record  # type: ignore[method-assign]
+        controller._forward_click_notice = MagicMock()  # type: ignore[method-assign]
+        _wire_app(controller, lambda a, p: _ns_ok())
+        sid, gen = _drive_to_painted(machine, "snap-live")
+        await controller._send_snapshot_item_click(
+            snapshot_id="snap-live", item_id="snap-live-item-2",
+            trace_id="tr-live", overlay_dispatch_pair=(sid, gen),
+        )
+        await asyncio.sleep(0)
+        assert machine.state is expected_state
+        # Start over for the next round.
+        machine.apply(OverlayEvent(OverlayEventKind.HIDE_NUMBERS))
+
+    asyncio.run(_run(OverlayState.CLOSED))
+    asyncio.run(
+        controller._set_config_value_and_apply(
+            "click.overlay_keep_numbers", True,
+        )
+    )
+    asyncio.run(_run(OverlayState.REFRESH_IN_FLIGHT))
+
+
+def test_gui_handler_map_routes_both_save_commands_through_the_live_apply():
+    controller = _controller()
+    seen: list = []
+
+    async def _direct_one(key, value, request_id=None):
+        seen.append(("state_manager one", key, value, request_id))
+        return True
+
+    async def _direct_many(values, request_id=None):
+        seen.append(("state_manager many", values, request_id))
+        return True
+
+    # A handler that skips the live apply lands here and records a different
+    # entry; a MagicMock would raise before the assertion could fail.
+    controller.state_manager = MagicMock()
+    controller.state_manager.set_config_value = _direct_one
+    controller.state_manager.set_config_values = _direct_many
+
+    async def _one(key, value, request_id=None):
+        seen.append(("one", key, value, request_id))
+        return True
+
+    async def _many(values, request_id=None):
+        seen.append(("many", values, request_id))
+        return True
+
+    controller._set_config_value_and_apply = _one  # type: ignore[method-assign]
+    controller._set_config_values_and_apply = _many  # type: ignore[method-assign]
+
+    def _run(command):
+        handlers = controller._build_gui_handler_map(command)
+        captured: list = []
+        controller.create_task_with_error_handling = (  # type: ignore[method-assign]
+            lambda coro, name: captured.append(coro)
+        )
+        handlers[command["action"]]()
+        for coro in captured:
+            asyncio.run(coro)
+
+    _run({
+        "action": "set_config_value", "key": "click.overlay_keep_numbers",
+        "value": True, "request_id": "r1",
+    })
+    _run({
+        "action": "set_config_values",
+        "values": {"click.overlay_keep_numbers": False}, "request_id": "r2",
+    })
+
+    assert seen == [
+        ("one", "click.overlay_keep_numbers", True, "r1"),
+        ("many", {"click.overlay_keep_numbers": False}, "r2"),
+    ]
+
+
+# -- gaps the mutation gate found (wh-numbers-stay-setting) ------------------
+
+
+def test_success_reply_with_no_recorded_show_count_still_removes_the_numbers():
+    """A reply whose dispatch ordinal has no recorded count (the dict entry was
+    pruned, or the click came from a path that never recorded one) is not a
+    "show numbers" after the click: the numbers go."""
+
+    async def _run():
+        machine = _ns_machine(_NS_KEEP_OFF_RAW)
+        sid, gen = _drive_to_painted(machine, "snap-ns")
+        controller = _controller(machine=machine)
+        controller.loop = asyncio.get_running_loop()
+        controller.background_tasks = []
+        controller._perform_overlay_effects = (  # type: ignore[method-assign]
+            lambda effects, *, trace_id: None
+        )
+        assert 999 not in getattr(controller, "_overlay_click_show_counts", {})
+        controller._feed_click_complete_refresh(
+            overlay_dispatch_pair=(sid, gen), trace_id="tr-ns",
+            click_succeeded=True, overlay_dispatch_ordinal=999,
+        )
+        await asyncio.sleep(0)
+        return machine
+
+    assert asyncio.run(_run()).state is OverlayState.CLOSED
+
+
+def test_click_show_counts_keep_exactly_the_newest_32_dispatches():
+    async def _run():
+        controller = _controller()
+        controller._send_snapshot_item_click_inner = (  # type: ignore[method-assign]
+            AsyncMock()
+        )
+        controller._overlay_show_numbers_applied = 7
+        for _ in range(40):
+            await controller._send_snapshot_item_click(
+                snapshot_id="snap-ns", item_id="snap-ns-item-2",
+                trace_id="tr-ns", overlay_dispatch_pair=(1, 1),
+            )
+        return controller
+
+    controller = asyncio.run(_run())
+
+    assert sorted(controller._overlay_click_show_counts) == list(range(9, 41))
+    assert set(controller._overlay_click_show_counts.values()) == {7}
+    assert sorted(controller._overlay_click_keep_numbers) == list(range(9, 41))
+
+
+def _ns_filter_controller(raw, monkeypatch, *, windows=None):
+    """A painted controller for calling the window-change filter directly."""
+    controller = _ns_refire_controller(raw, monkeypatch, current=0)
+    if windows is not None:
+        import services.wheelhouse.main as main_module
+
+        monkeypatch.setattr(
+            main_module, "_overlay_window_facts", lambda h: windows.get(h),
+        )
+    return controller
+
+
+def test_window_change_filter_reads_nothing_when_keep_numbers_is_true(monkeypatch):
+    import services.wheelhouse.main as main_module
+
+    controller = _ns_filter_controller(_NS_KEEP_ON_RAW, monkeypatch)
+    facts = MagicMock(return_value=_ns_windows()[600])
+    monkeypatch.setattr(main_module, "_overlay_window_facts", facts)
+    scan = MagicMock(return_value=[111, 222])
+    controller._wheelhouse_process_ids = scan  # type: ignore[method-assign]
+
+    assert controller._foreground_change_dismisses_numbers(600) is False
+
+    facts.assert_not_called()
+    scan.assert_not_called()
+
+
+def test_window_change_filter_answers_for_a_refresh_in_flight_machine(monkeypatch):
+    controller = _ns_filter_controller(_NS_KEEP_OFF_RAW, monkeypatch)
+    machine = controller.click_overlay_state
+    machine.apply(OverlayEvent(OverlayEventKind.FOCUS_CHANGE))
+    assert machine.state is OverlayState.REFRESH_IN_FLIGHT
+
+    assert controller._foreground_change_dismisses_numbers(600) is True
+
+
+def test_window_change_filter_ignores_the_case_of_the_tooltip_class_name(monkeypatch):
+    from services.wheelhouse.main import _OverlayWindowFacts as Facts
+
+    table = dict(_ns_windows())
+    table[701] = Facts(class_name="ToolTips_Class32", pid=9100, root=701)
+    controller = _ns_filter_controller(
+        _NS_KEEP_OFF_RAW, monkeypatch, windows=table,
+    )
+
+    assert controller._foreground_change_dismisses_numbers(701) is False
+
+
+def test_window_change_filter_matches_a_control_of_an_unreadable_numbered_window(monkeypatch):
+    """The numbered window itself cannot be read: its own handle stands in for
+    its top-level window, so a control inside it is still the same window."""
+    from services.wheelhouse.main import _OverlayWindowFacts as Facts
+
+    table = {501: Facts(class_name="Edit", pid=9000, root=500)}
+    controller = _ns_filter_controller(
+        _NS_KEEP_OFF_RAW, monkeypatch, windows=table,
+    )
+    assert 500 not in table
+
+    assert controller._foreground_change_dismisses_numbers(501) is False
+
+
+def test_window_change_filter_keeps_the_refresh_when_the_process_list_fails(monkeypatch):
+    controller = _ns_filter_controller(_NS_KEEP_OFF_RAW, monkeypatch)
+
+    def _boom():
+        raise OSError("process list unavailable")
+
+    controller._wheelhouse_process_ids = _boom  # type: ignore[method-assign]
+
+    assert controller._foreground_change_dismisses_numbers(600) is False
+
+
+def test_settle_refire_refreshes_when_the_foreground_window_reads_as_zero_but_has_facts(monkeypatch):
+    """A foreground handle of 0 means "unreadable". Even when the facts lookup
+    would answer for handle 0, the refire must not judge it a window change."""
+    from services.wheelhouse.main import _OverlayWindowFacts as Facts
+
+    table = dict(_ns_windows())
+    table[0] = Facts(class_name="Chrome_WidgetWin_1", pid=9100, root=0)
+    controller = _ns_refire_controller(_NS_KEEP_OFF_RAW, monkeypatch, current=0)
+    import services.wheelhouse.main as main_module
+
+    monkeypatch.setattr(
+        main_module, "_overlay_window_facts", lambda h: table.get(h),
+    )
+    controller._overlay_settle_refire_foreground = True
+
+    assert controller._consume_pending_foreground_dismissal() is False
+    assert controller._overlay_settle_refire_foreground is False
+
+
+def test_failed_group_save_returns_false_and_leaves_the_machine_unchanged():
+    controller, machine, _calls = _ns_save_controller(saved=False)
+
+    result = asyncio.run(
+        controller._set_config_values_and_apply(
+            {"click.overlay_keep_numbers": True}, request_id="g1",
+        )
+    )
+
+    assert result is False
+    assert machine.keep_numbers is False

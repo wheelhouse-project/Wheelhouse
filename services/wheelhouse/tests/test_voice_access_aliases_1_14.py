@@ -69,6 +69,15 @@ _NEW_FORMS = [
     ("move up 2 times", "nav-up-times", _hk("up", "g1"), True),
     ("go down 4 times", "nav-down-times", _hk("down", "g1"), True),
     ("move down", "nav-down-times", _hk("down", "g1"), True),
+    # A count with no "times" (wh-number-words-command-failures part D).
+    # These rows read the raw TOML, before the loader widens (\d+) to
+    # number words, so the word forms are in
+    # test_go_up_or_down_and_a_count_presses_the_key_that_many_times.
+    ("go up 3", "nav-up-times", _hk("up", "g1"), True),
+    ("move up 2", "nav-up-times", _hk("up", "g1"), True),
+    ("go down 4", "nav-down-times", _hk("down", "g1"), True),
+    # "lines" still belongs to the lines row.
+    ("go up 3 lines", "nav-up-lines", _hk("up", "g1"), True),
     ("go left 5 times", "nav-left-times", _hk("left", "g1"), True),
     ("move left", "nav-left-times", _hk("left", "g1"), True),
     ("go right 2 times", "nav-right-times", _hk("right", "g1"), True),
@@ -323,6 +332,31 @@ class TestSpokenThroughThePipeline:
         await _send_phrase(harness, ("go", "up", "3", "times"))
 
         assert ["up"] in _hotkey_key_lists(harness)
+        assert _inserted_text(harness) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("phrase, key, count", [
+        (("go", "up", "three"), "up", 3),
+        (("go", "up", "3"), "up", 3),
+        (("go", "down", "three"), "down", 3),
+        (("go", "down", "3"), "down", 3),
+        (("move", "up", "twenty", "three"), "up", 23),
+        (("go", "up", "three", "lines"), "up", 3),
+    ])
+    async def test_go_up_or_down_and_a_count_presses_the_key_that_many_times(
+        self, harness, phrase, key, count
+    ):
+        """ "go up three" does what "go up three lines" does
+        (wh-number-words-command-failures part D)."""
+        await _send_phrase(harness, phrase)
+
+        repeats = [
+            output.params.get("repeat")
+            for output in harness.get_outputs()
+            if output.action == "hotkey_action"
+            and output.params.get("keys") == [key]
+        ]
+        assert repeats == [count], harness.get_outputs()
         assert _inserted_text(harness) == []
 
     @pytest.mark.asyncio

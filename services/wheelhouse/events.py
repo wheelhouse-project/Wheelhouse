@@ -31,6 +31,27 @@ class SonosStateChangedEvent:
     is_playing: bool
 
 @dataclass
+class SpeakerExclusiveStateChangedEvent:
+    """
+    Event published when an app takes or gives back sole control of the
+    default speaker (Windows "exclusive mode").
+
+    While an app holds the speaker this way, WheelHouse pauses all listening
+    (wh-kodi-playback-echo-stutter). StateManager subscribes and sets or
+    clears the pause. The detector publishes it only when its answer changes.
+
+    :param held: True while an app holds the default render endpoint in
+        exclusive mode, False once it is free again.
+    :param endpoint_name: Friendly name of the speaker, for the log.
+    :param method: Which detection method saw the change, for the log
+        (for example "shared-mode check" or "session disconnect"). The state
+        manager treats it as free text.
+    """
+    held: bool
+    endpoint_name: str
+    method: str
+
+@dataclass
 class AudioStateChangedEvent:
     """
     Event published when the system audio playback state changes.

@@ -9,11 +9,12 @@ pytest` as a subprocess, in each provider's own service directory):
     python tests/mutation_gate_provider_ready_handshake.py google
     python tests/mutation_gate_provider_ready_handshake.py --check
 
-The defect this branch fixed was the same on all three shipped
-providers: the ready notice went out on a timer that knew nothing about
+The defect this branch fixed was the same on all three providers
+shipped at that time (the Distil-Whisper provider has since been
+removed): the ready notice went out on a timer that knew nothing about
 the microphone. A denied or missing device produced "Transcription
 service ready" while every spoken word was discarded, and on parakeet
-and distil an unconditional "Audio capture started" log line said the
+an unconditional "Audio capture started" log line said the
 same thing to whoever read wheelhouse.log afterwards.
 
 So the mutations mostly restore parts of that defect: the handshake not
@@ -49,7 +50,6 @@ SHARED = Path(__file__).resolve().parents[1]
 PROVIDERS = SHARED.parent
 
 PARAKEET = PROVIDERS / "sherpa_offline_parakeet_stt_server"
-DISTIL = PROVIDERS / "distil_medium_en"
 GOOGLE = PROVIDERS / "google_stt_server"
 
 READINESS_TESTS = "tests/test_startup_readiness.py"
@@ -61,10 +61,10 @@ REFUSAL = SHARED / "shared_stt" / "startup_refusal.py"
 
 
 def _provider_mutations(label, service, indent="        "):
-    """The mutations parakeet and distil share.
+    """The mutations the providers with a server-class announcement share.
 
-    Both hold the announcement as a method on their server class, so the
-    snippets differ only in the label. Google is written out separately
+    Parakeet holds the announcement as a method on its server class; the
+    label keeps the snippets reusable. Google is written out separately
     below: its function is module-level, takes the capture provider as an
     argument, and has no capture-started line.
     """
@@ -270,9 +270,9 @@ def _provider_mutations(label, service, indent="        "):
             # inside the function would bind the name time as a local of
             # that function and every earlier use would raise
             # UnboundLocalError before the sleep ran, which is a false
-            # catch (mutation-gate skill). distil no longer imports time
-            # at module level at all, so the local import is also what
-            # makes this mutation apply to both providers unchanged.
+            # catch (mutation-gate skill). the local import also
+            # keeps this mutation independent of what the provider
+            # module imports at module level.
             "name": f"{label}-announcement-sleeps-again",
             "service": service,
             "test_file": READINESS_TESTS,
@@ -314,31 +314,6 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
                 "        self.audio_capture.start()"),
         "expect": ["test_capture_starts_before_the_announcement"],
     },
-] + _provider_mutations("distil", DISTIL) + [
-    {
-        "name": "distil-announcement-before-capture-start",
-        "service": DISTIL,
-        "test_file": READINESS_TESTS,
-        "file": DISTIL / "main.py",
-        "old": ("        self.audio_capture.start()\n"
-                "\n"
-                "        # After start(), never before: wait_ready() is an "
-                "answer about\n"
-                "        # a capture provider that has been asked to open. "
-                "The\n"
-                '        # "Audio capture started" log line moved inside '
-                "the\n"
-                "        # announcement, so it is written only once the "
-                "handshake proves\n"
-                "        # the microphone works (wh-provider-ready-handshake "
-                "criterion 3).\n"
-                "        self._send_startup_notification()"),
-        "new": ("        self._send_startup_notification()\n"
-                "\n"
-                "        self.audio_capture.start()"),
-        "expect": ["test_capture_starts_before_the_announcement"],
-    },
-
     # -- google -----------------------------------------------------------
     {
         "name": "google-handshake-not-consulted",
@@ -387,10 +362,10 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         # capture_failure_message an empty detail
         # (wh-blocked-mic-message).
         "old": ("    message, cause = capture_failure_message(detail)\n"
-                '    return ("Google STT", message, "startup_failed", '
+                '    return ("Google Cloud", message, "startup_failed", '
                 "cause)"),
         "new": ('    message, cause = capture_failure_message("")\n'
-                '    return ("Google STT", message, "startup_failed", '
+                '    return ("Google Cloud", message, "startup_failed", '
                 "cause)"),
         "expect": ["test_the_failure_notice_names_the_cause"],
     },
@@ -403,10 +378,10 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "test_file": READINESS_TESTS,
         "file": GOOGLE / "main.py",
         "old": ("    message, cause = capture_failure_message(detail)\n"
-                '    return ("Google STT", message, "startup_failed", '
+                '    return ("Google Cloud", message, "startup_failed", '
                 "cause)"),
         "new": ("    message, cause = capture_failure_message(detail)\n"
-                '    return ("Google STT", message, "ready", cause)'),
+                '    return ("Google Cloud", message, "ready", cause)'),
         "expect": ["test_a_failed_capture_sends_startup_failed"],
     },
     {
@@ -418,7 +393,7 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "test_file": READINESS_TESTS,
         "file": GOOGLE / "main.py",
         "old": ("    message, cause = capture_failure_message(detail)\n"
-                '    return ("Google STT", message, "startup_failed", '
+                '    return ("Google Cloud", message, "startup_failed", '
                 "cause)"),
         "new": ("    message, cause = capture_failure_message(detail)\n"
                 '    return ("Google Speech", message, "startup_failed", '
@@ -709,19 +684,6 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
             "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
     },
     {
-        "name": "distil-cause-not-sent",
-        "service": DISTIL,
-        "test_file": BLOCKED_TESTS,
-        "file": DISTIL / "main.py",
-        "old": ('                kind="startup_failed",\n'
-                "                cause=cause,\n"
-                "            )"),
-        "new": ('                kind="startup_failed",\n'
-                "            )"),
-        "expect": [
-            "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
-    },
-    {
         # Google's send site, which serves all three outcomes through one
         # call. The capture_backend line is part of the pattern because
         # it makes the snippet unique.
@@ -747,8 +709,8 @@ MUTATIONS = _provider_mutations("parakeet", PARAKEET) + [
         "service": GOOGLE,
         "test_file": BLOCKED_TESTS,
         "file": GOOGLE / "main.py",
-        "old": '    return ("Google STT", message, "startup_failed", cause)',
-        "new": '    return ("Google STT", message, "startup_failed", "")',
+        "old": '    return ("Google Cloud", message, "startup_failed", cause)',
+        "new": '    return ("Google Cloud", message, "startup_failed", "")',
         "expect": [
             "test_a_blocked_microphone_sends_the_approved_sentence_and_the_cause"],
     },

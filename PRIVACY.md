@@ -11,7 +11,6 @@ The Wheelhouse desktop application sends no telemetry, analytics, crash reports,
 | Provider                            | Audio                                         | Transcribed text          | Notes                                                                        |
 | ----------------------------------- | --------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------- |
 | Parakeet (default)                  | Never leaves your machine                     | Never leaves your machine | Fully offline after the one-time model download at install                   |
-| Distil-Whisper (opt-in, NVIDIA GPU) | Never leaves your machine                     | Never leaves your machine | Downloads its model from Hugging Face once on first run                      |
 | Google Cloud STT (opt-in)           | Streams to Google's servers while you dictate | Returned by Google        | Governed by Google Cloud's terms; requires your own Google Cloud credentials |
 
 ## AI features (optional)
@@ -59,8 +58,9 @@ All of these stay on your machine and are excluded from any repository:
 * `services/stt_providers/shared/hints.txt` — vocabulary words you add for better recognition.
 * `data/soft_allow_*.toml` — the list of controls you approved or declined for dictation.
 * `%APPDATA%\WheelHouse` and `%LOCALAPPDATA%\WheelHouse` — runtime state, downloaded models, and the per-machine model-path override file.
+* `%LOCALAPPDATA%\WheelHouse\engine-audio` — only while you set `SAVE_ENGINE_AUDIO = true` in `config.toml`: one sound file of each phrase you say, as the Parakeet v3 speech engine received it. The files hold everything you say, as sound. While the Parakeet engine runs, it deletes each of these files that is more than 2 days old; while it does not run, the files stay. The Google Cloud engine saves no such files.
 
-Uninstalling removes all of the above: the application, both AppData folders, and every file listed. If you tell the uninstaller to keep your personal data, it instead saves your settings, voice patterns, vocabulary words, and the lists of controls you approved or declined for dictation in a `preserved-user-data` folder under `%LOCALAPPDATA%\WheelHouse`, and it keeps the downloaded speech model there too; everything else is still removed. The uninstall section of `INSTALL.md` describes both options.
+Uninstalling removes all of the above: the application, both AppData folders, and every file listed. If you tell the uninstaller to keep your personal data, it instead saves your settings, voice patterns, vocabulary words, and the lists of controls you approved or declined for dictation in a `preserved-user-data` folder under `%LOCALAPPDATA%\WheelHouse`, and it keeps the downloaded speech model there too; everything else is still removed, including the saved sound files in the `engine-audio` folder. The uninstall section of `INSTALL.md` describes both options.
 
 # Wheelhouse Assistant
 

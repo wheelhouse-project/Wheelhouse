@@ -2102,6 +2102,120 @@ class TestDeliveryProtection:
         assert before + _DURABLE_COMMAND_TTL_S - 1.0 < deadline
         assert deadline < before + _DURABLE_COMMAND_TTL_S + 1.5
 
+    @staticmethod
+    async def _queued_while_waiting(app, action, **kwargs):
+        """Send a request, read what it queued, then cancel the wait.
+
+        The caller's wait is long (kwargs carries a long timeout_s), so
+        the test reads the queued entry while the request is in flight
+        and never waits for a real timeout.
+        """
+        task = asyncio.create_task(app.send_request(action, {}, **kwargs))
+        await asyncio.sleep(0)  # let the request enqueue
+        assert app._outbound_q.qsize() == 1
+        item = app._outbound_q.get_nowait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return item
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("omitted", [{}, {"delivery_ttl_s": None}])
+    async def test_send_request_without_delivery_ttl_keeps_the_caller_deadline(
+        self, app, omitted,
+    ):
+        """wh-dictation-paste-loss-load.1.9 (b): the default changes nothing.
+
+        With delivery_ttl_s left out, or None, a plain action expires from
+        the send queue when its caller stops waiting.
+        """
+        before = time.monotonic()
+        item = await self._queued_while_waiting(
+            app, "walk", timeout_s=10.0, **omitted,
+        )
+
+        deadline = item["_delivery_deadline_monotonic"]
+        assert before + 9.0 < deadline < before + 11.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("omitted", [{}, {"delivery_ttl_s": None}])
+    async def test_durable_request_without_delivery_ttl_keeps_the_long_deadline(
+        self, app, omitted,
+    ):
+        """wh-dictation-paste-loss-load.1.9 (b): the default changes nothing
+        for a durable action either."""
+        from app import _DURABLE_COMMAND_TTL_S
+
+        before = time.monotonic()
+        item = await self._queued_while_waiting(
+            app, "intelligent_insert_text", timeout_s=10.0, **omitted,
+        )
+
+        deadline = item["_delivery_deadline_monotonic"]
+        assert before + _DURABLE_COMMAND_TTL_S - 1.0 < deadline
+        assert deadline < before + _DURABLE_COMMAND_TTL_S + 1.5
+
+    @pytest.mark.asyncio
+    async def test_delivery_ttl_sets_the_deadline_of_a_plain_action(self, app):
+        """wh-dictation-paste-loss-load.1.9 (b): the caller waits 10 s and
+        the payload expires from the send queue after 5 s."""
+        before = time.monotonic()
+        item = await self._queued_while_waiting(
+            app, "walk", timeout_s=10.0, delivery_ttl_s=5.0,
+        )
+
+        deadline = item["_delivery_deadline_monotonic"]
+        assert before + 4.0 < deadline < before + 6.5
+
+    @pytest.mark.asyncio
+    async def test_delivery_ttl_does_not_shorten_a_durable_action(self, app):
+        """wh-dictation-paste-loss-load.1.9 (c): a durable action keeps the
+        long deadline when the argument asks for less."""
+        from app import _DURABLE_COMMAND_TTL_S
+
+        before = time.monotonic()
+        item = await self._queued_while_waiting(
+            app, "intelligent_insert_text", timeout_s=10.0,
+            delivery_ttl_s=5.0,
+        )
+
+        deadline = item["_delivery_deadline_monotonic"]
+        assert before + _DURABLE_COMMAND_TTL_S - 1.0 < deadline
+        assert deadline < before + _DURABLE_COMMAND_TTL_S + 1.5
+
+    @pytest.mark.asyncio
+    async def test_delivery_ttl_does_not_move_the_awaited_window(self, app):
+        """wh-dictation-paste-loss-load.1.9: the stall limit still follows
+        the caller's wait, not the delivery budget."""
+        item = await self._queued_while_waiting(
+            app, "click_element", timeout_s=10.0, delivery_ttl_s=5.0,
+        )
+
+        frame = pickle.loads(item["_frame"])
+        assert frame["_awaited_window_s"] == 10.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [
+        0, 0.0, -1.0, float("inf"), float("nan"), True, "5", 10 ** 400,
+    ])
+    async def test_invalid_delivery_ttl_is_refused_before_anything_is_queued(
+        self, app, bad,
+    ):
+        # A short timeout_s turns a missing refusal into a TimeoutError
+        # after 0.05 s instead of a 10 s wait, and the type check below
+        # reports it as the missing refusal it is.
+        with pytest.raises(Exception) as refused:
+            await app.send_request(
+                "walk", {}, timeout_s=0.05, delivery_ttl_s=bad,
+            )
+
+        assert refused.type is ValueError, (
+            f"{bad!r} was not refused with ValueError: {refused.type}"
+        )
+        assert "delivery_ttl_s" in str(refused.value)
+        assert app._outbound_q.qsize() == 0
+        assert len(app.response_futures) == 0
+
     @pytest.mark.asyncio
     async def test_send_one_drops_payload_when_event_clears_after_deadline(
         self, app, mock_shm, mock_command_ready_event, caplog

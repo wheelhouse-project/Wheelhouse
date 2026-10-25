@@ -118,6 +118,354 @@ class TestSafeCopy:
         mock_pyperclip.copy.assert_called_once_with("")
 
 
+class _CopyClock:
+    """A clock that only moves when the code under test waits.
+
+    ``pyperclip.copy`` spends 0.5 s inside its own OpenClipboard loop
+    before it raises, so ``failing_copy`` advances the clock by 0.5 s per
+    failed call. Nothing here sleeps for real.
+    """
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept += seconds
+        self.now += seconds
+
+    @property
+    def elapsed(self):
+        return self.now - 1000.0
+
+    def open_clipboard_failure(self, *, until=None):
+        """A pyperclip.copy stand-in that fails like a held clipboard.
+
+        With ``until`` the clipboard frees at that elapsed time and the
+        next call succeeds.
+        """
+        from pyperclip import PyperclipWindowsException
+
+        self.copy_calls = 0
+
+        def copy(_text):
+            self.copy_calls += 1
+            if until is not None and self.elapsed >= until:
+                return None
+            self.now += 0.5
+            raise PyperclipWindowsException("Error calling OpenClipboard")
+
+        return copy
+
+
+@pytest.fixture
+def copy_clock():
+    clock = _CopyClock()
+    with patch(f"{_MOD}._copy_monotonic", clock.monotonic), \
+         patch(f"{_MOD}._copy_sleep", clock.sleep):
+        yield clock
+
+
+class TestSafeCopyRetry:
+    """A held clipboard is retried for about 3 s, then the copy gives up.
+
+    wh-dictation-paste-loss-load.2: ArsClip.exe held the clipboard open
+    2.4 s, pyperclip gave up after 0.5 s, and the word was lost.
+    """
+
+    @patch(f"{_MOD}.get_sequence_number", return_value=77)
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_copy_that_succeeds_inside_the_window_returns_true(
+        self, mock_pyperclip, _seq, copy_clock,
+    ):
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure(
+            until=2.4,
+        )
+        ops = _make_ops()
+        with ops.copy_retry_budget():
+            assert ops._safe_copy("hello") is True
+        assert copy_clock.copy_calls >= 2
+        assert copy_clock.elapsed < 3.0
+        assert ops.last_clipboard_write_seq == 77
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_copy_that_keeps_failing_gives_up_at_about_three_seconds(
+        self, mock_pyperclip, copy_clock,
+    ):
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        with ops.copy_retry_budget():
+            assert ops._safe_copy("hello") is False
+        # The last pyperclip call can end 0.5 s past the deadline.
+        assert 3.0 <= copy_clock.elapsed <= 3.6
+        assert ops.last_clipboard_write_seq is None
+
+    def test_the_window_is_one_named_constant(self):
+        import ui.clipboard_operations as module
+
+        assert module.COPY_RETRY_SECONDS == 3.0
+
+    @pytest.mark.parametrize("error", [
+        Exception("boom"),
+        RuntimeError("Error calling SetClipboardData"),
+    ])
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_failure_that_is_not_open_clipboard_is_not_retried(
+        self, mock_pyperclip, error, copy_clock,
+    ):
+        mock_pyperclip.copy.side_effect = error
+        ops = _make_ops()
+        # Inside a word budget, where a held clipboard is retried.
+        with ops.copy_retry_budget():
+            assert ops._safe_copy("hello") is False
+        assert mock_pyperclip.copy.call_count == 1
+        assert copy_clock.elapsed == 0.0
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_another_pyperclip_windows_error_is_not_retried(
+        self, mock_pyperclip, copy_clock,
+    ):
+        from pyperclip import PyperclipWindowsException
+
+        mock_pyperclip.copy.side_effect = PyperclipWindowsException(
+            "Error calling SetClipboardData",
+        )
+        ops = _make_ops()
+        # Inside a word budget, where a held clipboard is retried.
+        with ops.copy_retry_budget():
+            assert ops._safe_copy("hello") is False
+        assert mock_pyperclip.copy.call_count == 1
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_retry_false_makes_one_attempt(self, mock_pyperclip, copy_clock):
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        assert ops._safe_copy("hello", retry=False) is False
+        assert mock_pyperclip.copy.call_count == 1
+        assert copy_clock.elapsed == 0.5
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_word_scope_shares_one_budget_between_attempts(
+        self, mock_pyperclip, copy_clock,
+    ):
+        """Shadow attempt, then the fallback: about 3 s, not 6 s."""
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        with ops.copy_retry_budget():
+            assert ops._safe_copy("hello") is False
+            first = copy_clock.elapsed
+            calls_after_first = copy_clock.copy_calls
+            assert ops._safe_copy("hello") is False
+        assert 3.0 <= first <= 3.6
+        assert copy_clock.elapsed == first, "the second attempt waited"
+        assert copy_clock.copy_calls == calls_after_first, (
+            "the second attempt called pyperclip after the budget was spent"
+        )
+
+    @staticmethod
+    def _late_success(copy_clock, free_at=3.2):
+        """pyperclip.copy whose own OpenClipboard loop runs 0.5 s each call.
+
+        The call that starts just before the 3 s window ends succeeds
+        inside pyperclip's loop, so the word's spent time passes 3 s.
+        """
+        from pyperclip import PyperclipWindowsException
+
+        copy_clock.copy_calls = 0
+
+        def copy(_text):
+            copy_clock.copy_calls += 1
+            copy_clock.now += 0.5
+            if copy_clock.elapsed < free_at:
+                raise PyperclipWindowsException("Error calling OpenClipboard")
+
+        return copy
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_late_success_leaves_the_next_copy_its_attempt(
+        self, mock_pyperclip, copy_clock,
+    ):
+        """Verifier finding D1: a copy that lands after the window ends
+        must not stop the next copy of the same word."""
+        mock_pyperclip.copy.side_effect = self._late_success(copy_clock)
+        ops = _make_ops()
+        with ops.copy_retry_budget():
+            assert ops._safe_copy("sentinel") is True
+            assert copy_clock.elapsed > 3.0
+            calls = copy_clock.copy_calls
+            assert ops._safe_copy("word") is True
+        assert copy_clock.copy_calls == calls + 1
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_late_success_then_a_held_clipboard_logs_the_give_up_line(
+        self, mock_pyperclip, copy_clock, caplog,
+    ):
+        from pyperclip import PyperclipWindowsException
+
+        mock_pyperclip.copy.side_effect = self._late_success(copy_clock)
+        ops = _make_ops()
+        ops.current_utterance_id = 17
+        with ops.copy_retry_budget():
+            assert ops._safe_copy("sentinel") is True
+            mock_pyperclip.copy.side_effect = PyperclipWindowsException(
+                "Error calling OpenClipboard",
+            )
+            calls_before = mock_pyperclip.copy.call_count
+            with caplog.at_level(logging.DEBUG, logger=_MOD):
+                assert ops.verified_paste("text", MagicMock()) is False
+        # The window is spent, so the word's copy makes one attempt only.
+        assert mock_pyperclip.copy.call_count == calls_before + 1
+        gave_up = [
+            r for r in caplog.records
+            if "clipboard copy outcome: failed" in r.getMessage()
+        ]
+        assert len(gave_up) == 1
+        assert gave_up[0].levelno == logging.ERROR
+        assert "utterance=17" in gave_up[0].getMessage()
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_the_copy_failure_line_names_the_utterance_inside_a_word(
+        self, mock_pyperclip, copy_clock, caplog,
+    ):
+        """The clipboard fallback's sentinel copy gives up before
+        verified_paste runs, so _safe_copy's own line names the word."""
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        ops.current_utterance_id = 23
+        with caplog.at_level(logging.DEBUG, logger=_MOD):
+            with ops.copy_retry_budget():
+                assert ops._safe_copy("sentinel") is False
+        failed = [
+            r for r in caplog.records
+            if "Clipboard copy failed" in r.getMessage()
+        ]
+        assert len(failed) == 1
+        assert failed[0].levelno == logging.ERROR
+        assert "utterance=23" in failed[0].getMessage()
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_skipped_attempt_logs_no_error_of_its_own(
+        self, mock_pyperclip, copy_clock, caplog,
+    ):
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        with ops.copy_retry_budget():
+            ops._safe_copy("hello")
+            caplog.clear()
+            with caplog.at_level(logging.DEBUG, logger=_MOD):
+                ops._safe_copy("hello")
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_the_budget_is_fresh_for_the_next_word(
+        self, mock_pyperclip, copy_clock,
+    ):
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        with ops.copy_retry_budget():
+            ops._safe_copy("one")
+        before = copy_clock.elapsed
+        with ops.copy_retry_budget():
+            ops._safe_copy("two")
+        assert copy_clock.elapsed - before >= 3.0
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_another_thread_does_not_draw_on_the_word_budget(
+        self, mock_pyperclip, copy_clock,
+    ):
+        import threading
+
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        answers = []
+
+        with ops.copy_retry_budget():
+            ops._safe_copy("word")  # spends the whole window
+            mock_pyperclip.copy.side_effect = None
+
+            def other_thread():
+                answers.append(ops._safe_copy("other"))
+
+            worker = threading.Thread(target=other_thread)
+            worker.start()
+            worker.join()
+
+        assert answers == [True]
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_copy_outside_a_word_makes_one_attempt(
+        self, mock_pyperclip, copy_clock, caplog,
+    ):
+        """Boss ruling 01:35: only a dictated word retries. A copy outside
+        copy_retry_budget (the selection sentinels) keeps pyperclip's own
+        0.5 s and nothing more, so two of them cannot pass the 5.0 s
+        send_request timeout or the 6.0 s dispatch stall report."""
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        with caplog.at_level(logging.DEBUG, logger=_MOD):
+            assert ops._safe_copy("one") is False
+            assert ops._safe_copy("two") is False
+        assert copy_clock.copy_calls == 2
+        assert copy_clock.elapsed == 1.0
+        failed = [
+            r for r in caplog.records
+            if "Clipboard copy failed" in r.getMessage()
+        ]
+        assert [r.levelno for r in failed] == [logging.ERROR, logging.ERROR]
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_the_give_up_line_names_the_utterance(
+        self, mock_pyperclip, copy_clock, caplog,
+    ):
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        ops.current_utterance_id = 41
+        with caplog.at_level(logging.DEBUG, logger=_MOD):
+            assert ops.verified_paste("text", MagicMock()) is False
+        lines = [
+            r for r in caplog.records
+            if "clipboard copy outcome: failed" in r.getMessage()
+        ]
+        assert len(lines) == 1
+        assert lines[0].levelno == logging.ERROR
+        assert "utterance=41" in lines[0].getMessage()
+        assert "text_len=4" in lines[0].getMessage()
+
+    @patch(f"{_MOD}.verified_press_keys", return_value=_FULL)
+    @patch(f"{_MOD}.pyperclip")
+    def test_a_second_attempt_in_the_scope_adds_no_second_give_up_error(
+        self, mock_pyperclip, mock_vpk, copy_clock, caplog,
+    ):
+        mock_pyperclip.copy.side_effect = copy_clock.open_clipboard_failure()
+        ops = _make_ops()
+        ops.current_utterance_id = 5
+        with caplog.at_level(logging.DEBUG, logger=_MOD):
+            with ops.copy_retry_budget():
+                assert ops.verified_paste("text", MagicMock()) is False
+                assert ops.verified_paste("text", MagicMock()) is False
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        gave_up = [
+            r for r in errors if "clipboard copy outcome" in r.getMessage()
+        ]
+        assert len(gave_up) == 1
+        mock_vpk.assert_not_called()
+
+    @patch(f"{_MOD}.pyperclip")
+    def test_the_verification_recopy_does_not_retry(self, mock_pyperclip):
+        """The recopy runs inside a 10 ms polling loop; it keeps one try."""
+        mock_pyperclip.paste.return_value = "someone else's text"
+        ops = _make_ops(clipboard_verification_timeout_ms=60)
+        ops._safe_copy = MagicMock(return_value=True)
+        assert ops.verified_paste("text", MagicMock()) is False
+        calls = ops._safe_copy.call_args_list
+        assert len(calls) == 4  # the first copy and three recopies
+        assert calls[0].kwargs.get("retry", True) is True
+        assert all(c.kwargs.get("retry") is False for c in calls[1:])
+
+
 class TestSafePaste:
     """ClipboardOperations._safe_paste - error-safe clipboard read."""
 

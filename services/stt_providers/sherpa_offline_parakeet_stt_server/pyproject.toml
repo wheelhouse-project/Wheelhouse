@@ -13,13 +13,18 @@ dependencies = [
     # the verified version. 1.13.1+ also carries the ONNX Runtime that the
     # csukuangfj Nemotron streaming exports need (ORT API 24), so one pin
     # now serves both model families.
-    "sherpa-onnx>=1.13.3,<1.14",
+    # Floor raised to 1.13.8 (wh-parakeet-spinning-upgrade): 1.13.5 and
+    # later accept provider="cpu:<conf file>", which sherpa_engine.py uses
+    # to turn off the ONNX Runtime worker-thread wait loop, and 1.13.8
+    # bundles ONNX Runtime 1.28.2. From 1.13.4, result.text loses the
+    # space before punctuation, so sherpa_engine.py joins result.tokens.
+    "sherpa-onnx>=1.13.8,<1.14",
     # Explicit because uv locks sherpa-onnx from its sdist metadata, which
     # omits the sherpa-onnx-core dependency the wheel declares. Without
     # core (the native runtime), the binding falls back to the stale
     # C:/Windows/System32 onnxruntime 1.17.1 and dies with 'requested API
     # version [24] is not available' (wh-3g3s).
-    "sherpa-onnx-core>=1.13.3,<1.14",
+    "sherpa-onnx-core>=1.13.8,<1.14",
     "sounddevice>=0.5,<0.6",
     "numpy>=2.0",
     # winsdk is NOT pinned here. The WinRT capture path is shared, so

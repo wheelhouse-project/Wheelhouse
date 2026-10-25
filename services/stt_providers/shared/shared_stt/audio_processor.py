@@ -46,6 +46,11 @@ from shared_audio import diagnostics
 from shared_audio.silero_vad import SileroVAD
 from shared_audio.agc import SmartAGC, AGCConfig
 from shared_audio.lead_in_buffer import LeadInBuffer
+from shared_stt.chunk_recorder import (
+    FEED_ABORTED,
+    FEED_CONSUMED,
+    FEED_FINISHED,
+)
 from shared_stt.redact import redact_transcript
 from shared_stt.pre_engine_metrics import PreEngineWork
 from shared_stt.ws_forwarder import (
@@ -183,6 +188,8 @@ class AudioProcessor:
         agc_config: Optional[AGCConfig] = None,
         force_endpoint_silence_ms: Optional[float] = None,
         capture_stats: Optional[Callable[[], dict]] = None,
+        engine_audio_saver=None,
+        chunk_recorder=None,
         log_load_diagnostics: bool = False,
     ):
         """Initialize the AudioProcessor.
@@ -207,6 +214,16 @@ class AudioProcessor:
                 only to report load metrics (wh-stt-load-metrics). A provider
                 that does not pass one still gets the engine half of the
                 [load-diag] line; the capture fields then read "n/a".
+            engine_audio_saver: Optional EngineAudioSaver
+                (shared_stt.engine_audio_saver). When set, the processor hands
+                it the audio of each utterance's final decode after the final
+                transcript was sent (wh-first-sound-lost.1). None = disabled.
+            chunk_recorder: Optional ChunkRecorder
+                (shared_stt.chunk_recorder). None = no recording mode, and
+                process_chunk behaves as it always did. When one is given
+                and a recording is requested, process_chunk runs the VAD and
+                the AGC as usual but keeps the raw chunks and gives the
+                engine nothing (wh-first-sound-lost.23).
             log_load_diagnostics: The provider's [debug] log_load_diagnostics
                 setting, off by default. On, the [load-diag] work_scope=silence
                 line is written every ten seconds of silence. Off, that window
@@ -214,7 +231,10 @@ class AudioProcessor:
                 speech-onset and reset lines remain
                 (wh-audit13-preengine-load-review.1).
         """
+        self._chunk_recorder = chunk_recorder
         self.engine = engine
+        self._engine_audio_saver = engine_audio_saver
+        self._engine_audio_error_logged = False
         self.forwarder = forwarder
         self.sample_rate = sample_rate
 
@@ -312,13 +332,11 @@ class AudioProcessor:
         # so it is said once and never counted again
         # (wh-capture-load-gaps.1.1).
         self._capture_no_reader_reported = False
-        # True only while __init__ takes its own seeding reading. Both
-        # shipped providers construct the processor in their own __init__
-        # and attach the handler that carries provider records to
-        # wheelhouse.log later, in start(): distil_medium_en attaches to
-        # shared_stt.audio_processor, the parent of the loadmetrics
-        # logger, and the Parakeet server attaches to
-        # LOAD_METRICS_LOGGER_NAME itself. A record written here therefore
+        # True only while __init__ takes its own seeding reading. A
+        # provider constructs the processor in its own __init__ and
+        # attaches the handler that carries provider records to
+        # wheelhouse.log later, in start(): the Parakeet server attaches
+        # it to LOAD_METRICS_LOGGER_NAME itself. A record written here therefore
         # reaches the provider's stdout and nothing else, so the one
         # no-reader report must not be spent on it
         # (wh-capture-load-gaps.2.1).
@@ -349,6 +367,25 @@ class AudioProcessor:
         """Whether the VAD gate is currently open (speech in progress)."""
         return self._vad_gate_open
 
+    def end_recording_now(self) -> None:
+        """End a running recording-mode capture now (wh-first-sound-lost.23).
+
+        The provider's audio thread calls this where its loop skips
+        process_chunk because transcription is off (a push-to-talk release):
+        no chunk arrives to run the end-silence timer. It does nothing when no
+        recorder is attached or no capture is running. The utterance state is
+        reset before the finish callback runs, as it is after a normal end.
+        """
+        recorder = self._chunk_recorder
+        if recorder is None:
+            return
+        verdict = recorder.end_now()
+        if verdict == FEED_FINISHED:
+            self._reset_for_new_utterance()
+            recorder.deliver()
+        elif verdict == FEED_ABORTED and recorder.gate_opened:
+            self._reset_for_new_utterance()
+
     def process_chunk(self, pcm_bytes: bytes) -> None:
         """Process an audio chunk through the full pipeline.
 
@@ -376,6 +413,26 @@ class AudioProcessor:
         agc_ended = time.monotonic()
         work = PreEngineWork(len(pcm_bytes), vad_ended - work_started,
                              agc_ended - vad_ended)
+
+        # Recording mode (wh-first-sound-lost.23). The VAD and the AGC above
+        # have already run on this chunk, so both keep their state. With no
+        # recorder attached, or none requested, feed() answers "skip" and the
+        # chunk takes the path below unchanged. While it records, the chunk
+        # goes to the recorder as the raw bytes (before the AGC) and the
+        # engine, the lead-in flush and every transcript message are skipped.
+        recorder = self._chunk_recorder
+        if recorder is not None:
+            verdict = recorder.feed(
+                pcm_bytes, is_speech, self._vad_gate_open, self.lead_in_buffer)
+            if verdict == FEED_CONSUMED:
+                return
+            if verdict == FEED_FINISHED:
+                self._reset_for_new_utterance()
+                recorder.deliver()
+                return
+            if verdict == FEED_ABORTED and recorder.gate_opened:
+                # The cancelled capture had taken the lead-in buffer.
+                self._reset_for_new_utterance()
 
         # Step 3: Lead-in buffer logic
         if self._vad_gate_open:
@@ -440,9 +497,11 @@ class AudioProcessor:
                 lead_in = self.lead_in_buffer.get_lead_in()
                 self.lead_in_buffer.clear()
 
-                # Process lead-in + current chunk
+                # Process lead-in + current chunk. The buffer holds raw
+                # chunks, so the lead-in gets the gain that the AGC applied
+                # to this first speech chunk (wh-first-sound-lost.9).
                 if lead_in:
-                    self._process_speech_audio(lead_in)
+                    self._process_speech_audio(self.agc.apply_last_gain(lead_in))
                 self._process_speech_audio(agc_pcm)
             else:
                 # Still silence - add to lead-in buffer
@@ -533,6 +592,7 @@ class AudioProcessor:
             )
             self.agc.on_stt_outcome("VAD_SILENCE_ABORT", 0)
             self._log_vad_utterance_stats("endpoint_suppressed", "")
+            self._save_engine_audio(final_sent=False)
             self._reset_for_new_utterance()
             return
 
@@ -544,14 +604,11 @@ class AudioProcessor:
                     logger.info(f"FINAL [{self.current_utterance_id}]: '{redact_transcript(text)}'")
                     if self.forwarder:
                         tid = getattr(self, '_current_trace_id', '')
-                        confidence = self._get_final_confidence()
-                        if confidence is not None:
-                            self.forwarder.send_final(
-                                text, self.current_utterance_id,
-                                trace_id=tid, confidence=confidence,
-                            )
-                        else:
-                            self.forwarder.send_final(text, self.current_utterance_id, trace_id=tid)
+                        self.forwarder.send_final(text, self.current_utterance_id, trace_id=tid)
+
+                    # wh-first-sound-lost.1: after send_final, so a file write
+                    # can never delay the transcript; before the reset.
+                    self._save_engine_audio(final_sent=bool(self.forwarder))
 
                     # AGC feedback
                     word_count = len(text.split())
@@ -597,23 +654,26 @@ class AudioProcessor:
                 self._log_vad_utterance_stats("endpoint", text)
                 self._reset_for_new_utterance()
 
-    def _get_final_confidence(self) -> Optional[dict]:
-        """wh-7ou.7.1.1: fetch the engine's per-final measurement block.
+    def _save_engine_audio(self, final_sent: bool) -> None:
+        """Hand the audio of the final decode to the engine-audio saver.
 
-        Only Whisper-based engines expose get_final_confidence(); other
-        engines (Parakeet, the cloud providers) do not, and their finals go
-        out unchanged. Anything that is not a plain dict is discarded --
-        the block goes straight into a JSON payload.
+        wh-first-sound-lost.1. Does nothing when no saver is set or the engine
+        kept no audio. The saver copies the samples and writes on its own
+        thread, so this returns at once. Any error is logged at debug level,
+        once, and never stops recognition.
         """
-        getter = getattr(self.engine, "get_final_confidence", None)
-        if not callable(getter):
-            return None
+        saver = self._engine_audio_saver
+        if saver is None:
+            return
         try:
-            block = getter()
-        except Exception as e:
-            logger.warning("Failed to read final confidence block: %s", e)
-            return None
-        return block if isinstance(block, dict) else None
+            audio = getattr(self.engine, "last_final_audio", None)
+            if audio is None:
+                return
+            saver.submit(audio, self.current_utterance_id, final_sent=final_sent)
+        except Exception as exc:
+            if not self._engine_audio_error_logged:
+                self._engine_audio_error_logged = True
+                logger.debug("Engine audio hand-off failed: %r", exc)
 
     def _maybe_release_holdback(self, text: str) -> None:
         """Release held-back words when trailing silence exceeds threshold.
@@ -793,8 +853,9 @@ class AudioProcessor:
         and never counted again. self._capture_stats is bound in
         __init__ and never rebound, so that case can neither start nor
         stop being true, and a second line carries no information beyond
-        the chunk rate. distil_medium_en builds its processor without a
-        reader on purpose, so counting it on the two per-chunk paths
+        the chunk rate. A provider can build its processor without a
+        reader on purpose (the removed Distil-Whisper provider did), so
+        counting it on the two per-chunk paths
         wrote a line every CAPTURE_REASON_LOG_INTERVAL_S seconds into
         that provider's wheelhouse.log for the life of the process
         (wh-capture-load-gaps.1.1). The other two reasons are real
@@ -1100,14 +1161,9 @@ class AudioProcessor:
             logger.info(f"FINAL [{self.current_utterance_id}] (forced): '{redact_transcript(text)}'")
             if self.forwarder:
                 tid = getattr(self, '_current_trace_id', '')
-                confidence = self._get_final_confidence()
-                if confidence is not None:
-                    self.forwarder.send_final(
-                        text, self.current_utterance_id,
-                        trace_id=tid, confidence=confidence,
-                    )
-                else:
-                    self.forwarder.send_final(text, self.current_utterance_id, trace_id=tid)
+                self.forwarder.send_final(text, self.current_utterance_id, trace_id=tid)
+            # wh-first-sound-lost.1: after send_final, before the reset.
+            self._save_engine_audio(final_sent=bool(self.forwarder))
             word_count = len(text.split())
             self.agc.on_stt_outcome("GOOGLE_FINAL", word_count)
         else:
@@ -1117,6 +1173,7 @@ class AudioProcessor:
             # (throat clearing, cough, HVAC). Feed this back to AGC so its
             # failure ratchet engages and caps effective gain (wh-7ou.1).
             logger.debug("Force endpoint with no text - resetting")
+            self._save_engine_audio(final_sent=False)
             self.agc.on_stt_outcome("VAD_SILENCE_ABORT", 0)
 
         self._log_vad_utterance_stats("force", text)

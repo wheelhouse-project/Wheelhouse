@@ -194,6 +194,136 @@ def _app_paths_programs():
     return found
 
 
+_REG_EXPAND_SZ = 2
+_HIVES = ("HKCU", "HKLM")
+
+
+def _read_app_path_entry(hive, name):
+    """The (Default) value of one App Paths entry, as (value, registry type).
+
+    ``hive`` is "HKCU" or "HKLM". Read only (KEY_READ); nothing here can
+    write the registry. Raises OSError when the entry does not exist, which
+    is the ordinary answer for most names and most machines' per-user key.
+    """
+    import winreg
+
+    root = winreg.HKEY_CURRENT_USER if hive == "HKCU" else winreg.HKEY_LOCAL_MACHINE
+    with winreg.OpenKey(
+        root, _APP_PATHS_KEY + "\\" + name, 0, winreg.KEY_READ
+    ) as key:
+        return winreg.QueryValueEx(key, "")
+
+
+def _alias_exists(path):
+    # lexists, not exists: an execution alias is a zero-length reparse
+    # point, and lexists stays true for one that stat cannot follow.
+    import os.path
+
+    return os.path.lexists(path)
+
+
+def _in_drive_root_windowsapps(resolved):
+    """True when ``resolved`` lies under a WindowsApps folder at a drive root.
+
+    ``resolved`` is already normcased and normpathed, so it is lower case.
+    A second package volume keeps its Store packages in a WindowsApps
+    folder at the root of its drive (Settings > Storage > "New apps will
+    save to"). No machine with a second package volume was measured: Ikon
+    has one volume, the WindowsApps folder under Program Files on C:
+    (Get-AppxVolume and the SISPath value under
+    HKLM Software Microsoft Windows CurrentVersion Appx PackageVolumes 1
+    both say so). The drive-root rule follows the boss ruling of
+    2026-10-19 17:31. A UNC share root is not a drive root, and a folder
+    named WindowsApps anywhere else is not a package folder.
+    """
+    import os
+
+    drive, rest = os.path.splitdrive(resolved)
+    return (
+        len(drive) == 2
+        and drive[1] == ":"
+        and "a" <= drive[0] <= "z"
+        and rest.startswith(os.sep + "windowsapps" + os.sep)
+    )
+
+
+def store_alias_launch_target(target, *, read_entry=None, alias_exists=None):
+    """The thing to hand os.startfile for a launch target. Never raises.
+
+    wh-notepad-app-paths-launch. ShellExecute resolves a bare name such as
+    "notepad.exe" through the App Paths registry key. On a machine where
+    that key points into %ProgramFiles%\\WindowsApps, ShellExecute starts
+    the packaged file directly, outside its package, and the program
+    cannot load its own libraries (Notepad: "Microsoft.UI.Windowing.Core.dll
+    was not found"). The execution alias in %LOCALAPPDATA%\\Microsoft\\
+    WindowsApps starts the same program inside its package.
+
+    A bare executable name whose App Paths entry lies inside WindowsApps,
+    with the alias present, returns the alias path. Everything else
+    returns ``target`` unchanged: a path, a shortcut, a shell:AppsFolder
+    target, a name with no entry, an entry outside WindowsApps, a registry
+    error. The per-user entry is read first and decides alone, the order
+    ShellExecute uses; a hive without the entry (or one that cannot be
+    read) passes to the next. The registry is only ever read.
+
+    ``read_entry(hive, name)`` and ``alias_exists(path)`` are the seams
+    the tests replace; the defaults read the real registry and file system.
+    """
+    import os
+
+    try:
+        lowered = target.lower()
+        if (
+            not lowered.endswith(".exe")
+            or any(c in target for c in "\\/:")
+        ):
+            return target
+        read = read_entry or _read_app_path_entry
+        for hive in _HIVES:
+            try:
+                answer = read(hive, target)
+            except OSError:
+                continue
+            if not answer or not isinstance(answer[0], str) or not answer[0]:
+                continue
+            value, value_type = answer[0], answer[1]
+            if value_type == _REG_EXPAND_SZ:
+                value = os.path.expandvars(value)
+            resolved = os.path.normcase(os.path.normpath(value.strip().strip('"')))
+            packaged = os.path.normcase(
+                os.path.normpath(
+                    os.path.join(
+                        os.environ.get("ProgramFiles", "C:\\Program Files"),
+                        "WindowsApps",
+                    )
+                )
+            )
+            if not (
+                resolved.startswith(packaged + os.sep)
+                or _in_drive_root_windowsapps(resolved)
+            ):
+                return target
+            local = os.environ.get("LOCALAPPDATA")
+            if local:
+                alias = os.path.join(local, "Microsoft", "WindowsApps", target)
+                if (alias_exists or _alias_exists)(alias):
+                    return alias
+            # crewcut: a Store program with an App Paths entry and no
+            # execution alias still starts outside its package here. To
+            # remove the limit, start it through shell:AppsFolder\<app id>,
+            # found from the Store records (_store_programs).
+            logger.warning(
+                "%s has an App Paths entry inside WindowsApps and no "
+                "execution alias; starting it as given",
+                target,
+            )
+            return target
+        return target
+    except Exception as exc:
+        logger.warning("App Paths alias lookup failed for %s: %s", target, exc)
+        return target
+
+
 def _store_programs_from_records(records):
     """Turn apps-folder records into lookup entries. Pure: reads nothing.
 

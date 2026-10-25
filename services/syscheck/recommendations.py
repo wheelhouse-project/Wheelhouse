@@ -23,7 +23,6 @@ from __future__ import annotations
 # ========================= Constants =========================
 
 # GPU vendor IDs
-VENDOR_NVIDIA = 0x10DE
 VENDOR_AMD = 0x1002
 VENDOR_INTEL = 0x8086
 VENDOR_MICROSOFT = 0x1414  # Basic Render Driver
@@ -127,22 +126,14 @@ def classify_gpu_tier(syscheck: dict) -> str:
     return "minimum"
 
 
-def _get_nvidia_cuda_support(gpu: dict) -> bool:
-    """Check if GPU supports CUDA (NVIDIA with compute support)."""
-    vendor = gpu.get("vendor_id", 0)
-    compute = gpu.get("compute_support", {})
-    return vendor == VENDOR_NVIDIA and compute.get("d3d11", False)
-
-
 # ========================= STT Recommendations =========================
 
 def get_stt_recommendation(syscheck: dict) -> dict:
     """
     Get STT (Speech-to-Text) recommendations based on hardware.
 
-    Available providers (post wh-7z3 deprecation cleanup, 2026-04-18):
-    - distil_medium_en: distil-whisper medium.en via faster-whisper on CUDA
-      (NVIDIA GPU, 4GB+ VRAM). Replaces the retired faster_whisper_turbo path.
+    Available providers (Distil-Whisper was removed under
+    wh-distil-whisper-removal; every machine now gets the same ladder):
     - sherpa_offline_parakeet_stt_server: NVIDIA Parakeet-TDT v3 via sherpa-ONNX
       (CPU). Replaces the retired faster_whisper_cpu path; best open-source WER
       on English. AVX2 still gated because sherpa-ONNX quantized kernels lean
@@ -155,35 +146,10 @@ def get_stt_recommendation(syscheck: dict) -> dict:
     cpu_flags = syscheck.get("cpu", {}).get("flags", {})
     has_avx2 = cpu_flags.get("avx2", False)
 
-    # Find CUDA-capable NVIDIA GPU with sufficient VRAM
-    gpus = syscheck.get("gpu", [])
-    has_cuda = any(_get_nvidia_cuda_support(g) for g in gpus if not g.get("software"))
-
-    best_nvidia_vram = 0
-    for gpu in gpus:
-        if gpu.get("software", False):
-            continue
-        if _get_nvidia_cuda_support(gpu):
-            vram = gpu.get("dedicated_vram_bytes", 0)
-            if vram > best_nvidia_vram:
-                best_nvidia_vram = vram
-
     total_ram = syscheck.get("memory", {}).get("total_bytes", 0)
 
     options = []
     warnings = []
-
-    # GPU provider: distil-whisper medium.en on CUDA (NVIDIA 4GB+ VRAM)
-    if has_cuda and best_nvidia_vram >= VRAM_4GB:
-        options.append({
-            "id": "distil_medium_en",
-            "name": "Distil-Whisper Medium.en (GPU)",
-            "variant": "cuda",
-            "pros": ["Excellent WER", "Low latency"],
-            "cons": ["~750MB download", "Requires NVIDIA GPU with 4GB+ VRAM"],
-            "size_mb": 750,
-            "suitable": True,
-        })
 
     # CPU provider: Parakeet-TDT v3 via sherpa-ONNX. AVX2 still gated because
     # sherpa's CPU kernels lean heavily on it; AVX2-less systems fall
@@ -222,7 +188,7 @@ def get_stt_recommendation(syscheck: dict) -> dict:
         "suitable": True,
     })
 
-    # Pick recommended: GPU > CPU > Cloud
+    # Pick recommended: CPU (Parakeet) > Cloud
     suitable = [o for o in options if o.get("suitable", True)]
     recommended = suitable[0]["id"] if suitable else "google_cloud_stt"
 

@@ -217,6 +217,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, Optional
 
+from ui.confidence_scorer import names_are_same_number
 from ui.element_types import (
     DEFAULT_GESTURE,
     ClickGesture,
@@ -2311,7 +2312,8 @@ class ClickExecutor:
         m_name = (winner.name or "").casefold().strip()
 
         if q_name and m_name:
-            if m_name == q_name:
+            # "seven" and "7" are the same name (wh-number-words-command-failures).
+            if m_name == q_name or names_are_same_number(q_name, m_name):
                 return True
             if m_name.startswith(q_name):
                 return True

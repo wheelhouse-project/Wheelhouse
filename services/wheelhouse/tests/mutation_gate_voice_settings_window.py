@@ -419,11 +419,11 @@ MUTATIONS = [
         "file": GUI,
         "old": (
             "                    self._open_settings_window()\n"
-            '                elif action == "open_help_explainer":\n'
+            '                elif action == "show_about_dialog":\n'
         ),
         "new": (
             "                    pass\n"
-            '                elif action == "open_help_explainer":\n'
+            '                elif action == "show_about_dialog":\n'
         ),
         "selection": GUI_TESTS,
         "expect": {"test_the_gui_dispatch_opens_the_window_and_reuses_it": "'_sw_dialog'"},
@@ -545,7 +545,7 @@ MUTATIONS = [
         "old": "            'keys': list(CONFIG_KEYS),\n",
         "new": "            'keys': list(CONFIG_KEYS)[:3],\n",
         "selection": GUI_TESTS,
-        "expect": {"test_opening_asks_logic_for_the_six_saved_settings": "AssertionError: assert ['CHECK_FOR_U"},
+        "expect": {"test_opening_asks_logic_for_the_seven_saved_settings": "AssertionError: assert ['CHECK_FOR_U"},
     },
     {
         "name": "opening-does-not-restore-a-minimized-window",
@@ -568,8 +568,16 @@ MUTATIONS = [
     {
         "name": "opening-does-not-take-the-foreground",
         "file": GUI,
-        "old": "            _steal_foreground(int(dialog.winId()))\n",
-        "new": "            pass\n",
+        "old": (
+            "            _steal_foreground(int(dialog.winId()))\n"
+            "        except Exception as exc:\n"
+            "            logger.debug(\"Settings window foreground request failed: %s\", exc)\n"
+        ),
+        "new": (
+            "            pass\n"
+            "        except Exception as exc:\n"
+            "            logger.debug(\"Settings window foreground request failed: %s\", exc)\n"
+        ),
         "selection": GUI_TESTS,
         "expect": {"test_opening_takes_the_foreground_with_the_window_handle": "Called 0 times"},
     },
@@ -866,7 +874,7 @@ MUTATIONS = [
         "selection": HELP_TESTS,
         "expect": {
             "test_load_good_file_returns_pairs_in_order": "assert [('A', 'ta'), ('B', 'tb')] == [('B', 'tb'), ('A', 'ta')]",
-            "test_help_window_labels_equal_settings_window_order": "AssertionError: assert ['Wake word',",
+            "test_help_window_labels_equal_settings_window_order": "AssertionError: assert ['Keep number",
         },
     },
     {
@@ -902,7 +910,7 @@ MUTATIONS = [
         "old": "        self._labels = [label for label, _ in pairs]\n",
         "new": "        self._labels = [label for label, _ in reversed(list(pairs))]\n",
         "selection": HELP_TESTS,
-        "expect": {"test_help_window_labels_equal_settings_window_order": "AssertionError: assert ['Wake word',"},
+        "expect": {"test_help_window_labels_equal_settings_window_order": "AssertionError: assert ['Keep number"},
     },
     {
         "name": "help-close-button-does-not-close",
@@ -949,12 +957,14 @@ MUTATIONS = [
         "name": "help-button-missing-from-tab-order",
         "file": DIALOG,
         "old": (
-            "        order += [self._wake_box, self._help_btn, self._restart_btn,\n"
-            "                  self._close_btn]\n"
+            "        order += [self._wake_box, self._keep_numbers_box,\n"
+            "                  self._training_word_btn, self._help_btn,\n"
+            "                  self._restart_btn, self._close_btn]\n"
         ),
         "new": (
-            "        order += [self._wake_box, self._restart_btn,\n"
-            "                  self._close_btn]\n"
+            "        order += [self._wake_box, self._keep_numbers_box,\n"
+            "                  self._training_word_btn,\n"
+            "                  self._restart_btn, self._close_btn]\n"
         ),
         "selection": HELP_TESTS + DIALOG_TESTS,
         "expect": {"test_help_button_in_bottom_row_and_tab_order": "assert <PySide6.QtWidgets.QPushButton("},
@@ -963,15 +973,17 @@ MUTATIONS = [
         "name": "help-button-after-restart-in-tab-order",
         "file": DIALOG,
         "old": (
-            "        order += [self._wake_box, self._help_btn, self._restart_btn,\n"
-            "                  self._close_btn]\n"
+            "        order += [self._wake_box, self._keep_numbers_box,\n"
+            "                  self._training_word_btn, self._help_btn,\n"
+            "                  self._restart_btn, self._close_btn]\n"
         ),
         "new": (
-            "        order += [self._wake_box, self._restart_btn, self._help_btn,\n"
-            "                  self._close_btn]\n"
+            "        order += [self._wake_box, self._keep_numbers_box,\n"
+            "                  self._training_word_btn, self._restart_btn,\n"
+            "                  self._help_btn, self._close_btn]\n"
         ),
         "selection": HELP_TESTS + DIALOG_TESTS,
-        "expect": {"test_help_button_in_bottom_row_and_tab_order": "assert 16 == (14 + 1)"},
+        "expect": {"test_help_button_in_bottom_row_and_tab_order": "assert 18 == (16 + 1)"},
     },
     {
         "name": "setting-label-not-recorded-for-ai-model",
@@ -980,8 +992,8 @@ MUTATIONS = [
         "new": "        pass\n",
         "selection": HELP_TESTS + DIALOG_TESTS,
         "expect": {
-            "test_setting_labels_has_13_entries_each_visible_in_window": "assert 12 == 13",
-            "test_every_setting_control_in_window_has_a_recorded_label": "assert 12 == ((8 + 2) + 3)",
+            "test_setting_labels_has_14_entries_each_visible_in_window": "assert 13 == 14",
+            "test_every_setting_control_in_window_has_a_recorded_label": "assert 13 == ((9 + 2) + 3)",
         },
     },
     {
@@ -991,8 +1003,8 @@ MUTATIONS = [
         "new": "        row, layout = self._row(parent_layout)\n        box = QCheckBox(text)\n",
         "selection": HELP_TESTS + DIALOG_TESTS,
         "expect": {
-            "test_setting_labels_has_13_entries_each_visible_in_window": "assert 5 == 13",
-            "test_every_setting_control_in_window_has_a_recorded_label": "assert 5 == ((8 + 2) + 3)",
+            "test_setting_labels_has_14_entries_each_visible_in_window": "assert 5 == 14",
+            "test_every_setting_control_in_window_has_a_recorded_label": "assert 5 == ((9 + 2) + 3)",
         },
     },
     {
@@ -1002,8 +1014,8 @@ MUTATIONS = [
         "new": "        pass\n",
         "selection": HELP_TESTS + DIALOG_TESTS,
         "expect": {
-            "test_setting_labels_has_13_entries_each_visible_in_window": "assert 11 == 13",
-            "test_every_setting_control_in_window_has_a_recorded_label": "assert 11 == ((8 + 2) + 3)",
+            "test_setting_labels_has_14_entries_each_visible_in_window": "assert 12 == 14",
+            "test_every_setting_control_in_window_has_a_recorded_label": "assert 12 == ((9 + 2) + 3)",
         },
     },
     {
@@ -1011,9 +1023,9 @@ MUTATIONS = [
         "file": DIALOG,
         "edits": [
             (
-                '        self._setting_labels.append("STT Provider")\n',
+                '        self._setting_labels.append("Speech-to-Text Provider")\n',
                 '        self._setting_labels.append("AI Model")\n'
-                '        self._setting_labels.append("STT Provider")\n',
+                '        self._setting_labels.append("Speech-to-Text Provider")\n',
             ),
             (
                 '        self._setting_labels.append("AI Model")\n'

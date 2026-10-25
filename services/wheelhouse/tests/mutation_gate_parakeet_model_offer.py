@@ -239,11 +239,11 @@ add("logic-offers-on-a-complete-model", MAIN_SRC, OFFER_TESTS,
 # The early return removed: the offer is sent, then the engine is stopped
 # and the new one started anyway.
 add("logic-offer-falls-through-to-the-switch", MAIN_SRC, OFFER_TESTS,
-    "            _send_parakeet_model_offer(self.state_manager, plan)\n"
+    "            parakeet_model.send_parakeet_model_offer(self.state_manager, plan)\n"
     "            return\n"
     "\n"
     "        if remote_launcher:\n",
-    "            _send_parakeet_model_offer(self.state_manager, plan)\n"
+    "            parakeet_model.send_parakeet_model_offer(self.state_manager, plan)\n"
     "\n"
     "        if remote_launcher:\n",
     L_INCOMPLETE, L_FALLBACK)

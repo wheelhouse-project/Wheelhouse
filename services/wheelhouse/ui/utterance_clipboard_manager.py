@@ -25,12 +25,21 @@ import logging
 from utils.redact import redact_transcript
 import threading
 import time
+# wh-clipboard-save-lost-restore: the save retry reads its own clock names,
+# so a test can give it a fake clock without replacing ``time``. The
+# restore retry (wh-clipboard-restore-fail-lost) uses the same names.
+from time import monotonic as _save_clock, sleep as _save_sleep
 from dataclasses import dataclass, field
 from typing import Optional
 
 import pyperclip
 
 from ui import clipboard_sequence
+from ui.clipboard_operations import (
+    COPY_RETRY_SECONDS,
+    _COPY_RETRY_PAUSE,
+    _is_open_clipboard_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +60,12 @@ class PendingRestore:
     timer: Optional[threading.Timer] = None
     cancelled: bool = False
     utterance_id: Optional[int] = field(default=None)
+    # wh-clipboard-restore-fail-lost: restore attempts that found the
+    # clipboard held by another program, and the clock reading at the
+    # first attempt. restore_attempts > 0 means the timer thread is still
+    # trying.
+    restore_attempts: int = 0
+    restore_started: Optional[float] = None
 
 
 class UtteranceClipboardManager:
@@ -83,9 +98,9 @@ class UtteranceClipboardManager:
 
     Locking discipline (wh-9pye.3):
     Every method that mutates ``_pending_restore``, ``_saved_text``,
-    ``_in_utterance``, ``_utterance_id``, ``_clipboard_dirty``, or
-    ``_last_wheelhouse_seq`` must hold ``self._lock``. Internal helpers that
-    skip the acquire (because the caller already holds it) are suffixed
+    ``_in_utterance``, ``_utterance_id``, ``_clipboard_dirty``,
+    ``_last_wheelhouse_seq``, or ``_chained_seq`` must hold ``self._lock``.
+    Internal helpers that skip the acquire (because the caller already holds it) are suffixed
     ``_locked`` and document the precondition. The lock is non-reentrant
     (``threading.Lock``); helpers that need to call each other while the lock
     is held must use the ``_locked`` variants to avoid deadlock.
@@ -136,10 +151,22 @@ class UtteranceClipboardManager:
         # runs, the user copied something between our last paste and end_utterance,
         # so no PendingRestore is scheduled and the user's clipboard is preserved.
         self._last_wheelhouse_seq: Optional[int] = None
+        # wh-clipboard-restore-fail-lost.1.1: the clipboard sequence number
+        # that start_utterance checked when this utterance took over the
+        # saved text of a pending restore. None when the utterance saved
+        # fresh. While it is set, the clipboard may still hold the dictated
+        # text of the utterance before, so end_utterance owes a restore
+        # even when this utterance never writes the clipboard.
+        self._chained_seq: Optional[int] = None
         # wh-d0lr1: time of the previous utterance's end, for chain-gap
         # detection. Updated under lock at the end of every end_utterance call
         # (success or skip path).
         self._last_utterance_end_time: float = 0.0
+        # wh-clipboard-save-lost-restore: seconds the latest start_utterance
+        # spent on the clipboard save (0.0 when it chained and saved
+        # nothing). The handler charges them to the first word's copy
+        # budget, so the save and that copy share one COPY_RETRY_SECONDS.
+        self.last_save_seconds: float = 0.0
 
         logger.debug(
             "UtteranceClipboardManager initialized "
@@ -180,10 +207,18 @@ class UtteranceClipboardManager:
 
             # Decide what saved_text the new utterance should rely on.
             chained_text: Optional[str] = None
+            chained_seq: Optional[int] = None
             if self._pending_restore is not None:
                 pending = self._pending_restore
                 elapsed_since_end = time.monotonic() - self._last_utterance_end_time
-                if elapsed_since_end < self.chain_gap_s:
+                # wh-clipboard-restore-fail-lost: a restore that is still
+                # trying (another program holds the clipboard) chains
+                # whatever the gap. The clipboard still holds the dictated
+                # text, so a fresh save would lose the user's text, and
+                # the new utterance must not wait for the retry. Setting
+                # pending.cancelled below stops the retry in _do_restore.
+                if (elapsed_since_end < self.chain_gap_s
+                        or pending.restore_attempts > 0):
                     # Within chain gap. Before chaining, verify the clipboard
                     # is still WheelHouse-owned (no manual user copy during
                     # the pause). If the user copied between the prior
@@ -224,6 +259,7 @@ class UtteranceClipboardManager:
                         if pending.timer is not None:
                             pending.timer.cancel()
                         chained_text = pending.saved_text
+                        chained_seq = pending.clipboard_seq_at_paste
                         logger.debug(
                             f"[UTT-{utterance_id}] Chaining from prior "
                             f"PendingRestore (prior UTT-{pending.utterance_id}, "
@@ -236,7 +272,22 @@ class UtteranceClipboardManager:
                     # Expired pending: chain gap elapsed, but the timer has not
                     # fired (or was delayed). Apply the ownership-aware restore
                     # decision now, then proceed with a fresh save (wh-9pye.4).
-                    self._execute_restore_decision_locked(pending)
+                    # wh-clipboard-restore-fail-lost: this one attempt does
+                    # not retry, so the new utterance does not wait. When
+                    # the clipboard is held, the new utterance keeps the
+                    # saved text as its baseline instead of a fresh save,
+                    # which would read the dictated text.
+                    held = self._execute_restore_decision_locked(pending)
+                    if held is not None:
+                        pending.cancelled = True
+                        chained_text = pending.saved_text
+                        chained_seq = pending.clipboard_seq_at_paste
+                        logger.info(
+                            f"[UTT-{utterance_id}] Clipboard held at the "
+                            f"expired restore of UTT-{pending.utterance_id} "
+                            f"({held}); keeping its saved text as this "
+                            f"utterance's baseline"
+                        )
                     self._pending_restore = None
 
             self._utterance_id = utterance_id
@@ -244,23 +295,58 @@ class UtteranceClipboardManager:
             self._clipboard_dirty = False
             self._accumulated_text = ""
             self._last_wheelhouse_seq = None
+            self._chained_seq = chained_seq
 
             if chained_text is not None:
                 self._saved_text = chained_text
+                self.last_save_seconds = 0.0
             else:
-                try:
-                    self._saved_text = pyperclip.paste()
-                    logger.debug(
-                        f"[UTT-{utterance_id}] Saved clipboard fresh "
-                        f"(len={len(self._saved_text) if self._saved_text else 0})"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[UTT-{utterance_id}] Could not read clipboard at start: {e}"
-                    )
-                    self._saved_text = None
+                self._saved_text = self._save_clipboard_text(utterance_id)
 
             self._start_safety_timeout(utterance_id)
+
+    def _save_clipboard_text(self, utterance_id: int) -> Optional[str]:
+        """Read the clipboard text to restore at utterance end.
+
+        wh-clipboard-save-lost-restore: while another program holds the
+        clipboard open, pyperclip.paste raises "Error calling OpenClipboard"
+        after its own 0.5 s loop, and the text the user copied was lost.
+        This method calls it again until COPY_RETRY_SECONDS have passed
+        since the first attempt, the same window and pause as
+        ClipboardOperations._safe_copy. Any other exception gives up at
+        once, as before. Sets ``last_save_seconds``.
+
+        crewcut: the caller holds self._lock for the whole retry, so a
+        restore or safety timer thread waits up to about 3.5 s. Both
+        recheck their state after the wait. Release the lock around the
+        paste to remove the wait.
+        """
+        started = _save_clock()
+        deadline = started + COPY_RETRY_SECONDS
+        try:
+            while True:
+                try:
+                    text = pyperclip.paste()
+                except Exception as e:
+                    now = _save_clock()
+                    if _is_open_clipboard_failure(e) and now < deadline:
+                        _save_sleep(min(_COPY_RETRY_PAUSE, deadline - now))
+                        continue
+                    logger.warning(
+                        f"[UTT-{utterance_id}] Could not read the clipboard "
+                        f"at utterance start after {now - started:.1f} s "
+                        f"({e}); the clipboard text was not saved and will "
+                        f"not be restored after this utterance"
+                    )
+                    return None
+                logger.debug(
+                    f"[UTT-{utterance_id}] Saved clipboard fresh "
+                    f"(len={len(text) if text else 0}, "
+                    f"after {_save_clock() - started:.1f} s)"
+                )
+                return text
+        finally:
+            self.last_save_seconds = _save_clock() - started
 
     def end_utterance(self, utterance_id: Optional[int] = None) -> None:
         """Schedule a deferred clipboard restore at utterance end.
@@ -333,7 +419,12 @@ class UtteranceClipboardManager:
             self._skip_restore = False
             return
 
-        if not self._clipboard_dirty or self._saved_text is None:
+        # wh-clipboard-restore-fail-lost.1.1: a chained utterance owes the
+        # restore that it took over, even when it never writes the
+        # clipboard (a voice command, a Unicode insertion, an empty
+        # utterance).
+        restore_owed = self._clipboard_dirty or self._chained_seq is not None
+        if not restore_owed or self._saved_text is None:
             logger.debug(
                 f"[UTT-{self._utterance_id}] Ending utterance, clipboard "
                 f"not dirtied or no saved text -- no restore scheduled"
@@ -358,25 +449,34 @@ class UtteranceClipboardManager:
             self._reset_utterance_state_locked()
             return
 
+        # wh-clipboard-restore-fail-lost.1.1: an utterance that never wrote
+        # the clipboard compares with the sequence number that the chain
+        # checked. The fallback to the current sequence number would treat
+        # a copy that the user made during this utterance as WheelHouse's
+        # own text and write over it.
+        expected_seq = self._last_wheelhouse_seq
+        if expected_seq is None and not self._clipboard_dirty:
+            expected_seq = self._chained_seq
+
         baseline_seq: int
-        if self._last_wheelhouse_seq is None:
+        if expected_seq is None:
             baseline_seq = current_seq
             logger.debug(
                 f"[UTT-{self._utterance_id}] No Wheelhouse write seq tracked; "
                 f"using current seq {current_seq} as PendingRestore baseline"
             )
-        elif current_seq != self._last_wheelhouse_seq:
+        elif current_seq != expected_seq:
             logger.info(
                 f"[UTT-{self._utterance_id}] External clipboard write between "
                 f"last Wheelhouse write and end_utterance "
-                f"(wheelhouse_seq={self._last_wheelhouse_seq}, "
+                f"(wheelhouse_seq={expected_seq}, "
                 f"current_seq={current_seq}); preserving user's clipboard, "
                 f"NOT scheduling restore"
             )
             self._reset_utterance_state_locked()
             return
         else:
-            baseline_seq = self._last_wheelhouse_seq
+            baseline_seq = expected_seq
 
         saved_text = self._saved_text
         ending_utterance_id = self._utterance_id
@@ -421,6 +521,7 @@ class UtteranceClipboardManager:
         self._clipboard_dirty = False
         self._accumulated_text = ""
         self._last_wheelhouse_seq = None
+        self._chained_seq = None
         self._last_utterance_end_time = time.monotonic()
 
     # ========================================================================
@@ -473,7 +574,10 @@ class UtteranceClipboardManager:
         wh-4z4g9: callers (UIActionHandler) invoke this after any operation
         that wrote the system clipboard. end_utterance only schedules the
         deferred restore when this flag is True, so a Unicode-only or
-        terminal-only utterance leaves the user's clipboard alone.
+        terminal-only utterance leaves the user's clipboard alone. One
+        exception (wh-clipboard-restore-fail-lost.1.1): an utterance that
+        took over the saved text of a pending restore (``_chained_seq`` is
+        set) owes that restore even when this flag stays False.
 
         wh-fz7j.1: this method now acquires self._lock to serialize against
         the safety-timeout thread's end_utterance call. Without the lock,
@@ -537,20 +641,59 @@ class UtteranceClipboardManager:
         the current pending object; that would let an old timer accidentally
         restore for a newer utterance and reintroduce the original race
         (wh-9pye.1).
-        """
-        with self._lock:
-            if self._pending_restore is not expected_pending:
-                logger.debug(
-                    f"[UTT-{expected_pending.utterance_id}] Stale PendingRestore "
-                    f"timer fired; manager's pending differs (or is None). "
-                    f"Refusing to restore."
-                )
-                return
-            self._execute_restore_decision_locked(expected_pending)
-            if self._pending_restore is expected_pending:
-                self._pending_restore = None
 
-    def _execute_restore_decision_locked(self, pending: PendingRestore) -> None:
+        wh-clipboard-restore-fail-lost: while another program holds the
+        clipboard open, pyperclip.copy raises "Error calling OpenClipboard"
+        after its own 0.5 s loop. This method then tries again, pausing
+        _COPY_RETRY_PAUSE between attempts, until COPY_RETRY_SECONDS have
+        passed since the first attempt: the window and pause of the save
+        retry and of ClipboardOperations._safe_copy. The lock is held for
+        one attempt only and released for each pause, so start_utterance
+        never waits for the retry. Each attempt first checks again that
+        the pending is current, and _execute_restore_decision_locked checks
+        again that it is not cancelled and that the sequence number did not
+        change.
+
+        crewcut: one attempt holds self._lock for up to pyperclip's 0.5 s,
+        so a start_utterance that arrives during an attempt waits up to
+        0.5 s, as it did before the retry. The copy must stay under the
+        lock: outside it, an attempt could write the saved text after a
+        new utterance started. Remove the wait with a copy call that gives
+        up at once when the clipboard is held.
+        """
+        while True:
+            with self._lock:
+                if self._pending_restore is not expected_pending:
+                    logger.debug(
+                        f"[UTT-{expected_pending.utterance_id}] Stale "
+                        f"PendingRestore; manager's pending differs (or is "
+                        f"None). Refusing to restore."
+                    )
+                    return
+                held = self._execute_restore_decision_locked(expected_pending)
+                if held is None:
+                    self._pending_restore = None
+                    return
+                now = _save_clock()
+                deadline = expected_pending.restore_started + COPY_RETRY_SECONDS
+                spent = now - expected_pending.restore_started
+                if now >= deadline:
+                    expected_pending.cancelled = True
+                    self._pending_restore = None
+                    logger.warning(
+                        f"[UTT-{expected_pending.utterance_id}] Could not "
+                        f"restore clipboard after "
+                        f"{expected_pending.restore_attempts} attempts in "
+                        f"{spent:.1f} s ({held}); another program held the "
+                        f"clipboard, which keeps the dictated text"
+                    )
+                    return
+                pause = min(_COPY_RETRY_PAUSE, deadline - now)
+            _save_sleep(pause)
+
+    def _execute_restore_decision_locked(
+        self, pending: PendingRestore,
+    ) -> Optional[Exception]:
         """Apply the ownership-aware restore decision. Caller MUST hold ``self._lock``.
 
         Reads the current Win32 clipboard sequence number. If unchanged from
@@ -571,9 +714,15 @@ class UtteranceClipboardManager:
         decides whether to clear it (the timer callback clears only if it
         is still the same pending; the expired-pending caller clears
         unconditionally before doing the fresh save).
+
+        wh-clipboard-restore-fail-lost: returns the exception when the copy
+        failed because another program held the clipboard open, else None.
+        In that case the pending stays NOT cancelled, ``restore_attempts``
+        counts the failed attempt, and the caller decides whether to try
+        again. Every other outcome cancels the pending.
         """
         if pending.cancelled:
-            return
+            return None
         pending.cancelled = True
         if pending.timer is not None:
             try:
@@ -588,7 +737,7 @@ class UtteranceClipboardManager:
                 f"[UTT-{pending.utterance_id}] Could not read clipboard sequence "
                 f"at restore decision: {e}; refusing to restore (fail safe)"
             )
-            return
+            return None
 
         if current_seq != pending.clipboard_seq_at_paste:
             logger.info(
@@ -597,19 +746,29 @@ class UtteranceClipboardManager:
                 f"(seq {pending.clipboard_seq_at_paste} -> {current_seq}); "
                 f"preserving user's clipboard, NOT restoring"
             )
-            return
+            return None
 
+        if pending.restore_started is None:
+            pending.restore_started = _save_clock()
         try:
             pyperclip.copy(pending.saved_text)
             logger.debug(
                 f"[UTT-{pending.utterance_id}] Restored clipboard "
                 f"(seq unchanged at {current_seq}, "
-                f"len={len(pending.saved_text) if pending.saved_text else 0})"
+                f"len={len(pending.saved_text) if pending.saved_text else 0}, "
+                f"attempt {pending.restore_attempts + 1})"
             )
         except Exception as e:
+            if _is_open_clipboard_failure(e):
+                pending.restore_attempts += 1
+                pending.cancelled = False
+                return e
             logger.warning(
-                f"[UTT-{pending.utterance_id}] Could not restore clipboard: {e}"
+                f"[UTT-{pending.utterance_id}] Could not restore clipboard "
+                f"after {pending.restore_attempts + 1} attempts in "
+                f"{_save_clock() - pending.restore_started:.1f} s: {e}"
             )
+        return None
 
     def fire_pending_restore_now(self) -> None:
         """Synchronously fire the pending restore (test hook).

@@ -3,7 +3,7 @@ when it comes back (wh-mic-loss-notice).
 
 The capture sees the loss; main() owns the forwarder. So main() hands the
 capture an outage_callback at its get_audio_provider call, and that
-callback sends through main()'s forwarder with "Google STT", the title its
+callback sends through main()'s forwarder with "Google Cloud", the title its
 ready notice carries. The forwarder is built about 120 lines after the
 capture, so the callback reads it at call time.
 
@@ -86,8 +86,8 @@ def test_the_callback_sends_both_notices_through_the_forwarder():
     callback("recovered", "USB Webcam Microphone")
 
     assert forwarder.send_notification.call_args_list == [
-        call("Google STT", MIC_LOST_MESSAGE, kind="mic_lost"),
-        call("Google STT",
+        call("Google Cloud", MIC_LOST_MESSAGE, kind="mic_lost"),
+        call("Google Cloud",
              "Microphone is back (USB Webcam Microphone). "
              "Speech recognition works again.",
              kind="mic_recovered"),

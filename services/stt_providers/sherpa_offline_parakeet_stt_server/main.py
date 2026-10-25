@@ -41,6 +41,10 @@ from shared_stt.audio_processor import (
     AudioProcessor,
     LOAD_METRICS_LOGGER_NAME,
 )
+from shared_stt.engine_audio_saver import (
+    LOGGER_NAME as ENGINE_AUDIO_LOGGER_NAME,
+    create_from_environment,
+)
 from shared_stt.mic_notice import MicOutageNotifier
 from shared_stt.redact import redact_transcript
 from shared_stt.startup_refusal import (
@@ -59,6 +63,18 @@ from shared_audio.capture import (
 from shared_audio.diagnostics import CaptureLoadReporter
 
 from sherpa_engine import SherpaOfflineEngine, read_token_pieces
+from lead_word_controller import LeadWordController
+from lead_word_store import LeadWordStore, lead_word_folder
+import lead_word_controller
+import lead_word_recorder
+import lead_word_store
+
+# The loggers of the training-word modules, forwarded to wheelhouse.log.
+LEAD_WORD_LOGGER_NAMES = (
+    lead_word_controller.__name__,
+    lead_word_recorder.__name__,
+    lead_word_store.__name__,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -190,7 +206,7 @@ class ParakeetServer:
     """STT server using Sherpa-ONNX with NeMo Parakeet TDT."""
 
     DISCONNECT_TIMEOUT_S = 5.0
-    DISPLAY_NAME = "Parakeet v3 ({mode})"
+    DISPLAY_NAME = "Parakeet V3 (Local)"
 
     # Whether the capture handshake reported a microphone that never
     # opened, which start() turns into a nonzero exit
@@ -227,9 +243,9 @@ class ParakeetServer:
         # actually apply anything (wh-q33mj.1.1).
         self.hotwords_enabled = hotwords_enabled
 
-        # Resolve display name with CPU/GPU mode
+        # One name in CPU and GPU mode (wh-speech-provider-labels).
         use_gpu = model_config.get("use_gpu", False)
-        self.display_name = resolve_display_name(model_config)
+        self.display_name = self.DISPLAY_NAME
 
         audio_config = AudioConfig(rate=sample_rate, channels=1, chunk_ms=chunk_ms)
         # The capture sees a lost microphone; this provider owns the
@@ -308,7 +324,23 @@ class ParakeetServer:
             num_threads=model_config.get("num_threads", 4),
             hotwords_file=hotwords_file,
             hotwords_score=hotwords_score,
+            lead_word_path=engine_config.get("lead_word_path", ""),
         )
+
+        # wh-first-sound-lost.1: None unless Wheelhouse set
+        # WHEELHOUSE_SAVE_ENGINE_AUDIO=1 for this provider start.
+        self._engine_audio_saver = create_from_environment(
+            "parakeet_tdt", sample_rate=sample_rate)
+
+        # The 'Your training word' window (wh-first-sound-lost.23). Built
+        # here, after the forwarder and the engine exist and before the
+        # processor, because AudioProcessor takes its recorder only as a
+        # constructor argument. None when the feature cannot work; the
+        # capabilities frame then carries no lead_word field.
+        self.lead_word_controller = self._build_lead_word_controller(
+            sample_rate, vad_threshold, vad_lead_in_ms,
+            noise_advice_db=engine_config.get(
+                "lead_word_noise_advice_db", lead_word_recorder.NOISE_ADVICE_DB))
 
         self.audio_processor = AudioProcessor(
             engine=self.engine,
@@ -324,6 +356,10 @@ class ParakeetServer:
             # wh-audit13-preengine-load-review.1: the ten-second silence
             # line follows the same [debug] flag as the window line below.
             log_load_diagnostics=log_load_diagnostics,
+            engine_audio_saver=self._engine_audio_saver,
+            chunk_recorder=(
+                self.lead_word_controller.recorder
+                if self.lead_word_controller is not None else None),
         )
 
         # The periodic window line, which shows a struggling machine between
@@ -419,6 +455,38 @@ class ParakeetServer:
             hotwords_enabled,
         )
 
+    def _build_lead_word_controller(
+        self, sample_rate: int, silero_threshold: float, vad_lead_in_ms: int,
+        noise_advice_db=lead_word_recorder.NOISE_ADVICE_DB,
+    ) -> LeadWordController | None:
+        """Build the training-word controller, or None when it cannot work.
+
+        The cut and the WAV writer assume 16 kHz, so another [client] rate
+        builds nothing. A missing LOCALAPPDATA builds nothing either. In both
+        cases one line says why and the provider starts as it did before.
+        The forwarder was built before the engine, so its two lead-word
+        callbacks are set here and not in its constructor.
+        """
+        try:
+            store = LeadWordStore(
+                lead_word_folder(), Path(__file__).parent / "config.toml")
+            controller = LeadWordController(
+                engine=self.engine,
+                forwarder=self.forwarder,
+                store=store,
+                silero_threshold=silero_threshold,
+                get_microphone=lambda: self.forwarder.microphone_device,
+                sample_rate=sample_rate,
+                vad_lead_in_ms=vad_lead_in_ms,
+                noise_advice_db=noise_advice_db,
+            )
+        except Exception as e:
+            logger.warning(f"Training word is not available: {e!r}")
+            return None
+        self.forwarder.lead_word_callback = controller.handle_command
+        self.forwarder.lead_word_capabilities = controller.capabilities
+        return controller
+
     # -- Command handlers --
 
     def _handle_shutdown(self):
@@ -488,8 +556,7 @@ class ParakeetServer:
 
     def _handle_add_hint(self, hint: str):
         """Add a hint to the shared hints.txt and hard-restart so the
-        regenerated hotwords file takes effect (wh-kcu8f; mirrors the
-        distil-medium add-then-restart pattern).
+        regenerated hotwords file takes effect (wh-kcu8f).
 
         add_hint returns False for BOTH a duplicate and an I/O error (it
         catches Exception internally), so the duplicate report is only
@@ -617,6 +684,14 @@ class ParakeetServer:
                 # (wh-stt-load-metrics.1.14).
                 _load_t0 = time.perf_counter()
                 if not self.transcription_enabled.is_set():
+                    # A push-to-talk release turns transcription off, and
+                    # process_chunk is not called from here on. A training-
+                    # word take counts its end-silence in arriving audio, so
+                    # it would freeze: end it now (wh-first-sound-lost.23).
+                    try:
+                        self.audio_processor.end_recording_now()
+                    except Exception as e:
+                        logger.error(f"Cannot end the training-word take: {e}")
                     if self._wake_word_detector and self._wake_word_listening:
                         result = self._wake_word_detector.process(chunk)
                         if result:
@@ -834,6 +909,16 @@ class ParakeetServer:
         # other shared_stt record keeps the visibility it has today
         # (wh-stt-load-metrics).
         logging.getLogger(LOAD_METRICS_LOGGER_NAME).addHandler(ws_log_handler)
+        # Same reason for the engine-audio saver: its "Saved engine audio for
+        # UTT-N: <path>" line names the file for each utterance
+        # (wh-first-sound-lost.1). Attached whether or not the feature is on,
+        # because the setting can change between provider starts.
+        logging.getLogger(ENGINE_AUDIO_LOGGER_NAME).addHandler(ws_log_handler)
+        # Same reason for the training-word modules: the check measures
+        # line and the old-key line of a Keep (wh-first-sound-lost.23,
+        # acceptance items 8 and 13) otherwise reach only this console.
+        for name in LEAD_WORD_LOGGER_NAMES:
+            logging.getLogger(name).addHandler(ws_log_handler)
 
         # The capture path logs to the shared_audio tree, which nothing
         # here forwards, so the overflow warning, the device-open error,
@@ -939,6 +1024,14 @@ class ParakeetServer:
         logger.info("Cleaning up...")
         self.audio_capture.stop()
         self.engine.cleanup()
+        # wh-first-sound-lost.1: write the files still queued before the
+        # forwarder stops, so their "Saved engine audio" lines are sent.
+        saver = getattr(self, "_engine_audio_saver", None)
+        if saver is not None:
+            try:
+                saver.stop()
+            except Exception:
+                logger.debug("Engine audio saver did not stop cleanly", exc_info=True)
         self.forwarder.stop()
         logger.info("Server stopped cleanly")
 
@@ -1078,20 +1171,6 @@ def load_config(config_path: Path | None = None) -> dict:
     else:
         logger.warning("No config.toml found, using defaults")
     return _resolve_model_path(config)
-
-
-def resolve_display_name(model_config: dict) -> str:
-    """The user-visible provider name, with CPU or GPU filled in.
-
-    ParakeetServer.__init__ is the only caller. It was extracted so
-    --list-devices could name the provider in the notice it sent, and it
-    stayed after that path stopped sending one: the name still belongs
-    in one place, and __init__ needs it before the server exists.
-    """
-    use_gpu = model_config.get("use_gpu", False)
-    return ParakeetServer.DISPLAY_NAME.replace(
-        "{mode}", "GPU" if use_gpu else "CPU"
-    )
 
 
 def run_list_devices() -> int:

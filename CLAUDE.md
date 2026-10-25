@@ -20,7 +20,6 @@ Each service has its own uv-managed virtual environment:
 | `services/syscheck/` | Hardware detection used by the installer |
 | `services/stt_providers/shared/` | Code shared by the STT providers (consumed as an editable path dependency; do not `uv sync` it standalone) |
 | `services/stt_providers/sherpa_offline_parakeet_stt_server/` | Default offline STT provider (Parakeet TDT, CPU) |
-| `services/stt_providers/distil_medium_en/` | CUDA STT provider (Distil-Whisper) |
 | `services/stt_providers/google_stt_server/` | Google Cloud STT provider |
 
 Run `uv` and `python` commands from the service directory that owns the code.

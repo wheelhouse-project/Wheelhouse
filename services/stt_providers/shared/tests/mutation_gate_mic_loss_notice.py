@@ -17,7 +17,7 @@ with THAT service's interpreter:
     shared        services/stt_providers/google_stt_server/.venv (its
                   editable wheelhouse-shared install points at this tree;
                   the shared package has no venv of its own in a worktree)
-    parakeet, distil, google
+    parakeet, google
                   the provider's own .venv
     wheelhouse    <main checkout>/services/wheelhouse/.venv, run with the
                   worktree's services/wheelhouse as the working directory
@@ -59,7 +59,6 @@ import mutation_gate_runner as runner  # noqa: E402
 SHARED = Path(__file__).resolve().parents[1]
 PROVIDERS = SHARED.parent
 PARAKEET = PROVIDERS / "sherpa_offline_parakeet_stt_server"
-DISTIL = PROVIDERS / "distil_medium_en"
 GOOGLE = PROVIDERS / "google_stt_server"
 ROOT = PROVIDERS.parents[1]
 WHEELHOUSE = ROOT / "services" / "wheelhouse"
@@ -88,7 +87,6 @@ _VENV_PYTHON = Path(".venv") / "Scripts" / "python.exe"
 INTERPRETERS = {
     SHARED: GOOGLE / _VENV_PYTHON,
     PARAKEET: PARAKEET / _VENV_PYTHON,
-    DISTIL: DISTIL / _VENV_PYTHON,
     GOOGLE: GOOGLE / _VENV_PYTHON,
     WHEELHOUSE: _main_checkout(ROOT) / "services" / "wheelhouse" / _VENV_PYTHON,
 }
@@ -525,21 +523,6 @@ PROVIDER_MUTATIONS = [
         SENDS_WITH_TITLE,
     ),
     _mutation(
-        "distil-passes-no-outage-callback",
-        DISTIL, PROVIDER_TESTS, DISTIL / "main.py",
-        "                config=audio_config, outage_callback=outage_notifier)\n",
-        "                config=audio_config)\n",
-        GIVEN_CALLBACK, SENDS_WITH_TITLE,
-    ),
-    _mutation(
-        "distil-notifier-never-finds-the-forwarder",
-        DISTIL, PROVIDER_TESTS, DISTIL / "main.py",
-        "            self.DISPLAY_NAME, lambda: getattr(self, 'forwarder', "
-        "None))\n",
-        "            self.DISPLAY_NAME, lambda: None)\n",
-        SENDS_WITH_TITLE,
-    ),
-    _mutation(
         "google-passes-no-outage-callback",
         GOOGLE, PROVIDER_TESTS, GOOGLE / "main.py",
         "                                 overflow_callback="
@@ -552,9 +535,9 @@ PROVIDER_MUTATIONS = [
     _mutation(
         "google-notifier-never-finds-the-forwarder",
         GOOGLE, PROVIDER_TESTS, GOOGLE / "main.py",
-        '    outage_notifier = MicOutageNotifier("Google STT", '
+        '    outage_notifier = MicOutageNotifier("Google Cloud", '
         'lambda: forwarder)\n',
-        '    outage_notifier = MicOutageNotifier("Google STT", '
+        '    outage_notifier = MicOutageNotifier("Google Cloud", '
         'lambda: None)\n',
         GOOGLE_SENDS,
     ),

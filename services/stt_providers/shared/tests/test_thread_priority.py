@@ -213,7 +213,6 @@ class TestProviderMainsElevate:
     """
 
     PROVIDERS = [
-        "distil_medium_en",
         "google_stt_server",
         "sherpa_offline_parakeet_stt_server",
     ]

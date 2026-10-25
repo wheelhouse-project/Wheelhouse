@@ -1,6 +1,6 @@
 """One-off helper: insert the runtime-folder bootstrap into every entry point.
 
-It is committed so the fourteen insertions are reproducible and reviewable,
+It is committed so the twelve insertions are reproducible and reviewable,
 not because anyone should run it again. The leading underscore keeps pytest
 from collecting it, and it refuses a file that already carries the call, so a
 second run changes nothing.
@@ -20,8 +20,6 @@ FILES = (
     "stt_providers/sherpa_offline_parakeet_stt_server/launcher.py",
     "stt_providers/google_stt_server/main.py",
     "stt_providers/google_stt_server/launcher.py",
-    "stt_providers/distil_medium_en/main.py",
-    "stt_providers/distil_medium_en/launcher.py",
     "syscheck/syscheck.py",
     "installer/components/detector.py",
     "stt_providers/evaluation/run_benchmark.py",

@@ -176,6 +176,13 @@ class OverlayEvent:
         (wh-overlay-failed-focus-read-keeps-numbers). The refresh then closes
         instead of falling back to those numbers. Ignored for other kinds and
         states.
+      dismisses_numbers: ``True`` on a ``focus_change`` from a change of the
+        foreground window (wh-numbers-stay-setting). When the machine's
+        ``keep_numbers`` is ``False``, such an event removes the numbers
+        instead of refreshing them, as Windows Voice Access does. Ignored
+        for other kinds, and ignored when ``keep_numbers`` is ``True``. A
+        successful click does not use this field: Logic applies
+        ``hide_numbers`` for it (``LogicController._feed_click_complete_refresh``).
     """
 
     kind: OverlayEventKind
@@ -188,6 +195,7 @@ class OverlayEvent:
     notice: Optional[ClickNoticeEvent] = None
     reason: str = ""
     visible_window_left: bool = False
+    dismisses_numbers: bool = False
 
 
 # Sentinel for "this state has no timeout", mirroring editor_lifecycle's
@@ -373,6 +381,17 @@ class ClickOverlayStateMachine:
     # rejected. The integration reads the value from ClickConfig; this class
     # does NOT read config.
     settle_after_click: bool = False
+    # wh-numbers-stay-setting: ``True`` keeps the numbers on screen after a
+    # click and after a change of the foreground window (the app refreshes
+    # them). ``False`` removes them on a ``focus_change`` whose
+    # ``dismisses_numbers`` is set, as Windows Voice Access does; Logic also
+    # reads it to apply ``hide_numbers`` after a successful click. The class
+    # default is ``True`` so a bare machine keeps the long-standing refresh
+    # behaviour; the
+    # integration (``main.make_click_overlay_state_machine``) reads
+    # ``[click] overlay_keep_numbers`` (default ``False``) and passes it. This
+    # class does NOT read config.
+    keep_numbers: bool = True
 
     state: OverlayState = OverlayState.CLOSED
     overlay_session_id: int = 0
@@ -784,6 +803,11 @@ class ClickOverlayStateMachine:
         return ApplyResult(
             OverlayOutcome.INVALID_TRANSITION, (self._cancel_timer(),)
         )
+
+    def _event_dismisses_numbers(self, event: OverlayEvent) -> bool:
+        """True when ``event`` must remove the numbers (wh-numbers-stay-setting)."""
+
+        return event.dismisses_numbers and not self.keep_numbers
 
     def _hide_to_closed(self) -> ApplyResult:
         """Dispatch clear + unpin and transition straight to ``closed``.
@@ -1227,6 +1251,8 @@ class ClickOverlayStateMachine:
         if kind is OverlayEventKind.SHOW_NUMBERS:
             return self._refresh(BuildReason.REFRESH)
         if kind is OverlayEventKind.FOCUS_CHANGE:
+            if self._event_dismisses_numbers(event):
+                return self._hide_to_closed()
             return self._refresh(BuildReason.REFRESH)
         if kind is OverlayEventKind.CLICK_COMPLETE:
             # wh-overlay-slow-uia-stale-badges.1. The flag is OFF by default,
@@ -1476,6 +1502,8 @@ class ClickOverlayStateMachine:
         if kind is OverlayEventKind.SHOW_NUMBERS:
             return self._refresh_supersede(BuildReason.SUPERSEDE)
         if kind is OverlayEventKind.FOCUS_CHANGE:
+            if self._event_dismisses_numbers(event):
+                return self._hide_to_closed()
             return self._refresh_supersede(BuildReason.SUPERSEDE)
         if kind is OverlayEventKind.HIDE_NUMBERS:
             return self._hide_to_closed()

@@ -62,7 +62,6 @@ SHARED = Path(__file__).resolve().parents[1]
 PROVIDERS = SHARED.parent
 
 PARAKEET = PROVIDERS / "sherpa_offline_parakeet_stt_server"
-DISTIL = PROVIDERS / "distil_medium_en"
 GOOGLE = PROVIDERS / "google_stt_server"
 
 FACTORY = SHARED / "shared_audio" / "capture" / "factory.py"
@@ -100,7 +99,7 @@ BACKEND_TESTS = "tests/test_ready_backend_name.py"
 # because two tests in tests/test_ready_backend_name.py carry
 # @pytest.mark.asyncio and the Google venv is the only one of the three that
 # installs pytest-asyncio. Measured 2026-10-09 in this worktree: the
-# Parakeet and distil venvs answer no for pytest_asyncio, and those two
+# Parakeet venv answers no for pytest_asyncio, and those
 # tests fail there with "You need to install a suitable plugin for your
 # async framework". Under the Google venv the four shared test files this
 # gate uses report 151 passed. The gate names that interpreter rather than
@@ -327,19 +326,9 @@ PARAKEET_REFUSAL_CALL = (
     "            )\n"
 )
 
-DISTIL_REFUSAL_CALL = (
-    "            send_startup_failed_notice(\n"
-    "                self.DISPLAY_NAME,\n"
-    "                str(exc),\n"
-    "                ws_host,\n"
-    "                ws_port,\n"
-    "                provider_name=\"distil_medium_en\",\n"
-    "            )\n"
-)
-
 GOOGLE_REFUSAL_CALL = (
     "        send_startup_failed_notice(\n"
-    "            \"Google STT\",\n"
+    "            \"Google Cloud\",\n"
     "            str(exc),\n"
     "            cfg.ws_host,\n"
     "            cfg.ws_port,\n"
@@ -351,7 +340,6 @@ GOOGLE_REFUSAL_CALL = (
 REFUSAL_MUTATIONS = (
     _refusal_mutations("parakeet", PARAKEET, PARAKEET_REFUSAL_CALL,
                        " " * 12)
-    + _refusal_mutations("distil", DISTIL, DISTIL_REFUSAL_CALL, " " * 12)
     + [
         {
             # Google's own, written out: its refusal sits in main()
@@ -403,30 +391,11 @@ REFUSAL_MUTATIONS = (
             # WHICH tests failed and never why. `return` ends __init__
             # without ending the process, which is the behaviour this
             # entry means to break, and it stops short of line 275, so
-            # both tests now fail with DID NOT RAISE SystemExit. Distil's
-            # twin entry never needed this: its __init__ makes no second
-            # use of audio_capture. Found by codex in round 3 as a static
+            # both tests now fail with DID NOT RAISE SystemExit. Found by codex in round 3 as a static
             # observation and proved by running the mutation
             # (wh-capture-winrt-required.1).
             "new": ("            # (wh-capture-winrt-required.1.5).\n"
                     "            return\n"),
-            "expect": [
-                "test_construction_sends_the_refusal_and_exits_nonzero",
-                "test_no_engine_is_loaded_once_the_capture_has_refused",
-            ],
-        },
-        {
-            # Same disambiguation as parakeet above, for the same
-            # reason: A9 added a second exit to this file too.
-            "name": "distil-refusal-does-not-quit",
-            "service": DISTIL,
-            "test_file": REFUSAL_TESTS,
-            "file": DISTIL / "main.py",
-            # Anchor refreshed for the same reason as parakeet above.
-            "old": ("            # (wh-capture-winrt-required.1.5).\n"
-                    "            sys.exit(REFUSAL_EXIT_CODE)\n"),
-            "new": ("            # (wh-capture-winrt-required.1.5).\n"
-                    "            pass\n"),
             "expect": [
                 "test_construction_sends_the_refusal_and_exits_nonzero",
                 "test_no_engine_is_loaded_once_the_capture_has_refused",
@@ -446,21 +415,6 @@ BACKEND_MUTATIONS = [
         "service": PARAKEET,
         "test_file": BACKEND_TESTS,
         "file": PARAKEET / "main.py",
-        "old": (
-            "                    kind=\"ready\",\n"
-            "                    capture_backend=CAPTURE_BACKEND_NAME)\n"
-        ),
-        "new": "                    kind=\"ready\")\n",
-        "expect": [
-            "test_the_ready_notice_names_the_winrt_capture",
-            "test_the_name_comes_from_the_factory_that_built_the_capture",
-        ],
-    },
-    {
-        "name": "distil-ready-drops-the-backend",
-        "service": DISTIL,
-        "test_file": BACKEND_TESTS,
-        "file": DISTIL / "main.py",
         "old": (
             "                    kind=\"ready\",\n"
             "                    capture_backend=CAPTURE_BACKEND_NAME)\n"
@@ -612,29 +566,6 @@ LIST_DEVICES_MUTATIONS = [
         "expect": _LIST_DEVICES_EXPECT,
     },
     {
-        "name": "distil-list-devices-refuses-in-silence",
-        "service": DISTIL,
-        "test_file": REFUSAL_TESTS,
-        "file": DISTIL / "main.py",
-        "old": "        print(str(exc), file=sys.stderr)\n",
-        "new": "        pass\n",
-        "expect": _LIST_DEVICES_EXPECT,
-    },
-    {
-        "name": "distil-list-devices-notifies-wheelhouse",
-        "service": DISTIL,
-        "test_file": REFUSAL_TESTS,
-        "file": DISTIL / "main.py",
-        "old": "        print(str(exc), file=sys.stderr)\n",
-        "new": (
-            "        print(str(exc), file=sys.stderr)\n"
-            "        send_startup_failed_notice(\n"
-            "            \"Distil\", str(exc), \"localhost\", 8765,\n"
-            "            provider_name=\"distil_medium_en\")\n"
-        ),
-        "expect": _LIST_DEVICES_EXPECT,
-    },
-    {
         "name": "google-list-devices-refuses-in-silence",
         "service": GOOGLE,
         "test_file": REFUSAL_TESTS,
@@ -722,8 +653,8 @@ _A9_SERVER_EXPECT = [
     "test_cleanup_runs_before_the_exit",
 ]
 
-# parakeet and distil hold the run state on the server object, so the
-# same three lines say it for both: the flag start() reads for its exit
+# parakeet holds the run state on the server object, so these
+# three lines say it: the flag start() reads for its exit
 # code, and the flag process_audio_loop reads to keep turning.
 _A9_SERVER_STOP = (
     "            logger.error(\n"
@@ -739,15 +670,6 @@ CAPTURE_FAILURE_MUTATIONS = [
         "service": PARAKEET,
         "test_file": A9_TESTS,
         "file": PARAKEET / "main.py",
-        "old": _A9_SERVER_STOP,
-        "new": "",
-        "expect": _A9_SERVER_EXPECT,
-    },
-    {
-        "name": "distil-capture-failure-keeps-running",
-        "service": DISTIL,
-        "test_file": A9_TESTS,
-        "file": DISTIL / "main.py",
         "old": _A9_SERVER_STOP,
         "new": "",
         "expect": _A9_SERVER_EXPECT,
@@ -1075,21 +997,6 @@ REFUSAL_EXIT_MUTATIONS = [
         "expect": ["test_the_constructor_refusal_exits_with_the_refusal_code"],
     },
     {
-        "name": "distil-constructor-refusal-exits-one",
-        "service": DISTIL,
-        "test_file": REFUSAL_TESTS,
-        "file": DISTIL / "main.py",
-        "old": (
-            "            # (wh-capture-winrt-required.1.5).\n"
-            "            sys.exit(REFUSAL_EXIT_CODE)\n"
-        ),
-        "new": (
-            "            # (wh-capture-winrt-required.1.5).\n"
-            "            sys.exit(1)\n"
-        ),
-        "expect": ["test_the_constructor_refusal_exits_with_the_refusal_code"],
-    },
-    {
         # Google returns rather than exits -- `sys.exit(main())` is the
         # last line of the module -- and its two returns of the constant
         # are identical, so the anchor is the last line of the comment
@@ -1135,24 +1042,6 @@ NOTICE_WAIT_MUTATIONS = [
         "service": PARAKEET,
         "test_file": A9_TESTS,
         "file": PARAKEET / "main.py",
-        "old": (
-            "            wait_for_notice_connection("
-            "self.forwarder, self.forwarder.uri)\n"
-        ),
-        "new": "            pass\n",
-        "expect": [
-            "test_a_live_connection_is_confirmed_before_the_refusal_ends"
-            "_the_run",
-            "test_a_connection_that_opens_during_the_wait_gets_the_notice",
-            "test_a_notice_that_never_connects_is_reported_lost_with_its"
-            "_address",
-        ],
-    },
-    {
-        "name": "distil-refusal-does-not-wait-for-a-connection",
-        "service": DISTIL,
-        "test_file": A9_TESTS,
-        "file": DISTIL / "main.py",
         "old": (
             "            wait_for_notice_connection("
             "self.forwarder, self.forwarder.uri)\n"

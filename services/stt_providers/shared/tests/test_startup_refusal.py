@@ -6,8 +6,7 @@ Every STT provider builds its audio capture BEFORE it builds the
 WSForwarder that carries notices to WheelHouse: parakeet main.py builds
 the capture in ParakeetServer.__init__ and the forwarder a few lines
 later in the same __init__; google main.py builds the capture in main()
-about seventy lines before the forwarder; distil main.py has the same
-shape as parakeet. The capture factory now refuses when winsdk is
+about seventy lines before the forwarder. The capture factory now refuses when winsdk is
 missing, and the refusal has to reach the user, so the provider needs a
 way to send one notice without the forwarder it has not built yet.
 
@@ -143,8 +142,8 @@ def test_the_forwarder_is_stopped_after_the_notice_is_queued():
         forwarder.is_connected = True
 
         send_startup_failed_notice(
-            "Distil-Whisper Medium (GPU)", REFUSAL, "localhost", 8765,
-            "distil_medium_en",
+            "Parakeet v3 (Local)", REFUSAL, "localhost", 8765,
+            "parakeet_tdt",
         )
 
     forwarder.stop.assert_called_once()

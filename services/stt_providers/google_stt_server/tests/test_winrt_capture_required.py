@@ -54,7 +54,7 @@ def test_main_sends_the_refusal_and_returns_nonzero(mock_load_config):
         result = main()
 
     forwarder.send_notification.assert_called_once_with(
-        "Google STT", REFUSAL, kind="startup_failed"
+        "Google Cloud", REFUSAL, kind="startup_failed"
     )
     assert result != 0
 

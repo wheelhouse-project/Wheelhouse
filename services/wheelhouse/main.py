@@ -58,6 +58,7 @@ add_runtime_dll_directory()
 
 
 import asyncio
+import dataclasses
 import enum
 import functools
 import logging
@@ -68,7 +69,7 @@ import time
 from multiprocessing import Queue
 from multiprocessing.synchronize import Event
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -123,6 +124,7 @@ from services.wheelhouse.utils.audio_suppression_decision import (
     AUDIO_SUPPRESSION_DEFAULT,
     AUDIO_SUPPRESSION_SETTING,
     decide_audio_suppression,
+    parse_audio_suppression_setting,
 )
 from services.wheelhouse.utils.logging_setup import setup_logging
 from services.wheelhouse.utils.screen_reader_flag import (
@@ -461,6 +463,7 @@ def _handle_late_click_response(
             controller._feed_click_complete_refresh(
                 overlay_dispatch_pair=overlay_dispatch_pair,
                 trace_id=trace_id,
+                click_succeeded=True,
                 preclick_snapshot_id=fallback_snapshot_id,
                 overlay_dispatch_ordinal=overlay_dispatch_ordinal,
             )
@@ -481,6 +484,7 @@ def _handle_late_click_response(
         controller._feed_click_complete_refresh(
             overlay_dispatch_pair=overlay_dispatch_pair,
             trace_id=response.trace_id or trace_id,
+            click_succeeded=False,
             trigger=f"click refused ({response.reason})",
             preclick_snapshot_id=fallback_snapshot_id,
             overlay_dispatch_ordinal=overlay_dispatch_ordinal,
@@ -562,12 +566,86 @@ def make_click_overlay_state_machine(click_config):
     wait_ms = int(_OVERLAY_READ_SENTENCE_WAIT_MAX_S * 1000)
     return ClickOverlayStateMachine(
         settle_after_click=click_config.overlay_settle_after_click,
+        # wh-numbers-stay-setting: False (the default) removes the numbers
+        # after a successful click and after a change of window; True keeps
+        # showing new numbers. The settings window changes it live through
+        # ``LogicController._apply_saved_overlay_keep_numbers``.
+        keep_numbers=click_config.overlay_keep_numbers,
         walk_deadline_ms=read_bound_ms,
         settle_deadline_ms=max(
             ClickOverlayStateMachine.settle_deadline_ms,
             read_bound_ms + wait_ms,
         ),
     )
+
+
+class _OverlayWindowFacts(NamedTuple):
+    """What the numbers-stay filter reads about one window.
+
+    ``root`` is ``GetAncestor(hwnd, GA_ROOT)``: the top-level window that
+    contains ``hwnd`` through its parent chain (``hwnd`` itself for a top-level
+    window). It is NOT the owner: a dialog that the numbered window owns is a
+    top-level window of its own, so its ``root`` is the dialog.
+    """
+
+    class_name: str
+    pid: int
+    root: int
+
+
+def _overlay_window_facts(hwnd: int) -> "Optional[_OverlayWindowFacts]":
+    """Read the class name, process id and top-level window of ``hwnd``.
+
+    The Win32 seam of the wh-numbers-stay-setting window-change filter
+    (``LogicController._foreground_change_dismisses_numbers``); tests patch it.
+    Returns ``None`` when the window cannot be read (it is gone, or pywin32 is
+    missing), and the caller then keeps today's refresh.
+    """
+    try:
+        import win32con
+        import win32gui
+        import win32process
+    except Exception:  # noqa: BLE001 -- non-Windows / missing pywin32
+        return None
+    try:
+        handle = int(hwnd)
+        if not handle or not win32gui.IsWindow(handle):
+            return None
+        class_name = str(win32gui.GetClassName(handle))
+        _thread, pid = win32process.GetWindowThreadProcessId(handle)
+        root = int(win32gui.GetAncestor(handle, win32con.GA_ROOT)) or handle
+        return _OverlayWindowFacts(
+            class_name=class_name, pid=int(pid or 0), root=root,
+        )
+    except Exception:  # noqa: BLE001 -- the window can vanish mid-read
+        return None
+
+
+def _overlay_current_foreground_hwnd() -> int:
+    """The window that is in front now (``GetForegroundWindow``), or 0.
+
+    The seam the settle refire uses to judge a burst of foreground events by
+    where the burst ended (wh-numbers-stay-setting, ``_consume_pending_foreground_dismissal``);
+    tests patch it. 0 means the window cannot be read, and the caller then keeps
+    today's refresh.
+    """
+    try:
+        import win32gui
+
+        return int(win32gui.GetForegroundWindow() or 0)
+    except Exception:  # noqa: BLE001 -- non-Windows / missing pywin32
+        return 0
+
+
+# How many badge clicks' "show numbers" counts ``LogicController`` remembers
+# (wh-numbers-stay-setting). The value equals ``app._LATE_RESPONSE_CAPACITY``
+# (32), the most click replies that can arrive late, so no count that a late
+# reply needs is pruned before the reply arrives.
+_OVERLAY_CLICK_SHOW_COUNT_KEEP = 32
+
+# Window classes whose foreground changes are not the user moving to another
+# application window (wh-numbers-stay-setting, item 10).
+_OVERLAY_NON_WINDOW_CHANGE_CLASSES = frozenset({"tooltips_class32"})
 
 
 def _overlay_keepalive_states():
@@ -1331,30 +1409,6 @@ _MALFORMED_SETTINGS_MESSAGE = (
 )
 
 
-def _send_parakeet_model_offer(state_manager, plan) -> None:
-    """Ask the GUI to show the Parakeet model offer (wh-parakeet-model-download-offer).
-
-    One action on the Logic -> GUI queue: kind "launch" when ``plan`` is an
-    InstallerLaunchPlan (the notice offers Download now), otherwise kind
-    "fallback" with the one-line install command (the notice offers Copy
-    command). The ruled notice texts live in the GUI process, which shows
-    them. Never raises.
-    """
-    if isinstance(plan, parakeet_model.InstallerLaunchPlan):
-        message = {"action": "parakeet_model_offer", "kind": "launch"}
-    else:
-        message = {
-            "action": "parakeet_model_offer",
-            "kind": "fallback",
-            "command": (getattr(plan, "command", "")
-                        or parakeet_model.ONE_LINE_INSTALL_COMMAND),
-        }
-    try:
-        state_manager.state_to_gui_queue.put_nowait(message)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(f"Could not send the Parakeet model offer to the GUI: {exc}")
-
-
 def _send_update_notice(state_manager, version: str, tag: str) -> None:
     """Ask the GUI to show the update notice (wh-release-update-check).
 
@@ -1605,6 +1659,15 @@ async def _record_help_explainer_choice(
     return None
 
 
+# wh-first-sound-lost.23: the lw_* actions of the 'Your training word' window.
+# Module level, so a test that calls _build_gui_handler_map on a mock still
+# finds the list.
+_LEAD_WORD_GUI_ACTIONS = (
+    "lw_open", "lw_close", "lw_record", "lw_keep", "lw_discard",
+    "lw_restore", "lw_off", "lw_on", "lw_play_start", "lw_play_end",
+)
+
+
 class LogicController:
     """Main application logic coordinator."""
 
@@ -1749,10 +1812,10 @@ class LogicController:
             initial_generation=0,
         )
 
-        # wh-7ou.7.2.2: voice-calibration session state machine, built
-        # lazily on the first cal_* action from the GUI (see
-        # _get_calibration_controller).
-        self._calibration_controller = None
+        # 'Your training word' window controller, built on first use
+        # (wh-first-sound-lost.23, see _get_lead_word_controller).
+        self._lead_word_controller = None
+
         # Per-word timeouts. Section 5 specifies 1.0 s for insert (hot
         # path) and Section 2 specifies 2.0 s for retract (GUI Qt-side
         # ledger validation can dwell while a partial-trim runs). Both
@@ -2050,6 +2113,16 @@ class LogicController:
         # 250) so the Logic and Input processes derive the SAME debounce from
         # the same raw [click] block (wh-n29v.66 Phase 1.5 parity invariant).
         self._overlay_focus_debouncer = self._build_overlay_focus_debouncer()
+        # wh-numbers-stay-setting: True once a FOREGROUND event was coalesced
+        # by the debounce, whatever window it named, while numbers are on the
+        # screen and overlay_keep_numbers is off
+        # (``_overlay_numbers_can_be_dismissed``). The settle refire (or a
+        # menu / Pattern Manager event that fires at once) then runs
+        # ``_foreground_change_dismisses_numbers`` against the window that is
+        # in front at that moment and sends ``dismisses_numbers`` from the
+        # result; clearing the flag happens there, and cancelling the refire
+        # clears it too.
+        self._overlay_settle_refire_foreground: bool = False
         # Pending trailing settle re-fire timer (wh-overlay-nested-dupes.1.1):
         # a coalesced focus/menu event arms this one-shot loop timer for the
         # debounce-window remainder so the FINAL event of a burst always
@@ -2237,6 +2310,20 @@ class LogicController:
         # late-response callback that replays an older click's reply. It is
         # the ordering key for the slot above, and nothing else reads it.
         self._overlay_click_dispatch_ordinal: int = 0
+        # wh-numbers-stay-setting (decision D5): how many "show numbers" voice
+        # commands the machine has applied, and the count each outstanding
+        # badge click saw when it was sent (keyed by dispatch ordinal, newest
+        # ``_OVERLAY_CLICK_SHOW_COUNT_KEEP`` kept). A success reply whose click
+        # was sent BEFORE a later "show numbers" must not remove numbers the
+        # user asked for after it.
+        self._overlay_show_numbers_applied: int = 0
+        self._overlay_click_show_counts: "dict[int, int]" = {}
+        # wh-numbers-stay-setting (acceptance item 4): the keep_numbers value
+        # each outstanding badge click was sent under, keyed and pruned like
+        # the counts above. A click on the settings check box saves a new
+        # value, and that save can reach Logic before the click's own reply;
+        # the click still follows the value it was sent under.
+        self._overlay_click_keep_numbers: "dict[int, bool]" = {}
 
         # wh-n29v.111: the auto-open item_id_filter, stashed by
         # forward_click_element when it feeds an AUTO_OPEN OverlayEvent and read
@@ -2689,7 +2776,7 @@ class LogicController:
                 "Download now: no installer to start "
                 f"({getattr(plan, 'reason', 'unknown')}); showing the install command"
             )
-            _send_parakeet_model_offer(self.state_manager, plan)
+            parakeet_model.send_parakeet_model_offer(self.state_manager, plan)
             return
         pids = self._wheelhouse_process_ids()
         started = await asyncio.to_thread(
@@ -2700,7 +2787,7 @@ class LogicController:
                 "The Wheelhouse installer did not start; showing the install "
                 "command instead"
             )
-            _send_parakeet_model_offer(
+            parakeet_model.send_parakeet_model_offer(
                 self.state_manager,
                 parakeet_model.InstallerFallback(
                     command=parakeet_model.ONE_LINE_INSTALL_COMMAND,
@@ -2981,7 +3068,7 @@ class LogicController:
                 "Parakeet was picked but its speech model is not complete; "
                 f"offering the installer ({type(plan).__name__})"
             )
-            _send_parakeet_model_offer(self.state_manager, plan)
+            parakeet_model.send_parakeet_model_offer(self.state_manager, plan)
             return
 
         if remote_launcher:
@@ -4152,6 +4239,27 @@ class LogicController:
         self._overlay_click_dispatch_ordinal = (
             getattr(self, "_overlay_click_dispatch_ordinal", 0) + 1
         )
+        show_counts = getattr(self, "_overlay_click_show_counts", None)
+        if show_counts is None:
+            show_counts = self._overlay_click_show_counts = {}
+        show_counts[self._overlay_click_dispatch_ordinal] = getattr(
+            self, "_overlay_show_numbers_applied", 0,
+        )
+        click_keeps = getattr(self, "_overlay_click_keep_numbers", None)
+        if click_keeps is None:
+            click_keeps = self._overlay_click_keep_numbers = {}
+        machine = getattr(self, "click_overlay_state", None)
+        if machine is not None:
+            click_keeps[self._overlay_click_dispatch_ordinal] = (
+                machine.keep_numbers
+            )
+        for record in (show_counts, click_keeps):
+            for stale in [
+                key for key in record
+                if key <= self._overlay_click_dispatch_ordinal
+                - _OVERLAY_CLICK_SHOW_COUNT_KEEP
+            ]:
+                del record[stale]
         try:
             await self._send_snapshot_item_click_inner(
                 snapshot_id=snapshot_id, item_id=item_id, trace_id=trace_id,
@@ -4304,6 +4412,7 @@ class LogicController:
             self._feed_click_complete_refresh(
                 overlay_dispatch_pair=overlay_dispatch_pair,
                 trace_id=trace_id,
+                click_succeeded=True,
                 preclick_snapshot_id=snapshot_id,
                 overlay_dispatch_ordinal=overlay_dispatch_ordinal,
             )
@@ -4335,6 +4444,7 @@ class LogicController:
             self._feed_click_complete_refresh(
                 overlay_dispatch_pair=overlay_dispatch_pair,
                 trace_id=response.trace_id or trace_id,
+                click_succeeded=False,
                 trigger=f"click refused ({response.reason})",
                 preclick_snapshot_id=snapshot_id,
                 overlay_dispatch_ordinal=overlay_dispatch_ordinal,
@@ -4385,11 +4495,23 @@ class LogicController:
     def _feed_click_complete_refresh(
         self, *, overlay_dispatch_pair: "Optional[tuple[int, int]]",
         trace_id: str,
+        click_succeeded: bool,
         trigger: str = "click ok",
         preclick_snapshot_id: "Optional[str]" = None,
         overlay_dispatch_ordinal: int = 0,
     ) -> None:
         """Feed CLICK_COMPLETE after an overlay item click completes (this slice).
+
+        ``click_succeeded`` (wh-numbers-stay-setting) is True when the click
+        landed and False for a refusal because the saved position is stale.
+        With ``[click] overlay_keep_numbers`` off, a successful click removes
+        the numbers: this function applies the same ``HIDE_NUMBERS`` event the
+        "hide numbers" voice command applies, BEFORE the generation and state
+        gates below, whenever the click was dispatched in the overlay session
+        that is on the machine now. A refresh that started between the click
+        and its reply (a menu closing, the browser timer, an owned dialog)
+        bumps the generation and used to drop the success, so the numbers came
+        back as new numbers. A stale-position refusal still refreshes them.
 
         Called on a successful 'click N', and on a 'click N' refused for a stale
         or unreadable saved position (bounds_invalid / bounds_stale,
@@ -4450,6 +4572,53 @@ class LogicController:
         if machine is None or overlay_dispatch_pair is None:
             return
         current_pair = (machine.overlay_session_id, machine.paint_generation)
+        click_show_count = getattr(
+            self, "_overlay_click_show_counts", {},
+        ).get(overlay_dispatch_ordinal)
+        shown_again = (
+            click_show_count is not None
+            and click_show_count
+            != getattr(self, "_overlay_show_numbers_applied", 0)
+        )
+        # The value this click was sent under (``_overlay_click_keep_numbers``);
+        # the current value only when no record exists for the click.
+        click_keep_numbers = getattr(
+            self, "_overlay_click_keep_numbers", {},
+        ).get(overlay_dispatch_ordinal, machine.keep_numbers)
+        if (
+            click_succeeded
+            and not click_keep_numbers
+            and overlay_dispatch_pair[0] == current_pair[0]
+            and not shown_again
+        ):
+            # wh-numbers-stay-setting, item 2a: a successful click removes the
+            # numbers, whatever generation or state the machine is in now. The
+            # event is the one ``handle_overlay_command`` applies for "hide
+            # numbers" (and ``_apply_lost_restore_paint_hide`` applies through
+            # this same ``_apply_overlay_event`` path), so the clear, the
+            # unpin, the session end and every post-apply reconciler are the
+            # same. Only the SESSION is compared: a refresh in the same
+            # session does not change what the click did. A different session
+            # means the overlay the click was dispatched against is gone, and
+            # the gate below keeps today's drop. This also wins over
+            # ``settle_after_click`` (decision D1) and leaves no pending
+            # post-click record behind to be replaced and dropped. A "show
+            # numbers" applied AFTER the click was sent (decision D5, item 2e)
+            # cancels this early hide: the user asked for numbers after the
+            # click, and a late reply must not remove them. That reply takes
+            # today's path below.
+            logger.info(
+                "overlay: %s succeeded at gen=%s (machine now gen=%s, "
+                "state=%s); overlay_keep_numbers is off, so the numbers are "
+                "removed (trace_id=%s)",
+                trigger, overlay_dispatch_pair, current_pair,
+                machine.state.value, trace_id,
+            )
+            self._apply_overlay_event(
+                OverlayEvent(kind=OverlayEventKind.HIDE_NUMBERS),
+                source=f"click_complete ({trigger}) gen={current_pair}",
+            )
+            return
         if current_pair != overlay_dispatch_pair:
             # wh-overlay-slow-uia-stale-badges.15, the interleave this branch
             # used to drop on the floor. A FOCUS_CHANGE from any of the four
@@ -4471,9 +4640,12 @@ class LogicController:
             # click was dispatched against is genuinely gone.
             #
             # Only armed when settle_after_click is ON. With the flag OFF the
-            # drop costs nothing and always did: CLICK_COMPLETE would have
-            # started the very refresh the FOCUS_CHANGE already started, so
-            # the shipped default path is unchanged.
+            # drop costs nothing for a click that is refused or for a machine
+            # with overlay_keep_numbers ON: CLICK_COMPLETE would have started
+            # the very refresh the FOCUS_CHANGE already started. It does NOT
+            # cost nothing for a SUCCESSFUL click with overlay_keep_numbers
+            # OFF; that case never reaches this branch in the same session,
+            # because the early hide above removes the numbers first.
             self._maybe_defer_postclick_clear(
                 machine=machine,
                 overlay_dispatch_pair=overlay_dispatch_pair,
@@ -4503,7 +4675,7 @@ class LogicController:
             # captured pair; ``_reconcile_overlay_pending_postclick_refresh``
             # replays CLICK_COMPLETE once this generation settles into PAINTED
             # (or drops it if the overlay is superseded / torn down first).
-            self._overlay_pending_postclick_refresh = current_pair
+            self._record_pending_postclick_refresh(current_pair)
             logger.info(
                 "overlay: %s at matching gen=%s but machine is "
                 "refresh_in_flight; deferring post-click refresh until that "
@@ -4545,7 +4717,7 @@ class LogicController:
             # there. Every other exit from paused (a stale-snapshot re-walk, a
             # hide, a destroyed window) bumps the pair or closes the session,
             # so the reconciler drops the key rather than leaking it.
-            self._overlay_pending_postclick_refresh = current_pair
+            self._record_pending_postclick_refresh(current_pair)
             logger.info(
                 "overlay: %s at matching gen=%s but machine is paused; "
                 "deferring post-click refresh until that generation reaches "
@@ -4564,6 +4736,12 @@ class LogicController:
             OverlayEvent(kind=OverlayEventKind.CLICK_COMPLETE),
             source=f"click_complete ({trigger}) gen={current_pair}",
         )
+
+    def _record_pending_postclick_refresh(
+        self, pair: "tuple[int, int]",
+    ) -> None:
+        """Record a deferred post-click refresh keyed on ``pair``."""
+        self._overlay_pending_postclick_refresh = pair
 
     def _reconcile_overlay_pending_postclick_refresh(self) -> None:
         """Consume or clear a deferred post-click refresh (wh-n29v.101.1).
@@ -4749,9 +4927,12 @@ class LogicController:
         it with a fresh walk.) Arms ONLY when all four hold:
 
           * ``settle_after_click`` is ON. With it OFF the drop costs nothing
+            for a refused click or with ``overlay_keep_numbers`` ON
             (CLICK_COMPLETE would have started the same refresh the
-            FOCUS_CHANGE already started), so the shipped default path stays
-            exactly as it was.
+            FOCUS_CHANGE already started). A SUCCESSFUL click with
+            ``overlay_keep_numbers`` OFF never reaches this function in the
+            same session: ``_feed_click_complete_refresh`` removes the numbers
+            first (wh-numbers-stay-setting, item 2a).
           * The caller supplied the PRE-CLICK snapshot id. Without it there is
             no evidence to tell the two legs apart, so the old drop stands.
           * The mismatch is same-SESSION. A different session means the overlay
@@ -6232,6 +6413,12 @@ class LogicController:
 
         prev_state = self.click_overlay_state.state
         result = self.click_overlay_state.apply(OverlayEvent(kind))
+        if command == "show":
+            # wh-numbers-stay-setting (decision D5): see
+            # ``_overlay_click_show_counts``.
+            self._overlay_show_numbers_applied = (
+                getattr(self, "_overlay_show_numbers_applied", 0) + 1
+            )
         logger.info(
             "overlay: %s -> state=%s outcome=%s (%d effect(s), trace_id=%s)",
             command, self.click_overlay_state.state.value,
@@ -8634,13 +8821,125 @@ class LogicController:
                 "overlay: foreground change to hwnd=%s coalesced by debounce.",
                 hwnd,
             )
+            # The refire replays ONE event. It must remember that a
+            # foreground event was among the coalesced ones, including when
+            # the refire is already armed (the arm call below then returns
+            # early). Whether it counts as a change of window is decided at
+            # the refire, against the window that is in front then: a burst
+            # that ends back on the numbered window is not a change. Only
+            # while numbers are on the screen and the key is off: an event
+            # coalesced during the first walk (item 11) or while the overlay
+            # is closed is not a change of window, and no timer is armed to
+            # clear a flag set then.
+            if self._overlay_numbers_can_be_dismissed():
+                self._overlay_settle_refire_foreground = True
             self._arm_overlay_settle_refire("foreground change")
             return
         self._cancel_overlay_settle_refire()
         self._apply_overlay_event(
-            map_foreground_event(hwnd=hwnd),
+            map_foreground_event(
+                hwnd=hwnd,
+                dismisses_numbers=self._foreground_change_dismisses_numbers(
+                    hwnd
+                ),
+            ),
             source=f"foreground change hwnd={hwnd}",
         )
+
+    def _overlay_numbers_can_be_dismissed(self) -> bool:
+        """True when a change of window would remove numbers that are showing.
+
+        wh-numbers-stay-setting: ``overlay_keep_numbers`` is off AND the
+        machine is in ``painted`` or ``refresh_in_flight``. In every other
+        state (the first walk and paint, closed, paused, ...) a foreground
+        change keeps today's behaviour (item 11).
+        """
+        from services.wheelhouse.click_overlay_state import OverlayState
+
+        machine = getattr(self, "click_overlay_state", None)
+        if machine is None or getattr(machine, "keep_numbers", True):
+            return False
+        return machine.state in (
+            OverlayState.PAINTED, OverlayState.REFRESH_IN_FLIGHT,
+        )
+
+    def _consume_pending_foreground_dismissal(self) -> bool:
+        """Settle a coalesced foreground event: does the window in front count?
+
+        wh-numbers-stay-setting, item 2b. Returns False and changes nothing
+        when no foreground event was coalesced (``_overlay_settle_refire_
+        foreground`` is clear). Otherwise clears the flag and runs
+        ``_foreground_change_dismisses_numbers`` against the window that is in
+        front NOW (``_overlay_current_foreground_hwnd``), so a burst that ends
+        back on the numbered window keeps the refresh and a burst that ends on
+        another application removes the numbers. An unreadable foreground
+        window keeps the refresh. When no numbers are on the screen
+        (``_overlay_numbers_can_be_dismissed`` is False), it clears the flag
+        and returns False without reading the window. Never raises.
+        """
+        if not getattr(self, "_overlay_settle_refire_foreground", False):
+            return False
+        self._overlay_settle_refire_foreground = False
+        if not self._overlay_numbers_can_be_dismissed():
+            return False
+        hwnd = _overlay_current_foreground_hwnd()
+        if not hwnd:
+            return False
+        return self._foreground_change_dismisses_numbers(hwnd)
+
+    def _foreground_change_dismisses_numbers(self, hwnd: int) -> bool:
+        """True when a foreground change is the user moving to another window.
+
+        wh-numbers-stay-setting, items 2b, 10 and 11. With ``[click]
+        overlay_keep_numbers`` off, a change of window removes the numbers. The
+        answer is False (the change keeps today's refresh) when:
+
+          * the machine is not showing numbers (``painted`` or
+            ``refresh_in_flight``). During the first walk and paint after "show
+            numbers" the app reads the new window instead (item 11);
+          * ``keep_numbers`` is on (the machine ignores the flag then, so the
+            Win32 lookup is skipped);
+          * the window cannot be read (a refresh is always safe);
+          * the new foreground window is a tooltip (``tooltips_class32``);
+          * it is the numbered window itself: the tracked window handle, or a
+            window inside the same top-level window (``GA_ROOT``, compared
+            against ``_overlay_tracked_identity``). A dialog that the numbered
+            window OWNS (an Open dialog from Ctrl+O) is a top-level window of
+            its own, so it is a change of window (ruling R-B, option 1);
+          * it belongs to a WheelHouse process (``_wheelhouse_process_ids``).
+            This check comes last because it scans processes; a return to the
+            numbered window never pays for it.
+
+        Never raises.
+        """
+        if not self._overlay_numbers_can_be_dismissed():
+            return False
+        try:
+            facts = _overlay_window_facts(hwnd)
+            if facts is None:
+                return False
+            if facts.class_name.lower() in _OVERLAY_NON_WINDOW_CHANGE_CLASSES:
+                return False
+            tracked = getattr(self, "_overlay_tracked_identity", None)
+            if tracked is not None:
+                if int(hwnd) == int(tracked.hwnd):
+                    return False
+                numbered_facts = _overlay_window_facts(tracked.hwnd)
+                numbered_root = (
+                    numbered_facts.root if numbered_facts is not None
+                    else int(tracked.hwnd)
+                )
+                if facts.root == numbered_root:
+                    return False
+            if facts.pid in self._wheelhouse_process_ids():
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001 -- never break focus following
+            _overlay_focus_logger.debug(
+                "overlay: window-change check for hwnd=%s failed (%s); "
+                "keeping the refresh.", hwnd, exc,
+            )
+            return False
 
     def _on_overlay_menu_popup_change(self, event_id: int) -> None:
         """Loop-marshalled MENUPOPUP callback: map, debounce, feed FOCUS_CHANGE.
@@ -8682,6 +8981,10 @@ class LogicController:
             )
             self._arm_overlay_settle_refire(f"menu popup {verb}")
             return
+        # A foreground event coalesced earlier is still owed its decision; the
+        # cancel below would drop it, so settle it into this event first.
+        if self._consume_pending_foreground_dismissal():
+            event = dataclasses.replace(event, dismisses_numbers=True)
         self._cancel_overlay_settle_refire()
         self._apply_overlay_event(event, source=f"menu popup {verb}")
 
@@ -8776,9 +9079,14 @@ class LogicController:
             )
             self._arm_overlay_settle_refire("pattern manager tree change")
             return
+        event = decision.event
+        # As in ``_on_overlay_menu_popup_change``: settle a coalesced
+        # foreground event into this event before the cancel drops it.
+        if self._consume_pending_foreground_dismissal():
+            event = dataclasses.replace(event, dismisses_numbers=True)
         self._cancel_overlay_settle_refire()
         self._apply_overlay_event(
-            decision.event,
+            event,
             source=f"pattern manager tree change hwnd={hwnd} seq={sequence}",
         )
 
@@ -8852,13 +9160,21 @@ class LogicController:
             OverlayEventKind,
         )
 
+        # wh-numbers-stay-setting: the refire replays one event. When a
+        # foreground event was coalesced, the window in front NOW decides
+        # whether the burst was a change of window.
+        dismisses = self._consume_pending_foreground_dismissal()
         self._apply_overlay_event(
-            OverlayEvent(kind=OverlayEventKind.FOCUS_CHANGE),
+            OverlayEvent(
+                kind=OverlayEventKind.FOCUS_CHANGE,
+                dismisses_numbers=dismisses,
+            ),
             source=f"{source} (settled)",
         )
 
     def _cancel_overlay_settle_refire(self) -> None:
         """Cancel a pending settle timer (a real fire made it redundant)."""
+        self._overlay_settle_refire_foreground = False
         handle = self._overlay_settle_handle
         if handle is not None:
             handle.cancel()
@@ -10692,7 +11008,24 @@ class LogicController:
 
         try:
             try:
-                raw_response = await self.app.send_request(ACTION_NAME, params)
+                # wh-dictation-paste-loss-load.1.9: the replay can take
+                # about 3.5 s under the copy budget, so Logic waits up to
+                # 10 s for the true answer. The request still expires
+                # from the send queue after 5 s, so a replay that waited
+                # that long for delivery never pastes into a window that
+                # has changed since the click.
+                # crewcut: when the request expires in the send queue,
+                # app.py (about line 837) logs the drop through
+                # _log_ipc_dropped and does not end this wait. So in an
+                # Input stall of more than 5 s, the follow-up notice
+                # shows at 10 s instead of 5 s; no words paste late (boss
+                # ruling 12:32 on .1.9). Remove the limit by ending the
+                # caller's wait on an expired drop; that changes the drop
+                # path for every send_request caller.
+                raw_response = await self.app.send_request(
+                    ACTION_NAME, params,
+                    timeout_s=10.0, delivery_ttl_s=5.0,
+                )
             except asyncio.TimeoutError:
                 logger.warning(
                     "retry_dictation_by_token: request timed out for token=%s; "
@@ -11408,130 +11741,93 @@ class LogicController:
         """
         self._editor_rebuild_fanout.handle_notification(message)
 
-    def _get_calibration_controller(self):
-        """Lazily construct the voice-calibration session controller.
+    def _get_lead_word_controller(self):
+        """Lazily construct the 'Your training word' window controller.
 
-        wh-7ou.7.2.2. Built on the first cal_* action so construction
-        never races service startup. All controller side effects are
-        injected here: GUI states go out on the state queue
-        (cal_state messages, contract part B), provider commands go out
-        over the STT WebSocket (set_calibration_mode /
-        apply_engine_settings, contract part A) as fire-and-forget
-        broadcast tasks, and the review stage reads the CURRENT
-        thresholds straight from the Distil-Whisper provider's own
-        config.toml (the provider owns that file; Logic only reads it).
+        wh-first-sound-lost.23. Built on the first lw_* action, or on the
+        first lead_word capability frame, so construction never races
+        service startup. Window states go out on the state queue
+        (lw_state messages); provider commands go out only to the active
+        STT client (send_command_to_active_stt), never broadcast, because
+        a superseded provider must not record the user's voice.
         """
-        if self._calibration_controller is not None:
-            return self._calibration_controller
-        from speech.calibration_controller import (
-            CalibrationController,
-            read_current_thresholds,
-        )
+        if self._lead_word_controller is not None:
+            return self._lead_word_controller
+        from speech.lead_word_controller import LeadWordController
 
         logic = self
 
-        class _CalibrationProviderChannel:
+        class _LeadWordProviderChannel:
             """Bridges the sync controller to the async STT WebSocket."""
 
-            @staticmethod
-            def _ws_manager():
-                if not hasattr(logic.app, 'websocket_manager') or not logic.app.websocket_manager:
-                    logger.error("Cannot send calibration command: WebSocket manager not available")
-                    return None
-                return logic.app.websocket_manager
-
-            def set_calibration_mode(self, enabled: bool) -> None:
-                # Targeted at the active stream, never broadcast: a
-                # superseded provider kept connected in DISABLED state
-                # must not receive calibration commands (wh-7ou.7.6.6).
-                ws = self._ws_manager()
-                if ws is None:
-                    return
-                logic.create_task_with_error_handling(
-                    ws.send_command_to_active_stt(
-                        "set_calibration_mode", enabled=enabled,
-                    ),
-                    "CalSetCalibrationMode",
-                )
-
-            def apply_engine_settings(self, settings: dict) -> None:
-                ws = self._ws_manager()
-                if ws is None:
-                    self._report_send_failure()
-                    return
-                logic.create_task_with_error_handling(
-                    self._apply_and_report(ws, settings),
-                    "CalApplyEngineSettings",
-                )
-
-            async def _apply_and_report(self, ws, settings: dict) -> None:
-                sent = await ws.send_command_to_active_stt(
-                    "apply_engine_settings", **settings,
-                )
-                if not sent:
-                    self._report_send_failure()
-
-            @staticmethod
-            def _report_send_failure() -> None:
-                # The apply command never left this process: without a
-                # report the window stays on the restarting screen with
-                # the typing gate held until the inactivity timeout
-                # (wh-7ou.7.6.7). Route it through the same ok=false
-                # path a provider-side write failure takes.
-                controller = getattr(logic, "_calibration_controller", None)
-                if controller is not None:
-                    controller.on_engine_settings_result(
-                        False,
-                        "Could not reach the speech engine to apply "
-                        "the settings",
+            def send_command(self, command: str, request_id: str) -> bool:
+                ws = getattr(logic.app, "websocket_manager", None)
+                if not ws:
+                    logger.error(
+                        "Cannot send lead-word command: WebSocket manager not available"
                     )
+                    return False
+                logic.create_task_with_error_handling(
+                    self._send_and_report(ws, command, request_id),
+                    "LeadWordSendCommand",
+                )
+                return True
 
-        def _is_distil_provider() -> bool:
-            # Same source as the tray: the runtime record, config as
-            # fallback. A config-only read rejects Voice Teaching while
-            # the tray correctly shows Distil running after a fallback
-            # whose repair write failed (provider-removal review .1.9).
-            return (
-                self.state_manager._get_current_stt_provider()
-                == "distil_medium_en"
-            )
+            async def _send_and_report(self, ws, command: str, request_id: str) -> None:
+                # A raise here would shut the program down, so catch all.
+                try:
+                    sent = await ws.send_command_to_active_stt(
+                        command, request_id=request_id,
+                    )
+                except Exception:
+                    logger.exception("Lead-word command %s failed to send", command)
+                    sent = False
+                if not sent:
+                    controller = logic._lead_word_controller
+                    if controller is not None:
+                        controller.on_send_failed(request_id)
 
-        def _push_to_talk() -> bool:
-            return self.config_service.get(
-                "speech.interaction_mode", "toggle",
-            ) == "push_to_talk"
+            def hold_transcription(self, done) -> None:
+                logic.create_task_with_error_handling(
+                    self._hold_and_continue(done), "LeadWordHoldTranscription",
+                )
 
-        def _current_thresholds():
-            launcher = getattr(
-                self.service_manager, "remote_stt_launcher", None,
-            )
-            config_path = None
-            if launcher is not None:
-                info = launcher.get_provider_by_name("distil_medium_en")
-                if info:
-                    config_path = info["service_dir"] / "config.toml"
-            return read_current_thresholds(config_path)
+            @staticmethod
+            async def _hold_and_continue(done) -> None:
+                # ``done`` runs even when the hold fails: the playback
+                # hold has its own timer, and a window stuck on a sound
+                # that never starts is worse than a sound heard by the
+                # engine.
+                try:
+                    await logic.state_manager.hold_engine_for_lead_word_playback()
+                except Exception:
+                    logger.exception("Lead-word transcription hold failed")
+                finally:
+                    try:
+                        done()
+                    except Exception:
+                        logger.exception("Lead-word playback start failed")
 
-        self._calibration_controller = CalibrationController(
+            def release_transcription(self) -> None:
+                logic.state_manager.release_engine_after_lead_word_playback()
+
+        self._lead_word_controller = LeadWordController(
             send_to_gui=self.state_manager.state_to_gui_queue.put_nowait,
-            provider=_CalibrationProviderChannel(),
-            is_distil_provider=_is_distil_provider,
-            get_push_to_talk=_push_to_talk,
-            get_current_thresholds=_current_thresholds,
+            provider=_LeadWordProviderChannel(),
         )
-        return self._calibration_controller
+        return self._lead_word_controller
 
-    def _handle_calibration_action(self, action: str) -> None:
-        """Route one cal_* GUI action to the calibration controller.
+    def _handle_lead_word_action(self, action: str, command: dict) -> None:
+        """Route one lw_* GUI action to the lead-word controller.
 
         The controller guards its own transitions; this wrapper only
         protects the listener loop from a construction failure.
         """
         try:
-            self._get_calibration_controller().handle_gui_action(action)
+            self._get_lead_word_controller().handle_gui_action(action, command)
         except Exception as e:
             logger.error(
-                f"Calibration action '{action}' failed: {e}", exc_info=True,
+                f"Lead-word action '{action}' failed: {e}", exc_info=True,
             )
 
     async def _handle_pattern_manager_action(self, action: str, command: dict):
@@ -12038,6 +12334,67 @@ class LogicController:
         )
         return True
 
+    async def _set_config_value_and_apply(
+        self, key, value, request_id=None,
+    ) -> bool:
+        """Save one setting, then apply it to the running overlay (wh-numbers-stay-setting).
+
+        Awaits ``StateManager.set_config_value`` and returns its result
+        unchanged. When the save succeeded and ``key`` is one the overlay reads
+        live, the running machine takes the new value, so the next click or
+        window change follows it with no restart.
+        """
+        saved = await self.state_manager.set_config_value(
+            key, value, request_id=request_id,
+        )
+        self._apply_saved_overlay_keep_numbers([key], saved)
+        return saved
+
+    async def _set_config_values_and_apply(
+        self, values, request_id=None,
+    ) -> bool:
+        """Save several settings, then apply them to the running overlay.
+
+        The group form of ``_set_config_value_and_apply``; returns the
+        ``StateManager.set_config_values`` result unchanged.
+        """
+        saved = await self.state_manager.set_config_values(
+            values, request_id=request_id,
+        )
+        self._apply_saved_overlay_keep_numbers(list(values or {}), saved)
+        return saved
+
+    def _apply_saved_overlay_keep_numbers(self, keys, saved) -> None:
+        """Hand a saved ``click.overlay_keep_numbers`` to the running machine.
+
+        Does nothing unless the save succeeded and ``keys`` names the setting.
+        Reads the value back through ``ClickConfig.from_raw`` (the same reader
+        the factory uses at start), so a value that reader refuses keeps its
+        default. ``self.click_config`` is NOT replaced: every other [click]
+        key keeps its restart semantics. Never raises.
+        """
+        if not saved or "click.overlay_keep_numbers" not in keys:
+            return
+        machine = getattr(self, "click_overlay_state", None)
+        if machine is None:
+            return
+        try:
+            from services.wheelhouse.ui.click_config import ClickConfig
+
+            machine.keep_numbers = ClickConfig.from_raw(
+                self.config_service.get("click", {})
+            ).overlay_keep_numbers
+        except Exception as exc:  # noqa: BLE001 -- the save already succeeded
+            logger.warning(
+                "overlay: could not apply the saved overlay_keep_numbers "
+                "value live: %s", exc,
+            )
+            return
+        logger.info(
+            "overlay: overlay_keep_numbers is now %s (applied live)",
+            machine.keep_numbers,
+        )
+
     def _build_gui_handler_map(self, command: dict) -> dict:
         """Build the action -> callable map for the GUI command listener.
 
@@ -12053,7 +12410,13 @@ class LogicController:
         every command, which costs a small dict allocation but keeps
         the closure semantics simple.
         """
+        # wh-first-sound-lost.23: the lw_* actions of the training-word window.
+        lead_word_actions = {
+            name: (lambda name=name: self._handle_lead_word_action(name, command))
+            for name in _LEAD_WORD_GUI_ACTIONS
+        }
         return {
+            **lead_word_actions,
             "request_initial_state": self.state_manager.send_state_update,
             "toggle_speech_enabled_state": self.state_manager.toggle_speech_enabled_state,
             "ptt_start": lambda: self.state_manager.ptt_start(source=command.get("source", "unknown"), request_id=command.get("request_id")),
@@ -12064,8 +12427,8 @@ class LogicController:
             "toggle_interim_results": self.toggle_interim_results,
             "restart_program": self.restart_program,
             "restart_stt_service": self.restart_stt_service,
-            "set_config_value": lambda: self.create_task_with_error_handling(self.state_manager.set_config_value(command.get('key'), command.get('value'), request_id=command.get('request_id')), "SetConfigValue"),
-            "set_config_values": lambda: self.create_task_with_error_handling(self.state_manager.set_config_values(command.get('values') or {}, request_id=command.get('request_id')), "SetConfigValues"),
+            "set_config_value": lambda: self.create_task_with_error_handling(self._set_config_value_and_apply(command.get('key'), command.get('value'), request_id=command.get('request_id')), "SetConfigValue"),
+            "set_config_values": lambda: self.create_task_with_error_handling(self._set_config_values_and_apply(command.get('values') or {}, request_id=command.get('request_id')), "SetConfigValues"),
             "get_config_values": lambda: self.create_task_with_error_handling(self.state_manager.get_config_values(command.get('keys') or [], command.get('request_id')), "GetConfigValues"),
             "switch_stt_provider": lambda: self.create_task_with_error_handling(self._switch_stt_provider(command.get('provider')), "SwitchSTTProvider"),
             "switch_ai_provider": lambda: self.create_task_with_error_handling(self._switch_ai_provider(command.get('provider')), "SwitchAIProvider"),
@@ -12211,12 +12574,6 @@ class LogicController:
                 # Pattern Manager actions (need access to full command dict)
                 if action and action.startswith("pm_"):
                     await self._handle_pattern_manager_action(action, command)
-                    continue
-
-                # Voice-calibration actions (wh-7ou.7.2.2): the session
-                # controller owns the whole cal_* action set.
-                if action and action.startswith("cal_"):
-                    self._handle_calibration_action(action)
                     continue
 
                 """:flow: GUI State Synchronization
@@ -12473,6 +12830,41 @@ class LogicController:
             # Send the initial state to the GUI to ensure it initializes correctly.
             self.state_manager.send_state_update()
             
+            # The pause for an app that holds the speaker in exclusive mode
+            # applies unless the setting is false, whatever Windows said about
+            # the microphone (wh-kodi-playback-echo-stutter). "auto" and true
+            # both leave it on. An unreadable value logs one warning here and
+            # one in decide_audio_suppression below, and counts as "auto".
+            #
+            # This runs BEFORE the STT provider starts, and so does the
+            # detector (wh-kodi-playback-echo-stutter.1.1): a provider that
+            # connects while no exclusive state is known could have its speech
+            # acted on while an app holds the speaker. With the pause on, wait
+            # for the detector's first answer, bounded by
+            # FIRST_ANSWER_TIMEOUT_SECONDS. With the pause off there is
+            # nothing to learn, so nothing waits. start_services starts the
+            # detector again; start() does nothing when it already runs.
+            # crewcut: the first answer costs up to the timeout at startup
+            # when the detector hangs. To remove the limit, start the provider
+            # while the detector runs and refuse the provider's text in
+            # StateManager until the first answer arrives.
+            exclusive_speaker_pause_on = (
+                parse_audio_suppression_setting(
+                    self.config_service.get(
+                        AUDIO_SUPPRESSION_SETTING, AUDIO_SUPPRESSION_DEFAULT
+                    )
+                )
+                is not False
+            )
+            self.state_manager.apply_exclusive_speaker_pause_gate(
+                exclusive_speaker_pause_on
+            )
+            exclusive_speaker_monitor = self.service_manager.exclusive_speaker_monitor
+            if exclusive_speaker_monitor:
+                exclusive_speaker_monitor.start()
+                if exclusive_speaker_pause_on:
+                    await exclusive_speaker_monitor.wait_first_answer()
+
             # Start STT
             if self.service_manager.remote_stt_launcher:
                 # Wire up WebSocket manager for shutdown commands

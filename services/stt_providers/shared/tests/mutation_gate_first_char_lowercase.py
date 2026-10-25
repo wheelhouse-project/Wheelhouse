@@ -26,22 +26,18 @@ sys.stdout.reconfigure(line_buffering=True)
 HERE = pathlib.Path(__file__).resolve().parent
 SHARED = HERE.parent
 TRANSCRIPT_RULES = SHARED / "shared_stt" / "transcript_rules.py"
-WHISPER_ENGINE = SHARED / "shared_stt" / "whisper_engine.py"
 
-# Every mutation runs against this selection. It is the two files that
-# hold the guard rows plus the whisper engine file whose shipped rows the
-# condition also moved, so a mutation cannot pass by breaking a row the
-# selection does not run.
+# Every mutation runs against this selection: the file that holds the
+# guard rows, so a mutation cannot pass by breaking a row the selection
+# does not run. (The Distil-Whisper engine file and its tests, which this
+# gate also covered, were deleted with that provider.)
 SELECTION = [
     "tests/test_transcript_rules.py",
-    "tests/test_whisper_engine_text_rules.py",
-    "tests/test_whisper_engine.py",
 ]
 
 PER_MUTATION_TIMEOUT = 300  # far above a legitimate run, far below a hang
 
 TR = "transcript_rules.py"
-WE = "whisper_engine.py"
 
 # (name, target file, pattern, replacement, expected catching tests)
 MUTATIONS = [
@@ -54,16 +50,6 @@ MUTATIONS = [
             "test_a_capitalized_second_word_keeps_the_leading_capital",
             "test_an_internal_capital_keeps_the_leading_capital",
             "test_an_all_capitals_first_word_survives",
-        ],
-    ),
-    (
-        "call-site-whisper-engine-unconditional",
-        WHISPER_ENGINE,
-        "        if text and not has_capital_evidence(text):\n",
-        "        if text:\n",
-        [
-            "test_a_capitalized_second_word_keeps_the_leading_capital",
-            "test_an_internal_capital_keeps_the_leading_capital",
         ],
     ),
     (
@@ -100,8 +86,6 @@ MUTATIONS = [
     (
         # wh-first-char-lowercase.1.1, the mutation the ruling requires by
         # name: delete the pronoun check and the reported bug comes back.
-        # One mutation covers both call sites, because whisper_engine.py
-        # imports this same helper.
         "pronoun-check-deleted",
         TRANSCRIPT_RULES,
         "    return second[:1].isupper() and not _is_capitalized_pronoun(second)\n",
@@ -251,7 +235,6 @@ def main() -> int:
 
     originals = {
         TRANSCRIPT_RULES: TRANSCRIPT_RULES.read_bytes(),
-        WHISPER_ENGINE: WHISPER_ENGINE.read_bytes(),
     }
 
     try:
@@ -331,7 +314,7 @@ def main() -> int:
         if path.read_bytes() != raw:
             print(f"[ERROR] {path.name} was NOT restored byte for byte")
             return 2
-    print("[ok] both source files restored byte for byte")
+    print("[ok] the source file restored byte for byte")
 
     return 0 if not survivors and not errors else 1
 

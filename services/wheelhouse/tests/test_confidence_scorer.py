@@ -9,7 +9,12 @@ over ElementQuery / ElementMatch -- no I/O, no config, no COM.
 
 import pytest
 
-from ui.confidence_scorer import is_eligible, score
+from ui.confidence_scorer import (
+    _name_exact,
+    is_eligible,
+    names_are_same_number,
+    score,
+)
 from ui.element_types import ElementMatch, ElementQuery
 
 
@@ -407,3 +412,75 @@ def test_localized_role_none_still_not_a_match():
     assert is_eligible(q, m) is False
     # substring 0.3 + enabled 0.1 (fixture defaults is_enabled=True); no role bonus
     assert score(q, m) == pytest.approx(0.4)
+
+
+# --- A control whose name is a number (wh-number-words-command-failures) -----
+#
+# The user cannot choose whether the speech engine writes "7" or "seven", and
+# a control's own name can be either form (a calculator key). A spoken name
+# and a control name that read as the same number are an exact name match.
+
+
+@pytest.mark.parametrize("spoken, control_name", [
+    ("seven", "7"),
+    ("7", "Seven"),
+    ("seven", "Seven"),
+    ("zero", "0"),
+    ("0", "Zero"),
+    ("twenty three", "23"),
+    ("007", "7"),
+])
+def test_a_number_word_and_a_digit_name_are_an_exact_match(spoken, control_name):
+    q = _query(spoken, role="Button")
+    m = _match(control_name, role="Button")
+    assert is_eligible(q, m) is True
+    assert score(q, m) == score(_query(control_name, role="Button"), m)
+
+
+@pytest.mark.parametrize("spoken, control_name", [
+    ("for", "4"),
+    ("to", "2"),
+    ("seven", "8"),
+    ("eight", "7"),
+    ("zero", "1"),
+    ("number seven", "7"),
+    ("seven", "Number 7"),
+])
+def test_a_sound_alike_or_another_number_is_not_a_match(spoken, control_name):
+    """No sound-alikes: a control named "4" is not "for"."""
+    q = _query(spoken)
+    m = _match(control_name, role="Button")
+    assert is_eligible(q, m) is False
+
+
+def test_a_7_control_and_a_seven_control_score_the_same():
+    """Accepted risk (boss ruling 23:10): a window with both a "7" control
+    and a "Seven" control gives two equal scores, which the clear-winner
+    rule reports as ambiguous."""
+    q = _query("seven", role="Button")
+    assert score(q, _match("7")) == score(q, _match("Seven"))
+
+
+@pytest.mark.parametrize("spoken, control_name", [
+    pytest.param("one oh", "10", id="one-oh-10"),
+    pytest.param("one oh five", "105", id="one-oh-five-105"),
+    pytest.param("two oh two", "202", id="two-oh-two-202"),
+    pytest.param("oh", "0", id="oh-0"),
+    pytest.param("One Oh", "10", id="One-Oh-10"),
+    pytest.param("one-oh", "10", id="hyphen-one-oh-10"),
+    pytest.param("two-oh-two", "202", id="hyphen-two-oh-two-202"),
+])
+def test_the_word_oh_is_not_a_number_match(spoken, control_name):
+    """The sound-alike "oh" is not a number match for click, in either
+    argument order (wh-number-words-command-failures.1.2)."""
+    assert names_are_same_number(spoken, control_name) is False
+    assert names_are_same_number(control_name, spoken) is False
+    assert _name_exact(spoken, control_name) is False
+    assert _name_exact(control_name, spoken) is False
+
+
+def test_the_word_oh_does_not_stop_the_other_number_matches():
+    assert names_are_same_number("seven", "7") is True
+    assert names_are_same_number("zero", "0") is True
+    assert names_are_same_number("twenty three", "23") is True
+    assert names_are_same_number("007", "7") is True

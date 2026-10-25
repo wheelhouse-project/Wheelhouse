@@ -21,6 +21,12 @@ _RELATIVE_KEYS: dict[tuple[str, str], list[str]] = {
     ("left", "word"): ["ctrl", "left"],
     ("right", "paragraph"): ["ctrl", "down"],
     ("left", "paragraph"): ["ctrl", "up"],
+    # The keys of the single forms nav-up-lines, nav-down-lines,
+    # nav-up-paragraphs and nav-down-paragraphs (wh-voice-chain-up-down).
+    ("up", "line"): ["up"],
+    ("down", "line"): ["down"],
+    ("up", "paragraph"): ["ctrl", "up"],
+    ("down", "paragraph"): ["ctrl", "down"],
 }
 
 

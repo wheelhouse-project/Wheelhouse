@@ -162,11 +162,8 @@ _PROVIDERS_DIR = Path(__file__).parent.parent.parent
 def test_provider_mains_declare_their_capabilities():
     """Source-level drift alarm: each provider main must pass its
     capability declaration to WSForwarder. Google is the only eos
-    emitter today; the local providers declare False explicitly."""
+    emitter today; the local provider declares False explicitly."""
     google = (_PROVIDERS_DIR / "google_stt_server" / "main.py").read_text(
-        encoding="utf-8"
-    )
-    distil = (_PROVIDERS_DIR / "distil_medium_en" / "main.py").read_text(
         encoding="utf-8"
     )
     sherpa = (
@@ -175,8 +172,6 @@ def test_provider_mains_declare_their_capabilities():
 
     assert "emits_eos=True" in google
     assert 'provider_name="google_stt"' in google
-    assert "emits_eos=False" in distil
-    assert 'provider_name="distil_medium_en"' in distil
     assert "emits_eos=False" in sherpa
     assert 'provider_name="parakeet_tdt"' in sherpa
 

@@ -65,3 +65,12 @@ def no_real_mmcss_registration(monkeypatch):
         "shared_audio.capture.winrt_capture.elevate_current_thread",
         lambda *args, **kwargs: True,
     )
+
+
+@pytest.fixture(autouse=True)
+def no_engine_audio_saving_from_the_shell(monkeypatch):
+    """A developer shell that sets WHEELHOUSE_SAVE_ENGINE_AUDIO must not make
+    a test write or delete files in the real %LOCALAPPDATA%. A test that needs
+    the variable sets it itself with monkeypatch.setenv
+    (wh-first-sound-lost.1)."""
+    monkeypatch.delenv("WHEELHOUSE_SAVE_ENGINE_AUDIO", raising=False)

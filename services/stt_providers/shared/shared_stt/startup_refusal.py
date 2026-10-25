@@ -3,7 +3,7 @@
 Every STT provider builds its audio capture BEFORE it builds the
 WSForwarder that carries notices to WheelHouse. Parakeet builds the
 capture in ParakeetServer.__init__ and the forwarder a few lines later
-in the same __init__; distil has the same shape; google builds the
+in the same __init__; google builds the
 capture in main() about seventy lines before the forwarder, and starts
 that forwarder later still. The capture factory now refuses to build
 anything when winsdk is missing (shared_audio/capture/factory.py,

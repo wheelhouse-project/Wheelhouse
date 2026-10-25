@@ -337,3 +337,42 @@ class TestScalarEquivalence:
             speech = index % 3 != 0
             assert actual.process(pcm, speech) == reference.process(pcm, speech)
             assert actual.diagnostics == reference.diagnostics
+
+
+class TestApplyLastGain:
+    """wh-first-sound-lost.9: apply_last_gain gives other audio (the lead-in)
+    the gain that the last process() call applied."""
+
+    def test_it_uses_the_effective_gain_after_the_caps(self):
+        """The failure cap limits the gain to 2.0 while speech_gain stays
+        above it. The lead-in must get the 2.0 that the chunk got."""
+        agc = SmartAGC(AGCConfig(enabled=True))
+        agc.speech_gain = 5.0
+        agc.failure_gain_cap = 2.0
+
+        out = pcm_to_samples(agc.process(make_pcm([1000] * 480), True))
+        assert agc.speech_gain > 2.5  # the precondition: the cap is active
+        assert set(out) == {2000}
+
+        assert pcm_to_samples(agc.apply_last_gain(make_pcm([500] * 480))) == [1000] * 480
+
+    def test_it_uses_the_same_clipping_rule(self):
+        agc = SmartAGC(AGCConfig(enabled=True))
+        agc.speech_gain = 5.0
+        agc.failure_gain_cap = 2.0
+        agc.process(make_pcm([1000] * 480), True)
+
+        out = pcm_to_samples(agc.apply_last_gain(make_pcm([20000, -20000] * 240)))
+        assert out == [32767, -32768] * 240
+
+    def test_it_returns_the_input_when_agc_is_switched_off(self):
+        """process() returns its input unchanged when AGC is off, so the
+        lead-in must too, also after an earlier chunk got a gain."""
+        agc = SmartAGC(AGCConfig(enabled=True))
+        agc.speech_gain = 5.0
+        agc.failure_gain_cap = 2.0
+        agc.process(make_pcm([1000] * 480), True)
+        agc.config.enabled = False
+
+        pcm = make_pcm([500] * 480)
+        assert agc.apply_last_gain(pcm) is pcm

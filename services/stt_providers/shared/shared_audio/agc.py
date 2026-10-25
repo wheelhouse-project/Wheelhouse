@@ -61,6 +61,7 @@ class SmartAGC:
         self.consecutive_failures = 0
         self.failure_gain_cap = self.config.max_gain  # Ratchet: reduced after failures
         self._last_speech_rms = 0.0
+        self._last_effective_gain = 1.0  # the gain process() last applied
 
     def process(self, pcm_bytes: bytes, is_speech: bool) -> bytes:
         """Process audio chunk and return gain-adjusted audio.
@@ -97,8 +98,27 @@ class SmartAGC:
             self.config.min_gain,
             min(self.speech_gain, max_safe_gain, self.failure_gain_cap, self.config.max_gain)
         )
+        self._last_effective_gain = effective_gain
 
         return self._apply_gain(pcm_bytes, effective_gain)
+
+    def apply_last_gain(self, pcm_bytes: bytes) -> bytes:
+        """Apply the gain of the last process() call to other audio.
+
+        The lead-in buffer holds raw chunks. When the VAD gate opens, the
+        processor passes the lead-in through here, so the lead-in reaches the
+        engine at the same gain as the first speech chunk after it, with the
+        same clipping rule (wh-first-sound-lost.9).
+
+        Args:
+            pcm_bytes: Raw PCM audio bytes (16-bit signed, mono)
+
+        Returns:
+            Gain-adjusted PCM audio bytes; the input unchanged when AGC is off
+        """
+        if not self.config.enabled:
+            return pcm_bytes
+        return self._apply_gain(pcm_bytes, self._last_effective_gain)
 
     def on_stt_outcome(self, result_type: str, word_count: int) -> None:
         """Slow loop: feedback from STT outcomes.

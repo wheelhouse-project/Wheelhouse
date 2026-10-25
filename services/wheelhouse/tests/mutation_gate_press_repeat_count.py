@@ -1,7 +1,7 @@
 r"""Mutation gate for the repeat count on "press" (wh-voice-access-parity.2.12).
 
 WHAT THE CHANGE DOES. The press-keys row in speech/config/patterns.toml
-became ^press\s*(.+?)(?:\s+(\d+)\s+times?)?$ with params ["g1", "g2"], so
+became ^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$ with params ["g1", "g2"], so
 "press tab 3 times" passes "3" to press_keys. press_keys
 (speech/actions.py) reads it through _clamped_repeat, the reading press()
 uses, and clamps it to HOTKEY_REPEAT_CAP (30), because its payload is a
@@ -68,7 +68,7 @@ TESTS = (
     "::test_press_count_survives_a_pause_longer_than_the_command_timer",
 )
 
-PRESS_ROW = r"pattern = '''^press\s*(.+?)(?:\s+(\d+)\s+times?)?$'''" + "\n"
+PRESS_ROW = r"pattern = '''^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$'''" + "\n"
 PRESS_PARAMS = '    { function = "press_keys", params = ["g1", "g2"] }\n'
 PASS_COUNT = "                \"repeat\": _clamped_repeat(repeat_str, HOTKEY_REPEAT_CAP),\n"
 DEFAULT_LINE = "    if repeat_count is None or repeat_count < 1: repeat_count = 1\n"
@@ -88,7 +88,7 @@ def mutation(name, file, old, new, expect):
 
 MUTATIONS = [
     mutation("count-group-removed", PATTERNS, PRESS_ROW,
-             r"pattern = '''^press\s*(.+?)$'''" + "\n",
+             r"pattern = '''^press\b\s*(.+?)$'''" + "\n",
              [ENGINE_COUNT, TWO_WORD]),
     mutation("times-made-optional", PATTERNS, PRESS_ROW,
              PRESS_ROW.replace(r"\s+times?)?$", r"(?:\s+times?)?)?$"),

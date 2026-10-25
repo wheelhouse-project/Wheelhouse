@@ -28,6 +28,7 @@ from stt.provider_stderr import (
     native_crash_message,
 )
 from stt import parakeet_model
+from stt.removed_providers import REMOVED_PROVIDERS
 
 try:
     import tomllib
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 # The tray-menu entry for a disabled Parakeet whose speech model is not on
 # the computer. Picking it asks Logic to offer the installer instead of
 # starting an engine (wh-parakeet-model-download-offer, boss ruling B1).
-PARAKEET_NOT_INSTALLED_LABEL = "Parakeet (model not installed)"
+PARAKEET_NOT_INSTALLED_LABEL = "Parakeet V3 (Local) - model not installed"
 
 # Type alias for notification callback
 NotifyCallback = "Callable[[str, str], None]"
@@ -131,6 +132,30 @@ _PID_FILE_START_SLACK = 2.0
 _PROVIDER_PROCESS_NAMES = frozenset({"python.exe", "pythonw.exe", "uv.exe"})
 
 
+# wh-first-sound-lost.1: the Wheelhouse config.toml key that turns on the
+# opt-in saver of the audio a speech engine receives, and the environment
+# variable through which each provider process learns its value. The name
+# must equal ENV_VAR in shared_stt/engine_audio_saver.py.
+SAVE_ENGINE_AUDIO_KEY = "SAVE_ENGINE_AUDIO"
+SAVE_ENGINE_AUDIO_ENV_VAR = "WHEELHOUSE_SAVE_ENGINE_AUDIO"
+
+
+def _read_save_engine_audio(config_path: Path) -> bool:
+    """Return True only when config_path holds a top-level SAVE_ENGINE_AUDIO = true.
+
+    Reads the file again at each call, so a change takes effect at the next
+    provider start. A missing file, a file that is not valid UTF-8 TOML, a
+    missing key, or any value except the boolean true gives False: the saver
+    stays off unless the user clearly turned it on.
+    """
+    try:
+        with open(config_path, "rb") as f:
+            data = tomllib.load(f)
+        return data.get(SAVE_ENGINE_AUDIO_KEY) is True
+    except Exception:
+        return False
+
+
 class RemoteSTTLauncher:
     """Discovers and manages remote STT provider lifecycle.
 
@@ -151,6 +176,7 @@ class RemoteSTTLauncher:
         ws_port: int = 0,
         wake_word_config: Optional[dict] = None,
         google_credentials_file: str = "",
+        config_path: Optional[Path] = None,
     ):
         """Initialize RemoteSTTLauncher.
 
@@ -165,7 +191,13 @@ class RemoteSTTLauncher:
                 (stt.google.credentials_file). Passed to the google_stt provider
                 as a --credentials-file CLI arg; empty means the provider uses
                 the GOOGLE_APPLICATION_CREDENTIALS environment variable.
+            config_path: Path to the Wheelhouse config.toml, read at each
+                provider start for SAVE_ENGINE_AUDIO (wh-first-sound-lost.1).
+                Defaults to services/wheelhouse/config.toml.
         """
+        if config_path is None:
+            config_path = Path(__file__).resolve().parent.parent / "config.toml"
+        self.config_path = Path(config_path)
         if services_dir is None:
             # Default: project_root/services/stt_providers/
             project_root = Path(__file__).parent.parent.parent.parent
@@ -1724,6 +1756,14 @@ class RemoteSTTLauncher:
                     )
                     continue
 
+                # Skip a removed engine. An old machine can keep the folder
+                # on disk after an update; the fallback in start_remote_stt
+                # and the tray menu read this list, so neither may ever
+                # offer or start it (wh-distil-whisper-removal).
+                if name in REMOVED_PROVIDERS:
+                    logger.info(f"Skipping removed provider folder: {name} at {service_dir}")
+                    continue
+
                 # Skip disabled providers
                 if not provider_section.get("enabled", True):
                     logger.debug(f"Skipping disabled provider: {name}")
@@ -2266,6 +2306,12 @@ class RemoteSTTLauncher:
             # the lockfile is out of date with pyproject.toml.
             env = os.environ.copy()
             env.pop("VIRTUAL_ENV", None)
+            # wh-first-sound-lost.1: the saver switch comes from the config
+            # file at each start, never from the parent environment, so a
+            # change takes effect at the next provider start.
+            env[SAVE_ENGINE_AUDIO_ENV_VAR] = (
+                "1" if _read_save_engine_audio(self.config_path) else "0"
+            )
             cmd = [
                 "uv", "run", "--directory", str(service_dir),
                 "--locked", "--no-sync",

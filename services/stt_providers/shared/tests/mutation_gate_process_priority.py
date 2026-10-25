@@ -25,7 +25,6 @@ PROVIDERS_DIR = SERVICE.parent
 TEST_FILE = "tests/test_thread_priority.py"
 
 _PROVIDER_NAMES = [
-    "distil_medium_en",
     "google_stt_server",
     "sherpa_offline_parakeet_stt_server",
 ]

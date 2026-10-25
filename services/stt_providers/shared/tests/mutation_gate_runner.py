@@ -512,7 +512,7 @@ def _line_start_problem(data, old):
 
     Observed 2026-09-04 on this gate: wrapping two announcement bodies in
     "with self._notification_lock:" added four spaces, and six patterns
-    across parakeet and distil went on matching, every one of them four
+    across two providers went on matching, every one of them four
     characters into the new indent, every one reported ok.
 
     Only a match preceded by nothing but whitespace on its own line is

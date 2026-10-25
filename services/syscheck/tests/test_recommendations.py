@@ -237,23 +237,32 @@ class TestClassifyGpuTier:
 # ========================= STT Recommendation Tests =========================
 
 class TestSttRecommendation:
-    def test_high_tier_nvidia_recommends_turbo(self, high_end_syscheck):
-        """High tier NVIDIA should recommend faster_whisper_turbo."""
+    def test_high_tier_nvidia_recommends_the_cpu_provider(self, high_end_syscheck):
+        """High tier NVIDIA gets the same Parakeet recommendation as any
+        machine with AVX2 and 8GB RAM: the GPU speech engine is gone."""
         recs = get_stt_recommendation(high_end_syscheck)
-        assert recs["recommended"] == "distil_medium_en"
+        assert recs["recommended"] == "sherpa_offline_parakeet_stt_server"
 
-    def test_mid_tier_nvidia_recommends_turbo(self, mid_tier_nvidia_syscheck):
-        """Mid tier NVIDIA with CUDA should recommend faster_whisper_turbo."""
+    def test_mid_tier_nvidia_recommends_the_cpu_provider(self, mid_tier_nvidia_syscheck):
+        """Mid tier NVIDIA with CUDA gets the Parakeet recommendation."""
         recs = get_stt_recommendation(mid_tier_nvidia_syscheck)
-        assert recs["recommended"] == "distil_medium_en"
+        assert recs["recommended"] == "sherpa_offline_parakeet_stt_server"
+
+    def test_no_option_names_a_removed_speech_engine(self, high_end_syscheck):
+        """A CUDA machine is offered Parakeet and Google only; Distil-Whisper
+        was removed (wh-distil-whisper-removal)."""
+        recs = get_stt_recommendation(high_end_syscheck)
+        assert [o["id"] for o in recs["options"]] == [
+            "sherpa_offline_parakeet_stt_server", "google_cloud_stt",
+        ]
 
     def test_amd_gpu_recommends_cpu_provider(self, amd_gpu_syscheck):
-        """AMD GPU (no CUDA) should recommend faster_whisper_cpu."""
+        """AMD GPU (no CUDA) should recommend the Parakeet provider."""
         recs = get_stt_recommendation(amd_gpu_syscheck)
         assert recs["recommended"] == "sherpa_offline_parakeet_stt_server"
 
     def test_cpu_only_with_avx2_recommends_cpu_provider(self, cpu_avx2_syscheck):
-        """CPU-only with AVX2 should recommend faster_whisper_cpu."""
+        """CPU-only with AVX2 should recommend the Parakeet provider."""
         recs = get_stt_recommendation(cpu_avx2_syscheck)
         assert recs["recommended"] == "sherpa_offline_parakeet_stt_server"
 
@@ -300,7 +309,7 @@ class TestSttRecommendation:
         assert "google_cloud_stt" in option_ids
 
     def test_intel_arc_gets_cpu_provider(self, intel_arc_syscheck):
-        """Intel Arc (no CUDA) should get faster_whisper_cpu."""
+        """Intel Arc (no CUDA) should get the Parakeet provider."""
         recs = get_stt_recommendation(intel_arc_syscheck)
         assert recs["recommended"] == "sherpa_offline_parakeet_stt_server"
 

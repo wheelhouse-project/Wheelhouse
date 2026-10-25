@@ -167,6 +167,10 @@ nul
 # WheelHouse already has export.auto: false in .beads/config.yaml; this
 # is belt-and-suspenders in case the setting drifts.
 .beads/issues.jsonl
+# bd writes an empty lock file beside each .beads directory. Mutation gates
+# that check for a clean tree refused to run while it showed as untracked
+# (David, 2026-10-13).
+.beads.gate.lock
 
 # .claude/knowledge-*.md is the generated plain-text export of every bead and
 # memory, regenerated at session end by ~/.claude/scripts/export-beads-reasoning.sh

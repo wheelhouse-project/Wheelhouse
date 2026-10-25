@@ -315,6 +315,7 @@ ADAPTER_REGISTRY = {
     "voxtral": "adapters.voxtral_adapter.VoxtralAdapter",
     "parakeet": "adapters.parakeet_adapter.ParakeetAdapter",
     "whisper-cpp": "adapters.whisper_cpp_adapter.WhisperCppAdapter",
+    "transcribe-cpp": "adapters.transcribe_cpp_adapter.TranscribeCppAdapter",
 }
 
 
@@ -323,11 +324,22 @@ def create_adapter(
     model_path: str,
     provider: str,
     initial_prompt: str = "",
+    language: str = "",
+    num_threads: int = 0,
 ) -> ModelAdapter:
     """Create a model adapter by name."""
     if model_type not in ADAPTER_REGISTRY:
         available = ", ".join(sorted(ADAPTER_REGISTRY))
         raise ValueError(f"Unknown model type '{model_type}'. Available: {available}")
+
+    if language and not model_type.startswith("sherpa-"):
+        raise ValueError(
+            f"--language is supported only by the sherpa adapters, not '{model_type}'"
+        )
+    if num_threads and not model_type.startswith("sherpa-"):
+        raise ValueError(
+            f"--num-threads is supported only by the sherpa adapters, not '{model_type}'"
+        )
 
     if model_type == "google":
         from adapters.google_adapter import GoogleSTTAdapter
@@ -362,8 +374,20 @@ def create_adapter(
             initial_prompt=initial_prompt,
         )
 
+    if model_type == "transcribe-cpp":
+        if not model_path:
+            raise ValueError(
+                "transcribe-cpp requires --model-path pointing to a GGUF file"
+            )
+        from adapters.transcribe_cpp_adapter import TranscribeCppAdapter
+        # --provider names the backend: cpu or vulkan.
+        return TranscribeCppAdapter(model_path=model_path, backend=provider)
+
     from adapters.sherpa_adapter import SherpaAdapter
-    return SherpaAdapter(model_path=model_path, provider=provider)
+    return SherpaAdapter(
+        model_path=model_path, provider=provider, language=language or None,
+        num_threads=num_threads or None,
+    )
 
 
 # ── Benchmark Runner ────────────────────────────────────────────────
@@ -516,12 +540,18 @@ def compute_metrics(results: list[UtteranceResult]) -> dict:
     # Punctuation rate
     punct_count = sum(1 for r in results if r.punctuation_added)
 
+    # Latency spread. Same population as avg_inference_ms: every result,
+    # including a failed inference, which records 0 ms.
+    median_ms, p95_ms = np.percentile([r.elapsed_ms for r in results], [50, 95])
+
     return {
         "overall": {
             "count": overall.count,
             "exact_match_accuracy": round(overall.exact_match_accuracy, 4),
             "wer": round(overall.avg_wer, 4),
             "avg_inference_ms": round(overall.avg_ms, 1),
+            "median_inference_ms": round(float(median_ms), 1),
+            "p95_inference_ms": round(float(p95_ms), 1),
             "interim_stability": round(
                 interim_stable / interim_total, 4
             ) if interim_total else None,
@@ -543,6 +573,73 @@ def compute_metrics(results: list[UtteranceResult]) -> dict:
             for cat, m in sorted(categories.items())
         },
     }
+
+
+# ── Process Statistics ──────────────────────────────────────────────
+
+
+def process_stats() -> dict:
+    """Peak working set and CPU affinity of this benchmark process.
+
+    The peak working set is the most system RAM the process held at any
+    moment since it started, so a call after the run covers model load
+    and every utterance. On a platform other than Windows only the
+    process ID and the logical processor count are reported.
+    """
+    stats: dict = {"pid": os.getpid(), "cpu_count": os.cpu_count()}
+    if sys.platform != "win32":
+        return stats
+
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    # A private WinDLL instance, so these argtypes do not change the
+    # shared ctypes.windll.kernel32 that __main__ uses at exit.
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+    kernel32.K32GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD,
+    ]
+    kernel32.GetProcessAffinityMask.restype = wintypes.BOOL
+    kernel32.GetProcessAffinityMask.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t),
+    ]
+
+    process = kernel32.GetCurrentProcess()
+    counters = PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+    if kernel32.K32GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+        stats["peak_working_set_bytes"] = int(counters.PeakWorkingSetSize)
+        stats["working_set_bytes"] = int(counters.WorkingSetSize)
+    else:
+        log.warning("K32GetProcessMemoryInfo failed: error %d", ctypes.get_last_error())
+
+    process_mask = ctypes.c_size_t()
+    system_mask = ctypes.c_size_t()
+    if kernel32.GetProcessAffinityMask(
+        process, ctypes.byref(process_mask), ctypes.byref(system_mask),
+    ):
+        stats["affinity_mask"] = int(process_mask.value)
+        stats["affinity_processors"] = bin(process_mask.value).count("1")
+    else:
+        log.warning("GetProcessAffinityMask failed: error %d", ctypes.get_last_error())
+    return stats
 
 
 # ── Reporting ───────────────────────────────────────────────────────
@@ -575,6 +672,14 @@ def print_report(model_name: str, results: list[UtteranceResult], metrics: dict)
         f"{o['wer']:>8.3f} "
         f"{o['avg_inference_ms']:>8.1f}"
     )
+    print()
+    print(
+        f"Inference ms: median {o['median_inference_ms']:.1f}, "
+        f"p95 {o['p95_inference_ms']:.1f}"
+    )
+    peak = metrics.get("process", {}).get("peak_working_set_bytes")
+    if peak is not None:
+        print(f"Peak working set: {peak / 2**20:.0f} MiB")
     print()
 
     # Interim stability. Reported using the raw counts, not the rounded
@@ -725,7 +830,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--provider", default="cpu",
-        help="Inference provider: cpu (default), cuda",
+        help="Inference provider: cpu (default), cuda. For transcribe-cpp "
+             "this is the backend: cpu or vulkan.",
     )
     parser.add_argument(
         "--corpus", default=None,
@@ -745,6 +851,19 @@ def parse_args() -> argparse.Namespace:
              "whisper-cpp adapter runs with production Vulkan Small decoder "
              "knobs plus this prompt, producing a calibrated production-parity "
              "baseline. Without this flag the adapter runs bare whisper.cpp.",
+    )
+    parser.add_argument(
+        "--language", default="",
+        help="Stream language for multilingual streaming models (sherpa "
+             "adapters only), for example en-US for Nemotron 3.5 ASR. "
+             "Without this flag the model detects the language itself.",
+    )
+    parser.add_argument(
+        "--num-threads", type=int, default=0,
+        help="ONNX Runtime thread count for the sherpa adapters (sherpa "
+             "adapters only). Without this flag sherpa-onnx uses 2 threads "
+             "for a streaming model and 1 for an offline model; the shipped "
+             "Parakeet provider uses 4.",
     )
     return parser.parse_args()
 
@@ -776,6 +895,8 @@ def main() -> int:
         args.model_path,
         args.provider,
         initial_prompt=args.initial_prompt,
+        language=args.language,
+        num_threads=args.num_threads,
     )
     # wh-as9: park the adapter on a module global so it survives main()
     # returning. After a full-corpus CUDA run, the ctranslate2 model
@@ -795,6 +916,7 @@ def main() -> int:
 
     # Compute metrics
     metrics = compute_metrics(results)
+    metrics["process"] = process_stats()
 
     # Report
     print_report(adapter.name, results, metrics)

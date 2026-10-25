@@ -10,7 +10,7 @@ WHY THE RULE EXISTS
 The factory used to prefer WinRT and fall back to sounddevice without
 telling anyone. On 2026-09-05 the Parakeet venv had no winsdk, so the
 provider that started at 15:25 captured through PortAudio for its whole
-run and nothing said so. Distil-Whisper could never take the WinRT path at
+run and nothing said so. The removed Distil-Whisper provider could never take the WinRT path at
 all, because winsdk was not among its dependencies. A silent second path
 means two capture behaviours in the field and one of them untested.
 

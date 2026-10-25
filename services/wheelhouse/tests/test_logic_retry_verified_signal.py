@@ -278,7 +278,7 @@ class TestVerifiedWithCacheMissDoesNotPublish:
 
         controller = _make_controller(cache=cache)
 
-        async def slow_send_request(action, params):
+        async def slow_send_request(action, params, **_kwargs):
             # Round trip exceeds the cache TTL.
             clock[0] += 100.0
             return {
@@ -387,7 +387,7 @@ class TestDuplicateClickDedup:
         gate = asyncio.Event()
         ipc_calls: list = []
 
-        async def gated_send(action, params):
+        async def gated_send(action, params, **_kwargs):
             ipc_calls.append((action, params))
             await gate.wait()
             return {

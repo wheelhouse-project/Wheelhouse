@@ -76,7 +76,10 @@ def test_help_button_in_bottom_row_and_tab_order():
     assert button.text() == "Help"
     order = dialog.tab_order_widgets()
     assert button in order
-    assert order.index(button) == order.index(dialog._wake_box) + 1
+    # The 'Training word...' button (wh-first-sound-lost.23) sits between the
+    # last setting and the bottom row.
+    assert order.index(dialog._training_word_btn) == order.index(dialog._keep_numbers_box) + 1
+    assert order.index(button) == order.index(dialog._training_word_btn) + 1
     assert order.index(dialog._restart_btn) == order.index(button) + 1
     assert button.autoDefault() is False and button.isDefault() is False
     # The bottom row holds the Help, Restart WheelHouse and Close buttons in
@@ -106,10 +109,10 @@ def test_second_click_does_not_open_a_second_window():
 #  Items 2 and 8: labels and order, with the real file
 # --------------------------------------------------------------------------- #
 
-def test_setting_labels_has_13_entries_each_visible_in_window():
+def test_setting_labels_has_14_entries_each_visible_in_window():
     dialog = _make_settings()
     labels = dialog.setting_labels()
-    assert len(labels) == 13
+    assert len(labels) == 14
     visible = set()
     for box in dialog.findChildren(QCheckBox):
         visible.add(box.text())
@@ -172,6 +175,24 @@ def test_every_setting_has_window_text_in_real_file():
     texts = dict(load_settings_help())
     for label in dialog.setting_labels():
         assert texts.get(label, "").strip(), f"no window text for {label}"
+
+
+def test_keep_numbers_help_text_says_both_states_and_names_voice_access():
+    from settings_help_dialog import load_settings_help
+
+    label = "Keep numbers on after a click or window change"
+    texts = dict(load_settings_help())
+    assert label in texts
+    text = texts[label]
+    assert "Windows Voice Access" in text
+    assert "Select this check box" in text
+    assert "Clear it" in text
+    # The change applies at once: the text must not tell the user to restart.
+    assert "takes effect after a restart" not in text
+    assert "no restart" in text
+    # The new label sits right after the wake word, as the box does.
+    labels = [pair[0] for pair in load_settings_help()]
+    assert labels.index(label) == labels.index("Wake word") + 1
 
 
 def test_missing_text_check_can_fail():

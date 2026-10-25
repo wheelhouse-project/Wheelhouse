@@ -20,7 +20,6 @@ wheels are required at runtime by any shipped component.
 | Subsystem | What runs | Where inference happens |
 |-----------|-----------|------------------------|
 | STT (default) | Parakeet TDT 0.6B v3 full precision via sherpa-onnx | Local, CPU |
-| STT (opt-in) | Distil-Whisper distil-medium.en via faster-whisper | Local, NVIDIA CUDA |
 | STT (opt-in) | Google Cloud Speech-to-Text | Google's servers |
 | AI text fixing / help chat | Any OpenAI-compatible server (a bundled llama.cpp server by default) | Wherever that server runs |
 
@@ -58,10 +57,10 @@ is `services/stt_providers/shared/tests/test_capture_standing_rule.py`.
   benchmarked. Fully offline; nothing leaves the machine. The shipped
   export changed from int8 to full precision on 2026-09-07
   (wh-parakeet-fp32-shipped-model).
-- **`distil_medium_en`** (opt-in, NVIDIA GPUs): Distil-Whisper
-  distil-medium.en through faster-whisper/CTranslate2. Requires CUDA plus
-  system cuBLAS/cuDNN; auto-downloads its ~756 MB model from Hugging Face on
-  first run. No CPU fallback -- it is an acceleration tier, not the default.
+- **`distil_medium_en`** was removed on 2026-10-23
+  (wh-distil-whisper-removal). A config or an update that still names it
+  switches to Parakeet and shows one notice
+  (`services/wheelhouse/stt/removed_providers.py`).
 - **`google_stt_server`** (opt-in, cloud): Google Cloud Speech-to-Text
   streaming API. Requires a Google Cloud account with Application Default
   Credentials. Audio is sent to Google while dictating.
@@ -94,14 +93,7 @@ vocabulary (one phrase per line, user-editable). Google STT consumes it as
 adaptation phrase hints. The Parakeet provider regenerates
 `runtime/parakeet-hotwords.txt` from it at startup and can pass it to
 sherpa-onnx as hotwords -- off by default because hotword biasing forces
-beam-search decoding, which measured ~25% extra inference latency. The
-Distil-Whisper provider has a faster-whisper `hotwords` pass-through
-(wh-apmg) that is also off by default, for a harder reason: the
-word-list bias prompt collapses distil-medium.en decoding outright --
-with 10 hints (~70 chars) the model returns zero segments on clean
-speech (measured 2026-07-17, wh-distil-hotwords-decode-collapse). Do
-not enable `[hotwords]` in the distil config without verifying decode
-quality against the live hint list first.
+beam-search decoding, which measured ~25% extra inference latency.
 
 ## 3. AI text processing (thin client)
 
@@ -158,8 +150,6 @@ Supply-chain posture, hash sidecars, and the re-vendoring procedure live in
 ## 5. Privacy summary
 
 - **Parakeet (default):** audio and transcripts never leave the machine.
-- **Distil-Whisper:** inference is local; the model download itself comes
-  from Hugging Face once.
 - **Google STT:** audio streams to Google while dictating.
 - **AI features:** operate through the configured server; the bundled local
   server keeps text on-device.

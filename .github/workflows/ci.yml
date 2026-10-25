@@ -3,10 +3,6 @@
 # interaction. A green run is NOT the release gate; the manual pre-release
 # checklist (clean-VM install, live voice tests on real hardware) covers
 # what a hosted runner cannot.
-#
-# The distil_medium_en provider is excluded from the matrix: its
-# dependency stack (torch + CUDA) assumes an NVIDIA GPU that hosted
-# runners don't have.
 name: CI
 
 on:
@@ -34,7 +30,12 @@ jobs:
 
   test:
     runs-on: windows-latest
-    timeout-minutes: 45
+    # crewcut: one limit covers every service, and the wheelhouse service runs
+    # both of its --split parts inside one job. On a GitHub runner part 1 alone
+    # took 1825 s, and the 1.4.0 private CI run stopped at 45m13s inside part 2
+    # with a 45-minute limit. To remove this rough limit, split the wheelhouse
+    # service into two matrix jobs, one for each part.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

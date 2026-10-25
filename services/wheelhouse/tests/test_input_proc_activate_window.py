@@ -66,6 +66,25 @@ def _no_real_wait_for_a_started_store_window(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_app_paths_read(monkeypatch):
+    """Keep the real App Paths registry out of every launch in this file.
+
+    wh-notepad-app-paths-launch: a bare .exe name now passes through
+    utils.installed_programs.store_alias_launch_target, which reads App
+    Paths. On a machine where notepad.exe points into WindowsApps that
+    read would turn "notepad.exe" into the execution alias, and the
+    assertions below would then depend on the machine running them. Every
+    test sees "no entry"; TestStoreAliasLaunch sets its own.
+    """
+    from utils import installed_programs
+
+    monkeypatch.setattr(
+        installed_programs, "_read_app_path_entry", lambda hive, name: None,
+        raising=False,
+    )
+
+
 @pytest.fixture
 def startfile_calls(monkeypatch):
     """Record os.startfile calls without launching anything.
@@ -112,7 +131,7 @@ def _join_launch(launch_thread, timeout=10):
 
 
 def _handle(monkeypatch, target, *, found_hwnd, request_id=None,
-            programs=(), notices=None, looked_up=None):
+            programs=(), notices=None, looked_up=None, logger=None):
     """Drive _handle_activate_window with the window search stubbed out.
 
     The installed-program lookup is stubbed too, and defaults to finding
@@ -147,7 +166,7 @@ def _handle(monkeypatch, target, *, found_hwnd, request_id=None,
         50,
         10,
         {},
-        MagicMock(),
+        MagicMock() if logger is None else logger,
         notify=(lambda title, message: notices.append(message))
         if notices is not None
         else None,
@@ -459,6 +478,125 @@ class TestActivateWindowSpokenNameLookup:
             programs=[_program("Outlook", "C:\\Start\\Outlook.lnk")],
         )
         assert startfile_calls == ["C:\\Start\\Outlook.lnk"]
+
+
+class TestStoreAliasLaunch:
+    """wh-notepad-app-paths-launch: App Paths sends notepad.exe into WindowsApps.
+
+    With HKCU App Paths\\notepad.exe pointing at the packaged Notepad.exe,
+    os.startfile("notepad.exe") started that file outside its package and
+    Windows showed "Microsoft.UI.Windowing.Core.dll was not found". Both
+    launch paths that hand a bare name to os.startfile now start the
+    execution alias instead. The notices and logs keep the name the user
+    spoke. The registry read and the alias check are replaced here, so
+    nothing reads the real registry or file system.
+    """
+
+    PACKAGED = (
+        "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2607.14.0"
+        "_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe"
+    )
+    ALIAS = (
+        "C:\\Users\\Test\\AppData\\Local\\Microsoft\\WindowsApps\\notepad.exe"
+    )
+
+    @pytest.fixture(autouse=True)
+    def _packaged_notepad(self, monkeypatch):
+        from utils import installed_programs
+
+        monkeypatch.setenv("ProgramFiles", "C:\\Program Files")
+        monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\Test\\AppData\\Local")
+        monkeypatch.setattr(
+            installed_programs,
+            "_read_app_path_entry",
+            lambda hive, name: (self.PACKAGED, 1) if hive == "HKCU" else None,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            installed_programs,
+            "_alias_exists",
+            lambda path: path == self.ALIAS,
+            raising=False,
+        )
+
+    def test_the_exe_launch_path_starts_the_alias(
+        self, monkeypatch, startfile_calls
+    ):
+        _handle(monkeypatch, "notepad.exe", found_hwnd=None)
+        assert startfile_calls == [self.ALIAS]
+
+    def test_the_spoken_name_launch_path_starts_the_alias(
+        self, monkeypatch, startfile_calls
+    ):
+        from utils.installed_programs import APP_PATHS, InstalledProgram
+
+        _handle(
+            monkeypatch,
+            "notepad",
+            found_hwnd=None,
+            programs=[InstalledProgram("notepad", "notepad.exe", APP_PATHS)],
+        )
+        assert startfile_calls == [self.ALIAS]
+
+    def test_a_start_menu_shortcut_is_still_started_as_it_is(
+        self, monkeypatch, startfile_calls
+    ):
+        _handle(
+            monkeypatch,
+            "outlook",
+            found_hwnd=None,
+            programs=[_program("Outlook", "C:\\Start\\Outlook.lnk")],
+        )
+        assert startfile_calls == ["C:\\Start\\Outlook.lnk"]
+
+    def test_an_entry_outside_windowsapps_keeps_the_bare_name(
+        self, monkeypatch, startfile_calls
+    ):
+        from utils import installed_programs
+
+        monkeypatch.setattr(
+            installed_programs,
+            "_read_app_path_entry",
+            lambda hive, name: ("C:\\Windows\\System32\\notepad.exe", 1),
+            raising=False,
+        )
+        _handle(monkeypatch, "notepad.exe", found_hwnd=None)
+        assert startfile_calls == ["notepad.exe"]
+
+    def test_a_failed_exe_launch_names_the_spoken_program(self, monkeypatch):
+        calls = _startfile_that_fails(monkeypatch, {self.ALIAS})
+        notices = []
+        _handle(monkeypatch, "notepad.exe", found_hwnd=None, notices=notices)
+        assert calls == [self.ALIAS]
+        assert notices == ["Could not start notepad.exe."]
+
+    def test_a_failed_exe_launch_logs_the_spoken_name(self, monkeypatch):
+        calls = _startfile_that_fails(monkeypatch, {self.ALIAS})
+        logger = MagicMock()
+        _handle(monkeypatch, "notepad.exe", found_hwnd=None, logger=logger)
+        assert calls == [self.ALIAS]
+        logged = [str(c.args[0]) for c in logger.warning.call_args_list]
+        assert any(m.startswith("Could not launch notepad.exe:") for m in logged)
+        assert not any(self.ALIAS in m for m in logged)
+
+    def test_a_failed_spoken_name_launch_logs_the_candidates_own_target(
+        self, monkeypatch
+    ):
+        from utils.installed_programs import APP_PATHS, InstalledProgram
+
+        calls = _startfile_that_fails(monkeypatch, {self.ALIAS})
+        logger = MagicMock()
+        _handle(
+            monkeypatch,
+            "notepad",
+            found_hwnd=None,
+            programs=[InstalledProgram("notepad", "notepad.exe", APP_PATHS)],
+            logger=logger,
+        )
+        assert calls == [self.ALIAS]
+        logged = [str(c.args[0]) for c in logger.warning.call_args_list]
+        assert any(m.startswith("Could not start notepad.exe:") for m in logged)
+        assert not any(self.ALIAS in m for m in logged)
 
 
 def _valid_buffer():

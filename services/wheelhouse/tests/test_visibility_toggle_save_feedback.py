@@ -48,6 +48,10 @@ def make_state(manager, tmp_path):
         )
         controller = MagicMock(spec=LogicController)
         controller.state_manager = state
+        # wh-numbers-stay-setting: the handler routes through the controller's own
+        # save-and-apply wrapper, which a spec'd mock replaces; bind the real one.
+        controller._set_config_value_and_apply = (
+            lambda *a, **k: LogicController._set_config_value_and_apply(controller, *a, **k))
 
         async def dispatch(command):
             pending = []

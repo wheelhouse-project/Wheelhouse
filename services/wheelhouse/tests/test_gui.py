@@ -89,6 +89,10 @@ class TestSettingsAcknowledgement:
         state = StateManager(config, MagicMock(), asyncio.get_running_loop(), manager.state_from_logic_queue, None)
         controller = MagicMock(spec=LogicController)
         controller.state_manager = state
+        # wh-numbers-stay-setting: the handler routes through the controller's own
+        # save-and-apply wrapper, which a spec'd mock replaces; bind the real one.
+        controller._set_config_values_and_apply = (
+            lambda *a, **k: LogicController._set_config_values_and_apply(controller, *a, **k))
         tasks = []
         controller.create_task_with_error_handling.side_effect = lambda coro, name: tasks.append(coro)
         if not saved:
@@ -2256,12 +2260,45 @@ class TestTrayLeftClick:
         manager._on_deferred_tray_single_click()
         manager.commands_to_logic_queue.put_nowait.assert_not_called()
 
+    @staticmethod
+    def _run_queued_mode_change(manager):
+        """Run the queued double-click request through the Qt-thread handler.
+
+        wh-tray-ptt-toggle-thread: the double-click runs on a timer thread,
+        so it only queues the request; _check_queues_and_events makes the
+        change on the Qt thread."""
+        from queue import Empty
+
+        manager.state_from_logic_queue.put.assert_called_once_with(
+            {"action": "toggle_ptt_mode"}
+        )
+        manager.shutdown_event.is_set.return_value = False
+        manager.state_from_logic_queue.get_nowait.side_effect = [
+            {"action": "toggle_ptt_mode"},
+            Empty(),
+        ]
+        manager._check_queues_and_events()
+
+    def test_tray_double_click_queues_the_mode_change(self, manager):
+        """wh-tray-ptt-toggle-thread: the second click arrives on pystray's
+        thread, and _toggle_ptt_mode changes Qt widgets. The click only
+        queues the request, as the tray About item does."""
+        with patch.object(manager, "_toggle_ptt_mode") as toggle:
+            manager._on_tray_left_click()
+            manager._on_tray_left_click()
+
+        toggle.assert_not_called()
+        manager.state_from_logic_queue.put.assert_called_once_with(
+            {"action": "toggle_ptt_mode"}
+        )
+
     def test_tray_double_click_switches_mode(self, manager):
         """Two rapid tray clicks switch interaction mode and disable speech."""
         manager.speech_interaction_mode = "toggle"
         manager.speech_enabled = True
         manager._on_tray_left_click()  # First click -- starts timer
         manager._on_tray_left_click()  # Second click -- double-click
+        self._run_queued_mode_change(manager)
         cmd = manager.commands_to_logic_queue.put_nowait.call_args[0][0]
         assert cmd["action"] == "set_speech_interaction_mode"
         assert cmd["mode"] == "push_to_talk"
@@ -2273,6 +2310,7 @@ class TestTrayLeftClick:
         manager.speech_enabled = True
         manager._on_tray_left_click()
         manager._on_tray_left_click()
+        self._run_queued_mode_change(manager)
         cmd = manager.commands_to_logic_queue.put_nowait.call_args[0][0]
         assert cmd["action"] == "set_speech_interaction_mode"
         assert cmd["mode"] == "toggle"
@@ -2320,6 +2358,54 @@ class TestPTTModeMenuItem:
         manager.speech_enabled = True
         manager._toggle_ptt_mode()
         assert manager.speech_enabled is False
+
+    def test_the_tray_item_changes_nothing_on_the_pystray_thread(self, manager):
+        """wh-tray-ptt-toggle-thread: pystray runs a menu callback on its own
+        thread, and _toggle_ptt_mode changes Qt widgets. The item only
+        queues the request, as the tray About item does."""
+        import threading
+        import pystray
+
+        failures = []
+        with patch.object(manager, "_toggle_ptt_mode") as toggle:
+            menu = manager._create_menu(is_tray_menu=True)
+            item = [i for i in menu if i is not pystray.Menu.SEPARATOR
+                    and i.text == "Push-to-Talk Mode"][0]
+
+            def invoke():
+                try:
+                    item(manager.icon)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            worker = threading.Thread(target=invoke)
+            worker.start()
+            worker.join(timeout=2)
+
+        assert not worker.is_alive(), "the tray callback never returned"
+        assert not failures, failures
+        toggle.assert_not_called()
+        manager.state_from_logic_queue.put.assert_called_once_with(
+            {"action": "toggle_ptt_mode"}
+        )
+
+    def test_the_gui_thread_changes_the_mode_after_the_queued_request(
+        self, manager
+    ):
+        """The queue handler runs on the Qt thread, so it calls
+        _toggle_ptt_mode for the queued tray request."""
+        from queue import Empty
+
+        manager.shutdown_event.is_set.return_value = False
+        manager.state_from_logic_queue.get_nowait.side_effect = [
+            {"action": "toggle_ptt_mode"},
+            Empty(),
+        ]
+
+        with patch.object(manager, "_toggle_ptt_mode") as toggle:
+            manager._check_queues_and_events()
+
+        toggle.assert_called_once_with()
 
 
 # -----------------------------------------------------------------------
@@ -2580,6 +2666,63 @@ class TestHelpAndAboutOnTheMenu:
         assert "x-ray" not in body
         assert "wheelhouse help online" not in body
 
+    def test_the_tray_about_item_opens_nothing_on_the_pystray_thread(
+        self, manager
+    ):
+        """wh-about-window-close: pystray runs a menu callback on its own
+        thread, and a modal QMessageBox cannot run there. The item only
+        queues the request, as the Settings and Pattern Manager items do."""
+        import threading
+        import pystray
+
+        menu = manager._create_menu(is_tray_menu=True)
+        item = [i for i in menu if i is not pystray.Menu.SEPARATOR
+                and i.text == "About Wheelhouse"][0]
+        failures = []
+
+        def invoke():
+            try:
+                item(manager.icon)
+            except BaseException as exc:
+                failures.append(exc)
+
+        with patch("gui.QMessageBox") as message_box:
+            worker = threading.Thread(target=invoke)
+            worker.start()
+            worker.join(timeout=2)
+
+        assert not worker.is_alive(), "the tray callback never returned"
+        assert not failures, failures
+        assert not message_box.information.called, (
+            "the About box was built on the pystray thread"
+        )
+        manager.state_from_logic_queue.put.assert_called_once_with(
+            {"action": "show_about_dialog"}
+        )
+
+    def test_the_gui_thread_opens_the_about_box_after_the_queued_request(
+        self, manager
+    ):
+        """The queue handler runs on the Qt thread. It hands the box to the
+        event loop with a zero-delay timer, so the modal loop does not start
+        inside the queue timer's own callback."""
+        from queue import Empty
+
+        manager.shutdown_event.is_set.return_value = False
+        manager.state_from_logic_queue.get_nowait.side_effect = [
+            {"action": "show_about_dialog"},
+            Empty(),
+        ]
+
+        with patch("gui.QMessageBox") as message_box, \
+             patch("gui.QTimer") as timer:
+            manager._check_queues_and_events()
+
+        assert not message_box.information.called, (
+            "the box opened inside the queue timer callback"
+        )
+        timer.singleShot.assert_called_once_with(0, manager.show_about_dialog)
+
 
 class TestGeometryDuringAMiddlePressThatIsNotYetADrag:
     """A press is a live gesture from the moment it lands (.1.22).
@@ -2829,13 +2972,13 @@ class TestRemovedMenuItems:
     def test_the_tray_menu_still_builds_its_gated_items(self, manager):
         """Guard: the gates the two removed items sat behind are open."""
         labels = self._tray_labels(manager)
-        assert "STT Provider" in labels
+        assert "Speech-to-Text Provider" in labels
         assert "Restart Wheelhouse" in labels
 
     def test_the_button_menu_still_builds_its_gated_items(self, manager):
         """Guard: the gates the two removed items sat behind are open."""
         labels = self._window_labels(manager)
-        assert "STT Provider" in labels
+        assert "Speech-to-Text Provider" in labels
         assert "Restart Wheelhouse" in labels
 
     def test_the_tray_menu_has_no_restart_transcription_service(self, manager):
@@ -2892,7 +3035,7 @@ def menu_manager(qapp):
     Both branches build a submenu only when the matching provider list is
     non-empty (``if self.stt_providers_available:`` and
     ``if self.ai_providers_available:``, once in each branch of
-    ``_create_menu``), so empty lists would leave "STT Provider" and
+    ``_create_menu``), so empty lists would leave "Speech-to-Text Provider" and
     "AI Model" out of both label lists and let a comparison pass without
     ever having compared them. The gates are named rather than cited by
     line number, because the four line numbers this docstring used to give
@@ -2917,11 +3060,9 @@ def menu_manager(qapp):
         return mgr
 
 
-VOICE_TEACHING_LABEL = "Teach WheelHouse your voice..."
-STT_SUBMENU_TITLE = "STT Provider"
-VOICE_TEACHING_TOOLTIP = (
-    "Open the voice-teaching session for the Distil-Whisper engine."
-)
+STT_SUBMENU_TITLE = "Speech-to-Text Provider"
+#: wh-first-sound-lost.23: the entry after the separator.
+TRAINING_WORD_LABEL = "Your training word..."
 #: Stands for a separator in the entry lists below, so a test can state
 #: where a separator sits. No real entry can carry this text: both branches
 #: build every label from a literal or from a provider display name.
@@ -3110,13 +3251,14 @@ class TestTheTwoMenusOfferTheSameEntries:
         """
         for name, labels in (("tray", self._tray_labels(menu_manager)),
                              ("window", self._window_labels(menu_manager))):
-            assert "STT Provider" in labels, name
+            assert "Speech-to-Text Provider" in labels, name
             assert "AI Model" in labels, name
             # 12, not the 14 this bound started at:
             # wh-voice-teaching-stt-submenu moved the voice-teaching entry
-            # off the top level and into the STT Provider submenu, and
-            # wh-audio-suppression-auto removed the Audio Suppression entry,
-            # so the top level holds two entries fewer. The bound stays
+            # off the top level, and wh-audio-suppression-auto removed the
+            # Audio Suppression entry, so the top level holds two entries
+            # fewer. The voice-teaching entry itself is gone from the app
+            # (wh-distil-whisper-removal). The bound stays
             # rather than going away, because its job is to refuse a short
             # list that matches another short list.
             assert len(labels) >= 12, (name, labels)
@@ -3162,11 +3304,11 @@ class TestTheTwoMenusOfferTheSameEntries:
         comparison reads as a plain disagreement, or -- when the two
         branches happen to disagree nowhere else -- not at all.
         wh-voice-teaching-stt-submenu put an entry inside a submenu, which
-        is what makes this comparison necessary.
+        is what made this comparison necessary.
 
-        Separators count here, unlike in the top-level comparison. The
-        voice-teaching entry sits behind one, and a separator in one branch
-        only would present the same submenu differently in the two menus.
+        Separators count here, unlike in the top-level comparison: a
+        separator in one branch only would present the same submenu
+        differently in the two menus.
         """
         for title in (STT_SUBMENU_TITLE, "AI Model"):
             assert (_tray_entries(menu_manager, submenu=title)
@@ -3183,7 +3325,7 @@ class TestTheTwoMenusOfferTheSameEntries:
 
 class TestListeningOnEntryOnBothMenus:
     """One disabled entry names the open microphone, directly above
-    "STT Provider", in both branches of ``_create_menu``.
+    "Speech-to-Text Provider", in both branches of ``_create_menu``.
 
     The two strings are a user-visible contract (David approved them):
     "Listening on: <name>" and "Listening on: no microphone".
@@ -3310,19 +3452,15 @@ class TestListeningOnEntryOnBothMenus:
 
 
 # -----------------------------------------------------------------------
-# Voice teaching sits inside the STT Provider submenu
-# (wh-voice-teaching-stt-submenu)
+# 'Your training word...' sits inside the Speech-to-Text Provider submenu
+# (wh-first-sound-lost.23)
 # -----------------------------------------------------------------------
 
-class TestVoiceTeachingSitsInTheSttProviderSubmenu:
-    """"Teach WheelHouse your voice..." belongs to the STT Provider submenu.
-
-    The entry teaches one engine, Distil-Whisper, so it belongs beside the
-    engine list rather than among the entries that act on the whole
-    application. David asked for the move while checking the floating
-    button's menu by hand (the note at the end of
-    docs/testing/2026-09-16-audio-suppression-floating-menu-merge-manual-tests.md,
-    filed as wh-voice-teaching-stt-submenu).
+class TestTrainingWordEntryInBothMenus:
+    """'Your training word...' sits in the Speech-to-Text Provider submenu of both
+    menus, below the engine choices and a separator, at the place where
+    'Teach WheelHouse your voice...' stood before the merge that removed
+    it (wh-first-sound-lost.23, acceptance item 19).
 
     ``_create_menu`` has two exclusive branches -- the pystray tray menu and
     the floating button's QMenu -- and every entry is written into both by
@@ -3337,16 +3475,15 @@ class TestVoiceTeachingSitsInTheSttProviderSubmenu:
     def test_the_tray_submenu_lists_the_engines_then_the_entry(
         self, menu_manager
     ):
-        """Tray: the engines, then a separator, then voice teaching.
+        """Tray: the engines, then a separator, then the training word.
 
-        The separator is what keeps the entry from reading as a third
-        engine, and the order is what keeps the engine list first, where a
-        user who opened the submenu to switch engines expects it.
+        The separator is what keeps the entry from reading as another
+        engine, and the order is what keeps the engine list first.
         """
         assert _tray_entries(menu_manager, submenu=STT_SUBMENU_TITLE) == [
             *self._engine_labels(menu_manager),
             SEPARATOR_MARK,
-            VOICE_TEACHING_LABEL,
+            TRAINING_WORD_LABEL,
         ]
 
     def test_the_window_submenu_lists_the_engines_then_the_entry(
@@ -3356,76 +3493,34 @@ class TestVoiceTeachingSitsInTheSttProviderSubmenu:
         assert _window_entries(menu_manager, submenu=STT_SUBMENU_TITLE) == [
             *self._engine_labels(menu_manager),
             SEPARATOR_MARK,
-            VOICE_TEACHING_LABEL,
+            TRAINING_WORD_LABEL,
         ]
-
-    def test_neither_top_level_menu_still_offers_the_entry(self, menu_manager):
-        """The move is a move, not a copy: the top level lost the entry.
-
-        Both branches keep their own copy of every label, so one branch can
-        keep the old top-level entry while the other moves it.
-        """
-        assert VOICE_TEACHING_LABEL not in _tray_entries(menu_manager)
-        assert VOICE_TEACHING_LABEL not in _window_entries(menu_manager)
 
     def test_the_tray_entry_stays_greyed_until_the_first_state_arrives(
         self, menu_manager
     ):
-        """Tray: the entry keeps the readiness gate it had at the top level.
-
-        ``is_ready`` is ``bool(self.initial_state_received)``. Before the
-        first state message the GUI process knows nothing about the speech
-        engine, so opening a voice-teaching session would act on a state
-        nobody has confirmed.
-        """
         menu_manager.initial_state_received = False
-        item = _tray_submenu_item(menu_manager, VOICE_TEACHING_LABEL)
+        item = _tray_submenu_item(menu_manager, TRAINING_WORD_LABEL)
         assert item.enabled is False
+
+    def test_the_tray_entry_is_enabled_once_state_has_arrived(self, menu_manager):
+        item = _tray_submenu_item(menu_manager, TRAINING_WORD_LABEL)
+        assert item.enabled is True
 
     def test_the_window_entry_stays_greyed_until_the_first_state_arrives(
         self, menu_manager
     ):
-        """Floating button: the same readiness gate as the tray."""
         menu_manager.initial_state_received = False
         _menu, _holder, action = _window_submenu_action(
-            menu_manager, VOICE_TEACHING_LABEL)
+            menu_manager, TRAINING_WORD_LABEL)
         assert action.isEnabled() is False
 
-    def test_the_window_entry_keeps_its_hover_text(self, menu_manager):
-        """The hover text moves with the entry, word for word.
-
-        Qt answers ``toolTip()`` with the action's own text when no tooltip
-        was set, so "not empty" proves nothing and this test states the
-        whole sentence instead.
-
-        The submenu has to show tooltips as well: a QMenu hides the tooltips
-        of its actions unless ``setToolTipsVisible(True)`` was called on it.
-        The STT Provider submenu already calls it, so that half of the test
-        passes on the unmoved code. It is here because the hover text is
-        worth nothing to the user if the submenu holding it hides it.
-        """
-        _menu, holder, action = _window_submenu_action(
-            menu_manager, VOICE_TEACHING_LABEL)
-        assert action.toolTip() == VOICE_TEACHING_TOOLTIP
-        assert holder.toolTipsVisible(), (
-            "the submenu hides its tooltips, so the hover text never shows"
-        )
-
-    def test_the_tray_entry_asks_the_qt_thread_to_open_the_session(
-        self, menu_manager
-    ):
-        """Tray: the callback only hands the request to the Qt thread.
-
-        pystray runs a menu callback on its own thread, and the
-        voice-teaching window has to be built on the Qt thread, so the tray
-        item puts the request on the state queue, which the Qt thread reads
-        as ``action == "open_calibration"``. The call runs on a worker
-        thread here for the same reason, and the join proves the callback
-        returns instead of blocking on the queue.
-        """
+    def test_the_tray_entry_hands_the_request_to_the_qt_thread(self, menu_manager):
+        """pystray calls the callback on its own thread; the window is built
+        on the Qt thread, so the callback only queues open_lead_word."""
         import threading
 
-        item = _tray_submenu_item(menu_manager, VOICE_TEACHING_LABEL)
+        item = _tray_submenu_item(menu_manager, TRAINING_WORD_LABEL)
         failures = []
 
         def invoke():
@@ -3440,56 +3535,34 @@ class TestVoiceTeachingSitsInTheSttProviderSubmenu:
         assert not worker.is_alive(), "the tray callback never returned"
         assert not failures, failures
         menu_manager.state_from_logic_queue.put.assert_called_once_with(
-            {"action": "open_calibration"}
+            {"action": "open_lead_word"}
         )
 
-    def test_the_window_entry_opens_the_session(self, menu_manager):
-        """Floating button: the entry calls the handler directly.
-
-        This branch already runs on the Qt thread, so it needs no queue.
-        """
-        with patch.object(menu_manager, "_open_calibration") as opened:
+    def test_the_window_entry_opens_the_window_directly(self, menu_manager):
+        with patch.object(menu_manager, "_open_lead_word") as opened:
             _menu, _holder, action = _window_submenu_action(
-                menu_manager, VOICE_TEACHING_LABEL)
+                menu_manager, TRAINING_WORD_LABEL)
             action.trigger()
         opened.assert_called_once()
 
-    def test_with_no_engine_the_tray_menu_offers_the_entry_nowhere(
-        self, menu_manager
-    ):
-        """No engine available: no submenu, and no entry anywhere.
+    def test_the_window_entry_has_a_hover_text(self, menu_manager):
+        _menu, holder, action = _window_submenu_action(
+            menu_manager, TRAINING_WORD_LABEL)
+        assert action.toolTip() != TRAINING_WORD_LABEL
+        assert "Parakeet" in action.toolTip()
+        assert holder.toolTipsVisible()
 
-        Both branches build the submenu only when
-        ``self.stt_providers_available`` is non-empty, so an entry inside it
-        disappears with it. At the top level the entry stayed visible in that
-        state, enabled once the first state message arrived. The boss ruled
-        the disappearance acceptable on 2026-09-16, and David confirmed it: a
-        user with no speech engine set up has nothing to teach. This test
-        states the accepted behaviour, so a reversal must be a deliberate edit.
-
-        The search covers every submenu, not the top level alone, because
-        "nowhere" is what the ruling says.
-        """
+    def test_with_no_engine_neither_menu_offers_the_entry(self, menu_manager):
         menu_manager.stt_providers_available = []
-        entries = _tray_every_entry(menu_manager)
-        assert STT_SUBMENU_TITLE not in entries, entries
-        assert VOICE_TEACHING_LABEL not in entries, entries
-
-    def test_with_no_engine_the_window_menu_offers_the_entry_nowhere(
-        self, menu_manager
-    ):
-        """No engine available: the same in the floating button's menu."""
-        menu_manager.stt_providers_available = []
-        entries = _window_every_entry(menu_manager)
-        assert STT_SUBMENU_TITLE not in entries, entries
-        assert VOICE_TEACHING_LABEL not in entries, entries
+        assert TRAINING_WORD_LABEL not in _tray_every_entry(menu_manager)
+        assert TRAINING_WORD_LABEL not in _window_every_entry(menu_manager)
 
 
 # -----------------------------------------------------------------------
 # Parakeet without its model (wh-parakeet-model-download-offer)
 # -----------------------------------------------------------------------
 
-PARAKEET_NOT_INSTALLED_LABEL = "Parakeet (model not installed)"
+PARAKEET_NOT_INSTALLED_LABEL = "Parakeet V3 (Local) - model not installed"
 
 
 class TestParakeetNotInstalledEntry:
@@ -3520,7 +3593,7 @@ class TestParakeetNotInstalledEntry:
             "Google Cloud STT",
             PARAKEET_NOT_INSTALLED_LABEL,
             SEPARATOR_MARK,
-            VOICE_TEACHING_LABEL,
+            TRAINING_WORD_LABEL,
         ]
 
     def test_the_window_submenu_lists_the_entry_after_the_engines(self, offer_manager):
@@ -3528,7 +3601,7 @@ class TestParakeetNotInstalledEntry:
             "Google Cloud STT",
             PARAKEET_NOT_INSTALLED_LABEL,
             SEPARATOR_MARK,
-            VOICE_TEACHING_LABEL,
+            TRAINING_WORD_LABEL,
         ]
 
     def test_the_tray_entry_is_never_checked(self, offer_manager):
@@ -3599,7 +3672,7 @@ EXISTING_TOP_LEVEL_ENTRIES = [
     "Show Floating Button",
     "Interim Results",
     "Push-to-Talk Mode",
-    "STT Provider",
+    "Speech-to-Text Provider",
     "AI Model",
     "Pattern Manager",
     "Debug",

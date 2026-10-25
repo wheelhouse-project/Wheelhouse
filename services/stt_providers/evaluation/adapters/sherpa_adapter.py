@@ -58,10 +58,30 @@ class SherpaAdapter:
         provider: str = "cpu",
         name: str | None = None,
         recognizer_kind: str | None = None,
+        language: str | None = None,
+        num_threads: int | None = None,
     ):
         model_dir = Path(model_path)
-        self.name = name or model_dir.name
+        # None keeps the sherpa-onnx defaults (2 threads online, 1 offline),
+        # which every result before this option used.
+        if num_threads is not None and num_threads < 1:
+            raise ValueError(f"num_threads must be 1 or more, not {num_threads}")
+        thread_kwargs = {} if num_threads is None else {"num_threads": num_threads}
         self.recognizer_kind = recognizer_kind or self._detect_recognizer_kind(model_dir)
+        # Multilingual streaming models (Nemotron 3.5 ASR) read the language
+        # from a per-stream option; without it they detect the language.
+        # Only the online path can set it, so refuse it elsewhere instead
+        # of silently benchmarking auto-detection.
+        if language and self.recognizer_kind != "online":
+            raise ValueError(
+                f"language={language!r} needs an online (streaming) model; "
+                f"{model_dir.name} loads as {self.recognizer_kind}"
+            )
+        self.language = language
+        default_name = f"{model_dir.name}_{language}" if language else model_dir.name
+        if num_threads is not None:
+            default_name = f"{default_name}_t{num_threads}"
+        self.name = name or default_name
         # Typed as Any because the branch below binds either OnlineRecognizer
         # or OfflineRecognizer; pyright otherwise narrows to the first branch's
         # return type and flags cross-branch attribute access.
@@ -87,6 +107,7 @@ class SherpaAdapter:
                 joiner=joiner,
                 tokens=tokens,
                 provider=provider,
+                thread_kwargs=thread_kwargs,
             )
         else:
             # Streaming online recognizer. Decoding method depends on the
@@ -110,6 +131,7 @@ class SherpaAdapter:
                 rule1_min_trailing_silence=2.4,
                 rule2_min_trailing_silence=0.5,
                 rule3_min_utterance_length=30.0,
+                **thread_kwargs,
             )
 
     @staticmethod
@@ -145,6 +167,7 @@ class SherpaAdapter:
         joiner: str,
         tokens: str,
         provider: str,
+        thread_kwargs: dict[str, int],
     ) -> "sherpa_onnx.OfflineRecognizer":
         """Construct an OfflineRecognizer with NeMo-aware defaults.
 
@@ -177,6 +200,7 @@ class SherpaAdapter:
                 model_type=model_type,
                 decoding_method="greedy_search",
                 provider=provider,
+                **thread_kwargs,
             )
         finally:
             os.chdir(orig_cwd)
@@ -219,6 +243,8 @@ class SherpaAdapter:
         """
         recognizer: Any = self.recognizer
         stream = recognizer.create_stream()
+        if self.language:
+            stream.set_option("language", self.language)
         interim_results: list[str] = []
 
         t0 = time.perf_counter()
