@@ -663,6 +663,8 @@ class ActionFunctions:
         self._functions["open_pattern_manager"] = self.open_pattern_manager
         # Settings window (wh-voice-settings-window)
         self._functions["open_settings_window"] = self.open_settings_window
+        # Manual update check in the About window (wh-about-check-updates)
+        self._functions["check_for_updates"] = self.check_for_updates
         # 'Your training word' window (wh-first-sound-lost.23)
         self._functions["open_lead_word"] = self.open_lead_word
         # Mode switching
@@ -2124,6 +2126,17 @@ class ActionFunctions:
         """Open the settings window via GUI IPC (wh-voice-settings-window)."""
         self._send_gui_action({"action": "open_settings_window"})
         logger.info("Sent open_settings_window to GUI")
+        return None
+
+    async def check_for_updates(self):
+        """Open the About Wheelhouse window and check for updates (wh-about-check-updates).
+
+        The GUI process opens the window and starts the check through the
+        window's own button path, so the voice command and the button send
+        the same one ``check_for_updates`` command to the Logic process.
+        """
+        self._send_gui_action({"action": "check_for_updates_by_voice"})
+        logger.info("Sent check_for_updates_by_voice to GUI")
         return None
 
     async def open_lead_word(self):

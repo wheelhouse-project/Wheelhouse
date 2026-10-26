@@ -2817,6 +2817,19 @@ actions = [
     { function = "open_lead_word" }
 ]
 
+# Manual update check (wh-about-check-updates): opens the About Wheelhouse
+# window and checks GitHub for a newer release, the same check as the
+# window's "Check for updates" button. A whole utterance only. It sits after
+# the training-word row, which tests/test_lead_word_trigger.py keeps directly
+# after the settings row.
+[[pattern]]
+pattern = '''^check for updates?$'''
+doc_id = "check-for-updates"
+whole_utterance_only = true
+actions = [
+    { function = "check_for_updates" }
+]
+
 # =============================================================================
 # COMMANDS - Speech Mode
 # =============================================================================
@@ -2909,7 +2922,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^(?:hide|dismiss) numbers$'''
+pattern = '''^(?:hide|hyde|dismiss) numbers$'''
 doc_id = "hide-numbers"
 requires_hotword = false
 whole_utterance_only = true

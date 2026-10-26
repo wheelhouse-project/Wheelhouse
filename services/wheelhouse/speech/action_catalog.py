@@ -717,9 +717,9 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^(?:hide|dismiss) numbers$" with no params: saying '
-            '"hide numbers" hides the badges. "dismiss numbers" does the '
-            'same.'
+            'Trigger "^(?:hide|hyde|dismiss) numbers$" with no params: '
+            'saying "hide numbers" hides the badges. "hyde numbers" and '
+            '"dismiss numbers" do the same.'
         ),
         "audience": "advanced",
         "group": "Clicking",
@@ -1185,6 +1185,21 @@ ACTION_CATALOG = (
         "example": (
             'Trigger "^settings?$" with no params: saying "settings" '
             'opens the settings window.'
+        ),
+        "audience": "advanced",
+        "group": "Wheelhouse",
+    },
+    {
+        "name": "check_for_updates",
+        "label": "Check for updates",
+        "summary": (
+            "Opens the About Wheelhouse window and checks GitHub for a newer "
+            "release. The check runs even when the automatic check is off."
+        ),
+        "params": [],
+        "example": (
+            'Trigger "^check for updates?$" with no params: saying "check '
+            'for updates" opens the About Wheelhouse window and checks.'
         ),
         "audience": "advanced",
         "group": "Wheelhouse",

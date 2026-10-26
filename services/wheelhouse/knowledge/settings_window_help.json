@@ -31,7 +31,7 @@
     },
     {
       "label": "Check for updates",
-      "text": "Select this check box to let WheelHouse ask GitHub once a day if a newer release exists. When one exists, a notice offers to install it. Clear it to stop the check. WheelHouse then sends no update request."
+      "text": "Select this check box to let WheelHouse ask GitHub once a day if a newer release exists. When one exists, a notice offers to install it. Clear it to stop the automatic check. A manual check from the About Wheelhouse window, or the voice command \"check for updates\", still sends one request when you ask for it."
     },
     {
       "label": "Log transcripts",

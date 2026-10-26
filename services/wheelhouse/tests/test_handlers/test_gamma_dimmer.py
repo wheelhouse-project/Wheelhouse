@@ -304,6 +304,75 @@ class TestLifecycle:
 
 
 # ===========================================================================
+# A ramp left dimmed by an earlier run (wh-gamma-dimmer-no-hardware.1.1)
+# ===========================================================================
+
+def _ramp_with_tops(tops):
+    """A linear ramp per channel, scaled so that each channel ends at its top."""
+    from handlers.gamma_dimmer import GAMMA_RAMP
+    ramp = GAMMA_RAMP()
+    for ch, top in enumerate(tops):
+        for i in range(256):
+            ramp[ch][i] = i * top // 255
+    return ramp
+
+
+def _windows_returns(mock_gdi32, ramp):
+    """Make GetDeviceGammaRamp fill the caller's ramp with a copy of ramp."""
+    def fill(hdc, ramp_ref):
+        ctypes.memmove(ramp_ref._obj, ramp, ctypes.sizeof(ramp))
+        return True
+    mock_gdi32.GetDeviceGammaRamp.side_effect = fill
+
+
+def _channels(ramp):
+    return [list(ramp[ch]) for ch in range(3)]
+
+
+IDENTITY = [[i * 257 for i in range(256)] for _ in range(3)]
+
+
+class TestStartWithARampLeftDimmed:
+    """Logic killed while gamma-dimmed leaves the ramp dark; start() must not adopt it."""
+
+    @pytest.mark.parametrize("top", [52428, 62258], ids=["80pct", "just-below-95pct"])
+    def test_all_three_tops_below_95_percent_get_the_identity_ramp(
+        self, gamma_dimmer, mock_gdi32, caplog, top
+    ):
+        _windows_returns(mock_gdi32, _ramp_with_tops([top, top, top]))
+
+        with caplog.at_level("WARNING", logger="handlers.gamma_dimmer"):
+            gamma_dimmer.start()
+
+        assert gamma_dimmer._is_started is True
+        assert _channels(gamma_dimmer._original_ramp) == IDENTITY
+        mock_gdi32.SetDeviceGammaRamp.assert_called_once()
+        written = mock_gdi32.SetDeviceGammaRamp.call_args[0][1]._obj
+        assert _channels(written) == IDENTITY
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+
+    @pytest.mark.parametrize(
+        "tops",
+        [[52428, 52428, 65535], [52428, 65535, 65535], [62259, 62259, 62259]],
+        ids=["one-channel-full", "two-channels-full", "all-at-95pct"],
+    )
+    def test_a_ramp_with_a_top_at_or_above_95_percent_stays_the_original(
+        self, gamma_dimmer, mock_gdi32, caplog, tops
+    ):
+        returned = _ramp_with_tops(tops)
+        _windows_returns(mock_gdi32, returned)
+
+        with caplog.at_level("WARNING", logger="handlers.gamma_dimmer"):
+            gamma_dimmer.start()
+
+        assert gamma_dimmer._is_started is True
+        assert _channels(gamma_dimmer._original_ramp) == _channels(returned)
+        mock_gdi32.SetDeviceGammaRamp.assert_not_called()
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+
+
+# ===========================================================================
 # Atexit cleanup
 # ===========================================================================
 

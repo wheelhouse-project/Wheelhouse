@@ -332,6 +332,76 @@ def check_for_update(
     return (tag[1:] if tag.startswith("v") else tag, tag)
 
 
+@dataclass(frozen=True)
+class ManualCheckResult:
+    """The answer of one manual check (``check_now``).
+
+    ``status`` is one of:
+
+    * ``"newer"``: the latest release is newer than the running version.
+    * ``"current"``: the latest release is the same or older.
+    * ``"failed"``: GitHub was not reached, or its answer was unreadable.
+    * ``"unversioned"``: the running version has no version number, so the
+      two cannot be compared.
+
+    ``installed`` is the running version text. ``version`` (the tag without
+    a leading "v") and ``tag`` are set when the answer held a usable tag.
+    """
+
+    status: str
+    installed: str
+    version: str = ""
+    tag: str = ""
+
+
+def check_now(
+    *,
+    get_version: Callable[[], str] | None = None,
+    fetch: Callable[[str], str] | None = None,
+) -> ManualCheckResult:
+    """Run one manual check (the About Wheelhouse window). Blocking.
+
+    Sends the request of the automatic check (``fetch_latest_tag``, through
+    ``http_get``) exactly once and returns what it found. Unlike
+    ``check_for_update`` this function reads no config, so it runs when
+    CHECK_FOR_UPDATES is false, and it reads and writes no record file, so
+    ``last_check``, ``notified_version`` and ``notified_at`` stay as they
+    were: the automatic schedule and the 7-day Later wait do not change.
+
+    A running version without a number still sends the request, so the
+    button behaves the same in every copy; the result is "unversioned".
+
+    ``get_version`` and ``fetch`` default to ``get_app_version`` and
+    ``fetch_latest_tag``, looked up when the function runs.
+    """
+    if get_version is None:
+        get_version = get_app_version
+    if fetch is None:
+        fetch = fetch_latest_tag
+    running = get_version()
+    try:
+        tag = fetch(running)
+    except (UpdateCheckError, RecursionError) as exc:
+        # RecursionError: fetch_latest_tag lets it escape on a deeply nested
+        # answer (its crewcut note), and that is an unreadable answer too.
+        logger.warning("update_check: manual check found no result: %s", exc)
+        return ManualCheckResult(status="failed", installed=running)
+    if parse_version(tag) is None:
+        logger.warning("update_check: manual check got an unreadable tag: %r", tag)
+        return ManualCheckResult(status="failed", installed=running)
+    version = tag[1:] if tag.startswith("v") else tag
+    # A separate name keeps this line apart from the skip test in
+    # check_for_update, which tests/mutation_gate_update_check.py mutates.
+    running_parts = parse_version(running)
+    if running_parts is None:
+        status = "unversioned"
+    elif is_newer_version(tag, running):
+        status = "newer"
+    else:
+        status = "current"
+    return ManualCheckResult(status=status, installed=running, version=version, tag=tag)
+
+
 def record_notice_shown(path: Path, version: str, now: float) -> bool:
     """Record the version and the time its notice was shown.
 

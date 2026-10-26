@@ -5,6 +5,24 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-10-26
+
+### Added
+
+- The About Wheelhouse window now has a "Check for updates" button. To open the window, choose "About Wheelhouse" in the tray menu or the floating button's right-click menu. You can also say "check for updates": the window opens and the check starts. The window shows "Checking for updates...", then the result: "Wheelhouse [version] is available", "You have the newest version ([version]).", or "Wheelhouse could not reach GitHub. Check your internet connection and try again." When a newer release exists, an "Update now" button appears. It works as the "Update now" button in the update notice does. If the update cannot start, you can select the button again. While a check runs, you cannot select "Check for updates". A manual check sends the same one request to `api.github.com` as the daily check. It also runs when `CHECK_FOR_UPDATES` is false, and during the 7-day wait after "Later". It does not change the daily check or the "Later" wait.
+- The About Wheelhouse window shows a link to the Wheelhouse website, https://wheelhouse-project.org. A click on the link opens the website in your default browser.
+
+### Changed
+
+- `CHECK_FOR_UPDATES = false` in `config.toml` now turns off only the automatic daily check. A manual check from the About Wheelhouse window, or the voice command "check for updates", still sends one request when you ask for it. The help text of "Check for updates" in the Settings window, `config.toml.example`, and the privacy statement now say this.
+- When no plugin controls the brightness of a screen, the thumb wheel at the left edge of the screen now darkens the screen image in software. An example is a desktop computer with one external monitor, where the Internal Panel plugin finds no panel and the TV plugins are off. Turn the wheel down to darken the screen. Turn it up to brighten the screen again, until no dimming is left. "Exit" in the tray menu removes the dimming. The setting `software_dimmer` in the `[brightness_coordinator]` section selects the method; the default is "gamma_dimmer". Before, the wheel at the left edge did nothing on such a computer.
+- "hyde numbers" now works the same as "hide numbers".
+
+### Fixed
+
+- The thumb wheel now works on any slot of the Logitech receiver. Before, Wheelhouse accepted thumb wheel turns only from some receiver slots, so on some computers the wheel did nothing. At start, Wheelhouse now asks the receiver which slot has the mouse with the thumb wheel. It asks again when a mouse connects, for example after an Easy-Switch change. If the mouse is off or asleep when Wheelhouse starts, Wheelhouse asks when the mouse sends its first signal. The question only reads information from the mouse and changes no mouse setting.
+- Wheelhouse can stop without a normal exit while it dims the screen in software, for example after a crash or when Task Manager ends it. The next start of Wheelhouse now restores the normal screen brightness. Before, the screen could stay dark until you restarted Windows.
+
 ## [1.4.0] - 2026-10-24
 
 ### Added

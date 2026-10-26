@@ -44,7 +44,7 @@ Five mutations of speech/config/patterns.toml:
                             the table says select-word owns "select word",
                             and the assertion that the first owning row is
                             the named one is what catches the fall-through.
-  shadow-dismiss-numbers    Drop "dismiss" from ^(?:hide|dismiss) numbers$.
+  shadow-dismiss-numbers    Drop "dismiss" from ^(?:hide|hyde|dismiss) numbers$.
                             Widening the escape row must not cost the older
                             two-word wording wh-dismiss-alias-restore put
                             back at David's direction on 2026-08-20.
@@ -133,8 +133,8 @@ MUTATIONS = [
     },
     {
         "name": "shadow-dismiss-numbers",
-        "old": "pattern = '''^(?:hide|dismiss) numbers$'''\n",
-        "new": "pattern = '''^hide numbers$'''\n",
+        "old": "pattern = '''^(?:hide|hyde|dismiss) numbers$'''\n",
+        "new": "pattern = '''^(?:hide|hyde) numbers$'''\n",
         "expect": [_OWNS, _FIRES, _NO_HOTWORD, _TOGGLES],
     },
 ]

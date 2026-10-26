@@ -66,7 +66,7 @@
 <p>Action name: <code>hide_overlay_command</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
 <p>Removes the numbered badges painted by the show-numbers command.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^(?:hide|dismiss) numbers$" with no params: saying "hide numbers" hides the badges. "dismiss numbers" does the same.</code></p>
+<p>Example: <code>Trigger "^(?:hide|hyde|dismiss) numbers$" with no params: saying "hide numbers" hides the badges. "hyde numbers" and "dismiss numbers" do the same.</code></p>
 <h4 id="right-or-double-click-a-control-by-name">Right- or double-click a control by name</h4>
 <p>Action name: <code>click_element_command</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
 <p>Parses a full gesture click command (right click X, double click X) and clicks the named control with that mouse gesture.</p>
@@ -355,6 +355,11 @@
 </ul>
 <p>Example: <code>Trigger "\bparentheses(.*)$" with params ["(", ")", "g1"]: saying "parentheses hello" inserts "(hello)"; saying just "parentheses" wraps the selection or inserts "()".</code></p>
 <h3 id="wheelhouse">Wheelhouse</h3>
+<h4 id="check-for-updates">Check for updates</h4>
+<p>Action name: <code>check_for_updates</code>. The Pattern Manager lists it under Advanced actions, Wheelhouse.</p>
+<p>Opens the About Wheelhouse window and checks GitHub for a newer release. The check runs even when the automatic check is off.</p>
+<p>Parameters: none.</p>
+<p>Example: <code>Trigger "^check for updates?$" with no params: saying "check for updates" opens the About Wheelhouse window and checks.</code></p>
 <h4 id="open-online-help">Open online help</h4>
 <p>Action name: <code>wheelhouse_help_online</code>. The Pattern Manager lists it under Advanced actions, Wheelhouse.</p>
 <p>Opens the configured online help page in the default browser.</p>
@@ -527,7 +532,7 @@
 </tr>
 <tr>
 <td><strong>Wheelhouse {version} is available</strong> (notice in the corner of the screen)</td>
-<td>Wheelhouse checks once a day whether a newer public release exists, and it found one. The title shows the new version number in place of {version}. The notice does not close by itself. Wheelhouse does not check when CHECK_FOR_UPDATES is false in config.toml.</td>
+<td>Wheelhouse checks once a day whether a newer public release exists, and it found one. The title shows the new version number in place of {version}. The notice does not close by itself. The notice comes only from the automatic check. That check does not run when CHECK_FOR_UPDATES is false in config.toml. A manual check from the About Wheelhouse window shows its result in that window and shows no notice.</td>
 <td>A newer version of Wheelhouse can be installed. The notice has two buttons, Update now and Later.</td>
 <td>Click Update now to download the installer, check it, close Wheelhouse, and run the installer. Click Later, or close the notice, to hide it. Wheelhouse can show the notice for the same version again 7 days after it last appeared. A newer version shows its notice at once.</td>
 </tr>
@@ -552,14 +557,14 @@
 <p><strong>COMMAND_TIMEOUT_MS</strong> <em>(default: <code>700</code>)</em> -- How long Wheelhouse waits after you stop speaking, in milliseconds, before deciding a command phrase is complete. Raise to 900-1000 if commands fire before you finish (common on slower machines); lower slightly if responses feel sluggish.</p>
 <p><strong>GREEDY_TIMEOUT_MS</strong> <em>(default: <code>5000</code>)</em> -- A longer wait, in milliseconds, for commands that intentionally keep listening for more words. Rarely needs changing.</p>
 <p><strong>COMMAND_COMPLETION_WAIT_MS</strong> <em>(default: <code>1000</code>)</em> -- Has no effect. No part of Wheelhouse reads this setting. Changing it changes nothing. To give commands more time, change COMMAND_TIMEOUT_MS.</p>
-<p><strong>ENABLE_AUDIO_SUPPRESSION</strong> <em>(default: <code>"auto"</code>)</em> -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone has an echo canceller, and pauses only when Windows reports none or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.</p>
+<p><strong>ENABLE_AUDIO_SUPPRESSION</strong> <em>(default: <code>"auto"</code>)</em> -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone and the default communications microphone have an echo canceller, and pauses when Windows reports none on one of them or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.</p>
 <p><strong>ENABLE_SONOS_SUPPRESSION</strong> <em>(default: <code>true</code>)</em> -- Pause listening while Sonos music is playing. Turn off only if you want Wheelhouse listening during playback; expect more misrecognitions, because the microphone picks up the audio.</p>
 <p><strong>ENABLE_IDLE_SUPPRESSION</strong> <em>(default: <code>true</code>)</em> -- Pause listening after the computer sits idle. Turn off only if you never want idle pauses; the Idle Monitor plugin controls the timing.</p>
 <p><strong>LOG_FILE</strong> <em>(default: <code>""</code>)</em> -- Has no effect. No part of Wheelhouse reads this setting. Wheelhouse always writes its activity log to wheelhouse.log in its install folder, %LOCALAPPDATA%\Wheelhouse\app.</p>
 <p><strong>LOG_LEVEL</strong> <em>(default: <code>"INFO"</code>)</em> -- How detailed the activity log is. Change only when a support conversation asks you to.</p>
 <p><strong>LOG_TRANSCRIPTS</strong> <em>(default: <code>false</code>)</em> -- A privacy setting: false keeps the words you dictate and your clipboard contents out of the log files (only text lengths are noted). Set true only while troubleshooting recognition, then turn it back off; while on, everything you dictate, including passwords, accumulates in the logs.</p>
 <p><strong>SAVE_ENGINE_AUDIO</strong> <em>(default: <code>false</code>)</em> -- A privacy setting for diagnosing a missing first sound: when true, the Parakeet v3 speech engine saves one sound file for every phrase you say, in the folder %LOCALAPPDATA%\WheelHouse\engine-audio. While the Parakeet v3 engine runs, it deletes each of these files that is more than 2 days old, at engine start and once an hour; while the engine does not run, the files stay. Uninstalling Wheelhouse deletes the folder, also when you keep your personal data. The files stay on this computer. Set true only while a support conversation or a bug investigation asks for the sound files, then turn it back off; while on, the files hold everything you say. A change takes effect when the speech engine next starts, which an engine switch or a Wheelhouse restart does.</p>
-<p><strong>CHECK_FOR_UPDATES</strong> <em>(default: <code>true</code>)</em> -- Whether Wheelhouse asks api.github.com once a day if a newer release exists. When one exists, a notice offers to install it. Set false to stop the update check. Wheelhouse then makes no update request. Without this key, the check is on.</p>
+<p><strong>CHECK_FOR_UPDATES</strong> <em>(default: <code>true</code>)</em> -- Whether Wheelhouse asks api.github.com once a day if a newer release exists. When one exists, a notice offers to install it. Set false to stop the automatic update check. Wheelhouse then makes no automatic update request. A manual check from the About Wheelhouse window still sends one request when you ask for it. Without this key, the check is on.</p>
 <p><strong>SIDE_OFFSET</strong> <em>(default: <code>10</code>)</em> -- Width in pixels of the left-edge screen zone where the mouse thumb wheel adjusts brightness instead of volume. Raise it if the brightness zone is hard to hit.</p>
 <p><strong>BRIGHTNESS_INCREMENT</strong> <em>(default: <code>1.0</code>)</em> -- The size of each thumb-wheel brightness adjustment step. Raise for faster, coarser changes; lower for finer control.</p>
 <p><strong>VOLUME_INCREMENT</strong> <em>(default: <code>1</code>)</em> -- The size of each thumb-wheel volume adjustment step. Raise for faster, coarser changes; lower for finer control. Use a whole number when the volume goes to a Sonos speaker, because the Sonos speaker drops the fraction.</p>
@@ -576,7 +581,7 @@
 <p><strong>SPATIAL_SOUND_EXEC</strong> <em>(default: <code>""</code>)</em> -- Path to the small free NirSoft helper tool used for voice switching of Dolby Atmos spatial sound; empty means the feature is off. Fill in the tool path only if you use Dolby Atmos and have that tool installed; everyone else can ignore it.</p>
 <p><strong>SPATIAL_SOUND_FORMAT</strong> <em>(default: <code>"Dolby Atmos for home theater"</code>)</em> -- The spatial sound format name passed to the helper tool. Only matters if SPATIAL_SOUND_EXEC is set.</p>
 <h3 id="brightness_coordinator">[brightness_coordinator]</h3>
-<p><strong>software_dimmer</strong> <em>(default: <code>"gamma_dimmer"</code>)</em> -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens the screen image, including the mouse pointer, through the Windows display brightness curve), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.</p>
+<p><strong>software_dimmer</strong> <em>(default: <code>"gamma_dimmer"</code>)</em> -- The software dimming method used once hardware brightness is as low as it goes, and for every brightness step when no plugin controls a screen's brightness. Valid values: "gamma_dimmer" (darkens the screen image, including the mouse pointer, through the Windows display brightness curve), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.</p>
 <p><strong>unwinding_threshold</strong> <em>(default: <code>10</code>)</em> -- Currently has no effect -- Wheelhouse hands control back to the hardware only once software dimming is fully undone, whatever this is set to.</p>
 <h3 id="pluginsinternal_panel">[plugins.internal_panel]</h3>
 <p><strong>enabled</strong> <em>(default: <code>true</code>)</em> -- Turns the Internal Panel plugin on or off; it controls a laptop's built-in screen brightness from the brightness scroll zone. On a desktop PC with no built-in panel it does nothing and is safe to leave enabled.</p>
@@ -684,7 +689,7 @@
       <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
       <a href="#top">Back to top ↑</a>
     </nav>
-    <p class="fine-print">Documentation for Wheelhouse 1.4.0.</p>
+    <p class="fine-print">Documentation for Wheelhouse 1.4.1.</p>
   </footer>
 </body>
 </html>

@@ -76,7 +76,7 @@ Removes the numbered badges painted by the show-numbers command.
 
 Parameters: none.
 
-Example: `Trigger "^(?:hide|dismiss) numbers$" with no params: saying "hide numbers" hides the badges. "dismiss numbers" does the same.`
+Example: `Trigger "^(?:hide|hyde|dismiss) numbers$" with no params: saying "hide numbers" hides the badges. "hyde numbers" and "dismiss numbers" do the same.`
 
 #### Right- or double-click a control by name
 
@@ -528,6 +528,16 @@ Example: `Trigger "\bparentheses(.*)$" with params ["(", ")", "g1"]: saying "par
 
 ### Wheelhouse
 
+#### Check for updates
+
+Action name: `check_for_updates`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
+
+Opens the About Wheelhouse window and checks GitHub for a newer release. The check runs even when the automatic check is off.
+
+Parameters: none.
+
+Example: `Trigger "^check for updates?$" with no params: saying "check for updates" opens the About Wheelhouse window and checks.`
+
 #### Open online help
 
 Action name: `wheelhouse_help_online`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
@@ -626,7 +636,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 | **Wheelhouse: Speech engine changed** (Windows notification) | You update Wheelhouse from a version that used a speech engine that Wheelhouse no longer includes, and Wheelhouse starts for the first time after the update. Wheelhouse shows the notice one time. It does not come back on a later start. | The speech engine that you used is not part of Wheelhouse any more. Wheelhouse switched your speech engine setting to Parakeet. The notice says that the engine was removed from Wheelhouse, and then it says what happened when Wheelhouse started a speech engine. "Parakeet is now in use as your speech engine" means that Parakeet started. "Parakeet replaces it, but its speech model is not installed" means that Wheelhouse did not start Parakeet, because the speech model is missing. Wheelhouse also offers to install the model, and it starts another speech engine if one is available. "Parakeet could not start, so" followed by the name of an engine means that Parakeet did not start and that engine started instead. "No speech engine could start" means that no speech engine is running. | If the notice says that Parakeet is now in use, nothing is required if speech works. If it says that the speech model is not installed, accept the offer to install the model, or run the Wheelhouse installer again and choose Parakeet when it asks for the speech engine. If it says that Parakeet could not start, or that no speech engine could start, run the Wheelhouse installer again and choose Parakeet when it asks for the speech engine. To use Google Cloud instead, pick it from Speech-to-Text Provider in the right-click menu. |
 | **Wheelhouse: STT Choice Not Saved** (Windows notification) | You picked a speech engine from Speech-to-Text Provider in the right-click menu. The settings file could not record the choice. | Wheelhouse already stopped the old engine and started the new one, so the new engine is running now. The settings file was not changed. It has a plain value where its stt section belongs, so it cannot store the choice. The next time Wheelhouse starts, it will not remember this choice. | Select Exit in the menu to close Wheelhouse. Open the settings file, %LOCALAPPDATA%\Wheelhouse\app\services\wheelhouse\config.toml, in Notepad. Find the line that sets stt to one value, such as stt = "parakeet", and delete it. Or copy config.toml.example over config.toml to restore every default. Then start Wheelhouse and pick the engine again from Speech-to-Text Provider. |
 | **Windows is blocking your microphone** (notice in the corner of the screen) | A speech engine starts, and Windows refuses it the microphone because "Let desktop apps access your microphone" is off. Parakeet and Google Cloud both report this. A Windows notification near the clock also appears and closes itself after a few seconds. | Wheelhouse cannot hear you, so dictation and voice commands do not work. The notice reads "WheelHouse cannot use your microphone. Windows is blocking it." and then names the Windows setting to change. The notice has only a close button and stays on the screen until you close it. | Open Settings > Privacy and security > Microphone and turn on "Let desktop apps access your microphone". Then start Wheelhouse again. Click the close button to close the notice. |
-| **Wheelhouse {version} is available** (notice in the corner of the screen) | Wheelhouse checks once a day whether a newer public release exists, and it found one. The title shows the new version number in place of {version}. The notice does not close by itself. Wheelhouse does not check when CHECK_FOR_UPDATES is false in config.toml. | A newer version of Wheelhouse can be installed. The notice has two buttons, Update now and Later. | Click Update now to download the installer, check it, close Wheelhouse, and run the installer. Click Later, or close the notice, to hide it. Wheelhouse can show the notice for the same version again 7 days after it last appeared. A newer version shows its notice at once. |
+| **Wheelhouse {version} is available** (notice in the corner of the screen) | Wheelhouse checks once a day whether a newer public release exists, and it found one. The title shows the new version number in place of {version}. The notice does not close by itself. The notice comes only from the automatic check. That check does not run when CHECK_FOR_UPDATES is false in config.toml. A manual check from the About Wheelhouse window shows its result in that window and shows no notice. | A newer version of Wheelhouse can be installed. The notice has two buttons, Update now and Later. | Click Update now to download the installer, check it, close Wheelhouse, and run the installer. Click Later, or close the notice, to hide it. Wheelhouse can show the notice for the same version again 7 days after it last appeared. A newer version shows its notice at once. |
 | **Wheelhouse update** (notice in the corner of the screen) | You clicked Update now on the notice "Wheelhouse {version} is available", and one step of the update failed. The update has three steps that can fail. Wheelhouse could not download the installer script. Or Wheelhouse could not check the download against the digest (a check value) and the size that the release names. Or Wheelhouse could not start the installer console. Wheelhouse keeps running. The notice has only a close button and closes by itself after about 20 seconds. | The update did not start, and Wheelhouse was not changed. The notice for the same version can appear again 7 days after it last appeared. A newer version shows its notice at once. | Run the installer from the website. Updating Wheelhouse describes how. |
 | **Welcome to Wheelhouse** (window) | You start Wheelhouse for the first time after an install, or for the first time after an update from a release that did not have this window. Wheelhouse shows this window one time. It does not come back on a later start or after a later update. | The window says that the round red button shows that Wheelhouse hears you. The button pulses from red to orange while you speak. It also says that you can say the word help on its own to open the help page. The window has two buttons: Open help and Close. | Click Open help to open the help page in your browser. The Enter key also chooses Open help, because it is the default button. Click Close, press Escape, or click the X in the title bar to close the window. |
 
@@ -644,7 +654,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 **COMMAND_COMPLETION_WAIT_MS** *(default: `1000`)* -- Has no effect. No part of Wheelhouse reads this setting. Changing it changes nothing. To give commands more time, change COMMAND_TIMEOUT_MS.
 
-**ENABLE_AUDIO_SUPPRESSION** *(default: `"auto"`)* -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone has an echo canceller, and pauses only when Windows reports none or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.
+**ENABLE_AUDIO_SUPPRESSION** *(default: `"auto"`)* -- Pause listening while this computer plays sound, when the microphone has no echo canceller. Valid values: "auto", true, false. "auto" asks Windows once at startup whether the default microphone and the default communications microphone have an echo canceller, and pauses when Windows reports none on one of them or cannot answer. Set true to pause whenever sound plays, or false to never pause; with false and no echo canceller, expect more misrecognitions, because the microphone picks up the sound. On a machine where Windows reports no echo canceller, sound from a screen reader also pauses listening.
 
 **ENABLE_SONOS_SUPPRESSION** *(default: `true`)* -- Pause listening while Sonos music is playing. Turn off only if you want Wheelhouse listening during playback; expect more misrecognitions, because the microphone picks up the audio.
 
@@ -658,7 +668,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 **SAVE_ENGINE_AUDIO** *(default: `false`)* -- A privacy setting for diagnosing a missing first sound: when true, the Parakeet v3 speech engine saves one sound file for every phrase you say, in the folder %LOCALAPPDATA%\WheelHouse\engine-audio. While the Parakeet v3 engine runs, it deletes each of these files that is more than 2 days old, at engine start and once an hour; while the engine does not run, the files stay. Uninstalling Wheelhouse deletes the folder, also when you keep your personal data. The files stay on this computer. Set true only while a support conversation or a bug investigation asks for the sound files, then turn it back off; while on, the files hold everything you say. A change takes effect when the speech engine next starts, which an engine switch or a Wheelhouse restart does.
 
-**CHECK_FOR_UPDATES** *(default: `true`)* -- Whether Wheelhouse asks api.github.com once a day if a newer release exists. When one exists, a notice offers to install it. Set false to stop the update check. Wheelhouse then makes no update request. Without this key, the check is on.
+**CHECK_FOR_UPDATES** *(default: `true`)* -- Whether Wheelhouse asks api.github.com once a day if a newer release exists. When one exists, a notice offers to install it. Set false to stop the automatic update check. Wheelhouse then makes no automatic update request. A manual check from the About Wheelhouse window still sends one request when you ask for it. Without this key, the check is on.
 
 **SIDE_OFFSET** *(default: `10`)* -- Width in pixels of the left-edge screen zone where the mouse thumb wheel adjusts brightness instead of volume. Raise it if the brightness zone is hard to hit.
 
@@ -692,7 +702,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ### [brightness_coordinator]
 
-**software_dimmer** *(default: `"gamma_dimmer"`)* -- The software dimming method used once hardware brightness is as low as it goes. Valid values: "gamma_dimmer" (darkens the screen image, including the mouse pointer, through the Windows display brightness curve), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.
+**software_dimmer** *(default: `"gamma_dimmer"`)* -- The software dimming method used once hardware brightness is as low as it goes, and for every brightness step when no plugin controls a screen's brightness. Valid values: "gamma_dimmer" (darkens the screen image, including the mouse pointer, through the Windows display brightness curve), "overlay" (a translucent overlay window), or "software_dimmer" (the same overlay window as "overlay"). Any other value falls back to "gamma_dimmer" with a warning in the log. Change only if dimming misbehaves with your monitor setup.
 
 **unwinding_threshold** *(default: `10`)* -- Currently has no effect -- Wheelhouse hands control back to the hardware only once software dimming is fully undone, whatever this is set to.
 
@@ -894,4 +904,4 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ---
 
-Generated: 2026-10-23 for the v1.4.0 release
+Generated: 2026-10-25 for the v1.4.1 release

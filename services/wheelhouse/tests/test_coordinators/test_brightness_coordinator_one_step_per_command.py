@@ -22,6 +22,7 @@ from services.wheelhouse.events import (
     BrightnessAdjustCommand,
     BrightnessOverflowEvent,
     BrightnessStateChanged,
+    HardwareBrightnessCommand,
 )
 from services.wheelhouse.integrations.samsung_control import BrightnessChange
 from services.wheelhouse.plugins import internal_panel_plugin as panel_mod
@@ -289,8 +290,15 @@ async def test_tv_that_sent_an_overflow_and_a_state_did_not_apply_the_command_in
 async def test_offline_overflow_for_a_finished_command_applies_on_arrival(coordinator, bus, dimmer):
     """A command's record closes when its publish returns. A device_offline overflow
     tagged with that command that arrives afterwards has no record to wait in, so it
-    applies on arrival, as an untagged overflow does. No plugin is running, so the
-    command itself gets no answer and adds no step."""
+    applies on arrival, as an untagged overflow does. A plugin is subscribed and has
+    reported a state but answers nothing, so the command itself adds no step (with no
+    subscriber, the software dimmer would take it: wh-gamma-dimmer-no-hardware)."""
+    async def silent_plugin(event):
+        pass
+
+    bus.subscribe(HardwareBrightnessCommand, silent_plugin)
+    await bus.publish(BrightnessStateChanged(
+        level=40, at_min=False, at_max=False, source_plugin="bravia"))
     command = BrightnessAdjustCommand(delta=-10)
     await coordinator._handle_brightness_command(command)
     assert dimmer.set_brightness.call_args_list == []

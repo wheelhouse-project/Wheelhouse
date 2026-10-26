@@ -98,7 +98,9 @@ SAVE_ENGINE_AUDIO = false
 # least 60 seconds after start. The request carries no user data, only a
 # User-Agent header with the Wheelhouse version, so GitHub also sees your
 # IP address. When a newer release exists, a notice offers to install it.
-# Set false to turn the check off. Wheelhouse then makes no update request.
+# Set false to turn the automatic check off. Wheelhouse then makes no automatic
+# update request. A manual check from the About Wheelhouse window, or the voice
+# command "check for updates", still sends one request when you ask for it.
 CHECK_FOR_UPDATES = true
 
 # Thumb wheel. With the mouse inside this many pixels of the left screen

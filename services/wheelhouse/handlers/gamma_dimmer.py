@@ -129,6 +129,25 @@ class GammaDimmer:
             self._hdc = None
             return
 
+        # A hard kill skips stop() and atexit, so the ramp Windows returns can
+        # still hold the dimming of an earlier run. Taken as the original, that
+        # dimming would stay until a reboot (wh-gamma-dimmer-no-hardware.1.1).
+        if all(
+            self._original_ramp[channel][255] * 100 < 65535 * 95
+            for channel in range(3)
+        ):
+            logger.warning(
+                "GammaDimmer: the display gamma ramp is dimmed on all three channels "
+                "(tops %s), probably from an earlier run that did not stop normally; "
+                "using the identity ramp as the original",
+                [self._original_ramp[channel][255] for channel in range(3)],
+            )
+            for channel in range(3):
+                for i in range(256):
+                    self._original_ramp[channel][i] = i * 257
+            if not self.gdi32.SetDeviceGammaRamp(self._hdc, ctypes.byref(self._original_ramp)):
+                logger.error("GammaDimmer: Failed to apply the identity gamma ramp")
+
         self._is_started = True
         logger.info(f"GammaDimmer started (HDC: {self._hdc})")
 

@@ -1696,6 +1696,13 @@ class LogicController:
         self._shutdown_complete = False
         self.background_tasks: List[asyncio.Task] = []
         self.gui_shm_name = gui_shm_name
+        # True while a manual update check runs (wh-about-check-updates).
+        # A second check_for_updates command then sends no second request.
+        self._manual_update_check_running = False
+        # True while Update now downloads and starts the installer. The
+        # update notice and the About window both send update_now, so a
+        # second request then starts nothing (wh-about-check-updates).
+        self._update_now_running = False
         # Set once a speech provider of this start reports ready. The
         # first-run notice waits for it (wh-first-run-notice.2).
         self._speech_provider_ready = asyncio.Event()
@@ -2685,6 +2692,62 @@ class LogicController:
             ),
         )
 
+    def _start_manual_update_check(self):
+        """Start one manual update check, unless one runs (wh-about-check-updates).
+
+        The About Wheelhouse window's "Check for updates" button and the
+        voice command "check for updates" both arrive here as the GUI
+        command ``check_for_updates``. The flag is set before the task is
+        created, so a second command that arrives before the first task
+        runs is also refused. Returns the task, or None when a check runs.
+        """
+        if self._manual_update_check_running:
+            logger.info("Manual update check already running; command ignored")
+            return None
+        self._manual_update_check_running = True
+        try:
+            return self.create_task_with_error_handling(
+                self._run_manual_update_check(), "ManualUpdateCheck"
+            )
+        except BaseException:
+            self._manual_update_check_running = False
+            raise
+
+    async def _run_manual_update_check(self) -> None:
+        """Run update_check.check_now off the event loop and send its result.
+
+        The request runs in a worker thread (asyncio.to_thread), so the
+        event loop, and with it the GUI, keeps working while it waits. One
+        ``update_check_result`` action goes to the GUI process, which shows
+        it in the About Wheelhouse window. An unexpected failure still sends
+        a "failed" result, so the window never waits for ever. This method
+        catches every exception: an exception that escapes a task made by
+        create_task_with_error_handling shuts Wheelhouse down.
+        """
+        message = {
+            "action": "update_check_result",
+            "status": "failed",
+            "installed": "",
+            "version": "",
+            "tag": "",
+        }
+        try:
+            result = await asyncio.to_thread(update_check.check_now)
+            message.update(
+                status=result.status,
+                installed=result.installed,
+                version=result.version,
+                tag=result.tag,
+            )
+        except Exception as exc:  # noqa: BLE001 -- the window must get an answer
+            logger.warning(f"Manual update check failed: {exc}")
+        finally:
+            self._manual_update_check_running = False
+        try:
+            self.state_manager.state_to_gui_queue.put_nowait(message)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Could not send the update check result to the GUI: {exc}")
+
     async def _handle_update_now(self, version, tag) -> None:
         """Update now on the update notice: download the installer for ``tag``, then run it.
 
@@ -2710,6 +2773,12 @@ class LogicController:
         if self.shutdown_event and self.shutdown_event.is_set():
             logger.info("Update now ignored: Wheelhouse is already shutting down")
             return
+        if self._update_now_running:
+            logger.info(f"Update now ignored for version {version!r}: an update already runs")
+            return
+        # Each failure return below clears the flag. A success shuts
+        # Wheelhouse down, so the flag stays set until the process exits.
+        self._update_now_running = True
         logger.info(f"Update now requested for version {version!r}, release tag {tag!r}")
         try:
             prepared = await asyncio.to_thread(
@@ -2732,6 +2801,7 @@ class LogicController:
             )
         except Exception as exc:  # noqa: BLE001 -- any failure leaves Wheelhouse running
             logger.warning(f"Update to version {version!r} failed: {exc}")
+            self._update_now_running = False
             _send_update_failed_notice(self.state_manager)
             return
         if not started:
@@ -2742,6 +2812,7 @@ class LogicController:
             logger.warning(
                 f"Update to version {version!r} failed: the installer console did not start"
             )
+            self._update_now_running = False
             _send_update_failed_notice(self.state_manager)
             return
         logger.info(
@@ -12440,6 +12511,10 @@ class LogicController:
             # The GUI sends the version and the release tag it was shown.
             # The handler is a coroutine: it downloads in a worker thread.
             "update_now": lambda: self.create_task_with_error_handling(self._handle_update_now(command.get("version"), command.get("tag")), "UpdateNow"),
+            # wh-about-check-updates: the About Wheelhouse window's "Check
+            # for updates" button, and the voice command through the GUI.
+            # The starter refuses a second check while one runs.
+            "check_for_updates": lambda: self._start_manual_update_check(),
             # wh-blocked-mic-message.1.2: the GUI process sends this when the
             # update notice becomes visible, with its version. The handler
             # writes the shown-notice record, so a notice that waits for a

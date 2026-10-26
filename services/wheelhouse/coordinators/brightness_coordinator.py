@@ -383,6 +383,13 @@ class BrightnessCoordinator:
                 finished, so the device_offline overflows held in the record are
                 decided after every plugin has answered.
         """
+        if not self._event_bus.has_subscribers(HardwareBrightnessCommand):
+            # A plugin subscribes only when it is set up for a display, and no plugin
+            # unsubscribes, so no subscriber means no hardware brightness control
+            # (wh-gamma-dimmer-no-hardware).
+            await self._apply_step_without_hardware(delta)
+            return
+
         event = HardwareBrightnessCommand(delta=delta, command_id=command_id)
         if command_id is None:
             await self._event_bus.publish(event)
@@ -397,7 +404,26 @@ class BrightnessCoordinator:
             self._open_commands.pop(command_id, None)
         logger.debug(f"Routed to hardware: delta={delta:+d}")
         await self._settle_held_offline_overflows(command_id, record)
-    
+
+    async def _apply_step_without_hardware(self, delta: int) -> None:
+        """
+        Give one step to the software dimmer when no plugin is subscribed to hardware commands.
+
+        A dim step engages the software dimmer, the same as a hardware overflow. In
+        IDLE the software dimmer is at 100%, so a brightening step changes nothing.
+
+        Args:
+            delta: Brightness adjustment delta (negative dims, positive brightens)
+        """
+        if not self._software_dimmer:
+            logger.debug(f"No hardware brightness plugin and no software dimmer; ignoring delta={delta:+d}")
+            return
+        if delta >= 0:
+            logger.debug(f"No hardware brightness plugin; no dimming to remove (delta={delta:+d})")
+            return
+        logger.debug(f"No hardware brightness plugin; dimming in software (delta={delta:+d})")
+        await self._engage_and_apply_software_step(delta)
+
     async def _settle_held_offline_overflows(self, command_id: int, record: _CommandRecord) -> None:
         """
         Decide the device_offline overflows held for one command after every plugin answered.

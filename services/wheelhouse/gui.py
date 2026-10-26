@@ -73,7 +73,7 @@ import uuid
 from functools import partial
 
 # --- Qt and PySide6 Imports ---
-from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame, QMessageBox
+from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame
 from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject
 from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QAction, QFont, QPixmap, QGuiApplication
 
@@ -273,7 +273,10 @@ PARAKEET_OFFER_DECLINE_BUTTON = "Not now"
 # The update notice (wh-release-update-check). The Logic process sends an
 # update_available action when a newer release exists. The notice uses its
 # own GrantPromptToast, like the Parakeet offer, and does not close by
-# itself. The title takes the version number.
+# itself. The title takes the version number. The About Wheelhouse window
+# shows this same constant for a newer release (about_window.py,
+# wh-about-check-updates). The literal stays here: the help build checks
+# that this notice title appears in gui.py (notice_descriptions.toml).
 UPDATE_NOTICE_TITLE = "Wheelhouse {version} is available"
 UPDATE_NOTICE_BODY = (
     "A newer version of Wheelhouse is available. Update now downloads it, "
@@ -2195,6 +2198,9 @@ class GuiManager(QObject):
                 elif action == "update_failed":
                     # wh-release-update-check: the update did not start.
                     self._show_update_failed_notice(message)
+                    about_window = getattr(self, "_about_window", None)
+                    if about_window is not None:
+                        about_window.allow_update_again()
                 elif action == "microphone_blocked":
                     # wh-blocked-mic-message: Windows blocks the
                     # microphone. The notice stays until it is closed.
@@ -2224,9 +2230,21 @@ class GuiManager(QObject):
                     self._open_settings_window()
                 elif action == "show_about_dialog":
                     # wh-about-window-close: the tray item queues this from
-                    # pystray's thread. The box is modal, so it starts from
-                    # the event loop and not inside this timer callback.
+                    # pystray's thread. The window opens from the event loop
+                    # and not inside this timer callback.
                     QTimer.singleShot(0, self.show_about_dialog)
+                elif action == "update_check_result":
+                    # wh-about-check-updates: the Logic process finished a
+                    # manual update check. The result belongs to the About
+                    # window; with no window there is nothing to show.
+                    about_window = getattr(self, "_about_window", None)
+                    if about_window is not None:
+                        about_window.show_result(message)
+                elif action == "check_for_updates_by_voice":
+                    # wh-about-check-updates: the voice command "check for
+                    # updates". The window opens from the event loop, as
+                    # the queued About request does, then starts the check.
+                    QTimer.singleShot(0, self._open_about_and_check)
                 elif action == "toggle_ptt_mode":
                     # wh-tray-ptt-toggle-thread: the tray item and the tray
                     # double-click queue this from pystray's thread, because
@@ -5454,7 +5472,7 @@ class GuiManager(QObject):
                 ),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Help", self.request_help_online, enabled=is_ready),
-                # The About box is modal and must open on the Qt thread, but
+                # The About window must open on the Qt thread, but
                 # pystray runs this callback on its own thread, so the item
                 # queues the request like Pattern Manager and Settings do
                 # (wh-about-window-close).
@@ -5728,19 +5746,58 @@ class GuiManager(QObject):
         self.send_command({"action": "open_help_online"})
 
     def show_about_dialog(self):
-        """Show the program name, version, and where to get help."""
-        version = get_app_version()
-        QMessageBox.information(
-            None,
-            "About Wheelhouse",
-            (
-                "Wheelhouse\n"
-                f"Version {version}\n\n"
-                "Voice-controlled desktop automation for Windows.\n\n"
-                "Choose Help from this menu, or say \"open voice access help\", "
-                "to open the Wheelhouse Assistant in your browser."
-            ),
-        )
+        """Show the About Wheelhouse window: name, version, help, and updates.
+
+        Runs on the Qt thread only. The tray item queues the request from
+        pystray's thread (wh-about-window-close), and the floating-button
+        menu calls this directly. One window only: a second call shows and
+        raises the window already there. The window is modeless, so this
+        method returns at once (wh-about-check-updates). The text is the
+        text of the earlier About box (about_window.ABOUT_TEXT).
+        """
+        if getattr(self, "_about_window", None) is None:
+            from about_window import AboutWindow
+
+            self._about_window = AboutWindow(version=get_app_version())
+            self._about_window.check_requested.connect(
+                self._on_about_check_requested
+            )
+            self._about_window.update_requested.connect(
+                self._on_about_update_requested
+            )
+        self._about_window.show()
+        self._about_window.raise_()
+        self._about_window.activateWindow()
+
+    def _open_about_and_check(self):
+        """The voice command "check for updates": open the window, then check.
+
+        The check goes through the window's own start, so the voice command
+        and the button send the same one ``check_for_updates`` command. The
+        Logic process refuses a second check while one runs.
+        """
+        self.show_about_dialog()
+        self._about_window.start_check()
+
+    def _on_about_check_requested(self):
+        """Ask the Logic process for one manual update check.
+
+        A command the full queue refused gets no result, so the window
+        shows the failure at once instead of waiting for ever.
+        """
+        if self.send_command({"action": "check_for_updates"}) is False:
+            self._about_window.show_result({"status": "failed"})
+
+    def _on_about_update_requested(self, version: str, tag: str):
+        """Update now in the About window: the update notice's update_now path.
+
+        A command the full queue refused starts nothing, so the window
+        enables Update now again.
+        """
+        if self.send_command(
+            {"action": "update_now", "version": version, "tag": tag}
+        ) is False:
+            self._about_window.allow_update_again()
 
     def exit_app(self):
         """Set shutdown event to trigger graceful application exit."""

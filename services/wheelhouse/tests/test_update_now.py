@@ -163,6 +163,7 @@ def _controller(events):
     controller = MagicMock(spec=LogicController)
     controller.config_service = MagicMock()
     controller.shutdown_event = None
+    controller._update_now_running = False
     controller.state_manager = MagicMock()
     controller.state_manager.state_to_gui_queue = Queue()
     controller._wheelhouse_process_ids.return_value = [11, 22]
@@ -305,6 +306,55 @@ def test_a_request_during_shutdown_does_nothing():
     with p_prepare, p_params, p_launch:
         _run(controller)
     assert events == []
+
+
+def test_a_second_request_while_one_runs_starts_nothing(caplog):
+    """The update notice and the About window both have Update now.
+
+    A press in each while the first download runs must not start a
+    second download or a second installer console (wh-about-check-updates).
+    """
+    from main import LogicController
+
+    events = []
+    controller = _controller(events)
+    p_prepare, p_params, p_launch, _, _ = _patched(events)
+
+    async def both():
+        await asyncio.gather(
+            LogicController._handle_update_now(controller, VERSION, TAG),
+            LogicController._handle_update_now(controller, VERSION, TAG),
+        )
+
+    with p_prepare, p_params, p_launch, caplog.at_level(logging.INFO, logger="main"):
+        asyncio.run(both())
+    assert events == ["prepare", "launch", "shutdown"]
+
+
+def test_a_failed_update_allows_the_next_request():
+    events = []
+    controller = _controller(events)
+    p_prepare, p_params, p_launch, _, _ = _patched(
+        events, prepare=UpdateCheckError("no network")
+    )
+    with p_prepare, p_params, p_launch:
+        _run(controller)
+    p_prepare, p_params, p_launch, _, _ = _patched(events)
+    with p_prepare, p_params, p_launch:
+        _run(controller)
+    assert events == ["prepare", "prepare", "launch", "shutdown"]
+
+
+def test_an_installer_that_did_not_start_allows_the_next_request():
+    events = []
+    controller = _controller(events)
+    p_prepare, p_params, p_launch, _, _ = _patched(events, launch_result=False)
+    with p_prepare, p_params, p_launch:
+        _run(controller)
+    p_prepare, p_params, p_launch, _, _ = _patched(events)
+    with p_prepare, p_params, p_launch:
+        _run(controller)
+    assert events == ["prepare", "launch", "prepare", "launch", "shutdown"]
 
 
 def test_the_download_runs_in_a_worker_thread():

@@ -4043,15 +4043,16 @@ class TestAHyphenAfterTheCaptureBelongsToTheCaller:
             for key, value in self._bodies(transformed).items():
                 totals[key] += value
 
-        # 335: the record-my-training-word command was added
-        # (wh-first-sound-lost.23). 334: the voice-teaching command was
+        # 336: the check-for-updates command was added
+        # (wh-about-check-updates). 335: the record-my-training-word command
+        # was added (wh-first-sound-lost.23). 334: the voice-teaching command was
         # deleted with Distil-Whisper
         # (wh-distil-whisper-removal commit 2). 335: the settings command was
         # added (wh-voice-settings-window, commit 3326662c). 334: the numeric
         # command was added before it (wh-pattern-variants-numeric.1);
         # go-to-app was split from switch-to-app before that
         # (wh-safety-word-free-commands).
-        assert len(entries) == 335, len(entries)
+        assert len(entries) == 336, len(entries)
         # 123: the numeric command added the 123rd numeric capture; before it
         # the press pattern's "<number> times" repeat count had added the
         # 122nd (wh-voice-access-parity.2.12).

@@ -2609,8 +2609,33 @@ class TestHelpAndAboutOnTheMenu:
     """
 
     @pytest.fixture
-    def manager(self, qapp):
+    def manager(self, qapp, monkeypatch):
         import pystray
+
+        # Boss ruling 2026-10-25 11:22: no test puts a real window on the
+        # desktop. Every AboutWindow built here gets WA_DontShowOnScreen
+        # as it is built, so isVisible() still answers True.
+        from PySide6.QtCore import Qt
+
+        try:
+            import about_window
+        except ImportError:
+            about_window = None  # the code before the change has no window
+        if about_window is not None:
+            original_init = about_window.AboutWindow.__init__
+
+            def off_screen_init(window, *args, **kwargs):
+                original_init(window, *args, **kwargs)
+                window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+
+            monkeypatch.setattr(
+                about_window.AboutWindow, "__init__", off_screen_init
+            )
+        # The About box before wh-about-check-updates was a modal
+        # QMessageBox; replace it so no run can open one.
+        import gui
+
+        monkeypatch.setattr(gui, "QMessageBox", MagicMock(), raising=False)
         with patch("gui.FloatingButton"), \
              patch("gui.WorkingDialog"), \
              patch("gui.QTimer"), \
@@ -2654,12 +2679,22 @@ class TestHelpAndAboutOnTheMenu:
         send.assert_called_once_with({"action": "open_help_online"})
 
     def test_about_shows_a_dialog_naming_the_program_and_version(self, manager):
-        with patch("gui.QMessageBox") as message_box, \
-             patch("gui.get_app_version", return_value="9.9.9"):
+        # wh-about-check-updates: the About box is now the modeless
+        # AboutWindow, with the same text and a "Check for updates" button.
+        with patch("gui.get_app_version", return_value="9.9.9"):
             manager.show_about_dialog()
 
-        assert message_box.information.called
-        body = message_box.information.call_args[0][2]
+        window = manager._about_window
+        try:
+            from PySide6.QtCore import Qt
+
+            assert window.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+            assert window.isVisible()
+            assert window.windowTitle() == "About Wheelhouse"
+            body = window.about_text()
+        finally:
+            window.close()
+            window.deleteLater()
         assert "Wheelhouse" in body
         assert "9.9.9" in body
         assert 'say "open voice access help"' in body
@@ -2670,8 +2705,10 @@ class TestHelpAndAboutOnTheMenu:
         self, manager
     ):
         """wh-about-window-close: pystray runs a menu callback on its own
-        thread, and a modal QMessageBox cannot run there. The item only
-        queues the request, as the Settings and Pattern Manager items do."""
+        thread, and a Qt window built there would not close. The item only
+        queues the request, as the Settings and Pattern Manager items do.
+        wh-about-check-updates: the box is now AboutWindow; no window may be
+        built on the pystray thread."""
         import threading
         import pystray
 
@@ -2686,16 +2723,17 @@ class TestHelpAndAboutOnTheMenu:
             except BaseException as exc:
                 failures.append(exc)
 
-        with patch("gui.QMessageBox") as message_box:
+        with patch("about_window.AboutWindow") as window_cls:
             worker = threading.Thread(target=invoke)
             worker.start()
             worker.join(timeout=2)
 
         assert not worker.is_alive(), "the tray callback never returned"
         assert not failures, failures
-        assert not message_box.information.called, (
+        assert not window_cls.called, (
             "the About box was built on the pystray thread"
         )
+        assert getattr(manager, "_about_window", None) is None
         manager.state_from_logic_queue.put.assert_called_once_with(
             {"action": "show_about_dialog"}
         )
@@ -2704,7 +2742,7 @@ class TestHelpAndAboutOnTheMenu:
         self, manager
     ):
         """The queue handler runs on the Qt thread. It hands the box to the
-        event loop with a zero-delay timer, so the modal loop does not start
+        event loop with a zero-delay timer, so the window does not open
         inside the queue timer's own callback."""
         from queue import Empty
 
@@ -2714,11 +2752,11 @@ class TestHelpAndAboutOnTheMenu:
             Empty(),
         ]
 
-        with patch("gui.QMessageBox") as message_box, \
+        with patch("about_window.AboutWindow") as window_cls, \
              patch("gui.QTimer") as timer:
             manager._check_queues_and_events()
 
-        assert not message_box.information.called, (
+        assert not window_cls.called, (
             "the box opened inside the queue timer callback"
         )
         timer.singleShot.assert_called_once_with(0, manager.show_about_dialog)

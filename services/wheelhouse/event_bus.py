@@ -36,6 +36,15 @@ class EventBus:
         """
         self._subscribers[event_type].append(callback)
 
+    def has_subscribers(self, event_type: type) -> bool:
+        """
+        Tell whether any callback is subscribed to an event type. Changes nothing.
+
+        :param event_type: The type of event to check.
+        :return: True if at least one callback is subscribed to the type.
+        """
+        return bool(self._subscribers.get(event_type))
+
     async def publish(self, event: Any):
         """
         Publish an event to all subscribed callbacks.

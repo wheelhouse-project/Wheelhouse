@@ -6,6 +6,7 @@ Covers:
 - Unrelated event types don't cross-fire
 - Handler exception isolation (return_exceptions=True behavior)
 - Async handlers are awaited concurrently
+- has_subscribers reports whether a type has a handler, and changes nothing
 """
 
 from dataclasses import dataclass
@@ -267,3 +268,34 @@ async def test_non_callable_subscriber_does_not_crash_publish():
 
     # publish() should NOT raise -- the error is isolated and logged
     await bus.publish(AlphaEvent(value="x"))
+
+
+# -----------------------------------------------------------------------
+# has_subscribers (wh-gamma-dimmer-no-hardware)
+# -----------------------------------------------------------------------
+
+def test_has_subscribers_is_false_for_a_type_with_no_subscriber():
+    bus = EventBus()
+
+    assert bus.has_subscribers(AlphaEvent) is False
+
+
+def test_has_subscribers_is_true_only_for_the_subscribed_type():
+    bus = EventBus()
+
+    async def handler(event):
+        pass
+
+    bus.subscribe(AlphaEvent, handler)
+
+    assert bus.has_subscribers(AlphaEvent) is True
+    assert bus.has_subscribers(BetaEvent) is False
+
+
+def test_has_subscribers_adds_no_entry_for_the_type_it_checks():
+    # The check only reads: it must not add an empty handler list for the type.
+    bus = EventBus()
+
+    bus.has_subscribers(BetaEvent)
+
+    assert BetaEvent not in bus._subscribers

@@ -85,6 +85,7 @@ Run from services/wheelhouse:
     python tests/mutation_gate_thumb_wheel_sensitivity.py --check    # patterns
 """
 import importlib.util
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -103,6 +104,30 @@ spec = importlib.util.spec_from_file_location(
     ROOT / "services/stt_providers/shared/tests/mutation_gate_runner.py")
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
+
+
+def _launch(service, test_file, report, collect):
+    """Start pytest directly, never through ``uv run``.
+
+    The default launch goes through scripts/run_tests.py and ``uv run``,
+    which builds a .venv inside a git worktree and makes the worktree hard to
+    delete; tests/mutation_gate_volume_router_sonos_enabled.py makes the same
+    replacement. Run this gate with an interpreter that has the service's
+    dependencies: ``sys.executable`` starts pytest in the service directory.
+    The runner's ownership, timeout, and parsing are unchanged
+    (wh-thumb-wheel-not-detected).
+    """
+    command = [
+        sys.executable, "-m", "pytest",
+        *runner._targets(test_file),
+        f"--junitxml={report}",
+        *(["--collect-only", "-q"] if collect
+          else ["-q", "-rf", "-p", "no:randomly"]),
+    ]
+    return command, service
+
+
+runner.LAUNCH = _launch
 
 _shared_run_pytest = runner._run_pytest
 
