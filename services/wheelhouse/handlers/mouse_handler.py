@@ -36,10 +36,10 @@ Typical Usage:
 """
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import threading
-import time
-from typing import Any
+from typing import Any, List, Optional
 
 from pynput import mouse
 
@@ -71,6 +71,19 @@ BRIGHTNESS_STEP = 2
 # (wh-brightness-wheel-two-steps).
 DEFAULT_BRIGHTNESS_STEPS_PER_COMMAND = 2
 
+BRIGHTNESS_ZONE = "brightness"
+VOLUME_ZONE = "volume"
+
+
+@dataclass
+class _WheelRun:
+    """Consecutive drained batches of one zone (wh-wheel-zone-timeout-jump)."""
+
+    zone: str
+    last_x: int
+    ticks: int = 0
+
+
 class MouseHandler:
     """Handles mouse movements, clicks, and thumb wheel events."""
 
@@ -82,13 +95,16 @@ class MouseHandler:
         self.event_bus = event_bus
         
         self.mouse_x = 0
-        self.last_mouse_event = 0.0
-        self.debounce_delay = 0.1
 
         # HID event processing - HIDListener now does the batching
         self.hid_event_queue = asyncio.Queue(maxsize=50)
-        self.hid_listener = HIDListener(self.loop, self.hid_event_queue)
+        self.hid_listener = HIDListener(
+            self.loop, self.hid_event_queue, pointer_x=lambda: self.mouse_x
+        )
         self.process_hid_task = None
+        # The zone of the last wheel batch; None until the first batch.
+        # process_hid_events resets the filter when this changes.
+        self._last_wheel_zone: Optional[str] = None
         
         self.pynput_listener = None
         self._pynput_thread = None
@@ -134,7 +150,7 @@ class MouseHandler:
         :description: Routes pre-batched thumb wheel events to brightness or volume handlers
         :data_in: Pre-batched event dictionaries from hid_event_queue
         :data_out: Calls to _handle_brightness_zone_event or _handle_volume_zone_event
-        :notes: Long-running asyncio task consuming hid_event_queue from step 2. Each event contains aggregated delta over 50ms window plus its arrival time ("at", time.monotonic()), ready for immediate processing. Each drained batch first passes through ThumbWheelFilter on its own, in arrival order (step 3.5, wh-mouse-wheel-sensitivity): ticks below the dead zone are held, a pause longer than the gesture gap between arrival times forgets them, and one batch passes at most the cap. The zone acts on the sum of what passed; a drain the filter reduces to zero reaches no zone. Batches are filtered one by one, not as their sum, because the zone handlers await their plugins and later batches queue behind that wait (wh-mouse-wheel-sensitivity.1.1). Routing logic: if mouse_x < side_offset (left side of screen), routes to brightness handler (step 4A). Otherwise routes to volume handler (step 4B). Mouse position tracked by on_move() listener. Uses asyncio queue.get() for non-blocking event reception.
+        :notes: Long-running asyncio task consuming hid_event_queue from step 2. Each event contains aggregated delta over 50ms window plus its arrival time ("at", time.monotonic()), ready for immediate processing. Each drained batch first passes through ThumbWheelFilter on its own, in arrival order (step 3.5, wh-mouse-wheel-sensitivity): ticks below the dead zone are held, a pause longer than the gesture gap between arrival times forgets them, and one batch passes at most the cap. The zone acts on the sum of what passed; a drain the filter reduces to zero reaches no zone. Batches are filtered one by one, not as their sum, because the zone handlers await their plugins and later batches queue behind that wait (wh-mouse-wheel-sensitivity.1.1). Routing logic (wh-wheel-zone-timeout-jump): the zone of a batch comes from its own "x" stamp, the pointer position HIDListener read when it sent the batch, so a batch that waits behind a slow TV or speaker keeps the zone it was rolled in; a batch with no stamp uses mouse_x at drain time. x < side_offset (left side of screen) is the brightness zone (step 4A); otherwise the volume zone (step 4B). The filter is reset before a batch whose zone differs from the previous batch's zone, also across drains, so ticks held in one zone never reach the other. Consecutive batches of one zone form a run. The runs are final before any await: each run, in arrival order, whose passed ticks sum to nonzero makes one handler call with that sum, so a drain with one zone makes one call. Mouse position tracked by on_move() listener. Uses asyncio queue.get() for non-blocking event reception.
         """
         logger.debug("Starting HID event processor for pre-batched events.")
         
@@ -152,40 +168,61 @@ class MouseHandler:
                         break
                 
                 # Filter each drained batch on its own, in arrival order, and
-                # act on the sum of what passed. Batches queue up here while a
-                # zone awaits its plugin, and each one is 50 ms of real
-                # movement with its own cap (wh-mouse-wheel-sensitivity.1.1).
+                # act on the sum of what passed in each run of one zone.
+                # Batches queue up here while a zone awaits its plugin, and
+                # each one is 50 ms of real movement with its own cap
+                # (wh-mouse-wheel-sensitivity.1.1) and its own zone
+                # (wh-wheel-zone-timeout-jump). No await until the runs are
+                # final.
                 total_delta = 0
-                ticks = 0
+                runs: List[_WheelRun] = []
                 for e in events:
                     if e and e.get("type") == "thumb_wheel":
                         delta = e.get("delta", 0)
                         total_delta += delta
                         if delta != 0:
-                            ticks += self.thumb_wheel_filter.filter_batch(
+                            x = e.get("x", self.mouse_x)
+                            zone = BRIGHTNESS_ZONE if x < self.side_offset else VOLUME_ZONE
+                            # Held ticks belong to the zone they were rolled
+                            # in; the next batch must not release them into
+                            # the other zone.
+                            if self._last_wheel_zone not in (None, zone):
+                                self.thumb_wheel_filter.reset()
+                            self._last_wheel_zone = zone
+                            if not runs or runs[-1].zone != zone:
+                                runs.append(_WheelRun(zone, x))
+                            run = runs[-1]
+                            run.last_x = x
+                            run.ticks += self.thumb_wheel_filter.filter_batch(
                                 delta, at=e.get("at")
                             )
                     self.hid_event_queue.task_done()
 
-                if total_delta != 0 or ticks != 0:
+                ticks_passed = sum(run.ticks for run in runs)
+                if total_delta != 0 or ticks_passed != 0:
                     logger.debug(
                         f"Processed batch of {len(events)} events, "
-                        f"total_delta={total_delta}, ticks_passed={ticks}"
+                        f"total_delta={total_delta}, ticks_passed={ticks_passed}"
                     )
                 # The routing decision reads what PASSED, never the raw sum:
                 # per-batch capping and dead-zone release are not linear, so
                 # raw deltas can cancel (+4, -2, -2) while the passed ticks do
                 # not (3, -2, -2 = -1), and the reverse
                 # (wh-mouse-wheel-sensitivity.1.2).
-                if ticks == 0:
-                    # Held below the dead zone, cancelled, or no wheel
-                    # movement at all; nothing for a zone to do.
-                    continue
-                if self.mouse_x < self.side_offset:
-                    await self._handle_brightness_zone_event(ticks)
-                else:
-                    await self._handle_volume_zone_event(ticks)
-                    
+                for run in runs:
+                    if run.ticks == 0:
+                        # Held below the dead zone or cancelled; nothing for
+                        # a zone to do.
+                        continue
+                    logger.debug(
+                        f"Thumb wheel run: zone={run.zone}, x={run.last_x}, "
+                        f"ticks={run.ticks}"
+                    )
+                    if run.zone == BRIGHTNESS_ZONE:
+                        await self._handle_brightness_zone_event(run.ticks)
+                    else:
+                        await self._handle_volume_zone_event(run.ticks)
+
             except asyncio.CancelledError:
                 logger.debug("HID event processor task cancelled.")
                 break
@@ -216,17 +253,14 @@ class MouseHandler:
         :description: Captures mouse position for brightness/volume zone routing and Atmos hover detection.
         :data_in: x, y coordinates from pynput mouse listener.
         :data_out: Updates self.mouse_x for zone detection, queues position for Atmos trigger check.
-        :notes: Runs in pynput's background thread. Debounces updates (0.1s min interval). Mouse x
-            position used by HID processor (step 3) to route thumb wheel events to brightness
-            (left) vs volume (right).
+        :notes: Runs in pynput's background thread. Stores every move: a pointer that stops sends no
+            further move, so a dropped last move would leave the wheel on the wrong zone
+            (wh-wheel-zone-timeout-jump). HIDListener reads mouse_x when it sends a thumb wheel
+            batch and stamps the batch with it. The HID processor (step 3) routes each batch to
+            brightness (left) vs volume (right) by that stamp, and reads mouse_x itself only for
+            a batch that carries no stamp.
         """
-        try:
-            current_time = time.time()
-            if current_time - self.last_mouse_event > self.debounce_delay:
-                self.last_mouse_event = current_time
-                self.mouse_x = x
-        except Exception as e:
-            logger.error(f"Error in on_move: {e}")
+        self.mouse_x = x
 
     async def _adjust_brightness_staged(self, brightness_change_step: int):
         """:flow: High-Resolution Mouse Input
@@ -297,7 +331,7 @@ class MouseHandler:
         volume_change_step = -delta # Invert delta for volume (thumb wheel up = volume up)
         actual_volume_change_for_sonos = volume_change_step * self.volume_increment
         
-        logger.debug(f"VOLUME zone (X={self.mouse_x}): Delta={delta}, VolumeChangeStep={volume_change_step}, SonosVolumeChange={actual_volume_change_for_sonos}")
+        logger.debug(f"VOLUME zone: Delta={delta}, VolumeChangeStep={volume_change_step}, SonosVolumeChange={actual_volume_change_for_sonos}")
         
         # Publish volume adjustment event for plugin system
         try:

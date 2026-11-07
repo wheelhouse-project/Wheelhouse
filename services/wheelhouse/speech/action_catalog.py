@@ -717,9 +717,9 @@ ACTION_CATALOG = (
         ),
         "params": [],
         "example": (
-            'Trigger "^(?:hide|hyde|dismiss) numbers$" with no params: '
-            'saying "hide numbers" hides the badges. "hyde numbers" and '
-            '"dismiss numbers" do the same.'
+            'Trigger "^(?:hide|hyde|dismiss|dismissed) numbers$" with no '
+            'params: saying "hide numbers" hides the badges. "hyde numbers", '
+            '"dismiss numbers", and "dismissed numbers" do the same.'
         ),
         "audience": "advanced",
         "group": "Clicking",
@@ -773,11 +773,49 @@ ACTION_CATALOG = (
         "summary": "Closes the mouse grid without clicking anything.",
         "params": [],
         "example": (
-            'Trigger "^(?:hide|dismiss) grid$" with no params: saying '
-            '"hide grid" removes the grid. "dismiss grid" does the same.'
+            'Trigger "^(?:hide|dismiss|dismissed) grid$" with no params: '
+            'saying "hide grid" removes the grid. "dismiss grid" and '
+            '"dismissed grid" do the same.'
         ),
         "audience": "advanced",
         "group": "Mouse grid",
+    },
+    {
+        "name": "escape_hides_numbers_and_grid",
+        "label": "Hide the numbers and the grid after Escape",
+        "summary": (
+            "Hides the numbered badges and the mouse grid; put it after the "
+            "step that presses Escape. With key words it hides only when "
+            "Escape is the only key they name, whatever the count."
+        ),
+        "params": [
+            {
+                "name": "key_sequence",
+                "summary": (
+                    "Optional spoken key words, the capture group g1 of "
+                    "the press-keys trigger; the hide runs only when "
+                    "Escape is the only key they name, in any spelling "
+                    "press_keys reads. Leave it out to always hide."
+                ),
+                "kind": "group_ref",
+            },
+            {
+                "name": "repeat",
+                "summary": (
+                    "Optional spoken count, the capture group g2 of the "
+                    "press-keys trigger; any count still hides."
+                ),
+                "kind": "group_ref",
+            },
+        ],
+        "example": (
+            'Trigger "^(?:escape|dismiss|dismissed)$" with params ["esc"] '
+            "for press and no params for this step: saying \"escape\" "
+            "presses the Escape key and then hides the numbers and the "
+            "grid. \"dismiss\" and \"dismissed\" do the same."
+        ),
+        "audience": "advanced",
+        "group": "Clicking",
     },
     {
         "name": "grid_next_screen_command",

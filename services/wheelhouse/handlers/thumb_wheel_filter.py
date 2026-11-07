@@ -4,12 +4,18 @@ WHERE IT SITS. handlers/hid_listener.py turns the Logitech thumb wheel's raw
 HID reports into one batch per 50 ms window and queues it.
 handlers/mouse_handler.py drains that queue, runs EACH queued batch through
 this filter in arrival order, and hands the sum of what passed to the
-brightness zone or the volume zone by pointer position. Both zones get the
-same dead zone and the same speed limit. The filter runs per batch, not on
-the drained sum, because the zones await their plugins (the Sonos volume
-plugin makes three network calls per change) and later batches queue up
-behind that wait; summing them first would cap several 50 ms windows of
-real movement as if they were one flick (wh-mouse-wheel-sensitivity.1.1).
+brightness zone or the volume zone. The zone comes from each batch's own
+stamp of the pointer X, read when the listener sent the batch, so consecutive
+batches of one zone make one sum and a drain can reach both zones in turn.
+Both zones get the same dead zone and the same speed limit, but they do not
+share held ticks: when a batch's zone differs from the previous batch's zone,
+MouseHandler calls reset() before that batch is filtered, so ticks held in one
+zone are forgotten and never released into the other
+(wh-wheel-zone-timeout-jump). The filter runs per batch, not on the drained
+sum, because the zones await their plugins (the Sonos volume plugin makes
+three network calls per change) and later batches queue up behind that wait;
+summing them first would cap several 50 ms windows of real movement as if
+they were one flick (wh-mouse-wheel-sensitivity.1.1).
 
 WHY. David reported on 2026-09-13 that the wheel "responds to the slightest
 touch" and "needs to be smoother". The log showed why (wheelhouse.log,
@@ -92,6 +98,11 @@ class ThumbWheelFilter:
         self._held_ticks = 0
         self._gesture_open = False
         self._last_batch_at: float | None = None
+
+    def reset(self) -> None:
+        """Forget the held ticks and close the gesture (a zone change)."""
+        self._held_ticks = 0
+        self._gesture_open = False
 
     def filter_batch(self, delta: int, at: float | None = None) -> int:
         """Return the ticks of this batch the zones may act on.

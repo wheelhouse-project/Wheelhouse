@@ -233,6 +233,8 @@ class PatternManagerDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
         )
         self._apply_screen_bounded_size()
+        # wh-pattern-window-full-height: set by the first showEvent.
+        self._default_geometry_applied = False
         # Prevent Qt from quitting the app when this dialog closes
         self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
 
@@ -318,6 +320,36 @@ class PatternManagerDialog(QDialog):
         )
         self.setMinimumSize(min_size)
         self.resize(initial_size)
+
+    def _fit_frame_to_available_height(self):
+        """Make the whole window frame, title bar included, fill the
+        available height of its screen (wh-pattern-window-full-height),
+        so the text boxes do not clip their letters.
+
+        ``frameGeometry()`` includes the title bar only once the native
+        window exists, so this runs from the first showEvent, not from
+        __init__. Qt sends showEvent before Windows draws the window, so
+        the window never appears at the old height. ``move()`` positions
+        the frame, not the client area.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        frame = self.frameGeometry()
+        extra_w = frame.width() - self.width()
+        extra_h = frame.height() - self.height()
+        self.resize(
+            self.width(),
+            max(available.height() - extra_h, self.minimumHeight()),
+        )
+        frame_w = self.width() + extra_w
+        x = min(frame.x(), available.x() + available.width() - frame_w)
+        self.move(max(x, available.x()), available.y())
+        # move() sets WA_Moved, and Qt centers a QDialog on a later show only
+        # while WA_Moved is False. Clear it so that a reopen (closeEvent
+        # hides this dialog) still centers it on the screen under the cursor.
+        self.setAttribute(Qt.WidgetAttribute.WA_Moved, False)
 
     # ------------------------------------------------------------------ #
     #  Font-size zoom (wh-pattern-font-size)
@@ -481,6 +513,14 @@ class PatternManagerDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Only the first show: a later one (a restore from minimized, or a
+        # reopen of this same dialog) keeps the size the user chose. The
+        # position is as before the fit: Qt centers a reopened dialog on the
+        # screen under the cursor (_fit_frame_to_available_height clears
+        # WA_Moved for that).
+        if not self._default_geometry_applied:
+            self._default_geometry_applied = True
+            self._fit_frame_to_available_height()
         if self._tree.topLevelItemCount() == 0:
             self._load_timer.start()
 

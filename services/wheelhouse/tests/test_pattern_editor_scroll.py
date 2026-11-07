@@ -22,7 +22,7 @@ import pytest
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
 pytestmark = pytest.mark.usefixtures("qapp")
 
@@ -115,20 +115,30 @@ def _settle():
 
 
 def _visible_in_viewport(scroll, widget):
-    """True when the middle of the widget's left edge is inside the scroll
-    area's viewport, so the user can see where the field starts and read
-    its text line.
+    """True when the start of the field's text line is inside the scroll
+    area's viewport, so the user can see the text cursor and read the
+    text line.
+
+    For a line edit the check uses the middle of the left edge of the
+    text cursor rectangle (``QLineEdit.cursorRect``); for any other
+    widget it uses the middle of the widget's left edge.
 
     The whole widget is not required: Qt's own scroll-to-focus code
     (``QScrollArea.ensureWidgetVisible``) treats a line edit as visible
     once its text cursor is in view, which can leave a few pixels of the
     field's border cut off, and a wide field stays partly off to the
     right on a screen narrower than the content's minimum width, which
-    the horizontal scroll bar covers.
+    the horizontal scroll bar covers. The 1.4.2 release cut found that
+    the border pixel at x=0 is not a stable point: a longer step label
+    widened the editor by 9 px, and the left border of the field moved
+    1 px out of the viewport while the text cursor stayed in view.
     """
-    point = widget.mapTo(
-        scroll.viewport(), QPoint(0, widget.height() // 2)
-    )
+    if isinstance(widget, QLineEdit):
+        cursor = widget.cursorRect()
+        local = QPoint(cursor.left(), cursor.center().y())
+    else:
+        local = QPoint(0, widget.height() // 2)
+    point = widget.mapTo(scroll.viewport(), local)
     return scroll.viewport().rect().contains(point)
 
 

@@ -198,7 +198,7 @@ class TestWhatMustNotChange:
         test_pattern_customize_vs_duplicate.py; this is what the try-it
         line says once the draft carries the id. The rule being edited was
         customized from ``maximize-window`` and its new phrases generate
-        ``^(?:escape|dismiss)$``, the expression the shipped ``escape``
+        ``^(?:escape|dismiss|dismissed)$``, the expression the shipped ``escape``
         entry carries. Without the id the draft takes the ``escape`` slot
         by the legacy text rule -- which answers with that built-in's OWN
         doc identity -- and the preview says the draft wins. The save keeps
@@ -219,7 +219,7 @@ class TestWhatMustNotChange:
             "action_type": "hotkey",
             "action_params": {"keys": ["ctrl", "alt", "m"]},
             "requires_hotword": False,
-            "phrases": ["escape", "dismiss"],
+            "phrases": ["escape", "dismiss", "dismissed"],
             "exclude_pattern_id": PatternManager.pattern_id("^(?:maximize)$"),
             "doc_id": "maximize-window",
         }

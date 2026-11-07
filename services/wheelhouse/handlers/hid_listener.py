@@ -116,11 +116,15 @@ class HIDListener:
         event_queue: asyncio.Queue,
         target_vid: int = LOGITECH_VID,
         target_pids: Set[int] = LOGITECH_PIDS,
+        pointer_x: Optional[Callable[[], int]] = None,
     ):
         self.loop = loop
         self.event_queue = event_queue
         self.target_vid = target_vid
         self.target_pids = target_pids
+        # wh-wheel-zone-timeout-jump: reads the pointer X for the "x" stamp on
+        # each batch. Called on the HID thread and on the loop thread.
+        self._pointer_x = pointer_x
 
         self.opened_devices: List[hid.HidDevice] = []
         self.listener_thread: Optional[threading.Thread] = None
@@ -183,6 +187,32 @@ class HIDListener:
             except asyncio.QueueFull:
                 logger.debug("hid_event_queue saturated; dropping event")
 
+    def _batch_event(self, delta: int) -> Dict[str, Union[str, int, float]]:
+        """Build the queue entry for one batch; both send sites call this.
+
+        "at" is the arrival stamp the consumer's filter measures the gesture
+        gap from, so a batch that waits in the queue behind a slow zone action
+        still reads as part of the roll (wh-mouse-wheel-sensitivity.1.1).
+        monotonic, like the filter.
+
+        "x" is the pointer X at the send, present only with a pointer reader.
+        The consumer takes the batch's zone from it, because a batch can wait
+        in the queue while the pointer moves to the other zone
+        (wh-wheel-zone-timeout-jump).
+        """
+        # crewcut: one stamp covers one 50 ms window, so when the pointer
+        # crosses the zone edge inside a window, that window's ticks (the
+        # consumer's filter passes at most 3) go to the zone at the send. To
+        # remove this limit, send the batch early when the zone changes.
+        event: Dict[str, Union[str, int, float]] = {
+            "type": "thumb_wheel",
+            "delta": delta,
+            "at": time.monotonic(),
+        }
+        if self._pointer_x is not None:
+            event["x"] = self._pointer_x()
+        return event
+
     def _accumulate_and_maybe_send(self, delta: int):
         """Accumulate delta and send batched event if batch interval has elapsed.
 
@@ -220,15 +250,7 @@ class HIDListener:
                 window_remaining = self.batch_interval - elapsed
 
         if should_send:
-            # "at" is the arrival stamp the consumer's filter measures the
-            # gesture gap from, so a batch that waits in the queue behind a
-            # slow zone action still reads as part of the roll
-            # (wh-mouse-wheel-sensitivity.1.1). monotonic, like the filter.
-            event: Dict[str, Union[str, int, float]] = {
-                "type": "thumb_wheel",
-                "delta": accumulated_delta,
-                "at": time.monotonic(),
-            }
+            event = self._batch_event(accumulated_delta)
             self.loop.call_soon_threadsafe(self._safe_enqueue_event, event)
             logger.debug(f"  >>> Queued batched thumb_wheel event: delta={accumulated_delta} (batched from multiple events)")
         elif window_remaining is not None:
@@ -258,11 +280,7 @@ class HIDListener:
             self.delta_accumulator = 0
             self.last_batch_time = time.time()
         if accumulated_delta != 0:
-            self._safe_enqueue_event({
-                "type": "thumb_wheel",
-                "delta": accumulated_delta,
-                "at": time.monotonic(),
-            })
+            self._safe_enqueue_event(self._batch_event(accumulated_delta))
             logger.debug(f"  >>> Queued tail thumb_wheel event: delta={accumulated_delta} (window ended without a further report)")
 
     def _cancel_tail_flush(self) -> None:

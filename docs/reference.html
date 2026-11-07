@@ -66,7 +66,16 @@
 <p>Action name: <code>hide_overlay_command</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
 <p>Removes the numbered badges painted by the show-numbers command.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^(?:hide|hyde|dismiss) numbers$" with no params: saying "hide numbers" hides the badges. "hyde numbers" and "dismiss numbers" do the same.</code></p>
+<p>Example: <code>Trigger "^(?:hide|hyde|dismiss|dismissed) numbers$" with no params: saying "hide numbers" hides the badges. "hyde numbers", "dismiss numbers", and "dismissed numbers" do the same.</code></p>
+<h4 id="hide-the-numbers-and-the-grid-after-escape">Hide the numbers and the grid after Escape</h4>
+<p>Action name: <code>escape_hides_numbers_and_grid</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
+<p>Hides the numbered badges and the mouse grid; put it after the step that presses Escape. With key words it hides only when Escape is the only key they name, whatever the count.</p>
+<p>Parameters, in the order a pattern passes them:</p>
+<ul>
+<li><code>key_sequence</code> (group_ref) -- Optional spoken key words, the capture group g1 of the press-keys trigger; the hide runs only when Escape is the only key they name, in any spelling press_keys reads. Leave it out to always hide.</li>
+<li><code>repeat</code> (group_ref) -- Optional spoken count, the capture group g2 of the press-keys trigger; any count still hides.</li>
+</ul>
+<p>Example: <code>Trigger "^(?:escape|dismiss|dismissed)$" with params ["esc"] for press and no params for this step: saying "escape" presses the Escape key and then hides the numbers and the grid. "dismiss" and "dismissed" do the same.</code></p>
 <h4 id="right-or-double-click-a-control-by-name">Right- or double-click a control by name</h4>
 <p>Action name: <code>click_element_command</code>. The Pattern Manager lists it under Advanced actions, Clicking.</p>
 <p>Parses a full gesture click command (right click X, double click X) and clicks the named control with that mouse gesture.</p>
@@ -151,7 +160,7 @@
 <p>Action name: <code>grid_dismiss_command</code>. The Pattern Manager lists it under Advanced actions, Mouse grid.</p>
 <p>Closes the mouse grid without clicking anything.</p>
 <p>Parameters: none.</p>
-<p>Example: <code>Trigger "^(?:hide|dismiss) grid$" with no params: saying "hide grid" removes the grid. "dismiss grid" does the same.</code></p>
+<p>Example: <code>Trigger "^(?:hide|dismiss|dismissed) grid$" with no params: saying "hide grid" removes the grid. "dismiss grid" and "dismissed grid" do the same.</code></p>
 <h4 id="mouse-grid-action-word">Mouse-grid action word</h4>
 <p>Action name: <code>grid_action_command</code>. The Pattern Manager lists it under Advanced actions, Mouse grid.</p>
 <p>Runs one grid-only action word (mark, drag, or move_here) at the center of the grid that is on the screen; with the grid closed the word types as normal dictation.</p>
@@ -689,7 +698,7 @@
       <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
       <a href="#top">Back to top ↑</a>
     </nav>
-    <p class="fine-print">Documentation for Wheelhouse 1.4.1.</p>
+    <p class="fine-print">Documentation for Wheelhouse 1.4.2.</p>
   </footer>
 </body>
 </html>

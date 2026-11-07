@@ -76,7 +76,20 @@ Removes the numbered badges painted by the show-numbers command.
 
 Parameters: none.
 
-Example: `Trigger "^(?:hide|hyde|dismiss) numbers$" with no params: saying "hide numbers" hides the badges. "hyde numbers" and "dismiss numbers" do the same.`
+Example: `Trigger "^(?:hide|hyde|dismiss|dismissed) numbers$" with no params: saying "hide numbers" hides the badges. "hyde numbers", "dismiss numbers", and "dismissed numbers" do the same.`
+
+#### Hide the numbers and the grid after Escape
+
+Action name: `escape_hides_numbers_and_grid`. The Pattern Manager lists it under Advanced actions, Clicking.
+
+Hides the numbered badges and the mouse grid; put it after the step that presses Escape. With key words it hides only when Escape is the only key they name, whatever the count.
+
+Parameters, in the order a pattern passes them:
+
+- `key_sequence` (group_ref) -- Optional spoken key words, the capture group g1 of the press-keys trigger; the hide runs only when Escape is the only key they name, in any spelling press_keys reads. Leave it out to always hide.
+- `repeat` (group_ref) -- Optional spoken count, the capture group g2 of the press-keys trigger; any count still hides.
+
+Example: `Trigger "^(?:escape|dismiss|dismissed)$" with params ["esc"] for press and no params for this step: saying "escape" presses the Escape key and then hides the numbers and the grid. "dismiss" and "dismissed" do the same.`
 
 #### Right- or double-click a control by name
 
@@ -215,7 +228,7 @@ Closes the mouse grid without clicking anything.
 
 Parameters: none.
 
-Example: `Trigger "^(?:hide|dismiss) grid$" with no params: saying "hide grid" removes the grid. "dismiss grid" does the same.`
+Example: `Trigger "^(?:hide|dismiss|dismissed) grid$" with no params: saying "hide grid" removes the grid. "dismiss grid" and "dismissed grid" do the same.`
 
 #### Mouse-grid action word
 
@@ -904,4 +917,4 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ---
 
-Generated: 2026-10-25 for the v1.4.1 release
+Generated: 2026-11-06 for the v1.4.2 release

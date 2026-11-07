@@ -3763,3 +3763,336 @@ async def test_grid_journey_d_mark_then_drag_reports_a_stuck_button(
         "the grid stayed open after the drag; the action closes the session "
         "whether or not Input could carry it out"
     )
+
+
+# ---------------------------------------------------------------------------
+# The Escape command also hides the numbers and the grid
+# (wh-escape-hides-overlay)
+# ---------------------------------------------------------------------------
+#
+# David's rule (2026-11-04): "The Escape command should always hide numbers
+# and hide grid in addition to pressing the Escape key". His answers of
+# 2026-11-05 put "dismiss" and "press escape" under the same rule. The
+# overlay and grid windows are WS_EX_NOACTIVATE and WS_EX_TRANSPARENT, so
+# the Escape key itself never reaches them: Logic must hide them.
+#
+# The step order is the boss's ruling of 2026-11-04 16:55: the Escape key
+# press goes out FIRST, then the hide. The two go to different processes
+# (the key to Input over the shared-memory frame, the hides to the GUI
+# queue), so neither queue alone can show the order. ``_say_and_record``
+# records every Logic-side hand-over to either boundary in one list, in
+# the order Logic made them, and still reads the real frames and the real
+# GUI queue so the payloads are the shipped ones.
+
+# Each phrase, the words spoken, and the Input frame its key press is today
+# (dev 8f25c769). "escape" and "dismiss" run the doc_id "escape" row
+# (press esc, a press_key_action); the "press ..." phrases run the
+# press-keys row (press_keys, a hotkey_action). The key frames must stay
+# exactly these. The boss's ruling of 2026-11-05 17:04 puts every press
+# command whose ONLY key is Escape under the rule, whatever the count or
+# the spelling: hence "press escape 3 times" and "press esc".
+_ESCAPE_PHRASES = {
+    "escape": (["escape"], "press_key_action", {"key": "esc", "repeat": 1}),
+    "dismiss": (["dismiss"], "press_key_action", {"key": "esc", "repeat": 1}),
+    "press escape": (
+        ["press", "escape"], "hotkey_action", {"keys": ["esc"], "repeat": 1},
+    ),
+    "press escape 3 times": (
+        ["press", "escape", "3", "times"], "hotkey_action",
+        {"keys": ["esc"], "repeat": 3},
+    ),
+    "press esc": (
+        ["press", "esc"], "hotkey_action", {"keys": ["esc"], "repeat": 1},
+    ),
+}
+
+# Test ids with no spaces, so a mutation gate can read them back from
+# pytest's summary lines ("press escape" becomes "press-escape").
+_ESCAPE_IDS = [phrase.replace(" ", "-") for phrase in _ESCAPE_PHRASES]
+
+# GUI actions that tell the user something went wrong. None of them may
+# appear when the Escape command finds nothing to hide.
+_ESCAPE_NOTICE_ACTIONS = {"show_click_notice", "show_notice", "show_error"}
+
+# The speech processor's per-utterance bookkeeping frames. They are sent for
+# every utterance, command or not, so they say nothing about the command and
+# are left out of the recorded sequence and frames.
+_UTTERANCE_BOOKKEEPING = {"start_utterance", "end_utterance"}
+
+
+def _key_fields(params: dict, expected: dict) -> dict:
+    """The key fields of a key-press frame, without the stamped envelope."""
+
+    return {name: params.get(name) for name in expected}
+
+
+async def _say_and_record(rig: JourneyRig, processor, words: list) -> tuple:
+    """Speak ``words``; return (order, Input frames, GUI messages).
+
+    ``order`` is the Logic-side hand-over sequence across both boundaries:
+    ``("input", action)`` for each ``send_command`` / ``send_request`` and
+    ``("gui", action)`` for each put on the state-to-GUI queue. The spies
+    call the real methods, so the frames and the GUI dicts still travel the
+    production path and are read back below.
+
+    The overlay's clear and unpin are performed by a background task
+    (``_perform_overlay_effects`` schedules it), so the spy on it collects
+    those tasks and the utterance is not finished until they are. Their
+    ``unpin_snapshot`` request gets the reply the Input handler sends.
+    """
+    from services.wheelhouse.shared.pin_snapshot import PinSnapshotResponse
+
+    order: list = []
+    frames: list = []
+    effect_tasks: list = []
+    controller = rig.controller
+    gui_queue = controller.state_manager.state_to_gui_queue
+    barrier = "_escape_journey_input_barrier"
+
+    real_send_command = rig.app.send_command
+    real_send_request = rig.app.send_request
+    real_put = gui_queue.put
+    real_perform = controller._perform_overlay_effects
+
+    async def send_command(payload, params=None):
+        action = payload.get("action") if isinstance(payload, dict) else payload
+        if action not in _UTTERANCE_BOOKKEEPING:
+            order.append(("input", action))
+        return await real_send_command(payload, params)
+
+    async def send_request(action, *args, **kwargs):
+        if action != barrier and action not in _UTTERANCE_BOOKKEEPING:
+            order.append(("input", action))
+        return await real_send_request(action, *args, **kwargs)
+
+    def _gui_name(message):
+        return message.get("action") if isinstance(message, dict) else message
+
+    # Only ``put`` is wrapped: ``multiprocessing.Queue.put_nowait`` is
+    # ``self.put(obj, False)``, so production's put_nowait calls reach this
+    # wrapper too, once each.
+    def put(message, *args, **kwargs):
+        order.append(("gui", _gui_name(message)))
+        return real_put(message, *args, **kwargs)
+
+    def perform(effects, *, trace_id):
+        task = real_perform(effects, trace_id=trace_id)
+        if task is not None:
+            effect_tasks.append(task)
+        return task
+
+    async def speak_and_flush():
+        await _feed_utterance(processor, words)
+        await asyncio.gather(*effect_tasks)
+        reply = await real_send_request(barrier, {}, timeout_s=5.0)
+        assert reply.get("status") == "ok", reply
+
+    async def collect():
+        while True:
+            if rig.command_ready_event.is_set():
+                frame = _read_command_frame(rig.shm)
+                rig.command_ready_event.clear()
+                action, params, _has, request_id, _trace = frame
+                if action == barrier:
+                    rig.app.response_queue.put({
+                        "status": "ok", "action": action,
+                        "request_id": request_id,
+                    })
+                    return
+                if action not in _UTTERANCE_BOOKKEEPING:
+                    frames.append(frame)
+                if request_id is not None:
+                    assert action == "unpin_snapshot", (
+                        "the escape journey has no reply for unexpected "
+                        f"request {action!r}"
+                    )
+                    reply = PinSnapshotResponse(
+                        status="ok", reason=None,
+                        overlay_session_id=params["overlay_session_id"],
+                        snapshot_id=params["snapshot_id"], pinned=False,
+                    ).to_dict()
+                    reply.update(action=action, request_id=request_id)
+                    rig.app.response_queue.put(reply)
+            await asyncio.sleep(0.001)
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(rig.app, "send_command", send_command))
+        stack.enter_context(patch.object(rig.app, "send_request", send_request))
+        stack.enter_context(patch.object(gui_queue, "put", put))
+        stack.enter_context(
+            patch.object(controller, "_perform_overlay_effects", perform)
+        )
+        tasks = [
+            asyncio.create_task(speak_and_flush()),
+            asyncio.create_task(collect()),
+        ]
+        try:
+            async with asyncio.timeout(10.0):
+                await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    # Read the GUI queue after the spies are gone: the barrier that
+    # ``_grid_gui_actions`` puts must not enter ``order``.
+    return order, frames, _grid_gui_actions(rig)
+
+
+def _assert_key_first(phrase: str, order: list, frames: list) -> None:
+    """The Escape key press is the first thing Logic sends, exactly as today."""
+
+    _words, key_action, key_params = _ESCAPE_PHRASES[phrase]
+    assert order, f"{phrase!r} sent nothing to Input or the GUI"
+    assert order[0] == ("input", key_action), (
+        f"{phrase!r}: the first hand-over was {order[0]!r}; the Escape key "
+        f"press ({key_action}) must go out first (sequence: {order!r})"
+    )
+    assert frames, f"{phrase!r} wrote no Input frame"
+    action, params, _h, _r, _t = frames[0]
+    assert action == key_action and _key_fields(params, key_params) == (
+        key_params
+    ), (
+        f"{phrase!r} changed its key press: frame {action!r} {params!r}, "
+        f"expected {key_action!r} {key_params!r}"
+    )
+    key_frames = [
+        f for f in frames if f[0] in ("press_key_action", "hotkey_action")
+    ]
+    assert len(key_frames) == 1, (
+        f"{phrase!r} pressed keys {len(key_frames)} times: {key_frames!r}"
+    )
+
+
+def _gui_action_names(messages: list) -> list:
+    return [m.get("action") for m in messages if isinstance(m, dict)]
+
+
+@pytest.mark.parametrize("phrase", list(_ESCAPE_PHRASES), ids=_ESCAPE_IDS)
+async def test_escape_command_with_numbers_shown_presses_escape_then_hides_them(
+    journey_rig, phrase,
+):
+    rig = journey_rig
+    controller = rig.controller
+    processor = _grid_speech_processor(rig)
+    _paint_badges(controller, "snap-escape", 1, 2, 3)
+    words = _ESCAPE_PHRASES[phrase][0]
+
+    order, frames, gui = await _say_and_record(rig, processor, words)
+
+    _assert_key_first(phrase, order, frames)
+    assert controller.click_overlay_state.state is OverlayState.CLOSED, (
+        f"{phrase!r} left the numbers in state "
+        f"{controller.click_overlay_state.state.value}; the Escape command "
+        "must hide them"
+    )
+    assert ("gui", "clear_overlay") in order[1:], (
+        f"{phrase!r} never told the GUI to clear the numbers, so the badges "
+        f"would stay on screen (sequence: {order!r})"
+    )
+    assert "clear_overlay" in _gui_action_names(gui)
+    assert not _ESCAPE_NOTICE_ACTIONS & set(_gui_action_names(gui)), gui
+    typed = [f[0] for f in frames if f[0] == "intelligent_insert_text"]
+    assert typed == [], f"{phrase!r} was typed as text: {frames!r}"
+
+
+@pytest.mark.parametrize("phrase", list(_ESCAPE_PHRASES), ids=_ESCAPE_IDS)
+async def test_escape_command_with_grid_shown_presses_escape_then_hides_it(
+    journey_rig, phrase,
+):
+    rig = journey_rig
+    monitors = _grid_monitors()
+    rig.controller._grid_monitor_context = lambda: (monitors, monitors[0])
+    machine = rig.controller.grid_overlay_state
+    processor = _grid_speech_processor(rig)
+    await _say(rig, processor, ["show", "grid"])
+    assert machine.is_open
+    assert "paint_grid" in _grid_gui_names(rig)
+    words = _ESCAPE_PHRASES[phrase][0]
+
+    order, frames, gui = await _say_and_record(rig, processor, words)
+
+    _assert_key_first(phrase, order, frames)
+    assert not machine.is_open, (
+        f"{phrase!r} left the mouse grid open; the Escape command must hide it"
+    )
+    assert ("gui", "clear_grid") in order[1:], (
+        f"{phrase!r} never told the GUI to erase the grid (sequence: "
+        f"{order!r})"
+    )
+    assert "clear_grid" in _gui_action_names(gui)
+    assert not _ESCAPE_NOTICE_ACTIONS & set(_gui_action_names(gui)), gui
+    typed = [f[0] for f in frames if f[0] == "intelligent_insert_text"]
+    assert typed == [], f"{phrase!r} was typed as text: {frames!r}"
+
+
+@pytest.mark.parametrize("phrase", list(_ESCAPE_PHRASES), ids=_ESCAPE_IDS)
+async def test_escape_command_with_nothing_shown_presses_escape_quietly(
+    journey_rig, phrase,
+):
+    """Nothing to hide: the key press, then only the grid's defensive clear.
+
+    The hide still runs. The overlay hide is a no-op from CLOSED, and the
+    grid dismiss from CLOSED sends one defensive ``clear_grid``
+    (grid_overlay_state.py ``_on_dismiss``, wh-mouse-grid.1.3) -- the same
+    thing "hide grid" sends -- which erases nothing the user can see. The
+    exact sequence is asserted so that a notice, an error, a second key
+    press or any typed text fails the test.
+    """
+    rig = journey_rig
+    controller = rig.controller
+    processor = _grid_speech_processor(rig)
+    assert controller.click_overlay_state.state is OverlayState.CLOSED
+    assert not controller.grid_overlay_state.is_open
+    words, key_action, _params = _ESCAPE_PHRASES[phrase]
+
+    order, frames, gui = await _say_and_record(rig, processor, words)
+
+    _assert_key_first(phrase, order, frames)
+    assert order == [("input", key_action), ("gui", "clear_grid")], (
+        f"{phrase!r} with nothing shown must press Escape and then run the "
+        f"hide, which sends only the grid's defensive clear (sequence: "
+        f"{order!r})"
+    )
+    assert [f[0] for f in frames] == [key_action], frames
+    assert _gui_action_names(gui) == ["clear_grid"], gui
+
+
+@pytest.mark.parametrize(
+    "words, key_action, key_params",
+    [
+        (["press", "tab"], "hotkey_action", {"keys": ["tab"], "repeat": 1}),
+        (
+            ["press", "control", "escape"], "hotkey_action",
+            {"keys": ["ctrl", "esc"], "repeat": 1},
+        ),
+    ],
+    ids=["press-tab", "press-control-escape"],
+)
+async def test_other_press_commands_keep_the_numbers_and_the_grid(
+    journey_rig, words, key_action, key_params,
+):
+    """Only a press of Escape alone hides: other press commands are unchanged.
+
+    The numbers are shown so that a hide which spread to another press
+    command would show here as a clear_overlay and a CLOSED machine.
+    "press control escape" is listed because it names Escape inside a key
+    combination, which the boss's ruling of 2026-11-05 17:04 leaves as it
+    is (acceptance item 4).
+    """
+    rig = journey_rig
+    controller = rig.controller
+    processor = _grid_speech_processor(rig)
+    _paint_badges(controller, "snap-press", 1, 2)
+
+    order, frames, gui = await _say_and_record(rig, processor, words)
+
+    assert order == [("input", key_action)], (
+        f"{' '.join(words)!r} must only press its keys (sequence: {order!r})"
+    )
+    assert len(frames) == 1, frames
+    action, params, _h, _r, _t = frames[0]
+    assert action == key_action
+    assert _key_fields(params, key_params) == key_params, params
+    assert controller.click_overlay_state.state is OverlayState.PAINTED
+    assert _gui_action_names(gui) == [], gui

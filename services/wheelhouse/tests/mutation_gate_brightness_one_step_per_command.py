@@ -570,10 +570,10 @@ MUTATIONS = [
         "name": "samsung-offline-drops-id",
         "target": SAMSUNG,
         "old": (
-            "                        delta=event.delta, source_plugin=self.name, reason='device_offline',\n"
-            "                        command_id=event.command_id))\n"
+            "            delta=event.delta, source_plugin=self.name, reason='device_offline',\n"
+            "            command_id=event.command_id))\n"
         ),
-        "new": "                        delta=event.delta, source_plugin=self.name, reason='device_offline'))\n",
+        "new": "            delta=event.delta, source_plugin=self.name, reason='device_offline'))\n",
         "catchers": {
             SAMSUNG_OFFLINE: UNTAGGED_ONE,
             SAMSUNG_TIMEOUT: UNTAGGED_ONE,

@@ -11,7 +11,10 @@ failed three parametrized cases -- and only those three, out of 117 -- with
     AssertionError: 'dismiss' is listed as needing no hotword to reach
     doc_id 'escape', but the matcher refuses it without one
 
-The trigger was then widened to ^(?:escape|dismiss)$.
+The trigger was then widened to ^(?:escape|dismiss)$. Later, wh-dismissed-alias
+added "dismissed" to the same row and to the hide-numbers and hide-grid rows.
+The two mutations below that name "dismiss" remove only "dismiss" and keep
+"dismissed", so each one still tests the older word alone.
 
 THE COMPLETENESS CHECK. The other 37 forms in that table already worked, so
 every assertion about them was written green. This gate is what shows those
@@ -25,7 +28,8 @@ Run it from services/wheelhouse:
 
 Five mutations of speech/config/patterns.toml:
 
-  revert-dismiss            Put ^escape$ back. The plain revert of the fix.
+  revert-dismiss            Drop "dismiss" from ^(?:escape|dismiss|dismissed)$.
+                            The plain revert of the fix.
   drop-whole-utterance      Take whole_utterance_only off the escape row and
                             leave the alias in place. INPUT-LEVEL: "dismiss"
                             alone still fires, so every direction-two
@@ -44,7 +48,8 @@ Five mutations of speech/config/patterns.toml:
                             the table says select-word owns "select word",
                             and the assertion that the first owning row is
                             the named one is what catches the fall-through.
-  shadow-dismiss-numbers    Drop "dismiss" from ^(?:hide|hyde|dismiss) numbers$.
+  shadow-dismiss-numbers    Drop "dismiss" from
+                            ^(?:hide|hyde|dismiss|dismissed) numbers$.
                             Widening the escape row must not cost the older
                             two-word wording wh-dismiss-alias-restore put
                             back at David's direction on 2026-08-20.
@@ -105,8 +110,8 @@ _ESCAPE_ROW = 'doc_id = "escape"\nwhole_utterance_only = true\n'
 MUTATIONS = [
     {
         "name": "revert-dismiss",
-        "old": "pattern = '''^(?:escape|dismiss)$'''\n",
-        "new": "pattern = '''^escape$'''\n",
+        "old": "pattern = '''^(?:escape|dismiss|dismissed)$'''\n",
+        "new": "pattern = '''^(?:escape|dismissed)$'''\n",
         "expect": [_OWNS, _FIRES, _NO_HOTWORD, _ALONE],
     },
     {
@@ -133,8 +138,8 @@ MUTATIONS = [
     },
     {
         "name": "shadow-dismiss-numbers",
-        "old": "pattern = '''^(?:hide|hyde|dismiss) numbers$'''\n",
-        "new": "pattern = '''^(?:hide|hyde) numbers$'''\n",
+        "old": "pattern = '''^(?:hide|hyde|dismiss|dismissed) numbers$'''\n",
+        "new": "pattern = '''^(?:hide|hyde|dismissed) numbers$'''\n",
         "expect": [_OWNS, _FIRES, _NO_HOTWORD, _TOGGLES],
     },
 ]

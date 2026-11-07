@@ -155,7 +155,7 @@ def mutation(name, file, old, new, expect):
 
 
 PER_BATCH = (
-    "                            ticks += self.thumb_wheel_filter.filter_batch(\n"
+    "                            run.ticks += self.thumb_wheel_filter.filter_batch(\n"
     '                                delta, at=e.get("at")\n'
     "                            )\n"
 )
@@ -308,19 +308,19 @@ MUTATIONS = [
     # ---- the MouseHandler wiring ----------------------------------------
     mutation("loop-skips-the-filter", MOUSE,
              PER_BATCH,
-             "                            ticks += delta\n",
+             "                            run.ticks += delta\n",
              ["test_single_tick_reaches_no_zone",
               "test_flick_is_capped_before_volume_zone",
               "test_filter_applies_to_brightness_zone_too"]),
     mutation("a-held-batch-still-reaches-a-zone", MOUSE,
-             "                if ticks == 0:\n"
-             "                    # Held below the dead zone, cancelled, or no wheel\n"
-             "                    # movement at all; nothing for a zone to do.\n"
-             "                    continue\n",
-             "                if ticks == 0:\n"
-             "                    # Held below the dead zone, cancelled, or no wheel\n"
-             "                    # movement at all; nothing for a zone to do.\n"
-             "                    pass\n",
+             "                    if run.ticks == 0:\n"
+             "                        # Held below the dead zone or cancelled; nothing for\n"
+             "                        # a zone to do.\n"
+             "                        continue\n",
+             "                    if run.ticks == 0:\n"
+             "                        # Held below the dead zone or cancelled; nothing for\n"
+             "                        # a zone to do.\n"
+             "                        pass\n",
              ["test_single_tick_reaches_no_zone",
               "test_filter_applies_to_brightness_zone_too"]),
     mutation("brightness-cap-never-applies", MOUSE,
@@ -359,31 +359,30 @@ MUTATIONS = [
              "        ))\n",
              ["test_value_below_one_is_treated_as_one"]),
     mutation("routing-reads-the-raw-sum", MOUSE,
-             "                if ticks == 0:\n"
-             "                    # Held below the dead zone, cancelled, or no wheel\n",
-             "                if total_delta == 0:\n"
-             "                    # Held below the dead zone, cancelled, or no wheel\n",
+             "                    if run.ticks == 0:\n"
+             "                        # Held below the dead zone or cancelled; nothing for\n",
+             "                    if total_delta == 0:\n"
+             "                        # Held below the dead zone or cancelled; nothing for\n",
              ["test_cancelling_raw_deltas_still_route_the_passed_ticks",
               "test_cancelling_raw_deltas_route_to_the_brightness_zone_too",
               "test_correction_behind_a_slow_zone_action_is_not_lost"]),
     mutation("filter-sees-the-drained-sum-not-each-batch", MOUSE,
-             "                        total_delta += delta\n"
-             "                        if delta != 0:\n"
-             + PER_BATCH +
+             PER_BATCH +
              "                    self.hid_event_queue.task_done()\n"
              "\n"
-             "                if total_delta != 0 or ticks != 0:\n",
-             "                        total_delta += delta\n"
+             "                ticks_passed = sum(run.ticks for run in runs)\n",
+             "                            run.ticks += delta\n"
              "                    self.hid_event_queue.task_done()\n"
              "\n"
-             "                if total_delta != 0 or ticks != 0:\n"
-             "                    ticks = self.thumb_wheel_filter.filter_batch(total_delta)\n",
+             "                for run in runs:\n"
+             "                    run.ticks = self.thumb_wheel_filter.filter_batch(run.ticks)\n"
+             "                ticks_passed = sum(run.ticks for run in runs)\n",
              ["test_each_queued_batch_gets_its_own_cap",
               "test_queued_batch_arrival_times_reach_the_filter",
               "test_slow_zone_action_does_not_merge_later_batches"]),
     mutation("only-the-last-batch-counts", MOUSE,
              PER_BATCH,
-             PER_BATCH.replace("ticks +=", "ticks ="),
+             PER_BATCH.replace("run.ticks +=", "run.ticks ="),
              ["test_each_queued_batch_gets_its_own_cap",
               "test_slow_zone_action_does_not_merge_later_batches"]),
     mutation("arrival-time-not-passed-to-the-filter", MOUSE,
@@ -457,9 +456,9 @@ MUTATIONS = [
              ["test_flush_tail_starts_a_new_window"]),
     mutation("flush-sends-an-empty-tail", HID,
              "        if accumulated_delta != 0:\n"
-             "            self._safe_enqueue_event({\n",
+             "            self._safe_enqueue_event(self._batch_event(accumulated_delta))\n",
              "        if True:\n"
-             "            self._safe_enqueue_event({\n",
+             "            self._safe_enqueue_event(self._batch_event(accumulated_delta))\n",
              ["test_flush_tail_with_nothing_held_sends_nothing"]),
     mutation("arm-keeps-the-earlier-timer", HID,
              "        if self._tail_flush_handle is not None:\n"
@@ -475,20 +474,19 @@ MUTATIONS = [
              "        pass\n",
              ["test_stop_cancels_an_armed_flush"]),
     mutation("batch-lacks-arrival-time", HID,
-             '                "at": time.monotonic(),\n'
-             "            }\n",
-             "            }\n",
+             "            event = self._batch_event(accumulated_delta)\n",
+             "            event = self._batch_event(accumulated_delta)\n"
+             '            del event["at"]\n',
              ["test_batched_event_carries_its_arrival_time"]),
     mutation("arrival-time-from-wall-clock", HID,
-             '                "at": time.monotonic(),\n'
-             "            }\n",
-             '                "at": time.time(),\n'
-             "            }\n",
+             '            "at": time.monotonic(),\n',
+             '            "at": time.time(),\n',
              ["test_batched_event_carries_its_arrival_time"]),
     mutation("tail-lacks-arrival-time", HID,
-             '                "at": time.monotonic(),\n'
-             "            })\n",
-             "            })\n",
+             "            self._safe_enqueue_event(self._batch_event(accumulated_delta))\n",
+             "            event = self._batch_event(accumulated_delta)\n"
+             '            del event["at"]\n'
+             "            self._safe_enqueue_event(event)\n",
              ["test_tail_event_carries_its_arrival_time"]),
     mutation("closed-loop-raises", HID,
              "        except RuntimeError:\n"

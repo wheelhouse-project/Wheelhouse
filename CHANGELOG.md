@@ -5,6 +5,21 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-11-06
+
+### Changed
+
+- "escape" and "dismiss" now also hide the numbers and the mouse grid, after they press the Escape key. A press command whose only key is Escape does the same, for example "press escape", "press esc", or "press escape 3 times". A key combination such as "press control escape", and every other press command, work as before.
+- "dismissed" now works the same as "dismiss" in "dismiss", "dismiss numbers", and "dismiss grid". Speech recognition often writes "dismiss" as "dismissed". Only the whole phrase is a command: when you say a longer sentence such as "dismissed the meeting", Wheelhouse types it as before.
+- The Pattern Manager window now opens at the full height of its screen, from the top of the screen to the taskbar, so the text in the "Pattern regex" and "Raw actions" boxes is not cut off. The width stays the same. If you change the size of the window, it keeps your size when you restore it or open it again before Wheelhouse stops.
+- The notices "The Samsung TV did not respond in time." and "The Samsung TV connection is unavailable." now say that the address of the TV may have changed, for example after a router restart. They tell you to reserve the address on the router, or to put the new address in Wheelhouse and pair the TV again.
+- After a Samsung TV does not answer or is offline, Wheelhouse does not contact the TV for 10 seconds. A brightness change during those 10 seconds does not wait for the TV: Wheelhouse handles it as it handles a change that the TV did not answer. A correct answer from the TV ends the 10 seconds. If the TV comes back during the 10 seconds, Wheelhouse uses it again after the 10 seconds end.
+
+### Fixed
+
+- Thumb wheel movement now stays in the zone of the screen where you rolled the wheel. Before, while Wheelhouse waited for a Samsung TV that did not answer, the wheel movement waited too. If the pointer left the left edge of the screen during the wait, the movement then changed the volume instead of the brightness, and the volume could jump. A quick pointer movement just before you rolled the wheel could also send the movement to the wrong zone.
+- The notice "Voice clicking is disabled -- check config.toml [click]." now shows once per session. Before, when voice clicking was turned off in `config.toml`, the notice showed each time you said a click command with the safety word.
+
 ## [1.4.1] - 2026-10-26
 
 ### Added

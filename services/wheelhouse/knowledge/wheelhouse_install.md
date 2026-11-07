@@ -334,5 +334,5 @@ Each installer failure message and its action is listed under [Installation fail
 
 ---
 
-Generated: 2026-10-25 for the v1.4.1 release
-Wheelhouse version: 1.4.1
+Generated: 2026-11-06 for the v1.4.2 release
+Wheelhouse version: 1.4.2

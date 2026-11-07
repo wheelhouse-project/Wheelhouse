@@ -647,7 +647,17 @@ MUTATIONS = [
         "                pass\n"
         "            lc._forward_click_notice(**kwargs)\n",
         [F_CLICK],
-        ['test_with_the_safety_word_a_notice_is_shown_and_nothing_typed'],
+        ['test_with_the_safety_word_a_notice_is_shown_and_nothing_typed', 'test_click_turned_off_shows_its_notice_once_per_session'],
+    ),
+    # wh-click-off-notice-once: the safety-word path obeys the
+    # once-per-session check of the non-deferred path.
+    mut(
+        "actions-disabled-notice-shown-every-time",
+        ACTIONS,
+        "                if lc._click_disabled_notice_shown:\n",
+        "                if False:\n",
+        [F_CLICK],
+        ['test_click_turned_off_shows_its_notice_once_per_session'],
     ),
     # The typo test is not a catcher here: since cancel-fix is
     # whole_utterance_only (68ac69f0), "cancel fix the typo" never reaches

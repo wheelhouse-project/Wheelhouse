@@ -49,7 +49,12 @@ def test_preview_input_preserves_the_shipped_escape_guard(tmp_path):
     """The old preview copy omitted the whole-utterance-only guard."""
     entry = runtime_entry("escape", tmp_path)
     assert entry["whole_utterance_only"] is True
-    assert entry["actions"] == [{"function": "press", "params": ["esc"]}]
+    # The second step hides the numbers and the grid after the key press
+    # (wh-escape-hides-overlay).
+    assert entry["actions"] == [
+        {"function": "press", "params": ["esc"]},
+        {"function": "escape_hides_numbers_and_grid"},
+    ]
 
 
 def test_release_rewrite_changes_only_expression():

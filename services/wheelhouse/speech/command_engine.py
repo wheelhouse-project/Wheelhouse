@@ -699,12 +699,14 @@ class TextParser:
             # crewcut: a rule whose FAILING step is not its first one keeps
             # whatever the earlier steps already did, and the speech
             # processor then dictates the whole utterance on top of that.
-            # Every shipped pattern that calls press_keys has exactly one
-            # step, so no shipped command can reach that state; a
-            # hand-edited multi-step pattern could. Removing the limit
-            # means recording each step's side effects and undoing them
-            # here, which needs an undo path the action functions do not
-            # have yet.
+            # Every shipped pattern that calls press_keys calls it as its
+            # FIRST step, and the press-keys row's only later step,
+            # escape_hides_numbers_and_grid, never raises
+            # (wh-escape-hides-overlay), so no shipped command can reach
+            # that state; a hand-edited multi-step pattern could. Removing
+            # the limit means recording each step's side effects and
+            # undoing them here, which needs an undo path the action
+            # functions do not have yet.
             logger.info("Rule abandoned: %s", e)
             if isinstance(e, StepFailed):
                 self.last_step_failure = e

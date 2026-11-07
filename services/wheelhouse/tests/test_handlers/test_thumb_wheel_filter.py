@@ -159,6 +159,33 @@ class TestGestureGap:
 
 
 # ===========================================================================
+# Reset at a zone change (wh-wheel-zone-timeout-jump)
+# ===========================================================================
+
+class TestReset:
+
+    def test_reset_forgets_held_ticks(self, wheel):
+        """Two held ticks plus one more would cross the dead zone; after a
+        reset they are gone, so the third tick is held alone."""
+        wheel.filter_batch(2)
+        wheel.reset()
+        assert wheel.filter_batch(1) == 0
+
+    def test_reset_closes_an_open_gesture(self, wheel):
+        """Inside the gap an open gesture passes one tick at once; a reset
+        applies the dead zone again."""
+        wheel.filter_batch(3)
+        wheel.reset()
+        assert wheel.filter_batch(1) == 0
+
+    def test_a_gesture_can_open_again_after_a_reset(self, wheel):
+        wheel.filter_batch(2)
+        wheel.reset()
+        assert wheel.filter_batch(3) == 3
+        assert wheel.filter_batch(1) == 1
+
+
+# ===========================================================================
 # Per-batch cap
 # ===========================================================================
 

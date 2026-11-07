@@ -680,11 +680,22 @@ actions = [
 # Ctrl+2. press_keys reads "f" and a number as one function key, so "press
 # f 5" presses F5 and "press f 5 3 times" presses F5 three times; "press f 5
 # times" presses F five times (wh-press-f-number-function-key).
+#
+# The second step hides the numbers and the mouse grid, but only when the
+# ONLY key pressed is Escape, whatever the count or the spelling: "press
+# escape", "press esc", "press escape 3 times" (wh-escape-hides-overlay,
+# David's answer 2026-11-05 and the boss's ruling 2026-11-05 17:04). It
+# reads g1 and g2 through press_keys and does nothing when any other key is
+# pressed, so "press tab" and "press control escape" are unchanged. It is a step on this row, not
+# a row of its own, so "press escape" matches in exactly the utterances it
+# matched before. press_keys stays first: a misheard key name abandons the
+# rule before the hide step runs.
 [[pattern]]
 pattern = '''^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$'''
 doc_id = "press-keys"
 actions = [
-    { function = "press_keys", params = ["g1", "g2"] }
+    { function = "press_keys", params = ["g1", "g2"] },
+    { function = "escape_hides_numbers_and_grid", params = ["g1", "g2"] }
 ]
 
 # Insert raw text at cursor without intelligent insertion.
@@ -723,12 +734,24 @@ actions = [
 # meeting invite" dictating instead of pressing Escape and typing the rest.
 # It does not collide with "dismiss numbers" or "dismiss grid": those are
 # anchored two-word patterns, and this one is anchored at both ends.
+#
+# The second step hides the numbers and the mouse grid after the key press
+# (wh-escape-hides-overlay, David's rule 2026-11-04). Both windows ignore
+# the Escape key (WS_EX_NOACTIVATE, WS_EX_TRANSPARENT), so Logic hides
+# them. The key press stays first and unchanged (the boss's step-order
+# ruling, 2026-11-04 16:55). With nothing shown the hide shows no notice.
+#
+# "dismissed" is accepted here and on the hide-numbers and hide-grid rows,
+# because speech recognition often writes "dismiss" as "dismissed" (David,
+# 2026-11-06, wh-dismissed-alias). whole_utterance_only keeps "dismissed the
+# meeting" as typed text.
 [[pattern]]
-pattern = '''^(?:escape|dismiss)$'''
+pattern = '''^(?:escape|dismiss|dismissed)$'''
 doc_id = "escape"
 whole_utterance_only = true
 actions = [
-    { function = "press", params = ["esc"] }
+    { function = "press", params = ["esc"] },
+    { function = "escape_hides_numbers_and_grid" }
 ]
 
 # -----------------------------------------------------------------------
@@ -2922,7 +2945,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^(?:hide|hyde|dismiss) numbers$'''
+pattern = '''^(?:hide|hyde|dismiss|dismissed) numbers$'''
 doc_id = "hide-numbers"
 requires_hotword = false
 whole_utterance_only = true
@@ -2977,7 +3000,7 @@ actions = [
 ]
 
 [[pattern]]
-pattern = '''^(?:hide|dismiss) grid$'''
+pattern = '''^(?:hide|dismiss|dismissed) grid$'''
 doc_id = "hide-grid"
 whole_utterance_only = true
 actions = [

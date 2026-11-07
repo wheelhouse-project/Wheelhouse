@@ -649,6 +649,11 @@ class ActionFunctions:
         self._functions["grid_show_command"] = self.grid_show_command
         self._functions["grid_dismiss_command"] = self.grid_dismiss_command
         self._functions["grid_next_screen_command"] = self.grid_next_screen_command
+        # The Escape command also hides the numbers and the grid
+        # (wh-escape-hides-overlay)
+        self._functions["escape_hides_numbers_and_grid"] = (
+            self.escape_hides_numbers_and_grid
+        )
         self._functions["grid_action_command"] = self.grid_action_command
         self._functions["grid_number_command"] = self.grid_number_command
         self._functions["grid_click_command"] = self.grid_click_command
@@ -1781,7 +1786,17 @@ class ActionFunctions:
 
         def show() -> None:
             if kwargs.get("reason") == "disabled_by_config":
-                # The once-per-session flag records a notice that was shown.
+                # The clicking-turned-off notice shows once per session, the
+                # same check as the non-deferred path in
+                # LogicController.forward_click_element
+                # (wh-click-off-notice-once).
+                if lc._click_disabled_notice_shown:
+                    logger.debug(
+                        "click_element: disabled by config; notice already "
+                        "shown this session (trace_id=%s)",
+                        kwargs.get("trace_id"),
+                    )
+                    return
                 lc._click_disabled_notice_shown = True
             lc._forward_click_notice(**kwargs)
 
@@ -1886,6 +1901,67 @@ class ActionFunctions:
     async def grid_next_screen_command(self):
         """Handle 'grid next screen' (wh-grid-speech-routing)."""
         return await self._delegate_grid_command("next_screen")
+
+    async def escape_hides_numbers_and_grid(
+        self, key_sequence=None, repeat_str=None,
+    ):
+        """Hide the numbers and the mouse grid after an Escape key press.
+
+        David's rule (wh-escape-hides-overlay): "escape", "dismiss" and
+        "press escape" press the Escape key and then hide the numbered
+        overlay and the mouse grid. The Escape key alone cannot do it:
+        both windows are WS_EX_NOACTIVATE and WS_EX_TRANSPARENT, so the
+        key never reaches them.
+
+        This step comes AFTER the key-press step in its pattern row, so the
+        key goes out first and exactly as before (the boss's step-order
+        ruling, 2026-11-04 16:55).
+
+        Two call forms:
+
+        * No arguments -- the doc_id "escape" row ("escape", "dismiss").
+          Always hides.
+        * ``key_sequence`` and ``repeat_str`` -- the press-keys row passes
+          its g1 and g2. Hides only when the ONLY key pressed is Escape,
+          whatever the count or the spelling (the boss's ruling,
+          2026-11-05 17:04): "press escape", "press esc" and "press escape
+          3 times" hide, while "press tab" and a combination such as
+          "press control escape" keep their behavior. The keys are read
+          by press_keys itself, the step before this one, so this step
+          and the key press can never disagree about which keys were
+          pressed. A misheard key name never reaches here: press_keys
+          abandons the rule first.
+
+        The hides are the same calls "hide numbers" and "hide grid" make.
+        With nothing shown they show no notice: the overlay hide is a
+        no-op from CLOSED, and the grid dismiss sends only its defensive
+        clear. Each hide is guarded so that a failure is logged and never
+        fails the rule: the Escape key has already gone out, and a failed
+        rule would send the spoken words to dictation on top of it
+        (speech/command_engine.py, the ActionFailed and Exception arms of
+        _execute_rule). Returns None on every path.
+        """
+        if key_sequence is not None or repeat_str is not None:
+            try:
+                payload = self.press_keys(key_sequence, repeat_str)
+            except Exception:  # noqa: BLE001 -- not a key press: no hide
+                return None
+            keys = payload.get("params", {}).get("keys") or []
+            if not keys or any(key != "esc" for key in keys):
+                return None
+
+        for what, hide in (
+            ("numbers", self.hide_overlay_command),
+            ("grid", self.grid_dismiss_command),
+        ):
+            try:
+                await hide()
+            except Exception:  # noqa: BLE001 -- CancelledError propagates
+                logger.warning(
+                    "escape: hiding the %s failed after the Escape key "
+                    "press; the key press stands", what, exc_info=True,
+                )
+        return None
 
     async def grid_action_command(self, action: str, utterance: str):
         """Handle a bare grid-open-only word: mark / drag / move_here.

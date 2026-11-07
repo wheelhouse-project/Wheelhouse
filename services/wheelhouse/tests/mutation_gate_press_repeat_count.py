@@ -69,7 +69,9 @@ TESTS = (
 )
 
 PRESS_ROW = r"pattern = '''^press\b\s*(.+?)(?:\s+(\d+)\s+times?)?$'''" + "\n"
-PRESS_PARAMS = '    { function = "press_keys", params = ["g1", "g2"] }\n'
+# The press-keys row has a second step (escape_hides_numbers_and_grid,
+# wh-escape-hides-overlay), so its first action line ends with a comma.
+PRESS_PARAMS = '    { function = "press_keys", params = ["g1", "g2"] },\n'
 PASS_COUNT = "                \"repeat\": _clamped_repeat(repeat_str, HOTKEY_REPEAT_CAP),\n"
 DEFAULT_LINE = "    if repeat_count is None or repeat_count < 1: repeat_count = 1\n"
 CAP_LINE = "    if repeat_count > cap: repeat_count = cap\n"

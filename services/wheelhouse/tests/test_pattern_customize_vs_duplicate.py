@@ -109,7 +109,7 @@ def _runtime_entry(regex, is_user=False, doc_id=None):
 
 
 _OWN = "^(?:maximize)$"
-_OTHER = "^(?:escape|dismiss)$"
+_OTHER = "^(?:escape|dismiss|dismissed)$"
 
 
 class TestAnEditPreviewAgreesWithTheSaveItPreviews:
@@ -124,9 +124,9 @@ class TestAnEditPreviewAgreesWithTheSaveItPreviews:
     do.
 
     The reachable sequence, in the shipped file as it stands. Customize a
-    built-in, then Edit the copy and give it the phrases "escape" and
-    "dismiss". ``generate_expression`` joins a phrase list into
-    ``^(?:escape|dismiss)$``, which is byte for byte the expression the
+    built-in, then Edit the copy and give it the phrases "escape", "dismiss",
+    and "dismissed". ``generate_expression`` joins a phrase list into
+    ``^(?:escape|dismiss|dismissed)$``, which is byte for byte the expression the
     shipped ``escape`` entry carries, so the draft's text key is that
     built-in's text key. Keyed on text -- through the legacy branch, which
     answers with the built-in's OWN doc identity -- the draft takes the
@@ -151,7 +151,7 @@ class TestAnEditPreviewAgreesWithTheSaveItPreviews:
     test_pattern_tester_doc_id.py, which holds no QApplication.
     """
 
-    def _edit_dialog(self, phrases=("escape", "dismiss")):
+    def _edit_dialog(self, phrases=("escape", "dismiss", "dismissed")):
         from create_pattern_dialog import CreatePatternDialog
         from speech.pattern_manager import PatternManager
 

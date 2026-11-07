@@ -361,9 +361,9 @@ class TestPickerSections:
 # Catalog entry name -> the pattern that actually ships for it.
 RENAMED_COMMAND_ACTIONS = {
     "show_overlay_command": "^(?:show numbers|apply numbers|show numbers here)$",
-    "hide_overlay_command": "^(?:hide|hyde|dismiss) numbers$",
+    "hide_overlay_command": "^(?:hide|hyde|dismiss|dismissed) numbers$",
     "grid_show_command": "^(?:show|apply) grid$",
-    "grid_dismiss_command": "^(?:hide|dismiss) grid$",
+    "grid_dismiss_command": "^(?:hide|dismiss|dismissed) grid$",
 }
 
 _TRIGGER_RE = re.compile(r'Trigger "([^"]+)"')

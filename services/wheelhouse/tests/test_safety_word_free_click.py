@@ -559,3 +559,23 @@ class TestEndToEnd:
 
         assert _inserted_text(harness) == []
         assert click_notice_texts(gui_items(c)) == ["No match for 'reply'."]
+
+    @pytest.mark.asyncio
+    async def test_click_turned_off_shows_its_notice_once_per_session(
+        self, harness
+    ):
+        """wh-click-off-notice-once: with click.enabled false, the safety-word
+        click command said twice shows the disabled_by_config notice once
+        (requirements CK-41 and AO-9)."""
+        c = make_controller(enabled=False)
+        _wire(harness, c)
+
+        await _send_phrase(harness, ("click", "reply"), prefix=("x-ray",))
+        await _send_phrase(harness, ("click", "reply"), prefix=("x-ray",))
+
+        notices = [
+            i for i in gui_items(c) if i.get("action") == "show_click_notice"
+        ]
+        assert [n["reason"] for n in notices] == ["disabled_by_config"]
+        assert _inserted_text(harness) == []
+        assert "action" not in c._captured  # the gate is before any IPC

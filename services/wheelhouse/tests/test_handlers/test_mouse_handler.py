@@ -4,12 +4,11 @@ Tests mouse input routing including:
 - HID event processing and zone routing
 - Brightness accumulation and threshold
 - Volume event publishing
-- on_move debouncing
+- on_move stores every move
 - Adversarial: rapid events, extreme coordinates
 """
 
 import asyncio
-import time
 from unittest.mock import Mock, AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -96,15 +95,17 @@ class TestOnMove:
 
     def test_updates_mouse_x(self, mouse_handler):
         """on_move updates tracked X position."""
-        mouse_handler.last_mouse_event = 0.0  # Ensure no debounce
         mouse_handler.on_move(500, 300)
         assert mouse_handler.mouse_x == 500
 
-    def test_debounces_rapid_moves(self, mouse_handler):
-        """Moves within debounce interval are ignored."""
-        mouse_handler.last_mouse_event = time.time()  # Just happened
-        mouse_handler.on_move(500, 300)
-        # mouse_x should still be 0 (initial) since debounced
+    def test_the_last_move_of_a_flick_is_kept(self, mouse_handler):
+        """A flick that ends right after an earlier move leaves mouse_x at its end.
+
+        The pointer sends no further move once it stops, so a dropped last
+        move left the wheel on the wrong zone (wh-wheel-zone-timeout-jump).
+        """
+        mouse_handler.on_move(300, 200)
+        mouse_handler.on_move(0, 200)
         assert mouse_handler.mouse_x == 0
 
 
@@ -693,6 +694,324 @@ class TestThumbWheelFilterInLoop:
 
 
 # ===========================================================================
+# The zone comes from the batch's own stamp (wh-wheel-zone-timeout-jump)
+# ===========================================================================
+
+def _wheel_batch(delta, x, at=100.0):
+    """One queued batch as HIDListener sends it when it has a pointer reader."""
+    return {"type": "thumb_wheel", "delta": delta, "at": at, "x": x}
+
+
+def _record_zone_calls(handler):
+    """Replace both zone handlers; returns their calls in order."""
+    calls = []
+
+    async def brightness(ticks):
+        calls.append(("brightness", ticks))
+
+    async def volume(ticks):
+        calls.append(("volume", ticks))
+
+    handler._handle_brightness_zone_event = brightness
+    handler._handle_volume_zone_event = volume
+    return calls
+
+
+async def _stop_processor(task):
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+class TestZoneFromBatchStamp:
+    """Regression for wh-wheel-zone-timeout-jump. Log of 2026-11-01: a Samsung
+    timeout held the loop for 3 seconds, the wheel batches queued behind it,
+    and the sum went to the zone of the pointer at the end of the wait:
+    'VOLUME zone (X=1127): Delta=-29', Sonos 14 to 43."""
+
+    @pytest.mark.asyncio
+    async def test_left_edge_movement_behind_a_tv_wait_never_reaches_volume(self, mouse_handler):
+        """Acceptance item 1, forward."""
+        calls = _record_zone_calls(mouse_handler)
+        waiting_for_tv = asyncio.Event()
+        tv_answered = asyncio.Event()
+
+        async def brightness_waits_for_the_tv(ticks):
+            calls.append(("brightness", ticks))
+            waiting_for_tv.set()
+            await tv_answered.wait()
+
+        mouse_handler._handle_brightness_zone_event = brightness_waits_for_the_tv
+        queue = mouse_handler.hid_event_queue
+        mouse_handler.mouse_x = 5
+        queue.put_nowait(_wheel_batch(3, x=5))
+        task = asyncio.create_task(mouse_handler.process_hid_events())
+        await asyncio.wait_for(waiting_for_tv.wait(), timeout=1.0)
+
+        queue.put_nowait(_wheel_batch(-14, x=5))
+        queue.put_nowait(_wheel_batch(-15, x=5))
+        mouse_handler.mouse_x = 1127
+        tv_answered.set()
+        await asyncio.sleep(0.05)
+        await _stop_processor(task)
+
+        assert calls == [("brightness", 3), ("brightness", -29)]
+
+    @pytest.mark.asyncio
+    async def test_volume_zone_movement_behind_a_wait_never_reaches_brightness(self, mouse_handler):
+        """Acceptance item 1, reverse."""
+        calls = _record_zone_calls(mouse_handler)
+        waiting = asyncio.Event()
+        answered = asyncio.Event()
+
+        async def volume_waits_for_the_speaker(ticks):
+            calls.append(("volume", ticks))
+            waiting.set()
+            await answered.wait()
+
+        mouse_handler._handle_volume_zone_event = volume_waits_for_the_speaker
+        queue = mouse_handler.hid_event_queue
+        mouse_handler.mouse_x = 500
+        queue.put_nowait(_wheel_batch(3, x=500))
+        task = asyncio.create_task(mouse_handler.process_hid_events())
+        await asyncio.wait_for(waiting.wait(), timeout=1.0)
+
+        queue.put_nowait(_wheel_batch(-14, x=500))
+        queue.put_nowait(_wheel_batch(-15, x=500))
+        mouse_handler.mouse_x = 5
+        answered.set()
+        await asyncio.sleep(0.05)
+        await _stop_processor(task)
+
+        assert calls == [("volume", 3), ("volume", -29)]
+
+    @pytest.mark.asyncio
+    async def test_real_listener_stamp_decides_the_zone(self, mock_deps):
+        """The real HIDListener and MouseHandler together: the listener reads
+        the handler's mouse_x at the send, and the pointer moves after that."""
+        with patch("handlers.mouse_handler.mouse"), patch("handlers.hid_listener.hid"):
+            from handlers.mouse_handler import MouseHandler
+            handler = MouseHandler(
+                loop=asyncio.get_running_loop(),
+                config_service=mock_deps["config"],
+                app=mock_deps["app"],
+                audio_monitor=mock_deps["audio_monitor"],
+                bravia_control=mock_deps["bravia_control"],
+                software_dimmer=mock_deps["software_dimmer"],
+                event_bus=mock_deps["event_bus"],
+            )
+        calls = _record_zone_calls(handler)
+        handler.mouse_x = 5
+        handler.hid_listener.delta_accumulator = 3
+        handler.hid_listener._flush_tail()
+        handler.mouse_x = 1127
+
+        await _run_one_drain(handler)
+
+        assert calls == [("brightness", 3)]
+
+    @pytest.mark.parametrize("stamp, zone", [
+        pytest.param(0, "brightness", id="the-left-screen-edge"),
+        pytest.param(9, "brightness", id="one-inside-the-left-edge"),
+        pytest.param(10, "volume", id="at-the-side-offset"),
+    ])
+    @pytest.mark.asyncio
+    async def test_the_stamp_decides_against_the_side_offset(self, mouse_handler, stamp, zone):
+        """The pointer stands in the other zone, so only the stamp can give
+        this result."""
+        mouse_handler.mouse_x = 500 if zone == "brightness" else 0
+        calls = _record_zone_calls(mouse_handler)
+        mouse_handler.hid_event_queue.put_nowait(_wheel_batch(3, x=stamp))
+
+        await _run_one_drain(mouse_handler)
+
+        assert calls == [(zone, 3)]
+
+    @pytest.mark.asyncio
+    async def test_a_drain_with_both_zones_gives_each_its_own_ticks_in_order(self, mouse_handler):
+        calls = _record_zone_calls(mouse_handler)
+        for delta, x in ((1, 5), (2, 5), (4, 500), (8, 5)):
+            mouse_handler.hid_event_queue.put_nowait(_wheel_batch(delta, x=x))
+
+        await _run_one_drain(mouse_handler)
+
+        assert calls == [("brightness", 3), ("volume", 4), ("brightness", 8)]
+
+    @pytest.mark.asyncio
+    async def test_a_drain_with_one_zone_makes_one_call_with_the_sum(self, mouse_handler):
+        """Bounding test: a stamped drain in one zone behaves as an unstamped
+        drain does (test_aggregates_multiple_queued_events). Green before and
+        after."""
+        mouse_handler.mouse_x = 500
+        calls = _record_zone_calls(mouse_handler)
+        for delta in (2, 3, 4):
+            mouse_handler.hid_event_queue.put_nowait(_wheel_batch(delta, x=500))
+
+        await _run_one_drain(mouse_handler)
+
+        assert calls == [("volume", 9)]
+
+    @pytest.mark.asyncio
+    async def test_a_run_that_nets_to_zero_reaches_no_zone(self, mouse_handler):
+        """The first run passes +2 and -2; only the second run is acted on."""
+        calls = _record_zone_calls(mouse_handler)
+        for delta, x in ((2, 5), (-2, 5), (4, 500)):
+            mouse_handler.hid_event_queue.put_nowait(_wheel_batch(delta, x=x))
+
+        await _run_one_drain(mouse_handler)
+
+        assert calls == [("volume", 4)]
+
+    @pytest.mark.asyncio
+    async def test_every_drained_batch_is_filtered_before_the_first_zone_acts(self, mouse_handler):
+        """The first zone's wait must not hold back the filtering of the batches
+        drained with it: the runs are final before any await."""
+        real_filter_batch = mouse_handler.thumb_wheel_filter.filter_batch
+        filter_batch = Mock(side_effect=real_filter_batch)
+        mouse_handler.thumb_wheel_filter.filter_batch = filter_batch
+        filtered_when_a_zone_acted = []
+
+        async def record_filtered_count(_ticks):
+            filtered_when_a_zone_acted.append(filter_batch.call_count)
+
+        mouse_handler._handle_brightness_zone_event = record_filtered_count
+        mouse_handler._handle_volume_zone_event = record_filtered_count
+        for delta, x in ((1, 5), (2, 500), (4, 5)):
+            mouse_handler.hid_event_queue.put_nowait(_wheel_batch(delta, x=x))
+
+        await _run_one_drain(mouse_handler)
+
+        assert filtered_when_a_zone_acted == [3, 3, 3]
+
+    @pytest.mark.asyncio
+    async def test_each_run_logs_its_zone_stamp_and_ticks(self, mouse_handler, caplog):
+        """The bead's log could not show where the pointer was. Each run names
+        the X of its last batch, not the current position."""
+        _record_zone_calls(mouse_handler)
+        mouse_handler.mouse_x = 1127
+        for delta, x in ((1, 3), (2, 7), (4, 500)):
+            mouse_handler.hid_event_queue.put_nowait(_wheel_batch(delta, x=x))
+
+        with caplog.at_level("DEBUG", logger="handlers.mouse_handler"):
+            await _run_one_drain(mouse_handler)
+
+        lines = [r.getMessage() for r in caplog.records if "zone=" in r.getMessage()]
+        assert len(lines) == 2
+        assert "zone=brightness" in lines[0] and "x=7" in lines[0] and "ticks=3" in lines[0]
+        assert "zone=volume" in lines[1] and "x=500" in lines[1] and "ticks=4" in lines[1]
+
+
+class TestHeldTicksStayInTheirZone:
+    """ThumbWheelFilter holds ticks below the dead zone. Without a reset at a
+    zone change, ticks rolled at the left edge would be released into the
+    volume zone by the next batch, which acceptance item 1 forbids."""
+
+    @pytest.fixture
+    def filtered_handler(self, mock_deps):
+        return _build_handler(mock_deps, {
+            "THUMB_WHEEL_DEAD_ZONE_TICKS": 3,
+            "THUMB_WHEEL_GESTURE_GAP_MS": 500,
+            "THUMB_WHEEL_MAX_TICKS_PER_BATCH": 3,
+        })
+
+    @pytest.mark.asyncio
+    async def test_ticks_held_at_the_left_edge_never_reach_volume(self, filtered_handler):
+        calls = _record_zone_calls(filtered_handler)
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(2, x=5, at=100.0))
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(1, x=500, at=100.05))
+
+        await _run_one_drain(filtered_handler)
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_ticks_held_in_the_volume_zone_never_reach_brightness(self, filtered_handler):
+        calls = _record_zone_calls(filtered_handler)
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(2, x=500, at=100.0))
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(1, x=5, at=100.05))
+
+        await _run_one_drain(filtered_handler)
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_the_reset_works_across_two_drains(self, filtered_handler):
+        calls = _record_zone_calls(filtered_handler)
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(2, x=5, at=100.0))
+        await _run_one_drain(filtered_handler)
+
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(1, x=500, at=100.05))
+        await _run_one_drain(filtered_handler)
+
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_zone_change_closes_an_open_gesture(self, filtered_handler):
+        """The left edge opens a gesture; the first tick in the volume zone
+        meets the dead zone again."""
+        calls = _record_zone_calls(filtered_handler)
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(3, x=5, at=100.0))
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(1, x=500, at=100.05))
+
+        await _run_one_drain(filtered_handler)
+
+        assert calls == [("brightness", 3)]
+
+    @pytest.mark.asyncio
+    async def test_the_new_zone_counts_its_own_ticks_after_a_change(self, filtered_handler):
+        """Bounding test: one reset for each change of zone. After the change,
+        the ticks of the new zone build up to the dead zone as usual."""
+        calls = _record_zone_calls(filtered_handler)
+        for delta, x, at in ((2, 5, 100.0), (2, 500, 100.05), (1, 500, 100.1)):
+            filtered_handler.hid_event_queue.put_nowait(_wheel_batch(delta, x=x, at=at))
+
+        await _run_one_drain(filtered_handler)
+
+        assert calls == [("volume", 3)]
+
+    @pytest.mark.asyncio
+    async def test_two_drains_in_one_zone_still_share_the_dead_zone(self, filtered_handler):
+        """Bounding test: only a zone CHANGE resets. Green before and after."""
+        calls = _record_zone_calls(filtered_handler)
+        filtered_handler.mouse_x = 5
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(2, x=5, at=100.0))
+        await _run_one_drain(filtered_handler)
+
+        filtered_handler.hid_event_queue.put_nowait(_wheel_batch(1, x=5, at=100.05))
+        await _run_one_drain(filtered_handler)
+
+        assert calls == [("brightness", 3)]
+
+
+class TestPointerReader:
+    """MouseHandler gives HIDListener the means to stamp each batch."""
+
+    def test_the_listener_reader_returns_the_current_mouse_x(self, mock_deps):
+        """A reader that returned the value at construction would stamp every
+        batch with the starting position."""
+        with patch("handlers.mouse_handler.mouse"), \
+             patch("handlers.mouse_handler.HIDListener") as listener_class:
+            from handlers.mouse_handler import MouseHandler
+            handler = MouseHandler(
+                loop=mock_deps["loop"],
+                config_service=mock_deps["config"],
+                app=mock_deps["app"],
+                audio_monitor=mock_deps["audio_monitor"],
+                bravia_control=mock_deps["bravia_control"],
+                software_dimmer=mock_deps["software_dimmer"],
+                event_bus=mock_deps["event_bus"],
+            )
+
+        reader = listener_class.call_args.kwargs["pointer_x"]
+        handler.mouse_x = 7
+        assert reader() == 7
+        handler.mouse_x = 900
+        assert reader() == 900
+
+
+# ===========================================================================
 # stop_listeners
 # ===========================================================================
 
@@ -748,18 +1067,3 @@ class TestAdversarial:
         """Event bus publish failure doesn't crash handler."""
         mouse_handler.event_bus.publish.side_effect = Exception("Bus error")
         await mouse_handler._handle_volume_zone_event(5)  # Should not raise
-
-    def test_on_move_exception_doesnt_crash(self, mouse_handler):
-        """Exception in on_move is caught."""
-        mouse_handler.last_mouse_event = 0.0
-        real_time = time.time
-        calls = {"count": 0}
-
-        def fail_first():
-            calls["count"] += 1
-            if calls["count"] == 1:
-                raise RuntimeError("clock error")
-            return real_time()
-
-        with patch("handlers.mouse_handler.time.time", side_effect=fail_first):
-            mouse_handler.on_move(100, 300)  # Should not raise

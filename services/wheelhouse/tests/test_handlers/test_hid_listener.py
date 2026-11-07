@@ -369,6 +369,90 @@ class TestTailFlush:
 
 
 # ===========================================================================
+# Pointer stamp on each batch (wh-wheel-zone-timeout-jump)
+# ===========================================================================
+
+class TestPointerStamp:
+    """Each batch carries the pointer X read when the batch is sent, so the
+    consumer can route the batch by where the person rolled it, however long
+    the batch then waits in the queue."""
+
+    @pytest.fixture
+    def pointer(self):
+        """A pointer position the test moves by hand."""
+        return SimpleNamespace(x=5)
+
+    @pytest.fixture
+    def stamping_listener(self, event_loop_for_hid, hid_event_queue, pointer):
+        with patch("handlers.hid_listener.hid"):
+            from handlers.hid_listener import HIDListener
+            yield HIDListener(
+                loop=event_loop_for_hid,
+                event_queue=hid_event_queue,
+                pointer_x=lambda: pointer.x,
+            )
+
+    def test_batch_sent_from_the_hid_thread_carries_the_pointer_x(self, stamping_listener):
+        stamping_listener.last_batch_time = time.time() - 1.0
+        mock_loop = Mock()
+        stamping_listener.loop = mock_loop
+
+        stamping_listener._accumulate_and_maybe_send(2)
+
+        _callback, event = mock_loop.call_soon_threadsafe.call_args[0]
+        assert event["x"] == 5
+
+    def test_tail_batch_carries_the_pointer_x(self, stamping_listener, hid_event_queue):
+        stamping_listener.delta_accumulator = 4
+
+        stamping_listener._flush_tail()
+
+        assert hid_event_queue.get_nowait()["x"] == 5
+
+    def test_the_stamp_is_read_when_the_batch_is_sent(
+        self, stamping_listener, hid_event_queue, pointer
+    ):
+        """A tick arrives inside the window, the pointer moves, then the flush
+        sends the batch: the stamp is the position at the send."""
+        stamping_listener.last_batch_time = time.time()
+        stamping_listener.loop = Mock()
+        stamping_listener._accumulate_and_maybe_send(2)
+        pointer.x = 900
+
+        stamping_listener._flush_tail()
+
+        assert hid_event_queue.get_nowait()["x"] == 900
+
+    def test_a_pointer_at_the_left_screen_edge_is_still_stamped(
+        self, stamping_listener, hid_event_queue, pointer
+    ):
+        """X 0 is the far left of the brightness zone, not a missing value."""
+        pointer.x = 0
+        stamping_listener.delta_accumulator = 4
+
+        stamping_listener._flush_tail()
+
+        assert hid_event_queue.get_nowait()["x"] == 0
+
+    def test_no_reader_leaves_the_key_out_of_a_batch(self, hid_listener):
+        hid_listener.last_batch_time = time.time() - 1.0
+        mock_loop = Mock()
+        hid_listener.loop = mock_loop
+
+        hid_listener._accumulate_and_maybe_send(2)
+
+        _callback, event = mock_loop.call_soon_threadsafe.call_args[0]
+        assert set(event) == {"type", "delta", "at"}
+
+    def test_no_reader_leaves_the_key_out_of_a_tail_batch(self, hid_listener, hid_event_queue):
+        hid_listener.delta_accumulator = 4
+
+        hid_listener._flush_tail()
+
+        assert set(hid_event_queue.get_nowait()) == {"type", "delta", "at"}
+
+
+# ===========================================================================
 # _safe_enqueue_event
 # ===========================================================================
 
