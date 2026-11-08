@@ -652,7 +652,7 @@ MUTATIONS = [
     {
         "name": "exe-launch-starts-the-raw-name",
         "file": INPUT_PROC,
-        "old": "        os.startfile(store_alias_launch_target(target))\n",
+        "old": "        os.startfile(\n            store_alias_launch_target(target), cwd=launch_start_folder()\n        )\n",
         "new": "        os.startfile(target)\n",
         "expect": [
             "test_the_exe_launch_path_starts_the_alias",
@@ -662,7 +662,7 @@ MUTATIONS = [
     {
         "name": "spoken-name-launch-starts-the-raw-name",
         "file": INPUT_PROC,
-        "old": "                os.startfile(store_alias_launch_target(candidate.launch_target))\n",
+        "old": "                os.startfile(\n                    store_alias_launch_target(candidate.launch_target),\n                    cwd=launch_start_folder(),\n                )\n",
         "new": "                os.startfile(candidate.launch_target)\n",
         "expect": [
             "test_the_spoken_name_launch_path_starts_the_alias",
@@ -674,7 +674,7 @@ MUTATIONS = [
         # the user spoke.
         "name": "exe-launch-notices-the-alias",
         "file": INPUT_PROC,
-        "old": "        os.startfile(store_alias_launch_target(target))\n",
+        "old": "        os.startfile(\n            store_alias_launch_target(target), cwd=launch_start_folder()\n        )\n",
         "new": "        target = store_alias_launch_target(target)\n        os.startfile(target)\n",
         "expect": [
             "test_a_failed_exe_launch_names_the_spoken_program",

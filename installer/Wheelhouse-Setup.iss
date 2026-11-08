@@ -89,6 +89,7 @@ Source: "install-wheelhouse.ps1"; DestDir: "{app}"; Flags: ignoreversion
 #include "failuremsg.isi"
 #include "notices.isi"
 #include "micconsent.isi"
+#include "priorinstall.isi"
 
 const
   ENGINE = 'install-wheelhouse.ps1';
@@ -135,53 +136,23 @@ function SetEnvironmentVariable(lpName: string; lpValue: string): Boolean;
 
 // ---------- existing-install detection (re-run / repair) ----------
 
-function InstalledConfigPath: string;
+// The engine installs under %LOCALAPPDATA%\Wheelhouse (its $LocalRoot); the
+// app's config.toml, or the staged copy an interrupted update left, records
+// the user's prior choices. The decisions live in priorinstall.isi, where the
+// harness in scripts/release/tests/test_wizard.py runs them.
+function WheelhouseLocalRoot: string;
 begin
-  // The engine installs under %LOCALAPPDATA%\Wheelhouse\app; its config.toml
-  // records the user's prior choices. Mirrors $AppDir in install-wheelhouse.ps1.
-  Result := ExpandConstant('{localappdata}\Wheelhouse\app\services\wheelhouse\config.toml');
+  Result := ExpandConstant('{localappdata}\Wheelhouse');
 end;
 
 function ExistingInstall: Boolean;
 begin
-  Result := FileExists(InstalledConfigPath);
+  Result := IsExistingInstall(WheelhouseLocalRoot);
 end;
 
 function CurrentProvider: string;
-var
-  lines: TArrayOfString;
-  i, eq, p: Integer;
-  s, key, val, quote: string;
 begin
-  // Read last_provider from the installed config so a re-run defaults the speech
-  // choice to the engine already installed instead of silently forcing Parakeet.
-  // Mirrors Get-CurrentProvider in the engine, including both TOML quote styles.
-  Result := '';
-  if not LoadStringsFromFile(InstalledConfigPath, lines) then
-    exit;
-  for i := 0 to GetArrayLength(lines) - 1 do begin
-    s := Trim(lines[i]);
-    eq := Pos('=', s);
-    if eq > 0 then begin
-      // Compare the key exactly, not by prefix: a bare "starts with last_provider"
-      // test would also match a future key like last_provider_url.
-      key := Trim(Copy(s, 1, eq - 1));
-      if key = 'last_provider' then begin
-        val := Trim(Copy(s, eq + 1, Length(s)));
-        // Extract the text between the opening and matching closing quote, so
-        // any trailing content (e.g. a hand-added comment) is ignored.
-        if (Length(val) >= 2) and ((val[1] = '"') or (val[1] = #39)) then begin
-          quote := Copy(val, 1, 1);
-          val := Copy(val, 2, Length(val) - 1);
-          p := Pos(quote, val);
-          if p > 0 then
-            val := Copy(val, 1, p - 1);
-        end;
-        Result := val;
-        exit;
-      end;
-    end;
-  end;
+  Result := LastProviderIn(PriorConfigPath(WheelhouseLocalRoot));
 end;
 
 // ---------- microphone permission ----------

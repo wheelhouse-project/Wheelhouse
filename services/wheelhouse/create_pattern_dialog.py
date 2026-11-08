@@ -69,6 +69,7 @@ from PySide6.QtWidgets import (
 )
 
 from pattern_help_dialog import REGEX_CHECKER_URL
+from utils.launch_cwd import open_in_browser
 from speech.action_catalog import (
     CATALOG_BY_NAME,
     RESULT_PRODUCING_ACTIONS,
@@ -2683,6 +2684,10 @@ class CreatePatternDialog(QDialog):
         page_layout.addRow(activate_label, self._activate_target)
         return page
 
+    def _open_regex_link(self, link: str) -> None:
+        """Open the expression checker outside the app folder."""
+        open_in_browser(link)
+
     def _build_advanced_pane(self) -> QWidget:
         """Advanced-mode pane: editable expression with a live local compile
         check, capture-group count, regex101 link, honest pattern-type
@@ -2724,7 +2729,11 @@ class CreatePatternDialog(QDialog):
         self._regex_link_label = QLabel(
             f'<a href="{REGEX_CHECKER_URL}">Test on regex101.com</a>'
         )
-        self._regex_link_label.setOpenExternalLinks(True)
+        # False so the click reaches linkActivated: Qt would open the link
+        # with a browser that starts in the app folder
+        # (wh-installer-update-folder-locked).
+        self._regex_link_label.setOpenExternalLinks(False)
+        self._regex_link_label.linkActivated.connect(self._open_regex_link)
         self._regex_link_label.setAccessibleName("Test on regex101.com")
         self._regex_link_label.setAccessibleDescription(
             "Opens regex101.com preset to the Python flavor to test the "

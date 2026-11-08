@@ -720,7 +720,7 @@ A short explanation window comes first, the same one the **Help** menu item show
 
 ## Speech Modes
 
-Wheelhouse has no command mode and no dictation mode to switch between. Each utterance is classified as it arrives, using the position of the words within the phrase.
+Wheelhouse has no command mode and no dictation mode to switch between. Each phrase is classified as it arrives. The first word of the phrase decides whether the phrase can be a command, and most commands run only when the whole phrase is the command.
 
 ### Classification of spoken input
 
@@ -730,8 +730,8 @@ Wheelhouse has no command mode and no dictation mode to switch between. Each utt
 
 ### Word position determines classification
 
-- **The first word of a phrase is a candidate command.** When speech starts after a pause, the first word is checked against the set of known command openings. If it could begin a command, it is held briefly -- well under a second -- to see whether the following word or two completes one. If you are still speaking when that time ends, the hold continues until the next word arrives or the phrase ends, for at most five more seconds with the shipped settings. "delete five" spoken as its own phrase runs the command. If the words match no command, they are typed as ordinary text; no words are discarded.
-- **Words in the middle of a phrase are dictation.** "I want to delete five items" is typed in full, including the word "delete", because "delete" did not begin the phrase.
+- **The first word of a phrase is a candidate command.** A phrase is what the speech engine reports as one utterance; it normally ends when you pause. The first word of a phrase is checked against the set of known command openings. If it could begin a command, it is held to see whether the following words complete one. With the shipped settings, most openings are held for 700 ms. Openings that are followed by a name or other free text, such as "click", "go", "select" and "press", are held for up to five seconds. If you are still speaking when a 700 ms hold ends, the hold continues until the next word arrives or the phrase ends, for at most five more seconds. Most commands, such as "undo" and "delete five", run only when they are the whole phrase. If the words match no command, they are typed as ordinary text. Words are dropped only in the cases that the safety word and streaming insertion descriptions below name.
+- **A command word in the middle of a phrase is typed as text.** "I want to delete five items" is typed in full, including the word "delete", because "delete" did not begin the phrase. A short pause that does not end the phrase does not change this. The rule does not mean that only the first word of a phrase can belong to a command. When a phrase begins with a command, the words after the first word are part of that command: "go home then grab to end" is one command.
 - **Replacement words apply in any position.** Words such as "comma" and "period" are replaced whether they occur first, last, or mid-sentence, since their purpose is to appear within dictation.
 
 ### Commands that need the safety word
@@ -750,6 +750,16 @@ Cursor movements and text selections can be chained into one phrase with "then":
 - "go top then grab to bottom" -- moves to the top of the document, then selects to the bottom.
 
 Chaining applies only to the "go" (move the cursor) and "grab" (extend the selection) navigation commands. All other commands, including copy, paste, and window switching, are spoken as separate phrases.
+
+### Wheelhouse and Windows Voice Access
+
+Windows Voice Access is the voice control that Microsoft includes in Windows 11. In its default mode, Voice Access also accepts commands and dictation without a mode switch. The absence of a mode switch is therefore not a difference between Wheelhouse and Voice Access. Voice Access also has a commands mode and a dictation mode, which the user turns on by voice. Wheelhouse has no such modes.
+
+Some features work the same way in both programs. To type words that would otherwise run a command, both programs accept them after the word type or dictate: "type undo" types the word "undo" instead of running the undo command. Wheelhouse also accepts "literal undo". Both programs can put numbers on the clickable controls ("show numbers") and show a grid for the mouse ("show grid").
+
+Voice Access requires Windows 11, version 22H2 or later. Wheelhouse also runs on Windows 10.
+
+This document describes Wheelhouse. It cannot list every Voice Access feature, and it does not describe how Voice Access decides between a command and dictation in its default mode. For Voice Access details, see Microsoft's documentation, which starts at "Get started with voice access" (https://support.microsoft.com/topic/get-started-with-voice-access-bd2aa2dc-46c2-486c-93ae-3d75f7d053a4). When this document does not mention a Voice Access feature, that does not mean that Voice Access lacks the feature.
 
 ## Interaction Modes
 
@@ -1115,5 +1125,5 @@ Include the Wheelhouse version from **About Wheelhouse** in the right-click menu
 
 ---
 
-Generated: 2026-11-06 for the v1.4.2 release
-Wheelhouse version: 1.4.2
+Generated: 2026-11-07 for the v1.4.3 release
+Wheelhouse version: 1.4.3

@@ -44,6 +44,7 @@ import logging
 import math
 import ntpath
 
+from utils.launch_cwd import ensure_browser_start_folder, launch_start_folder
 from utils.redact import redact_transcript
 import subprocess
 import asyncio
@@ -60,6 +61,10 @@ from .actions_config import (
 from .number_word_parser import parse_number_word
 
 logger = logging.getLogger(__name__)
+
+# wh-installer-update-folder-locked: webbrowser.open starts the browser
+# outside the app folder from here on.
+ensure_browser_start_folder()
 
 _RUN_CAPTURE_READ_CHUNK_BYTES = 4 * 1024
 _RUN_CAPTURE_STDERR_LOG_BYTES = 4 * 1024
@@ -1279,7 +1284,13 @@ class ActionFunctions:
 
     # ---- Local actions ----
     async def run_program(self, program_path):
-        try: await asyncio.to_thread(subprocess.Popen, str(program_path), shell=True)
+        try:
+            # wh-installer-update-folder-locked: the program starts outside
+            # the app folder, so it cannot keep an update from deleting it.
+            await asyncio.to_thread(
+                subprocess.Popen, str(program_path), shell=True,
+                cwd=launch_start_folder(),
+            )
         except Exception as e: logger.error("run_program error: %s", e)
         return None
     def format_date(self, format_string="%Y-%m-%d"):

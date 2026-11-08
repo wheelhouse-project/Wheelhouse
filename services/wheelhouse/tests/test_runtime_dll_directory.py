@@ -131,9 +131,10 @@ def test_entry_point_adds_the_runtime_folder_before_any_native_import(relative):
 
 
 def test_the_folder_is_one_constant_outside_the_replaced_application_folder():
-    # install-wheelhouse.ps1 deletes %LOCALAPPDATA%\Wheelhouse\app on every
-    # re-install -- Remove-Item -LiteralPath $AppDir -Recurse -Force -- and
-    # re-extracts it with Expand-Archive -DestinationPath $AppDir. The
+    # install-wheelhouse.ps1 replaces %LOCALAPPDATA%\Wheelhouse\app on every
+    # re-install -- Move-AppDirAside renames it, Remove-OldAppTrees deletes
+    # the renamed tree -- and re-extracts it with Expand-Archive
+    # -DestinationPath $AppDir. The
     # statements are named rather than their line numbers, which this branch
     # moved. A sibling of that folder survives the wipe, so the file does not
     # have to be re-placed each time.

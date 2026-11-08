@@ -555,7 +555,7 @@ Example: `Trigger "^check for updates?$" with no params: saying "check for updat
 
 Action name: `wheelhouse_help_online`. The Pattern Manager lists it under Advanced actions, Wheelhouse.
 
-Opens the configured online help page in the default browser.
+Opens the Wheelhouse Assistant at the assistant_url address under [ai.help] in the default browser. By default a short explanation window comes first, and its Assistant button opens the browser. When assistant_url is blank, a notice says that online help is not configured and nothing opens.
 
 Parameters: none.
 
@@ -855,7 +855,7 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ### [ai.runtime]
 
-**enabled** *(default: `false`)* -- Whether Wheelhouse starts its own model server. False means you start one yourself and point base_url at it. Valid values: true or false. When true, base_url above must name 127.0.0.1 or localhost and include a port -- the port Wheelhouse starts its server on comes from that address, so the two cannot drift apart. The installer sets this to true when it has downloaded a model for you. Set it to false if you would rather run your own server, or point Wheelhouse at a hosted one.
+**enabled** *(default: `false`)* -- Whether Wheelhouse starts its own model server. False means you start one yourself and point base_url at it. Valid values: true or false. When true, base_url above must be a plain http address on 127.0.0.1 or localhost, with a port from 1 to 65535, that ends in /v1 (for example http://127.0.0.1:8781/v1), with no query, fragment, user name or password. Any other form makes Wheelhouse log an error and start no local server; an external server at that address still works. The port Wheelhouse starts its server on comes from that address, so the two cannot drift apart. The installer sets this to true when it has downloaded a model for you. Set it to false if you would rather run your own server, or point Wheelhouse at a hosted one.
 
 **model_path** *(default: `""`)* -- The full path to the model file Wheelhouse loads. The installer writes this. Point it at a different model file to change which model answers. Nothing else has to change.
 
@@ -917,4 +917,4 @@ The titles of the notices, message boxes, and windows that Wheelhouse shows, eac
 
 ---
 
-Generated: 2026-11-06 for the v1.4.2 release
+Generated: 2026-11-07 for the v1.4.3 release

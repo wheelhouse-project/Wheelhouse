@@ -13,17 +13,17 @@ Link handling: QTextBrowser's default openLinks behavior would try to
 *load* an http URL as a document on click (blanking the page), so the
 dialog takes over routing entirely -- ``setOpenLinks(False)`` plus an
 ``anchorClicked`` handler that sends external URLs to the system browser
-via QDesktopServices and scrolls internal ``#fragment`` anchors itself.
+via ``open_in_browser`` and scrolls internal ``#fragment`` anchors itself.
 The decision is the pure function ``link_is_external``.
 """
 
 import html
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QPushButton
 
 from speech.action_catalog import ACTION_CATALOG
+from utils.launch_cwd import open_in_browser
 
 # The online regular-expression checker the advanced editor links to; the
 # query string preselects the Python flavor, which is the engine WheelHouse
@@ -252,6 +252,6 @@ class PatternHelpDialog(QDialog):
         """Route a clicked link: external URLs to the system browser,
         internal ``#fragment`` anchors to a scroll within the page."""
         if link_is_external(url.toString()):
-            QDesktopServices.openUrl(url)
+            open_in_browser(url.toString())
         else:
             self._browser.scrollToAnchor(url.fragment())

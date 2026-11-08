@@ -106,7 +106,7 @@ $script:RunningFromFile = [bool]$PSCommandPath
 # The archive URL and hash are stamped on publish day: build the release
 # archive, hash it, stamp both values here, upload archive + this script.
 
-$AppVersion = "1.4.2"
+$AppVersion = "1.4.3"
 $DefaultArchiveUrl = "https://github.com/wheelhouse-project/Wheelhouse/releases/download/v$AppVersion/wheelhouse-$AppVersion.zip"
 $DefaultArchiveSha256 = "<ARCHIVE-SHA256>"
 
@@ -416,6 +416,21 @@ function Write-InstallFailure {
         $WhatToTry = Hide-UserProfilePath -Text $WhatToTry
         [Console]::Out.WriteLine("FAILHINT " + ($WhatToTry -replace '\s+', ' '))
     }
+}
+
+function Get-UnexpectedErrorHint {
+    # What the top-level handler tells the user to try after an error it did
+    # not plan for. Only the graphical installer writes a setup log, and it
+    # is the one caller that passes -TaggedOutput. The in-app "Update now"
+    # console and the one-line command run this script in a window that the
+    # user can read, and write no setup log, so asking them for one would
+    # send them after a file that does not exist
+    # (wh-installer-update-folder-locked, acceptance item 5).
+    if ($TaggedOutput) {
+        return "Run Setup again. If it stops the same way, send the setup log to help@wheelhouse-project.org."
+    }
+    return ("Run the installer again. If it stops the same way, email help@wheelhouse-project.org " +
+        "with the messages in this window.")
 }
 
 # Something the user should still know about once setup has finished: the speech
@@ -1801,6 +1816,90 @@ function Restore-LeadWordPath {
     Write-Status "Kept your training word setting."
 }
 
+function Move-AppDirAside {
+    # Renames $AppDir to a new sibling folder named <app>.old-<time>, and
+    # returns @{ Moved; Path; Error }. A rename is the check for a held
+    # folder: Windows refuses to rename a folder while another process has
+    # its current directory inside it or a file in it open (measured
+    # 2026-11-07 on Windows 11: both holds refuse with "Access to the path
+    # is denied"), and a refused rename changes nothing.
+    #
+    # Three attempts one second apart, so that a file an antivirus scanner
+    # holds for a moment does not stop the update. A program the user has
+    # open holds the folder for much longer than that.
+    $parent = Split-Path -Parent $AppDir
+    $leaf = Split-Path -Leaf $AppDir
+    $path = Join-Path $parent ("$leaf.old-" + (Get-Date -Format "yyyyMMdd-HHmmss-fff"))
+    $lastError = ""
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            [System.IO.Directory]::Move($AppDir, $path)
+            return @{ Moved = $true; Path = $path; Error = "" }
+        } catch {
+            $inner = $_.Exception
+            if ($inner.InnerException) { $inner = $inner.InnerException }
+            $lastError = $inner.Message
+            if ($attempt -lt 3) { Start-Sleep -Seconds 1 }
+        }
+    }
+    return @{ Moved = $false; Path = ""; Error = $lastError }
+}
+
+function Undo-AppDirMove {
+    param([string]$AsidePath)
+    # Puts the tree that Move-AppDirAside renamed back at $AppDir, after an
+    # update failed between that rename and the restore of the user files
+    # (wh-installer-update-folder-locked.1.2). The partial new tree at $AppDir
+    # is removed first, because a rename cannot replace a folder that exists.
+    # Returns "" when the old tree is back, or the reason it is not.
+    #
+    # Three attempts one second apart, as in Move-AppDirAside: an antivirus
+    # scanner often holds a file for a moment just after it was unpacked.
+    $lastError = ""
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            if (Test-Path -LiteralPath $AppDir) {
+                Remove-Item -LiteralPath $AppDir -Recurse -Force -ErrorAction Stop
+            }
+            [System.IO.Directory]::Move($AsidePath, $AppDir)
+            return ""
+        } catch {
+            $inner = $_.Exception
+            if ($inner.InnerException) { $inner = $inner.InnerException }
+            $lastError = $inner.Message
+            if ($attempt -lt 3) { Start-Sleep -Seconds 1 }
+        }
+    }
+    return $lastError
+}
+
+function Remove-OldAppTrees {
+    # Deletes every <app>.old-* folder beside $AppDir: the tree that
+    # Move-AppDirAside renamed on this run, and any that an earlier run could
+    # not delete. Install-AppArchive calls it only after the user files are
+    # restored into the new tree, because until then this run's renamed tree is
+    # the install that a failed update puts back
+    # (wh-installer-update-folder-locked.1.2). A failure only warns. The new
+    # install does not need these folders, and the next run tries again. The
+    # warning is a notice because the leftover stays after setup ends and can
+    # hold gigabytes; the wizard shows only NOTICE lines
+    # (wh-installer-update-folder-locked.1.1).
+    $parent = Split-Path -Parent $AppDir
+    $leaf = Split-Path -Leaf $AppDir
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { return }
+    $old = @(Get-ChildItem -LiteralPath $parent -Directory -Force |
+        Where-Object { $_.Name -like "$leaf.old-*" })
+    foreach ($folder in $old) {
+        try {
+            Remove-Item -LiteralPath $folder.FullName -Recurse -Force -ErrorAction Stop
+        } catch {
+            Write-InstallNotice ("The old Wheelhouse folder $($folder.FullName) could not be removed " +
+                "($($_.Exception.Message)). Wheelhouse does not use it, and you can delete it. " +
+                "This installer tries again each time it runs.")
+        }
+    }
+}
+
 function Install-AppArchive {
     param([string]$Url, [string]$Sha256)
 
@@ -1812,9 +1911,22 @@ function Install-AppArchive {
     # The marker lives NEXT TO staging, not inside it, so the restore
     # (which copies everything staging holds) never plants it in the app.
     $marker = "$staging.wipe-started"
+    # $aside stays $null when this run moves nothing aside (a fresh install,
+    # or an interrupted update whose app folder is gone); nothing is rolled
+    # back then.
+    $aside = $null
+    $markerWasKept = $false
     if (Test-Path -LiteralPath $AppDir) {
         Write-Status "Updating the existing install (your settings and voice patterns are preserved)..."
         Initialize-UpdateStaging -StagingDir $staging -MarkerPath $marker
+        # After that step the marker exists only when staging exists too: an
+        # earlier update crashed after its destructive phase began, and
+        # staging holds the only copy of the user's files. A rollback must
+        # then leave the marker and staging as they are. Otherwise this run
+        # writes the marker itself below, and a rollback removes it again,
+        # because the tree put back holds the user's live files and the next
+        # run must re-stage from them (wh-installer-update-folder-locked.1.2).
+        $markerWasKept = Test-Path -LiteralPath $marker
         New-Item -ItemType Directory -Force -Path $staging | Out-Null
         Save-PreservedFiles -StagingDir $staging | Out-Null
         Save-LeadWordPath -StagingDir $staging
@@ -1824,42 +1936,104 @@ function Install-AppArchive {
         # an unverifiable check must not proceed to the wipe.
         Test-RunningWheelHouse -RequireVerified
         # The marker records that the destructive phase is beginning: from
-        # here until the restore completes, staging holds the only copy of
-        # the user's files, and the next run must keep it (crash survivor)
-        # rather than discard it as stale. Written only AFTER the running
-        # re-check, so a refusal cannot strand fresh staging as a false
-        # crash survivor.
-        New-Item -ItemType File -Force -Path $marker | Out-Null
-        Remove-Item -LiteralPath $AppDir -Recurse -Force
-    }
-
-    Write-Status "Unpacking the application..."
-    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $AppDir -Force
-
-    # If the archive wraps everything in a single top-level directory,
-    # flatten it so $AppDir is the repository root.
-    if (-not (Test-Path -LiteralPath (Join-Path $AppDir "VERSION"))) {
-        $children = @(Get-ChildItem -LiteralPath $AppDir)
-        if ($children.Count -eq 1 -and $children[0].PSIsContainer -and (Test-Path -LiteralPath (Join-Path $children[0].FullName "VERSION"))) {
-            Get-ChildItem -LiteralPath $children[0].FullName -Force | Move-Item -Destination $AppDir
-            Remove-Item -LiteralPath $children[0].FullName -Recurse -Force
+        # here until the restore completes, staging holds the copy of the
+        # user's files that the next run must restore if this run dies, so
+        # the next run must keep it (crash survivor) rather than discard it
+        # as stale. Written only AFTER the running
+        # re-check and the rename below, so a refusal cannot strand fresh
+        # staging as a false crash survivor.
+        #
+        # The app folder is renamed aside, not deleted in place. A program
+        # that Wheelhouse started can have a folder inside the app as its
+        # current directory, and a delete in place then removes everything
+        # else and fails on that folder, leaving neither the old install nor
+        # the new one (wh-installer-update-folder-locked). Windows refuses
+        # the rename while any process holds the folder or a file in it, so
+        # the hold is found before anything is deleted.
+        $aside = Move-AppDirAside
+        if (-not $aside.Moved) {
+            Stop-Install ("Another program is using the Wheelhouse folder, so the update cannot replace it. " +
+                "Nothing was deleted. Windows reported: $($aside.Error)") `
+                ("Close the programs that Wheelhouse opened for you (for example a command prompt or an " +
+                "editor), or restart Windows. Then run the update again.")
         }
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $AppDir "VERSION"))) {
-        Stop-Install "The unpacked application archive does not look like Wheelhouse (no VERSION file)." `
-            "If you overrode the archive URL, check it points at a Wheelhouse release archive."
+        New-Item -ItemType File -Force -Path $marker | Out-Null
     }
 
-    # Restore runs off staging CONTENTS so a leftover staging dir from a
-    # crashed earlier update is recovered here instead of deleted below.
-    $restored = Restore-PreservedFiles -StagingDir $staging
-    if ($restored -gt 0) {
-        Write-Status "Restored $restored preserved file(s) from the previous install."
+    # This run's renamed tree stays on disk until the user files are restored
+    # into the new tree. If any step below fails, the catch puts the old tree
+    # back at $AppDir, so a failed update leaves a complete, runnable install
+    # (wh-installer-update-folder-locked.1.2). The old trees are removed only
+    # after the restore, at the end of this function.
+    # crewcut: the old tree now stays on disk during the unpack, so an update
+    # needs room for both trees at once (about 1.5 to 3 GB more than before).
+    # To remove the limit, unpack into a folder that hard-links the files the
+    # two releases share, or check the free space before the rename.
+    #
+    # $failure holds the reason of a stop this function makes itself, because
+    # Stop-Install throws only its fixed marker text, and a rollback that fails
+    # must still say why the update stopped.
+    $failure = ""
+    try {
+        Write-Status "Unpacking the application..."
+        New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+        Expand-Archive -LiteralPath $zipPath -DestinationPath $AppDir -Force
+
+        # If the archive wraps everything in a single top-level directory,
+        # flatten it so $AppDir is the repository root.
+        if (-not (Test-Path -LiteralPath (Join-Path $AppDir "VERSION"))) {
+            $children = @(Get-ChildItem -LiteralPath $AppDir)
+            if ($children.Count -eq 1 -and $children[0].PSIsContainer -and (Test-Path -LiteralPath (Join-Path $children[0].FullName "VERSION"))) {
+                Get-ChildItem -LiteralPath $children[0].FullName -Force | Move-Item -Destination $AppDir
+                Remove-Item -LiteralPath $children[0].FullName -Recurse -Force
+            }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $AppDir "VERSION"))) {
+            $failure = "The unpacked application archive does not look like Wheelhouse (no VERSION file)."
+            Stop-Install $failure `
+                "If you overrode the archive URL, check it points at a Wheelhouse release archive."
+        }
+
+        # Restore runs off staging CONTENTS so a leftover staging dir from a
+        # crashed earlier update is recovered here instead of deleted below.
+        $restored = Restore-PreservedFiles -StagingDir $staging
+        if ($restored -gt 0) {
+            Write-Status "Restored $restored preserved file(s) from the previous install."
+        }
+        Restore-LeadWordPath
+    } catch {
+        if ($null -ne $aside -and $aside.Moved) {
+            $cause = $_.Exception.Message
+            if ($cause -eq "WHEELHOUSE-INSTALL-STOP" -and $failure) { $cause = $failure }
+            $undoError = Undo-AppDirMove -AsidePath $aside.Path
+            if ($undoError) {
+                # The marker stays: the saved tree is swept by the next run
+                # that succeeds, so staging is the copy of the user's files
+                # that the next run must restore.
+                Stop-Install ("The update did not finish, and the installer could not put the previous " +
+                    "install back ($undoError). Your previous install is saved in $($aside.Path). " +
+                    "The update stopped because: $cause") `
+                    ("Run the update again: it restores your settings and voice patterns from the copy " +
+                    "it saved. Until then, do not delete that folder.")
+            }
+            if (-not $markerWasKept) {
+                try {
+                    Remove-Item -LiteralPath $marker -Force -ErrorAction Stop
+                } catch {
+                    Write-Warn "Could not remove the update marker $marker ($($_.Exception.Message))."
+                }
+            }
+            Write-Warn "The update did not finish. The previous Wheelhouse install is back in place."
+        }
+        # The same error, so the top-level handler and the failure text are
+        # unchanged by the rollback.
+        throw
     }
-    Restore-LeadWordPath
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
     if (Test-Path -LiteralPath $marker) { Remove-Item -LiteralPath $marker -Force }
+    # Removes this run's renamed tree and any that an earlier run could not
+    # remove. The new install is complete by now.
+    Remove-OldAppTrees
 }
 
 # --- Environment syncs (step d) ---------------------------------------------------
@@ -1992,6 +2166,19 @@ function Get-CurrentProvider {
     # fresh install. Keeps an update's Enter-through-the-prompt from
     # silently switching a user's engine.
     $config = Join-Path $AppDir "services\wheelhouse\config.toml"
+    # An update that stopped after its wipe began leaves the user's config
+    # only in staging, with the marker beside it (the paths Install-AppArchive
+    # uses). Until the restore, that copy is the user's: the app's own config
+    # is missing, or is the shipped one that the stopped run unpacked
+    # (wh-installer-update-folder-locked). The wizard's PriorConfigPath in
+    # priorinstall.isi makes the same choice.
+    if ($LocalRoot) {
+        $staging = Join-Path $LocalRoot "update-preserve"
+        $staged = Join-Path $staging "services\wheelhouse\config.toml"
+        if ((Test-Path -LiteralPath "$staging.wipe-started") -and (Test-Path -LiteralPath $staged)) {
+            $config = $staged
+        }
+    }
     if (Test-Path -LiteralPath $config) {
         $content = [System.IO.File]::ReadAllText($config)
         # Both TOML string quotings: the write path normalizes to double
@@ -3827,7 +4014,7 @@ try {
         # the unexpected one -- would also be the one the user is told nothing
         # about.
         Write-InstallFailure -Reason "Unexpected error: $($_.Exception.Message)" `
-            -WhatToTry "Run Setup again. If it stops the same way, send the setup log to help@wheelhouse-project.org."
+            -WhatToTry (Get-UnexpectedErrorHint)
     }
     if ($script:RunningFromFile) { exit 1 }
 }

@@ -924,9 +924,14 @@ def _launch_exe_target(target, logger, notice, reply=None) -> None:
         # project-local import in this file is deferred to the process
         # that uses it. The log and notice below keep the spoken name.
         from utils.installed_programs import store_alias_launch_target
+        from utils.launch_cwd import launch_start_folder
         # wh-notepad-app-paths-launch: a name that App Paths sends into
         # WindowsApps starts through its execution alias instead.
-        os.startfile(store_alias_launch_target(target))
+        # wh-installer-update-folder-locked: the program starts outside the
+        # app folder, so it cannot keep an update from deleting that folder.
+        os.startfile(
+            store_alias_launch_target(target), cwd=launch_start_folder()
+        )
     except OSError as e:
         logger.warning(f"Could not launch {target}: {e}")
         if reply is not None:
@@ -1118,7 +1123,11 @@ def _start_named_program(target, logger, notify, find_programs,
                 # into WindowsApps starts through its execution alias.
                 # The logs keep the candidate's own launch target.
                 from utils.installed_programs import store_alias_launch_target
-                os.startfile(store_alias_launch_target(candidate.launch_target))
+                from utils.launch_cwd import launch_start_folder
+                os.startfile(
+                    store_alias_launch_target(candidate.launch_target),
+                    cwd=launch_start_folder(),
+                )
             except OSError as e:
                 logger.warning(
                     f"Could not start {candidate.launch_target}: {e}"

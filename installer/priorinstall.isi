@@ -1,0 +1,92 @@
+// What the wizard knows about an earlier install, read from the folders the
+// installation engine (install-wheelhouse.ps1) leaves behind.
+//
+// This file is included into the [Code] section of Wheelhouse-Setup.iss, so
+// everything in it is Pascal Script and takes Pascal comments -- a ';' comment
+// here is read as code and fails the compile with "'BEGIN' expected".
+//
+// Every function takes the local root (%LOCALAPPDATA%\Wheelhouse, the engine's
+// $LocalRoot) as an argument, so scripts/release/tests/test_wizard.py can run
+// them over folders it builds itself instead of the user's real install.
+//
+// An update copies the user's files to <root>\update-preserve, writes the
+// marker <root>\update-preserve.wipe-started, and only then replaces the app
+// folder (Install-AppArchive). When an update stops after the marker, the
+// app's config.toml is gone, or is the shipped one the stopped run unpacked,
+// and the staged copy is the user's. A rerun in that state is an update of an
+// existing install: treating it as a first install passed -AiMode off, which
+// deletes the stored cloud key, and defaulted the engine to Parakeet
+// (wh-installer-update-folder-locked).
+
+function InstalledConfigIn(const LocalRoot: string): string;
+begin
+  Result := AddBackslash(LocalRoot) + 'app\services\wheelhouse\config.toml';
+end;
+
+function InterruptedUpdate(const LocalRoot: string): Boolean;
+begin
+  { The engine's own test (Initialize-UpdateStaging): staging is the user's
+    only copy when the marker AND the staging folder are both there. Staging
+    without the marker is from a run that stopped before its wipe, and the
+    engine discards it; a marker without staging is stray, and the engine
+    deletes it. }
+  Result := FileExists(AddBackslash(LocalRoot) + 'update-preserve.wipe-started')
+        and DirExists(AddBackslash(LocalRoot) + 'update-preserve');
+end;
+
+function PriorConfigPath(const LocalRoot: string): string;
+var
+  staged: string;
+begin
+  { The config.toml that holds the user's prior choices. Mirrors
+    Get-CurrentProvider in the engine. }
+  staged := AddBackslash(LocalRoot) + 'update-preserve\services\wheelhouse\config.toml';
+  if InterruptedUpdate(LocalRoot) and FileExists(staged) then
+    Result := staged
+  else
+    Result := InstalledConfigIn(LocalRoot);
+end;
+
+function IsExistingInstall(const LocalRoot: string): Boolean;
+begin
+  Result := FileExists(InstalledConfigIn(LocalRoot)) or InterruptedUpdate(LocalRoot);
+end;
+
+function LastProviderIn(const ConfigPath: string): string;
+var
+  lines: TArrayOfString;
+  i, eq, p: Integer;
+  s, key, val, quote: string;
+begin
+  { Read last_provider from the config so a re-run defaults the speech choice
+    to the engine already installed instead of silently forcing Parakeet.
+    Mirrors Get-CurrentProvider in the engine, including both TOML quote
+    styles. }
+  Result := '';
+  if not LoadStringsFromFile(ConfigPath, lines) then
+    exit;
+  for i := 0 to GetArrayLength(lines) - 1 do begin
+    s := Trim(lines[i]);
+    eq := Pos('=', s);
+    if eq > 0 then begin
+      { Compare the key exactly, not by prefix: a bare "starts with
+        last_provider" test would also match a future key like
+        last_provider_url. }
+      key := Trim(Copy(s, 1, eq - 1));
+      if key = 'last_provider' then begin
+        val := Trim(Copy(s, eq + 1, Length(s)));
+        { Extract the text between the opening and matching closing quote, so
+          any trailing content (e.g. a hand-added comment) is ignored. }
+        if (Length(val) >= 2) and ((val[1] = '"') or (val[1] = #39)) then begin
+          quote := Copy(val, 1, 1);
+          val := Copy(val, 2, Length(val) - 1);
+          p := Pos(quote, val);
+          if p > 0 then
+            val := Copy(val, 1, p - 1);
+        end;
+        Result := val;
+        exit;
+      end;
+    end;
+  end;
+end;

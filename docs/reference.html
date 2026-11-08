@@ -371,7 +371,7 @@
 <p>Example: <code>Trigger "^check for updates?$" with no params: saying "check for updates" opens the About Wheelhouse window and checks.</code></p>
 <h4 id="open-online-help">Open online help</h4>
 <p>Action name: <code>wheelhouse_help_online</code>. The Pattern Manager lists it under Advanced actions, Wheelhouse.</p>
-<p>Opens the configured online help page in the default browser.</p>
+<p>Opens the Wheelhouse Assistant at the assistant_url address under [ai.help] in the default browser. By default a short explanation window comes first, and its Assistant button opens the browser. When assistant_url is blank, a notice says that online help is not configured and nothing opens.</p>
 <p>Parameters: none.</p>
 <p>Example: <code>Trigger "^help$" with no params: saying "help" opens the help page.</code></p>
 <h4 id="open-the-pattern-manager">Open the Pattern Manager</h4>
@@ -660,7 +660,7 @@
 <p><strong>kind</strong> <em>(default: <code>"local"</code>)</em> -- Whether the AI server is on your own machine or out on the internet, which frames the privacy tradeoff: with a local server, the text being corrected never leaves your computer. Valid values: "local" or "cloud". This setting does not decide where your text is sent -- base_url above does that. Capitals and stray spaces are forgiven; anything else falls back to local and says so in the log.</p>
 <p><strong>timeout_s</strong> <em>(default: <code>30</code>)</em> -- Seconds Wheelhouse waits for the AI server before giving up on a request. Raise it if a slow local model keeps timing out.</p>
 <h3 id="airuntime">[ai.runtime]</h3>
-<p><strong>enabled</strong> <em>(default: <code>false</code>)</em> -- Whether Wheelhouse starts its own model server. False means you start one yourself and point base_url at it. Valid values: true or false. When true, base_url above must name 127.0.0.1 or localhost and include a port -- the port Wheelhouse starts its server on comes from that address, so the two cannot drift apart. The installer sets this to true when it has downloaded a model for you. Set it to false if you would rather run your own server, or point Wheelhouse at a hosted one.</p>
+<p><strong>enabled</strong> <em>(default: <code>false</code>)</em> -- Whether Wheelhouse starts its own model server. False means you start one yourself and point base_url at it. Valid values: true or false. When true, base_url above must be a plain http address on 127.0.0.1 or localhost, with a port from 1 to 65535, that ends in /v1 (for example http://127.0.0.1:8781/v1), with no query, fragment, user name or password. Any other form makes Wheelhouse log an error and start no local server; an external server at that address still works. The port Wheelhouse starts its server on comes from that address, so the two cannot drift apart. The installer sets this to true when it has downloaded a model for you. Set it to false if you would rather run your own server, or point Wheelhouse at a hosted one.</p>
 <p><strong>model_path</strong> <em>(default: <code>""</code>)</em> -- The full path to the model file Wheelhouse loads. The installer writes this. Point it at a different model file to change which model answers. Nothing else has to change.</p>
 <p><strong>binary_dir</strong> <em>(default: <code>""</code>)</em> -- The folder holding llama-server.exe, the program that runs the model. The installer writes this. Change it if you moved the llama.cpp build, or to use a build made for different graphics hardware.</p>
 <p><strong>context_size</strong> <em>(default: <code>8192</code>)</em> -- How much text the model can consider at once, counted in tokens. Raise it if you correct or rewrite long passages and the reply comes back cut short. A larger value uses more memory.</p>
@@ -698,7 +698,7 @@
       <a href="https://github.com/wheelhouse-project/Wheelhouse/blob/main/LICENSE">Apache 2.0 license</a>
       <a href="#top">Back to top ↑</a>
     </nav>
-    <p class="fine-print">Documentation for Wheelhouse 1.4.2.</p>
+    <p class="fine-print">Documentation for Wheelhouse 1.4.3.</p>
   </footer>
 </body>
 </html>

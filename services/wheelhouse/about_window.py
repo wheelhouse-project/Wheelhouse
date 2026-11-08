@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from utils.launch_cwd import open_in_browser
 
 
 ABOUT_WINDOW_TITLE = "About Wheelhouse"
@@ -179,7 +180,7 @@ class AboutWindow(QDialog):
 
         Always opens WEBSITE_URL, whatever link text the label reports.
         """
-        QDesktopServices.openUrl(QUrl(WEBSITE_URL))
+        open_in_browser(WEBSITE_URL)
 
     # -- the check --------------------------------------------------------
 

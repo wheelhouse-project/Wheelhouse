@@ -464,16 +464,13 @@ class TestTheAboutWindow:
         self, window
     ):
         """Acceptance item 8: the open call is patched, no browser starts."""
-        from PySide6.QtCore import QUrl
         from PySide6.QtWidgets import QLabel
 
         label = window.findChild(QLabel, "about_website")
         assert label is not None
-        with patch("about_window.QDesktopServices") as desktop_services:
+        with patch("about_window.open_in_browser") as open_in_browser:
             label.linkActivated.emit("https://wheelhouse-project.org")
-        desktop_services.openUrl.assert_called_once_with(
-            QUrl("https://wheelhouse-project.org")
-        )
+        open_in_browser.assert_called_once_with("https://wheelhouse-project.org")
 
     def test_it_has_a_check_button_and_no_update_button_at_first(self, window):
         window.show()

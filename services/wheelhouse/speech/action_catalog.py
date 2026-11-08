@@ -1187,7 +1187,11 @@ ACTION_CATALOG = (
         "name": "wheelhouse_help_online",
         "label": "Open online help",
         "summary": (
-            "Opens the configured online help page in the default browser."
+            "Opens the Wheelhouse Assistant at the assistant_url address "
+            "under [ai.help] in the default browser. By default a short "
+            "explanation window comes first, and its Assistant button opens "
+            "the browser. When assistant_url is blank, a notice says that "
+            "online help is not configured and nothing opens."
         ),
         "params": [],
         "example": (

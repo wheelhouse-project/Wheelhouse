@@ -94,7 +94,7 @@ def startfile_calls(monkeypatch):
     """
     calls = []
     monkeypatch.setattr(
-        os, "startfile", lambda target: calls.append(target), raising=False
+        os, "startfile", lambda target, **kw: calls.append(target), raising=False
     )
     return calls
 
@@ -108,7 +108,7 @@ def _startfile_that_fails(monkeypatch, failing):
     """
     calls = []
 
-    def startfile(target):
+    def startfile(target, **kw):
         calls.append(target)
         if target in failing:
             raise OSError("the shortcut points at nothing")
@@ -208,7 +208,7 @@ class TestActivateWindowLaunchFallback:
         assert activated == []
 
     def test_launch_failure_degrades_to_warning(self, monkeypatch):
-        def boom(target):
+        def boom(target, **kw):
             raise OSError("no association")
 
         monkeypatch.setattr(os, "startfile", boom, raising=False)
@@ -236,7 +236,7 @@ class TestActivateWindowLaunchFallback:
         fired either, and a test that only searched the list for the
         failure text would pass with a spurious slow notice beside it.
         """
-        def boom(target):
+        def boom(target, **kw):
             raise OSError("no association")
 
         monkeypatch.setattr(os, "startfile", boom, raising=False)
@@ -429,7 +429,7 @@ class TestActivateWindowSpokenNameLookup:
         assert looked_up == ["outlook"]
 
     def test_a_launch_failure_does_not_raise(self, monkeypatch):
-        def boom(target):
+        def boom(target, **kw):
             raise OSError("no association")
 
         monkeypatch.setattr(os, "startfile", boom, raising=False)
@@ -449,7 +449,7 @@ class TestActivateWindowSpokenNameLookup:
         """The user asked for a program. Failing in silence is the defect
         class of wh-keyboard-refusal-notice, so the failure is spoken.
         """
-        def boom(target):
+        def boom(target, **kw):
             raise OSError("no association")
 
         monkeypatch.setattr(os, "startfile", boom, raising=False)
@@ -701,7 +701,7 @@ class TestActivateWindowShadowBufferInvalidation:
         UIA synchronize -- so the invalidation has to wait for the launch
         to succeed.
         """
-        def boom(target):
+        def boom(target, **kw):
             raise OSError("the shortcut points at nothing")
 
         monkeypatch.setattr(os, "startfile", boom, raising=False)
@@ -901,7 +901,7 @@ class _BlockingLauncher:
         self.release = threading.Event()
         self.calls = []
 
-    def __call__(self, target):
+    def __call__(self, target, **kw):
         self.calls.append(target)
         self.entered.set()
         self.release.wait(timeout=10)
@@ -1883,7 +1883,7 @@ class TestStoreBranchReportsTheRealOutcome:
         _running_windows(monkeypatch, {_TERMINAL_ID: 777})
         started = []
         monkeypatch.setattr(
-            os, "startfile", lambda t: started.append(t), raising=False
+            os, "startfile", lambda t, **kw: started.append(t), raising=False
         )
         logger = MagicMock()
         notices = []
@@ -2016,7 +2016,7 @@ class TestAStartedStoreProgramIsBroughtForward:
         activated = _record_activations(monkeypatch)
         started = []
         monkeypatch.setattr(
-            os, "startfile", lambda t: started.append(t), raising=False
+            os, "startfile", lambda t, **kw: started.append(t), raising=False
         )
         logger = MagicMock()
         notices = []
@@ -2129,7 +2129,7 @@ class TestAStartedWindowRespectsTheUsersNextChoice:
 
         monkeypatch.setattr(input_proc, "_activate_window_impl", activate)
 
-        def startfile(target):
+        def startfile(target, **kw):
             events.append(("start", target))
 
         monkeypatch.setattr(os, "startfile", startfile, raising=False)
@@ -2280,3 +2280,42 @@ class TestARefusedActivationNeverReportsSuccess:
         )
         assert sent == []
         assert len(verified) == 1
+
+
+class TestLaunchedProgramsStartOutsideTheAppFolder:
+    """wh-installer-update-folder-locked: a program that Wheelhouse starts
+    for the user must not inherit services/wheelhouse as its current
+    directory, or it can keep an update from deleting the app folder."""
+
+    @staticmethod
+    def _record(monkeypatch, tmp_path):
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls = []
+        monkeypatch.setattr(
+            os, "startfile",
+            lambda *args, **kwargs: calls.append((args, kwargs)),
+            raising=False,
+        )
+        return calls
+
+    def test_a_bare_exe_name_starts_in_the_profile_folder(
+        self, monkeypatch, tmp_path
+    ):
+        calls = self._record(monkeypatch, tmp_path)
+        _handle(monkeypatch, "notepad.exe", found_hwnd=None)
+        assert calls == [(("notepad.exe",), {"cwd": str(tmp_path)})]
+
+    def test_an_installed_program_starts_in_the_profile_folder(
+        self, monkeypatch, tmp_path
+    ):
+        calls = self._record(monkeypatch, tmp_path)
+        _handle(
+            monkeypatch,
+            "outlook",
+            found_hwnd=None,
+            programs=[_program("Outlook", "C:\\Start\\Outlook.lnk")],
+        )
+        assert calls == [
+            (("C:\\Start\\Outlook.lnk",), {"cwd": str(tmp_path)})
+        ]

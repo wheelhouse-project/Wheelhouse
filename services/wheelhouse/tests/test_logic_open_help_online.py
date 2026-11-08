@@ -46,6 +46,11 @@ def marker(tmp_path, monkeypatch):
     return path
 
 
+import webbrowser as _webbrowser_module
+
+_REAL_WEBBROWSER_OPEN = _webbrowser_module.open
+
+
 @pytest.fixture(autouse=True)
 def no_real_browser(monkeypatch):
     """Replace webbrowser.open and os.startfile with a guard that opens
@@ -504,6 +509,49 @@ class TestABrowserThatReportsFailureByReturningFalse:
 
         browser.assert_called_once_with("https://example.test/help")
         assert _queued(controller) == []
+
+
+class TestTheBrowserStartsOutsideTheAppFolder:
+    """wh-installer-update-folder-locked: a browser that Wheelhouse starts
+    must not inherit services/wheelhouse as its current directory."""
+
+    @pytest.mark.asyncio
+    async def test_the_browser_gets_a_start_folder_outside_the_app_folder(
+        self, monkeypatch, tmp_path
+    ):
+        import os
+        import webbrowser
+        from pathlib import Path
+
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        calls = []
+        monkeypatch.setattr(
+            os, "startfile",
+            lambda *args, **kwargs: calls.append((args, kwargs)),
+            raising=False,
+        )
+        monkeypatch.setattr(webbrowser, "open", _REAL_WEBBROWSER_OPEN)
+        if webbrowser._tryorder is None:
+            webbrowser.register_standard_browsers()
+        # A process where nothing has registered the browser yet: the help
+        # command itself must do it.
+        monkeypatch.setattr(
+            webbrowser,
+            "_browsers",
+            {k: v for k, v in webbrowser._browsers.items()
+             if k != "wheelhouse-outside-app"},
+        )
+        monkeypatch.setattr(webbrowser, "_tryorder", ["windows-default"])
+        controller = _controller()
+        _settings(controller, explain=False)
+
+        await controller.start_help_online()
+
+        assert calls == [
+            (("https://example.test/help",), {"cwd": str(tmp_path)})
+        ]
+        assert Path(calls[0][1]["cwd"]).resolve() != Path(os.getcwd()).resolve()
 
 
 _OLD_GEM_URL = "https://gemini.google.com/gem/1z3my7h0wNiR2msZW8_NAEzxboZOTjN2A"

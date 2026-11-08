@@ -5,7 +5,20 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.2] - 2026-11-06
+## [1.4.3] - 2026-11-07
+
+### Fixed
+
+- An update no longer leaves Wheelhouse broken when another program has the Wheelhouse folder open. Before, the update stopped with "The process cannot access the file ... because it is being used by another process." after it had already deleted part of the old install. Now the update first moves the old install aside. When Windows does not allow the move, the update stops with "Another program is using the Wheelhouse folder, so the update cannot replace it. Nothing was deleted." and the old install stays as it was. When a later step of the update fails, the installer puts the old install back.
+- When the update cannot remove the old install after a successful update, the last page of Setup names the folder that is left. The installer tries again each time it runs.
+- Programs and browser windows that Wheelhouse opens no longer use the Wheelhouse folder as their current folder. Before, a program that Wheelhouse opened could keep the folder open after Wheelhouse stopped, and the next update then failed.
+
+### Changed
+
+- The help document, and so the Wheelhouse Assistant, now describes Windows Voice Access correctly. In its default mode, Voice Access also accepts commands and dictation without a mode switch, so "no mode switch" is not a difference between the two programs. For Voice Access details, the help document points to Microsoft's documentation.
+- The help document now states more exactly how Wheelhouse decides whether a phrase is a command: how long it waits after the first word of a phrase, and when it drops words.
+
+## [1.4.2] - 2026-11-07
 
 ### Changed
 

@@ -151,10 +151,10 @@ def test_dialog_routes_external_links_to_system_browser():
     from PySide6.QtCore import QUrl
 
     dlg = PatternHelpDialog(parent=None)
-    with patch("pattern_help_dialog.QDesktopServices.openUrl") as open_url:
+    with patch("pattern_help_dialog.open_in_browser") as open_url:
         dlg._on_anchor_clicked(QUrl(REGEX_CHECKER_URL))
     open_url.assert_called_once()
-    assert open_url.call_args[0][0].toString() == REGEX_CHECKER_URL
+    assert open_url.call_args[0][0] == REGEX_CHECKER_URL
 
 
 def test_dialog_keeps_internal_anchors_internal():
@@ -165,7 +165,7 @@ def test_dialog_keeps_internal_anchors_internal():
     # Shadow the C++ slot with a recorder; PySide6 allows instance
     # attribute assignment over bound methods.
     dlg._browser.scrollToAnchor = scrolled.append
-    with patch("pattern_help_dialog.QDesktopServices.openUrl") as open_url:
+    with patch("pattern_help_dialog.open_in_browser") as open_url:
         dlg._on_anchor_clicked(QUrl("#function-reference"))
     open_url.assert_not_called()
     assert scrolled == ["function-reference"]

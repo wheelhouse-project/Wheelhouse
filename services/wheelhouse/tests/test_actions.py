@@ -662,7 +662,9 @@ class TestRunProgram:
         with patch("speech.actions.subprocess.Popen") as mock_popen:
             result = await action_funcs.run_program("notepad.exe")
             assert result is None
-            mock_popen.assert_called_once_with("notepad.exe", shell=True)
+            mock_popen.assert_called_once()
+            assert mock_popen.call_args.args == ("notepad.exe",)
+            assert mock_popen.call_args.kwargs["shell"] is True
 
     @pytest.mark.asyncio
     async def test_run_program_handles_error(self, action_funcs):

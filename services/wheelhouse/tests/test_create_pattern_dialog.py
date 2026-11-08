@@ -1054,7 +1054,18 @@ class TestAdvancedExpressionField:
 
         dialog = _make_dialog()
         assert REGEX_CHECKER_URL in dialog._regex_link_label.text()
-        assert dialog._regex_link_label.openExternalLinks()
+        # wh-installer-update-folder-locked: Qt must not open the link itself,
+        # because its browser would start in the app folder.
+        assert not dialog._regex_link_label.openExternalLinks()
+
+    def test_regex101_link_opens_through_the_start_folder_helper(self):
+        from unittest.mock import patch
+        from pattern_help_dialog import REGEX_CHECKER_URL
+
+        dialog = _make_dialog()
+        with patch("create_pattern_dialog.open_in_browser") as opener:
+            dialog._regex_link_label.linkActivated.emit(REGEX_CHECKER_URL)
+        opener.assert_called_once_with(REGEX_CHECKER_URL)
 
     def test_type_contradiction_is_field_error_gating_save(self):
         # The runtime loader decides the kind from the ^ anchor; an

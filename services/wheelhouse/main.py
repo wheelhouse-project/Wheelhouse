@@ -11297,6 +11297,12 @@ class LogicController:
         )
         try:
             import webbrowser
+            from services.wheelhouse.utils.launch_cwd import (
+                ensure_browser_start_folder,
+            )
+            # wh-installer-update-folder-locked: the browser starts outside
+            # the app folder, so it cannot keep an update from deleting it.
+            ensure_browser_start_folder()
             opened = await asyncio.to_thread(webbrowser.open, assistant_url)
             if not opened:
                 # webbrowser.open reports the common failure by returning

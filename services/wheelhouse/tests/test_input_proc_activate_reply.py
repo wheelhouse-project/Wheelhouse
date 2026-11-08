@@ -105,7 +105,7 @@ class _Run:
             lambda app_id, logger: running_store_hwnd,
         )
 
-        def startfile(path):
+        def startfile(path, **kw):
             self.startfile_calls.append(path)
             if startfile_fails:
                 raise OSError("no such program")
@@ -250,7 +250,7 @@ class TestNothingMatchedAndNothingStarts:
         release = threading.Event()
         started = []
 
-        def blocking_startfile(path):
+        def blocking_startfile(path, **kw):
             started.append(path)
             release.wait(timeout=10)
 
@@ -372,7 +372,7 @@ class TestAStartedProgramMustComeForward:
                 lambda t, logger: False, raising=False,
             )
             monkeypatch.setattr(
-                os, "startfile", lambda path: None, raising=False
+                os, "startfile", lambda path, **kw: None, raising=False
             )
             input_proc._handle_activate_window(
                 {"target": "terminal"}, "r1", run.replies, "activate_window",
