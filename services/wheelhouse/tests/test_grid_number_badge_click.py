@@ -485,7 +485,7 @@ def test_a_pause_mid_sentence_keeps_every_word():
 # The in-process STT bridge (main.py _handle_stt_transcript) sets
 # end_of_utterance=True on the utterance's LAST REAL WORD, and the router
 # finalizes the buffer on that word, before the queued end marker arrives.
-# SpeechProcessor._utterance_end_is_confirmed answers True for that word
+# BareNumberHolds.utterance_end_is_confirmed answers True for that word
 # (its flagged-last-word arm), so the multi-word badge click fires at that
 # finalization. Without the arm the finalization is not a confirmed end,
 # the words type, and the end marker that follows finds nothing to click.

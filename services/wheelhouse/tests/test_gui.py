@@ -88,6 +88,12 @@ class TestSettingsAcknowledgement:
         config = ConfigService(str(path))
         state = StateManager(config, MagicMock(), asyncio.get_running_loop(), manager.state_from_logic_queue, None)
         controller = MagicMock(spec=LogicController)
+        # wh-overlay-refactor-pilot.2: the save wrapper now reaches the
+        # overlay through controller.overlay.
+        from services.wheelhouse.numbered_overlay.controller import (
+            NumberedOverlayController,
+        )
+        controller.overlay = MagicMock(spec=NumberedOverlayController)
         controller.state_manager = state
         # wh-numbers-stay-setting: the handler routes through the controller's own
         # save-and-apply wrapper, which a spec'd mock replaces; bind the real one.
@@ -1787,6 +1793,67 @@ class TestWorkingDialog:
         assert dialog._dot_timer.isActive()
         dialog.hide_working()
         assert not dialog._dot_timer.isActive()
+
+    def test_a_long_text_change_shows_the_whole_text_inside_the_plaque_width(
+        self, dialog
+    ):
+        """The text after the startup limit is long, and none of it is cut.
+
+        The launcher changes the text of a dialog that is already on the
+        screen when a provider takes longer than its startup limit
+        (wh-loading-dialog-until-ready, acceptance item 1). The text
+        wraps inside the width of the plaque, and the dialog grows in
+        height so that every line shows.
+        """
+        from PySide6.QtCore import QRect, Qt
+
+        long_text = (
+            "Loading Parakeet (sherpa-onnx, offline, GPU) takes longer than "
+            "usual. Wheelhouse cannot hear you yet."
+        )
+        dialog.show_working("Loading Parakeet (sherpa-onnx, offline, GPU)", "stt:1")
+        width_before = dialog.width()
+
+        dialog.show_working(long_text, "stt:1")
+        # The longest text the dot animation shows.
+        dialog._message_label.setText(long_text + "...")
+        dialog._message_label.parentWidget().layout().activate()
+
+        label = dialog._message_label
+        assert label.wordWrap()
+        assert dialog.width() == width_before
+        needed = label.fontMetrics().boundingRect(
+            QRect(0, 0, label.contentsRect().width(), 100000),
+            int(Qt.TextFlag.TextWordWrap),
+            long_text + "...",
+        )
+        assert needed.width() <= label.contentsRect().width()
+        assert needed.height() <= label.contentsRect().height()
+
+    def test_a_text_change_that_grows_the_dialog_keeps_its_centre(self, dialog):
+        """A dialog that grows for a longer text stays centred where it was.
+
+        The long text after the startup limit wraps to more lines, so
+        the dialog grows in height. Without the re-centre it would grow
+        downward only, and its centre would move away from the place
+        where the user saw it (wh-loading-dialog-until-ready).
+        """
+        dialog.show_working("Loading Parakeet (sherpa-onnx, offline, GPU)", "stt:1")
+        height_before = dialog.height()
+        centre_before = dialog.geometry().center()
+
+        dialog.show_working(
+            "Loading Parakeet (sherpa-onnx, offline, GPU) takes longer than "
+            "usual. Wheelhouse cannot hear you yet.",
+            "stt:1",
+        )
+
+        # The precondition: the dialog really grew, or the centre check
+        # below proves nothing.
+        assert dialog.height() > height_before
+        centre_after = dialog.geometry().center()
+        assert abs(centre_after.x() - centre_before.x()) <= 1
+        assert abs(centre_after.y() - centre_before.y()) <= 1
 
     def test_hide_working_when_not_visible_is_safe(self, dialog):
         # Should not raise

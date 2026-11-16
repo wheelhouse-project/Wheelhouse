@@ -17,8 +17,8 @@ def add(name, file, old, new, *expect):
 
 
 add("drop-original-capture", "ui/context.py",
-    "    target_identity = capture_target_identity(focused_control)",
-    "    target_identity = None",
+    "        target_identity = capture_target_identity(focused_control)",
+    "        target_identity = None",
     "test_fallback_uses_identity_captured_before_the_control_turns_stale")
 add("drop-context-propagation", "ui/context.py",
     "        target_identity=target_identity,", "        target_identity=None,",

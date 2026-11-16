@@ -156,11 +156,11 @@ MUTATIONS = [
         "files": [BARE],
         "old": """        if (
             not word_event.start_of_utterance
-            and self._bare_number_extends(word_event.word)
+            and self.bare_number_holds.bare_number_extends(word_event.word)
         ):
 """,
         "new": """        if (
-            self._bare_number_extends(word_event.word)
+            self.bare_number_holds.bare_number_extends(word_event.word)
         ):
 """,
         "expect": ["test_a_new_utterance_word_never_joins_the_previous_number"],
@@ -200,14 +200,14 @@ MUTATIONS = [
         "old": """        if tail.kind is _HeldTailKind.REPLACEMENT_PREFIX:
             await self._flush_pending_replacement_prefix_as_dictation()
         else:
-            await self._flush_pending_bare_number_as_dictation()
+            await self.bare_number_holds.flush_pending_bare_number_as_dictation()
 
     async def _consume_held_tail_at_utterance_end(
 """,
         "new": """        if tail.kind is _HeldTailKind.REPLACEMENT_PREFIX:
-            await self._flush_pending_bare_number_as_dictation()
+            await self.bare_number_holds.flush_pending_bare_number_as_dictation()
         else:
-            await self._flush_pending_bare_number_as_dictation()
+            await self.bare_number_holds.flush_pending_bare_number_as_dictation()
 
     async def _consume_held_tail_at_utterance_end(
 """,

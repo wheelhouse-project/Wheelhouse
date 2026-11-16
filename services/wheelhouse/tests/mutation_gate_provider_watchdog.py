@@ -2,7 +2,8 @@
 
 Committed beside the tests it checks, so it can be re-run on demand
 (wh-codex-merge-audit.8.1.1). Run it from the service directory with the
-service venv; it refuses to start unless the worktree is clean.
+service venv; it refuses to start unless each target file and the test
+file match HEAD.
 
 Follows the user-level `mutation-gate` skill:
   - every pattern must match the target file EXACTLY once (ambiguous and
@@ -500,6 +501,10 @@ def restore(path: Path, original: bytes) -> None:
         raise held
 
 
+def target_files() -> list[str]:
+    return sorted({m["file"] for m in MUTATIONS}) + [TESTS]
+
+
 def collected_test_names() -> set[str]:
     proc = subprocess.run(
         [str(PYTHON), "-m", "pytest", TESTS, "--collect-only", "-q",
@@ -574,11 +579,15 @@ def main() -> int:
 
     errors: list[str] = []
 
-    # ---- the worktree must start clean --------------------------------
-    st = subprocess.run(["git", "status", "--porcelain"], cwd=str(SERVICE),
-                        capture_output=True, text=True)
+    # ---- the target files and the guard tests must match HEAD -------------
+    # Only these files: a change to any other file in the worktree cannot
+    # alter what this gate proves, and a check of the whole worktree made
+    # --check refuse with return code 2 whenever another file was edited
+    # (wh-gate-provider-watchdog-check).
+    st = subprocess.run(["git", "status", "--porcelain", "--", *target_files()],
+                        cwd=str(SERVICE), capture_output=True, text=True)
     if st.stdout.strip():
-        print("[ERROR] worktree is not clean before the gate:")
+        print("[ERROR] a target or test file differs from HEAD before the gate:")
         print(st.stdout)
         return 2
 
@@ -613,8 +622,10 @@ def main() -> int:
             m["_bad"] = True
             continue
         m["_mutated"] = mutated.encode("utf-8")
-    print(f"checked {len(selected)} patterns, "
-          f"{sum(1 for m in selected if m.get('_bad'))} bad")
+    stale = sum(1 for e in errors if "PATTERN-" in e or "NO-OP" in e)
+    nocompile = sum(1 for e in errors if "DOES-NOT-COMPILE" in e)
+    print(f"checked {len(selected)} patterns, {stale} stale or ambiguous, "
+          f"{nocompile} that do not compile")
 
     # ---- expected catcher names must exist ----------------------------
     print("collecting test names ...")
@@ -703,9 +714,9 @@ def main() -> int:
             print(f"      {detail}")
     print(f"\ncaught={len(caught)}  survived/error={len(bad)}")
 
-    st = subprocess.run(["git", "status", "--porcelain"], cwd=str(SERVICE),
-                        capture_output=True, text=True)
-    print(f"worktree after the gate: "
+    st = subprocess.run(["git", "status", "--porcelain", "--", *target_files()],
+                        cwd=str(SERVICE), capture_output=True, text=True)
+    print(f"target files after the gate: "
           f"{'CLEAN' if not st.stdout.strip() else 'DIRTY -- ' + st.stdout}")
     leftovers = list((SERVICE).rglob("*.mutation-gate.*.tmp"))
     if leftovers:

@@ -446,9 +446,10 @@ actions = [
     { function = "number_point", params = ["g1"] }
 ]
 
-# Numeric pattern: "numeric twenty three" -> "23", "numeric 5" -> "5"
+# Numeric pattern: "numeric twenty three" -> "23", "numeric 5" -> "5".
+# "numeral" is a synonym: "numeral seven" -> "7" (wh-numeral-synonym).
 [[pattern]]
-pattern = '''^numeric (\d+)$'''
+pattern = '''^(?:numeric|numeral) (\d+)$'''
 doc_id = "numeric-digits"
 whole_utterance_only = true
 actions = [

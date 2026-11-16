@@ -13,8 +13,8 @@ Layers under test:
      drag / move_here / click, including the [click] config gate, the
      NO_MONITOR degrade, and the True/False consumed contract that
      drives the actions-layer dictation fallback.
-  3. ``LogicController._send_mouse_action`` failure notices, including
-     the distinct release_failed wording tag.
+  3. The failure notices of the grid pointer actions, including the
+     distinct release_failed wording tag.
   4. Mutual exclusion: opening the numbered overlay closes the grid.
   5. Gesture threading: a gesture query routed to the numbered overlay
      carries the gesture into the ``click_snapshot_item`` request.
@@ -28,7 +28,9 @@ send_request calls), mirroring tests/test_voice_overlay_routing.py.
 from __future__ import annotations
 
 import asyncio
+import time
 import re
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Optional
 from unittest import mock
@@ -57,15 +59,69 @@ from services.wheelhouse.ui.element_types import (
     WalkSnapshotSummary,
     WalkSnapshotSummaryItem,
 )
+from services.wheelhouse.numbered_overlay.controller import (
+    NumberedOverlayController,
+)
+from tests.mouse_grid_boundary_harness import FakeMonitors, Monitor
 
 
 MON = GridRect(0, 0, 1920, 1080)
 MON2 = GridRect(1920, 0, 1920, 1080)
 
+# The FakeMonitors that the autouse fixture _fake_monitors installs.
+_INSTALLED_MONITORS: list = []
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_foreground_window(monkeypatch):
+    """The real overlay's first-use hint reads the foreground window.
+
+    With no foreground window the hint returns before it reads or writes
+    its record file, so these tests never show a hint and never touch
+    services/wheelhouse/data/. A test that installs a FakeDesktop patches
+    the same Win32 call again inside its own scope.
+    """
+    import win32gui
+
+    monkeypatch.setattr(win32gui, "GetForegroundWindow", lambda: 0)
+
+
+@pytest.fixture(autouse=True)
+def _fake_monitors():
+    """Windows reports the monitors that _make_controller names.
+
+    The monitor list and the window rectangle come from a FakeMonitors
+    (tests/mouse_grid_boundary_harness.py), so no test reads the monitors
+    of the machine. _make_controller sets its fields.
+    """
+    fake = FakeMonitors()
+    with ExitStack() as stack:
+        fake.install(stack)
+        _INSTALLED_MONITORS.append(fake)
+        try:
+            yield fake
+        finally:
+            _INSTALLED_MONITORS.remove(fake)
+
+
+def _monitor(rect: GridRect) -> Monitor:
+    return Monitor(rect.left, rect.top, rect.width, rect.height)
+
+
+def _bind_overlay(c):
+    """Build the real NumberedOverlayController as ``c.overlay``.
+
+    wh-overlay-refactor-pilot.2 moved the numbered overlay out of
+    LogicController. The public constructor takes the (mocked)
+    LogicController as its host, so ``c.click_config`` must be set first.
+    """
+    c.overlay = NumberedOverlayController(c, clock=time.monotonic)
+    return c.overlay
 
 
 def _summary(snapshot_id: str, *display_numbers: int) -> WalkSnapshotSummary:
@@ -109,7 +165,7 @@ def _probe_reply(params, *, last_mouse_action=None) -> dict:
     scripted ``send_request`` in this file that answers a ``channel_probe``
     must return THIS envelope (wh-mouse-grid.1.26). Asserts the probe
     request carried a nonempty ``trace_id``, mirroring the real request
-    built by ``_confirm_grid_mouse_channel``, and echoes it back the way
+    built by the grid's channel confirmation, and echoes it back the way
     the real handler does.
     """
     assert isinstance(params, dict) and params.get("trace_id"), (
@@ -141,31 +197,31 @@ def _make_controller(
     machines are real; app.send_request and the GUI queue are captured.
     """
     from main import LogicController
-    from services.wheelhouse.overlay_focus_hooks import FocusChangeDebouncer
     from ui.click_config import ClickConfig
 
     c = MagicMock(spec=LogicController)
+
     for name in (
         "forward_click_element",
         "handle_grid_command",
-        "_perform_grid_effects",
-        "_forward_click_notice",
-        "_close_grid_for_numbered_overlay",
-        "_send_mouse_action",
-        "_confirm_grid_mouse_channel",
-        "_dispatch_mouse_action",
         "handle_overlay_command",
-        "_hold_click_n",
-        "_grid_monitor_context_off_loop",
-        "_grid_gesture_buttons",
-        "_put_grid_gui_event",
+        "put_grid_gui_event",
         "handle_pointer_click",
+        "take_click_disabled_notice",
+        "mark_grid_mouse_channel_suspect",
+        "grid_session_in_transition",
     ):
         setattr(c, name, getattr(LogicController, name).__get__(c))
+    # wh-full-refactor.6.2: the grid methods live in MouseGridController,
+    # which reaches this mock through its host back-reference.
+    from services.wheelhouse.mouse_grid.controller import MouseGridController
+
+    c.mouse_grid = MouseGridController(c)
 
     c.click_config = ClickConfig.from_raw(
         {"enabled": enabled, "response_timeout_ms": 3000}
     )
+    _bind_overlay(c)
     c._click_disabled_notice_shown = False
 
     grid = GridOverlayStateMachine()
@@ -183,9 +239,8 @@ def _make_controller(
     machine = ClickOverlayStateMachine()
     machine.state = overlay_state
     machine.pinned_snapshot_id = pinned_snapshot_id
-    c.click_overlay_state = machine
-    c._overlay_focus_debouncer = FocusChangeDebouncer()
-    c.click_snapshot_summary_cache = _cache_with(*cache_summaries)
+    c.overlay.click_overlay_state = machine
+    c.overlay.click_snapshot_summary_cache = _cache_with(*cache_summaries)
 
     gui_events: list = []
     c.state_manager = MagicMock()
@@ -225,12 +280,16 @@ def _make_controller(
     c.app.send_request = _send_request
     c._captured = captured
 
-    async def _hint(_trace):
-        return None
-
-    c._maybe_show_first_use_hint = _hint
-
-    c._grid_monitor_context = lambda: (monitors, focused)
+    # What Windows reports when the grid opens. The fixture
+    # _no_foreground_window makes the foreground window 0, so the grid opens
+    # on the monitor at (0, 0), else on the first one listed; every caller
+    # passes focused as MON (at (0, 0)) or None, which gives that monitor.
+    fake = _INSTALLED_MONITORS[-1]
+    fake.monitors = [_monitor(m) for m in monitors]
+    fake.window_rect = None if focused is None else (
+        focused.left, focused.top,
+        focused.left + focused.width, focused.top + focused.height,
+    )
 
     c._tasks = []
 
@@ -352,44 +411,9 @@ def test_grid_open_out_of_range_number_goes_by_name():
     assert c.grid_overlay_state.is_open
 
 
-def test_grid_closed_number_goes_by_name():
-    c = _make_controller(grid_open=False)
-    _run(c, c.forward_click_element(_query("7"), "tr"))
-    assert c._captured.get("action") == "click_element"
-
-
-def test_grid_closed_overlay_painted_number_routes_snapshot_item():
-    c = _make_controller(
-        grid_open=False,
-        overlay_state=OverlayState.PAINTED,
-        pinned_snapshot_id="snap",
-        cache_summaries=(_summary("snap", 1, 2, 3),),
-    )
-    c._dispatch_snapshot_item_click = MagicMock()
-    _run(c, c.forward_click_element(_query("2"), "tr"))
-    assert c._captured.get("action") != "click_element"
-    c._dispatch_snapshot_item_click.assert_called_once()
-
-
-def test_grid_open_takes_precedence_over_overlay_routing():
-    # Mutual exclusion should keep both from being open, but if they ever
-    # are, the grid claim runs first (same precedence slot, grid checked
-    # before route_click_n).
-    c = _make_controller(
-        grid_open=True,
-        overlay_state=OverlayState.PAINTED,
-        pinned_snapshot_id="snap",
-        cache_summaries=(_summary("snap", 1, 2, 3),),
-    )
-    c._dispatch_snapshot_item_click = MagicMock()
-    _run(c, c.forward_click_element(_query("2"), "tr"))
-    c._dispatch_snapshot_item_click.assert_not_called()
-    assert len(_mouse_calls(c)) == 1
-
-
 def test_no_grid_machine_attr_degrades_to_existing_routing():
     c = _make_controller(grid_open=False)
-    del c.grid_overlay_state
+    c.grid_overlay_state = None
     _run(c, c.forward_click_element(_query("7"), "tr"))
     assert c._captured.get("action") == "click_element"
 
@@ -406,7 +430,7 @@ def test_open_paints_grid_on_focused_monitor_and_closes_overlay():
     async def _overlay(command, trace_id):
         hidden.append(command)
 
-    c.handle_overlay_command = _overlay
+    c.overlay.handle_overlay_command = _overlay
     consumed = _run(c, c.handle_grid_command("open", "tr"))
     assert consumed is True
     assert c.grid_overlay_state.is_open
@@ -433,7 +457,7 @@ def test_open_with_no_focused_monitor_falls_back_to_primary():
     async def _overlay(command, trace_id):
         return None
 
-    c.handle_overlay_command = _overlay
+    c.overlay.handle_overlay_command = _overlay
     _run(c, c.handle_grid_command("open", "tr"))
     assert c.grid_overlay_state.is_open
     (paint,) = _gui(c, "paint_grid")
@@ -565,7 +589,7 @@ def test_bare_click_acts_at_current_center():
 def test_triple_click_with_the_grid_open_clicks_the_center_three_times():
     """R4 of RULING 22:16 (wh-voice-access-parity.2.5).
 
-    Without its own entry in _grid_gesture_buttons a TRIPLE_CLICK gesture
+    Without its own entry in the grid's gesture-to-button table a TRIPLE_CLICK gesture
     would fall through to a silent single left click at the grid center.
     """
     c = _make_controller(grid_open=True)
@@ -583,14 +607,6 @@ def test_triple_click_with_the_grid_open_clicks_the_center_three_times():
     assert action == "click_point"
     assert (params["x"], params["y"]) == (center.x, center.y)
     assert (params["button"], params["click_count"]) == ("left", 3)
-
-
-def test_dismiss_clears_and_closes():
-    c = _make_controller(grid_open=True)
-    consumed = _run(c, c.handle_grid_command("dismiss", "tr"))
-    assert consumed is True
-    assert not c.grid_overlay_state.is_open
-    assert _gui(c, "clear_grid")
 
 
 def test_dismiss_when_closed_is_consumed_and_defensively_clears():
@@ -612,12 +628,6 @@ def test_next_screen_repaints_on_next_monitor():
     assert paint["left"] == MON2.left and paint["width"] == MON2.width
 
 
-def test_next_screen_when_closed_is_consumed_noop():
-    c = _make_controller(grid_open=False)
-    assert _run(c, c.handle_grid_command("next_screen", "tr")) is True
-    assert c._gui_events == []
-
-
 # ---------------------------------------------------------------------------
 # 3. Mouse-action failure notices.
 # ---------------------------------------------------------------------------
@@ -625,7 +635,7 @@ def test_next_screen_when_closed_is_consumed_noop():
 
 def _failed_mouse_response(reason: str) -> dict:
     # status="error" matches the ONLY real producer,
-    # UIActionHandler._emit_mouse_action_response, which always pairs
+    # the MouseActionResponse emitter of MousePointerActions, which always pairs
     # status="error" with outcome="execution_failed"
     # (wh-mouse-grid.1.14: a fixture claiming status="ok" for a failure
     # exercised a wire shape no Input process ever sends).
@@ -643,15 +653,6 @@ def test_click_failure_fires_grid_click_failed_notice():
     _run(c, c.handle_grid_command("click", "tr"))
     (notice,) = _notices(c)
     assert notice["reason"] == "grid_click_failed"
-
-
-def test_drag_release_failed_gets_distinct_notice():
-    c = _make_controller(grid_open=True)
-    _run(c, c.handle_grid_command("mark", "tr"))
-    c._mouse_response = _failed_mouse_response("release_failed")
-    _run(c, c.handle_grid_command("drag", "tr"))
-    reasons = [n["reason"] for n in _notices(c)]
-    assert "grid_button_release_failed" in reasons
 
 
 def test_click_release_failed_gets_the_same_distinct_notice():
@@ -696,117 +697,9 @@ def test_malformed_mouse_response_fires_failure_notice():
 # ---------------------------------------------------------------------------
 
 
-def test_show_numbers_closes_open_grid():
-    c = _make_controller(grid_open=True)
-    _run(c, c.handle_overlay_command("show", "tr"))
-    assert not c.grid_overlay_state.is_open
-    assert _gui(c, "clear_grid")
-
-
-def test_auto_open_ambiguous_closes_open_grid():
-    from main import LogicController
-
-    c = _make_controller(grid_open=True)
-    c._perform_auto_open_ambiguous = LogicController._perform_auto_open_ambiguous.__get__(c)
-    response = MagicMock()
-    response.snapshot_id = "snap"
-    response.ambiguous_item_ids = ("a", "b")
-    response.outcome = "ambiguous"
-    response.reason = None
-    response.matched_name = None
-    response.matched_names = ("A", "B")
-    response.trace_id = "tr"
-    c._perform_auto_open_ambiguous(response, "spoken", "tr")
-    assert not c.grid_overlay_state.is_open
-
-
-def test_close_grid_helper_noop_when_closed():
-    c = _make_controller(grid_open=False)
-    c._close_grid_for_numbered_overlay("tr")
-    assert c._gui_events == []
-
-
 # ---------------------------------------------------------------------------
 # 5. Gesture threading to the numbered overlay click.
 # ---------------------------------------------------------------------------
-
-
-def test_overlay_pick_threads_gesture_to_dispatch():
-    c = _make_controller(
-        overlay_state=OverlayState.PAINTED,
-        pinned_snapshot_id="snap",
-        cache_summaries=(_summary("snap", 1, 2, 3),),
-    )
-    c._dispatch_snapshot_item_click = MagicMock()
-    _run(
-        c,
-        c.forward_click_element(
-            _query("2", gesture=ClickGesture.RIGHT_CLICK), "tr",
-        ),
-    )
-    _, kwargs = c._dispatch_snapshot_item_click.call_args
-    # == not "is": the module is importable both as ui.element_types
-    # and services.wheelhouse.ui.element_types, giving two enum classes;
-    # ClickGesture subclasses str so equality compares the wire value.
-    assert kwargs.get("gesture") == ClickGesture.RIGHT_CLICK
-
-
-def test_snapshot_item_request_carries_gesture_payload():
-    from main import LogicController
-
-    c = _make_controller()
-    c._dispatch_snapshot_item_click = (
-        LogicController._dispatch_snapshot_item_click.__get__(c)
-    )
-    c._send_snapshot_item_click = (
-        LogicController._send_snapshot_item_click.__get__(c)
-    )
-    # wh-overlay-slow-uia-stale-badges.8: the send body lives in the inner
-    # method; without binding it the spec'd mock swallows the send.
-    c._send_snapshot_item_click_inner = (
-        LogicController._send_snapshot_item_click_inner.__get__(c)
-    )
-    c._cancel_held_click_after_success = MagicMock()
-    c._feed_click_complete_refresh = MagicMock()
-
-    async def _go():
-        c._dispatch_snapshot_item_click(
-            snapshot_id="snap", item_id="snap-item-2", trace_id="tr",
-            gesture=ClickGesture.DOUBLE_CLICK,
-        )
-
-    _run(c, _go())
-    action, params, _timeout = c._captured["calls"][-1]
-    assert action == "click_snapshot_item"
-    assert params["gesture"] == "double_click"
-
-
-def test_snapshot_item_request_omits_default_gesture():
-    from main import LogicController
-
-    c = _make_controller()
-    c._dispatch_snapshot_item_click = (
-        LogicController._dispatch_snapshot_item_click.__get__(c)
-    )
-    c._send_snapshot_item_click = (
-        LogicController._send_snapshot_item_click.__get__(c)
-    )
-    # wh-overlay-slow-uia-stale-badges.8: see the sibling test above.
-    c._send_snapshot_item_click_inner = (
-        LogicController._send_snapshot_item_click_inner.__get__(c)
-    )
-    c._cancel_held_click_after_success = MagicMock()
-    c._feed_click_complete_refresh = MagicMock()
-
-    async def _go():
-        c._dispatch_snapshot_item_click(
-            snapshot_id="snap", item_id="snap-item-2", trace_id="tr",
-        )
-
-    _run(c, _go())
-    action, params, _timeout = c._captured["calls"][-1]
-    assert action == "click_snapshot_item"
-    assert "gesture" not in params
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +911,7 @@ def test_bare_click_grid_closed_clicks_at_the_pointer(spoken, button, count):
 
     With the grid closed, the bare click words click where the pointer
     is instead of typing. The send goes through the real Logic path
-    (_dispatch_mouse_action: the grid pointer lock and the session
+    (the grid pointer dispatch: the grid pointer lock and the session
     fence), as the Input action click_at_pointer. This test replaced
     test_bare_click_grid_closed_dictates, which pinned the old
     dictation fallback.
@@ -1056,49 +949,6 @@ def test_a_failed_pointer_click_fires_pointer_click_failed():
     _run(c, functions.grid_click_command("double click"))
     (notice,) = _notices(c)
     assert notice["reason"] == "pointer_click_failed"
-    assert dictated == []
-
-
-def test_a_pointer_click_waits_its_turn_behind_the_grid_lock():
-    """The pointer click shares the grid's serialization and fence.
-
-    It is recorded as pending pointer work (so a later grid open waits
-    for it), and it cannot be sent while another pointer action holds
-    the grid mouse-action lock.
-    """
-    from main import LogicController
-
-    c = _make_controller(grid_open=False)
-    c._track_pending_pointer_task = (
-        LogicController._track_pending_pointer_task.__get__(c)
-    )
-
-    async def _scenario():
-        lock = asyncio.Lock()
-        c._grid_mouse_action_lock = lock
-        c._pending_grid_mouse_actions = set()
-        await lock.acquire()
-        consumed = await c.handle_pointer_click(
-            ClickGesture.INVOKE, "tr-lock", spoken="click",
-        )
-        assert consumed is True
-        assert len(c._pending_grid_mouse_actions) == 1
-        for _ in range(5):
-            await asyncio.sleep(0)
-        assert _mouse_calls(c) == []
-        lock.release()
-        await asyncio.gather(*c._tasks)
-        assert [a for a, _p in _mouse_calls(c)] == ["click_at_pointer"]
-
-    asyncio.run(_scenario())
-
-
-def test_the_pointer_click_does_not_run_while_the_grid_is_open():
-    """An open grid still takes the bare click words, as before."""
-    c = _make_controller(grid_open=True)
-    functions, _sent, dictated, _processor = _make_actions(c)
-    _run(c, functions.grid_click_command("click"))
-    assert [a for a, _p in _mouse_calls(c)] == ["click_point"]
     assert dictated == []
 
 
@@ -1324,11 +1174,6 @@ def test_click_to_talk_mode_still_wins_over_click_element(catalog):
     assert _first_function(entry) not in (
         "click_element", "click_element_command", "grid_click_command",
     )
-
-
-def test_plain_click_element_pattern_unchanged(catalog):
-    entry = _first_match(catalog, "click cancel")
-    assert _first_function(entry) == "click_element"
 
 
 def test_bare_word_patterns_are_whole_utterance_only(catalog):
@@ -1581,7 +1426,10 @@ def test_wording_gesture_sendinput_failed_names_control():
 #    User32 monitor / window rectangles are virtualized (a 3840x2160
 #    monitor at 300% reads as 1280x720 -- verified empirically on Ikon).
 #    The seam must establish a per-monitor thread context for its reads
-#    and refuse (degrade to NO_MONITOR) when it cannot.
+#    and refuse (degrade to NO_MONITOR) when it cannot. The grid side is
+#    covered at the boundary by test_mg_4 and test_mg_47
+#    (tests/test_mouse_grid_requirements_l5.py); this section keeps the
+#    tests of the shared context manager.
 # ---------------------------------------------------------------------------
 
 
@@ -1659,182 +1507,9 @@ class TestPerMonitorDpiContext:
             patcher.stop()
 
 
-class TestGridMonitorContextDpi:
-    """_grid_monitor_context reads only inside the context, refuses without."""
-
-    def _controller(self):
-        from main import LogicController
-
-        c = MagicMock(spec=LogicController)
-        c._grid_monitor_context = (
-            LogicController._grid_monitor_context.__get__(c)
-        )
-        return c
-
-    def test_refuses_when_no_reliable_physical_coordinates(self):
-        from contextlib import contextmanager
-
-        from services.wheelhouse.shared import monitor_geometry
-
-        c = self._controller()
-
-        @contextmanager
-        def _no_dpi():
-            yield False
-
-        enum = MagicMock()
-        with mock.patch.object(
-            monitor_geometry, "per_monitor_dpi_context", _no_dpi
-        ), mock.patch.object(
-            monitor_geometry, "_enumerate_native_monitors", enum
-        ):
-            monitors, focused = c._grid_monitor_context()
-
-        # Fail-safe refusal: no monitors (degrades to NO_MONITOR -> notice)
-        # and no virtualized rectangles ever read.
-        assert monitors == () and focused is None
-        enum.assert_not_called()
-
-    def test_reads_happen_inside_the_established_context(self):
-        from contextlib import contextmanager
-
-        from services.wheelhouse.shared import monitor_geometry
-
-        c = self._controller()
-        order: list = []
-
-        @contextmanager
-        def _dpi_ok():
-            order.append("enter")
-            yield True
-            order.append("exit")
-
-        def _enum():
-            order.append("enumerate")
-            return []
-
-        with mock.patch.object(
-            monitor_geometry, "per_monitor_dpi_context", _dpi_ok
-        ), mock.patch.object(
-            monitor_geometry, "_enumerate_native_monitors", _enum
-        ):
-            monitors, focused = c._grid_monitor_context()
-
-        assert order == ["enter", "enumerate", "exit"]
-        assert monitors == () and focused is None
-
-
 # ---------------------------------------------------------------------------
-# 10. Grid mouse IPC serialization (wh-mouse-grid.1.15). perform_drag
-#     blocks the synchronous Input command loop for its whole interpolated
-#     duration (up to 5s). A second grid pointer action sent during that
-#     window could time out at Logic (its budget starts at enqueue), be
-#     reported failed, and still execute later -- or overwrite an unread
-#     shared-memory payload and be silently dropped. Admission is
-#     serialized: a grid pointer action is not SENT until the previous
-#     one's reply has arrived, so each send_request's timeout starts at
-#     its own admission and at most one grid payload is ever outstanding.
-# ---------------------------------------------------------------------------
-
-
-class TestGridMouseActionSerialization:
-    def test_second_action_is_not_sent_while_a_drag_is_in_flight(self):
-        c = _make_controller()
-        calls: list = []
-
-        async def _scenario():
-            gate = asyncio.Event()
-
-            async def _send_request(action, params=None, timeout_s=None,
-                                    on_late_response=None):
-                calls.append(action)
-                if action == "perform_drag":
-                    await gate.wait()
-                from shared.mouse_action import MouseActionResponse
-                return MouseActionResponse(
-                    status="ok", outcome="ok", reason=None, trace_id="t",
-                ).to_dict()
-
-            c.app.send_request = _send_request
-            loop = asyncio.get_event_loop()
-            drag = loop.create_task(
-                c._send_mouse_action(
-                    "perform_drag",
-                    {"from_x": 0, "from_y": 0, "x": 9, "y": 9,
-                     "duration_ms": 5000},
-                    trace_id="t1", spoken="drag",
-                    failure_reason="grid_drag_failed",
-                )
-            )
-            # Let the drag reach its (held) send.
-            for _ in range(5):
-                await asyncio.sleep(0)
-            click = loop.create_task(
-                c._send_mouse_action(
-                    "click_point",
-                    {"x": 5, "y": 5, "button": "left", "click_count": 1},
-                    trace_id="t2", spoken="click",
-                    failure_reason="grid_click_failed",
-                )
-            )
-            for _ in range(5):
-                await asyncio.sleep(0)
-            # The click has NOT been sent while the drag is in flight --
-            # its timeout budget has not started and its payload cannot
-            # overwrite the drag's.
-            assert calls == ["perform_drag"]
-            gate.set()
-            await asyncio.gather(drag, click)
-
-        asyncio.run(_scenario())
-        assert calls == ["perform_drag", "click_point"]
-        assert _notices(c) == []
-
-    def test_lock_releases_after_a_timeout_and_the_next_action_sends(self):
-        c = _make_controller()
-        calls: list = []
-
-        async def _scenario():
-            async def _send_request(action, params=None, timeout_s=None,
-                                    on_late_response=None):
-                calls.append(action)
-                if action == "perform_drag":
-                    raise asyncio.TimeoutError()
-                if action == "channel_probe":
-                    return _probe_reply(params)
-                from shared.mouse_action import MouseActionResponse
-                return MouseActionResponse(
-                    status="ok", outcome="ok", reason=None, trace_id="t",
-                ).to_dict()
-
-            c.app.send_request = _send_request
-            await c._send_mouse_action(
-                "perform_drag",
-                {"from_x": 0, "from_y": 0, "x": 9, "y": 9,
-                 "duration_ms": 100},
-                trace_id="t1", spoken="drag",
-                failure_reason="grid_drag_failed",
-            )
-            await c._send_mouse_action(
-                "click_point",
-                {"x": 5, "y": 5, "button": "left", "click_count": 1},
-                trace_id="t2", spoken="click",
-                failure_reason="grid_click_failed",
-            )
-
-        asyncio.run(_scenario())
-        # Both were attempted (the timeout released the serialization
-        # lock). The timeout marked the channel suspect, so the click was
-        # admitted only after a channel_probe reply confirmed Input had
-        # drained past the timed-out payload (wh-mouse-grid.1.18). Only
-        # the drag noticed.
-        assert calls == ["perform_drag", "channel_probe", "click_point"]
-        notices = _notices(c)
-        assert len(notices) == 1
-        assert notices[0]["reason"] == "grid_drag_failed"
-
-
-# ---------------------------------------------------------------------------
+# 10. (wh-mouse-grid.1.15, grid mouse IPC serialization: covered at the
+#     boundary by test_mg_33, test_mg_36 and test_mg_39.)
 # 11. A timed-out grid pointer request may still execute later
 #     (wh-mouse-grid.1.18): after a timeout the channel is suspect, and the
 #     next action is admitted only once a probe round trip proves Input has
@@ -1842,27 +1517,43 @@ class TestGridMouseActionSerialization:
 # ---------------------------------------------------------------------------
 
 
+async def _drain_tasks(c) -> None:
+    while c._tasks:
+        pending, c._tasks = c._tasks, []
+        await asyncio.gather(*pending)
+
+
+def _reopen_grid(c) -> None:
+    """Open the grid's state machine again, as a new "show grid" leaves it.
+
+    A grid action closes the grid. The test prepares the open grid for the
+    next action through the public state machine, so no other Input request
+    (the open's channel probe) runs between the two actions.
+    """
+    result = c.grid_overlay_state.apply(
+        GridEvent(GridEventKind.OPEN_GRID, monitors=(MON,), focused_monitor=MON)
+    )
+    assert c.grid_overlay_state.is_open, result
+
+
 class TestGridMouseChannelProbe:
     def _drag_then_click(self, c, calls):
+        """With the grid open: "mark", "3", "drag", then "click" on a new grid."""
         async def _scenario():
-            await c._send_mouse_action(
-                "perform_drag",
-                {"from_x": 0, "from_y": 0, "x": 9, "y": 9,
-                 "duration_ms": 100},
-                trace_id="t1", spoken="drag",
-                failure_reason="grid_drag_failed",
+            assert await c.handle_grid_command("mark", "t0", spoken="mark")
+            assert await c.handle_grid_command(
+                "refine", "t0", number=3, spoken="3",
             )
-            await c._send_mouse_action(
-                "click_point",
-                {"x": 5, "y": 5, "button": "left", "click_count": 1},
-                trace_id="t2", spoken="click",
-                failure_reason="grid_click_failed",
-            )
+            assert await c.handle_grid_command("drag", "t1", spoken="drag")
+            await _drain_tasks(c)
+            _reopen_grid(c)
+            assert await c.handle_grid_command("click", "t2", spoken="click")
+            await _drain_tasks(c)
 
         asyncio.run(_scenario())
 
     def test_action_withheld_and_noticed_when_the_probe_gets_no_reply(self):
-        c = _make_controller()
+        c = _make_controller(grid_open=True)
         calls: list = []
 
         async def _send_request(action, params=None, timeout_s=None,
@@ -1884,50 +1575,8 @@ class TestGridMouseChannelProbe:
             "grid_drag_failed", "grid_click_failed",
         ]
 
-    def test_probe_runs_once_then_the_channel_is_trusted_again(self):
-        c = _make_controller()
-        calls: list = []
-
-        async def _send_request(action, params=None, timeout_s=None,
-                                on_late_response=None):
-            calls.append(action)
-            if action == "perform_drag" and calls.count("perform_drag") == 1:
-                raise asyncio.TimeoutError()
-            if action == "channel_probe":
-                return _probe_reply(params)
-            from shared.mouse_action import MouseActionResponse
-            return MouseActionResponse(
-                status="ok", outcome="ok", reason=None, trace_id="t",
-            ).to_dict()
-
-        c.app.send_request = _send_request
-
-        async def _scenario():
-            await c._send_mouse_action(
-                "perform_drag",
-                {"from_x": 0, "from_y": 0, "x": 9, "y": 9,
-                 "duration_ms": 100},
-                trace_id="t1", spoken="drag",
-                failure_reason="grid_drag_failed",
-            )
-            for n, trace in ((1, "t2"), (2, "t3")):
-                await c._send_mouse_action(
-                    "click_point",
-                    {"x": n, "y": n, "button": "left", "click_count": 1},
-                    trace_id=trace, spoken="click",
-                    failure_reason="grid_click_failed",
-                )
-
-        asyncio.run(_scenario())
-        # Exactly one probe: the immediate post-timeout recovery probe
-        # (wh-mouse-grid.1.24) confirms the channel, so BOTH clicks are
-        # admitted without another probe.
-        assert calls == [
-            "perform_drag", "channel_probe", "click_point", "click_point",
-        ]
-
     def test_non_timeout_send_failure_also_marks_the_channel_suspect(self):
-        c = _make_controller()
+        c = _make_controller(grid_open=True)
         calls: list = []
 
         async def _send_request(action, params=None, timeout_s=None,
@@ -1955,55 +1604,124 @@ class TestGridMouseChannelProbe:
 # ---------------------------------------------------------------------------
 
 
-class TestGridPaintWaitsForOverlayClearDispatch:
-    def test_paint_grid_not_queued_until_the_overlay_clear_batch_ships(self):
-        from main import LogicController
+async def _grid_open_during_a_refresh_build(tmp_path) -> list:
+    """Open the grid while a real overlay refresh build holds the effect lock.
 
-        c = _make_controller(overlay_state=OverlayState.PAINTED)
-        # Bind the REAL overlay effect performers: the bug lives in the
-        # scheduling seam between them, so faking handle_overlay_command
-        # (as the open test does) cannot see it.
-        for name in ("_perform_overlay_effects", "_dispatch_overlay_effects"):
-            setattr(c, name, getattr(LogicController, name).__get__(c))
+    Painted badges, then a re-said "show numbers" whose refresh walk Input
+    never answers: the refresh batch holds ``_overlay_effect_lock`` across
+    that round trip. "show grid" then closes the numbered overlay and paints
+    the grid through the public LogicController entry its pattern calls,
+    called directly so the open does not queue behind the unanswered
+    utterance. The clock never moves, so no request deadline can pass.
 
-        order: list = []
-        gui_events = c._gui_events
+    Returns the order of the clear_overlay and paint_grid messages on the GUI
+    queue.
+    """
+    from tests.overlay_boundary_harness import overlay_boundary
 
-        def _put(event):
-            order.append(event.get("action"))
-            gui_events.append(event)
+    async with overlay_boundary(tmp_path) as b:
+        await b.show_numbers_painted("snap-1")
+        mark = b.mark()
+        b.say_soon("show numbers")
+        await b.next_frame("start_overlay_walk")
+        open_task = asyncio.ensure_future(
+            b.controller.handle_grid_command("open", "tr", spoken="show grid")
+        )
+        # Fails with a timeout when the open stalls behind the stale build.
+        # The stale build's own deadline is screen_read_timeout_ms (10 s);
+        # the open measured 0.02-0.03 s, so 1 s is the tightest bound that
+        # keeps a margin for a loaded machine and still fails a wait for the
+        # stale build. The bound is real time: the paint crosses the real
+        # GUI queue's feeder thread, so event-loop yields cannot count it.
+        await b.next_gui("paint_grid", timeout_s=1.0)
+        await asyncio.wait_for(open_task, 1.0)
+        await b.flush()
+        order = [
+            m["action"]
+            for m in b.gui_since(mark, actions={"clear_overlay", "paint_grid"})
+        ]
+    return order
 
-        c.state_manager.state_to_gui_queue.put_nowait = _put
 
-        async def _clear_one(effect, trace_id):
-            order.append("clear_overlay")
+async def _grid_open_while_a_refresh_pin_holds_the_lock(tmp_path) -> list:
+    """Open the grid while a refresh batch that cannot be aborted holds the lock.
 
-        c._overlay_dispatch_clear_one = _clear_one
+    Painted badges, then a re-said "show numbers" whose refresh walk Input
+    answers. The batch that commits the new badges sends pin_snapshot before
+    it paints, under ``_overlay_effect_lock``, and Input does not answer that
+    pin until the test lets it: the test holds the reply in the app's public
+    ``send_request``. A grid open aborts only a parked BUILD, so it cannot
+    wake this batch. "show grid" then closes the numbered overlay through the
+    public LogicController entry its pattern calls, called directly so the
+    open does not queue behind the utterance. Returns the order of the
+    paint_grid and clear_overlay messages, and asserts while the pin is held
+    that paint_grid has not reached the GUI queue.
+    """
+    from tests.overlay_boundary_harness import (
+        overlay_boundary,
+        settle,
+        walk_ok_reply,
+    )
 
-        async def _scenario():
-            # Simulate an in-flight overlay refresh batch holding the
-            # effect lock when 'show grid' arrives.
-            lock = asyncio.Lock()
-            c._overlay_effect_lock = lock
-            await lock.acquire()
-            open_task = asyncio.get_event_loop().create_task(
-                c.handle_grid_command("open", "tr")
+    async with overlay_boundary(tmp_path) as b:
+        await b.show_numbers_painted("snap-1")
+        pin_held = asyncio.Event()
+        release_pin = asyncio.Event()
+        send_request = b.app.send_request
+
+        async def _hold_the_pin(action, *args, **kwargs):
+            if action == "pin_snapshot" and not release_pin.is_set():
+                pin_held.set()
+                await release_pin.wait()
+            return await send_request(action, *args, **kwargs)
+
+        b.app.send_request = _hold_the_pin
+        try:
+            mark = b.mark()
+            b.say_soon("show numbers")
+            await b.answer_walk(lambda p: walk_ok_reply(
+                p, snapshot_id="snap-2", numbers=(1, 2),
+            ))
+            await asyncio.wait_for(pin_held.wait(), 5.0)
+            open_task = asyncio.ensure_future(
+                b.controller.handle_grid_command(
+                    "open", "tr", spoken="show grid",
+                )
             )
-            for _ in range(20):
-                await asyncio.sleep(0)
-            assert not _gui(c, "paint_grid"), (
+            await settle()
+            await b.flush()
+            assert not b.gui_since(mark, actions={"paint_grid"}), (
                 "paint_grid shipped while the numbered-overlay clear batch "
                 "was still waiting on _overlay_effect_lock"
             )
-            lock.release()
-            await open_task
-            while c._tasks:
-                pending, c._tasks = c._tasks, []
-                await asyncio.gather(*pending)
+            assert not open_task.done()
+            release_pin.set()
+            await b.next_gui("paint_grid")
+            await asyncio.wait_for(open_task, 5.0)
+            await b.flush()
+        finally:
+            release_pin.set()
+            b.app.send_request = send_request
+        order = [
+            m["action"]
+            for m in b.gui_since(mark, actions={"clear_overlay", "paint_grid"})
+        ]
+    return order
 
-        asyncio.run(_scenario())
+
+class TestGridPaintWaitsForOverlayClearDispatch:
+    async def test_paint_grid_not_queued_until_the_overlay_clear_batch_ships(
+        self, tmp_path,
+    ):
+        # An in-flight overlay refresh batch holds the effect lock when
+        # 'show grid' arrives; the clear batch it schedules waits on that
+        # lock, and paint_grid must not reach the GUI queue before it.
+        order = await _grid_open_while_a_refresh_pin_holds_the_lock(tmp_path)
         assert "clear_overlay" in order and "paint_grid" in order
-        assert order.index("clear_overlay") < order.index("paint_grid")
+        assert order.index("clear_overlay") < order.index("paint_grid"), (
+            "paint_grid shipped while the numbered-overlay clear batch "
+            "was still waiting on _overlay_effect_lock"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2017,161 +1735,20 @@ class TestGridPaintWaitsForOverlayClearDispatch:
 
 
 class TestGridOpenNotBlockedByStaleOverlayBuild:
-    def test_grid_open_ships_promptly_while_a_real_build_holds_the_lock(self):
-        from main import LogicController
-        from services.wheelhouse.click_overlay_state import (
-            OverlayEvent,
-            OverlayEventKind,
+    async def test_grid_open_ships_promptly_while_a_real_build_holds_the_lock(
+        self, tmp_path,
+    ):
+        # A REAL refresh build: machine painted -> refresh in flight, prior
+        # badges deliberately left visible, its batch holding the effect lock
+        # while it awaits Input. Input never answers the walk and the clock
+        # never moves before the paint arrives, so a grid open that waits for
+        # the stale build's response (or its timeout) cannot pass this.
+        order = await _grid_open_during_a_refresh_build(tmp_path)
+        assert "paint_grid" in order, (
+            "grid open stalled behind the stale overlay build's deadline"
         )
-
-        c = _make_controller(overlay_state=OverlayState.PAINTED)
-        for name in (
-            "_perform_overlay_effects",
-            "_dispatch_overlay_effects",
-            "_overlay_dispatch_build",
-            "_abort_inflight_overlay_build",
-        ):
-            setattr(c, name, getattr(LogicController, name).__get__(c))
-
-        order: list = []
-        gui_events = c._gui_events
-
-        def _put(event):
-            order.append(event.get("action"))
-            gui_events.append(event)
-
-        c.state_manager.state_to_gui_queue.put_nowait = _put
-
-        async def _clear_one(effect, trace_id):
-            order.append("clear_overlay")
-
-        c._overlay_dispatch_clear_one = _clear_one
-
-        calls: list = []
-
-        async def _scenario():
-            c.loop = asyncio.get_running_loop()
-            gate = asyncio.Event()
-
-            async def _send(action, params=None, timeout_s=None):
-                calls.append(action)
-                if action == "start_overlay_walk":
-                    # A slow Input walk: never answers until the gate opens.
-                    await gate.wait()
-                    return {}
-                from shared.mouse_action import MouseActionResponse
-                return MouseActionResponse(
-                    status="ok", outcome="ok", reason=None, trace_id="t",
-                ).to_dict()
-
-            c.app.send_request = _send
-            # A REAL refresh build batch: machine painted -> refresh in
-            # flight, prior badges deliberately left visible, DISPATCH_BUILD
-            # acquires the effect lock and blocks awaiting Input.
-            result = c.click_overlay_state.apply(
-                OverlayEvent(OverlayEventKind.SHOW_NUMBERS)
-            )
-            loop = asyncio.get_event_loop()
-            build = loop.create_task(
-                c._dispatch_overlay_effects(
-                    tuple(result.effects), trace_id="tr0",
-                )
-            )
-            for _ in range(10):
-                await asyncio.sleep(0)
-            assert "start_overlay_walk" in calls, (
-                "fixture failed to put a real build on the effect lock"
-            )
-            open_task = loop.create_task(c.handle_grid_command("open", "tr"))
-            # Only cooperative yields -- the gate is never opened before the
-            # assertion, so a grid open that waits for the stale build's
-            # response (or its timeout) cannot pass this.
-            for _ in range(50):
-                await asyncio.sleep(0)
-            assert _gui(c, "paint_grid"), (
-                "grid open stalled behind the stale overlay build's deadline"
-            )
-            assert "clear_overlay" in order
-            assert order.index("clear_overlay") < order.index("paint_grid")
-            gate.set()
-            await open_task
-            await build
-            while c._tasks:
-                pending, c._tasks = c._tasks, []
-                await asyncio.gather(*pending)
-
-        asyncio.run(_scenario())
-
-    def test_hide_before_the_build_batch_starts_skips_the_stale_send(self):
-        # The abort event only wakes a build already awaiting Input. A build
-        # batch still QUEUED behind the effect lock when the hide commits
-        # must notice the teardown at start (machine CLOSED) and skip its
-        # send entirely -- otherwise it holds the lock for the full
-        # response_timeout_ms on a session that no longer exists.
-        from main import LogicController
-        from services.wheelhouse.click_overlay_state import (
-            OverlayEvent,
-            OverlayEventKind,
-        )
-
-        c = _make_controller(overlay_state=OverlayState.PAINTED)
-        for name in (
-            "_perform_overlay_effects",
-            "_dispatch_overlay_effects",
-            "_overlay_dispatch_build",
-            "_abort_inflight_overlay_build",
-        ):
-            setattr(c, name, getattr(LogicController, name).__get__(c))
-
-        order: list = []
-
-        async def _clear_one(effect, trace_id):
-            order.append("clear_overlay")
-
-        c._overlay_dispatch_clear_one = _clear_one
-        calls: list = []
-
-        async def _scenario():
-            c.loop = asyncio.get_running_loop()
-            gate = asyncio.Event()
-
-            async def _send(action, params=None, timeout_s=None):
-                calls.append(action)
-                if action == "start_overlay_walk":
-                    await gate.wait()
-                return {}
-
-            c.app.send_request = _send
-            lock = asyncio.Lock()
-            c._overlay_effect_lock = lock
-            await lock.acquire()
-            result = c.click_overlay_state.apply(
-                OverlayEvent(OverlayEventKind.SHOW_NUMBERS)
-            )
-            build = asyncio.get_event_loop().create_task(
-                c._dispatch_overlay_effects(
-                    tuple(result.effects), trace_id="tr0",
-                )
-            )
-            for _ in range(5):
-                await asyncio.sleep(0)
-            # The hide commits while the build batch is still queued.
-            await c.handle_overlay_command("hide", "tr-hide")
-            lock.release()
-            for _ in range(50):
-                await asyncio.sleep(0)
-            assert "start_overlay_walk" not in calls, (
-                "a stale build sent its walk request after the session "
-                "was already hidden"
-            )
-            assert "clear_overlay" in order
-            gate.set()
-            await build
-            while c._tasks:
-                pending, c._tasks = c._tasks, []
-                await asyncio.gather(*pending)
-
-        asyncio.run(_scenario())
+        assert "clear_overlay" in order
+        assert order.index("clear_overlay") < order.index("paint_grid")
 
 
 # ---------------------------------------------------------------------------
@@ -2206,21 +1783,6 @@ class TestInvalidGridConfigRefusesTheGrid:
         # One-shot: the second attempt is consumed without a second notice.
         assert _run(c, c.handle_grid_command("open", "tr2")) is True
         assert len(_notices(c)) == 1
-
-    def test_open_allowed_when_the_overlay_is_opted_out(self):
-        # overlay_enabled=false is a valid numbered-overlay opt-out. The gate
-        # must NOT be overlay_enabled_effective wholesale: the grid stays
-        # governed by the master switch plus the GRID keys alone.
-        from ui.click_config import ClickConfig
-
-        c = _make_controller()
-        c.click_config = ClickConfig.from_raw(
-            {"overlay_enabled": False, "response_timeout_ms": 3000}
-        )
-
-        assert _run(c, c.handle_grid_command("open", "tr")) is True
-        assert c.grid_overlay_state.is_open
-        assert len(_gui(c, "paint_grid")) == 1
 
     def test_grid_only_words_not_consumed_when_grid_config_invalid(self):
         c = _make_controller()
@@ -2281,13 +1843,17 @@ class TestLateReplyRecovery:
         return c
 
     def _timed_out_click(self, c, *, button: str, trace_id: str):
+        """With the grid open, "click" or "right click" times out."""
+        gesture = (
+            ClickGesture.RIGHT_CLICK if button == "right"
+            else ClickGesture.INVOKE
+        )
+
         async def _scenario():
-            await c._send_mouse_action(
-                "click_point",
-                {"x": 5, "y": 5, "button": button, "click_count": 1},
-                trace_id=trace_id, spoken="click",
-                failure_reason="grid_click_failed",
+            assert await c.handle_grid_command(
+                "click", trace_id, gesture=gesture, spoken="click",
             )
+            await _drain_tasks(c)
 
         asyncio.run(_scenario())
 

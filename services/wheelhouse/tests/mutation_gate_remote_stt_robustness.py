@@ -86,6 +86,7 @@ LAUNCHER = SERVICE / "stt" / "remote_stt_launcher.py"
 GUI = SERVICE / "gui.py"
 
 PROC = SERVICE / "speech" / "speech_processor.py"
+HOLDS = SERVICE / "speech" / "bare_number_holds.py"
 
 MAL = "tests/test_malformed_stt_settings.py"
 STOP = "tests/test_remote_stt_stopped_state.py"
@@ -1712,13 +1713,15 @@ MUTATIONS = [
         # Refreshed for wh-launch-signal-eviction.1.1, which put the
         # start inside a `try` so a refused thread can give the hold
         # back. The claim itself is unchanged; only the line after it is.
+        # Refreshed again for wh-loading-dialog-until-ready, which put the
+        # slow-start text change between the claim and the `try`.
         "old": """                    # (wh-launch-signal-eviction).
                     self._claim_launch_signal(generation)
-                try:
+                # Before the watch starts, not after: a watch whose
 """,
         "new": """                    # (wh-launch-signal-eviction).
                     pass
-                try:
+                # Before the watch starts, not after: a watch whose
 """,
         "selection": [LG],
         "catchers": [
@@ -2081,10 +2084,10 @@ MUTATIONS = [
         # two-line pair appears at the same indent in the flush and the
         # consume.
         "name": "the-drop-clears-neither-slot",
-        "file": PROC,
+        "file": HOLDS,
         "old": """        # named here mean. A tail held for another kind is left alone.
-        self._pending_bare_number_words = None
-        self._bare_number_deferred_word = None
+        self._host.pending_bare_number_words = None
+        self._host.bare_number_deferred_word = None
 """,
         "new": """        # named here mean. A tail held for another kind is left alone.
         pass

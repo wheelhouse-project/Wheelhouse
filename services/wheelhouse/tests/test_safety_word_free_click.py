@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
@@ -45,20 +46,45 @@ from speech.speech_processor import SpeechProcessor
 from ui.click_config import ClickConfig
 from ui.element_types import ElementQuery
 
-from services.wheelhouse.click_snapshot_summary_cache import (
-    ClickSnapshotSummaryCache,
-)
 from tests.test_safety_word_free_window_commands import ScriptedApp
 from tests.test_speech_pipeline import SpeechPipelineHarness
 from tests.test_voice_access_punctuation_router import (
     _inserted_text,
     _send_phrase,
 )
+from services.wheelhouse.numbered_overlay.controller import (
+    NumberedOverlayController,
+)
 
 
 # ---------------------------------------------------------------------------
 # Rig
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _no_foreground_window(monkeypatch):
+    """The real overlay's first-use hint reads the foreground window.
+
+    With no foreground window the hint returns before it reads or writes
+    its record file, so these tests never show a hint and never touch
+    services/wheelhouse/data/. A test that installs a FakeDesktop patches
+    the same Win32 call again inside its own scope.
+    """
+    import win32gui
+
+    monkeypatch.setattr(win32gui, "GetForegroundWindow", lambda: 0)
+
+
+def _bind_overlay(c):
+    """Build the real NumberedOverlayController as ``c.overlay``.
+
+    wh-overlay-refactor-pilot.2 moved the numbered overlay out of
+    LogicController. The public constructor takes the (mocked)
+    LogicController as its host, so ``c.click_config`` must be set first.
+    """
+    c.overlay = NumberedOverlayController(c, clock=time.monotonic)
+    return c.overlay
+
 
 def _response(outcome, reason=None, matched_names=(), matched_name=None):
     return ClickElementResponse(
@@ -92,14 +118,17 @@ def make_controller(*, enabled=True, send_result=None, send_exc=None):
     from main import LogicController
 
     c = MagicMock(spec=LogicController)
+
     c.forward_click_element = LogicController.forward_click_element.__get__(c)
-    c._forward_click_notice = LogicController._forward_click_notice.__get__(c)
+    c.forward_click_notice = LogicController.forward_click_notice.__get__(c)
     cfg = ClickConfig.from_raw({"enabled": enabled, "response_timeout_ms": 3000})
     c.click_config = cfg
-    c.click_snapshot_summary_cache = ClickSnapshotSummaryCache(
-        ttl_seconds=float(cfg.snapshot_ttl_seconds),
-    )
+    _bind_overlay(c)
     c._click_disabled_notice_shown = False
+    c.take_click_disabled_notice = (
+        LogicController.take_click_disabled_notice.__get__(c)
+    )
+    c.grid_overlay_state = None
     c.state_manager = MagicMock()
     c.state_manager.state_to_gui_queue = queue.Queue()
 
@@ -291,8 +320,9 @@ class TestDisabledByConfig:
         assert "action" not in c._captured  # the gate is before any IPC
         assert app.dictated() == ["click reply"]
         assert gui_items(c) == []
-        # No notice was shown, so the once-per-session flag stays unset.
-        assert c._click_disabled_notice_shown is False
+        # No notice was shown, so the once-per-session notice is still
+        # unclaimed: the first claim succeeds.
+        assert c.take_click_disabled_notice() is True
 
     @pytest.mark.asyncio
     async def test_with_the_safety_word_a_notice_is_shown_and_nothing_typed(
@@ -306,7 +336,8 @@ class TestDisabledByConfig:
         [item] = [i for i in items if i["action"] == "show_click_notice"]
         assert item["reason"] == "disabled_by_config"
         assert app.dictated() == []
-        assert c._click_disabled_notice_shown is True
+        # The notice claimed the once-per-session flag.
+        assert c.take_click_disabled_notice() is False
 
     @pytest.mark.asyncio
     async def test_a_typed_attempt_does_not_use_up_the_one_notice(self, app):
@@ -442,7 +473,7 @@ class TestForwardClickElementDefersThreeFailures:
         assert result["spoken_name"] == "reply"
         assert "action" not in c._captured
         assert gui_items(c) == []
-        assert c._click_disabled_notice_shown is False
+        assert c.take_click_disabled_notice() is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -493,7 +524,7 @@ class TestForwardClickElementDefersThreeFailures:
         [item] = gui_items(c)
         assert reason_or_outcome in (item["outcome"], item["reason"])
         if reason_or_outcome == "disabled_by_config":
-            assert c._click_disabled_notice_shown is True
+            assert c.take_click_disabled_notice() is False
 
 
 # ---------------------------------------------------------------------------

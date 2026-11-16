@@ -208,6 +208,7 @@ sys.stdout.reconfigure(line_buffering=True)
 SERVICE = Path(__file__).resolve().parent.parent
 SP = SERVICE / "speech" / "speech_processor.py"
 MAIN = SERVICE / "main.py"
+CONTROLLER = SERVICE / "numbered_overlay" / "controller.py"
 CE = SERVICE / "speech" / "command_engine.py"
 ACT = SERVICE / "speech" / "actions.py"
 APP = SERVICE / "app.py"
@@ -358,7 +359,7 @@ MUTATIONS = [
     },
     {
         "name": "sentence-wait-dropped",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """            await self._wait_for_open_sentence_end(
                 sid=sid, gen=gen, action=action, trace_id=trace_id,
             )
@@ -375,7 +376,7 @@ MUTATIONS = [
         # hang the bound prevents IS the defect, so the TimeoutError
         # raise is the catch.
         "name": "wait-bound-removed",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": "                timeout=bound,\n",
         "new": "                timeout=None,\n",
         "expect": ["test_the_sentence_wait_gives_up_at_its_bound"],
@@ -383,9 +384,9 @@ MUTATIONS = [
     },
     {
         "name": "marker-never-set",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """        if walks_input:
-            self._mark_screen_read_started()
+            self._host.mark_screen_read_started()
         try:
             await asyncio.wait(
 """,
@@ -396,10 +397,10 @@ MUTATIONS = [
     },
     {
         "name": "marker-never-cleared",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """        finally:
             if walks_input:
-                self._mark_screen_read_finished()
+                self._host.mark_screen_read_finished()
             self._overlay_build_abort = None
 """,
         "new": """        finally:
@@ -412,21 +413,21 @@ MUTATIONS = [
     },
     {
         "name": "click-marker-never-set",
-        "src": MAIN,
-        "old": """        self._mark_screen_read_started()
+        "src": CONTROLLER,
+        "old": """        self._host.mark_screen_read_started()
         try:
-            raw = await self.app.send_request(
+            raw = await self._host.app.send_request(
 """,
         "new": """        try:
-            raw = await self.app.send_request(
+            raw = await self._host.app.send_request(
 """,
         "expect": ["test_click_element_marker_spans_the_send"],
     },
     {
         "name": "click-marker-never-cleared",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """        finally:
-            self._mark_screen_read_finished()
+            self._host.mark_screen_read_finished()
 
         from shared.click_element import (
 """,
@@ -470,40 +471,45 @@ MUTATIONS = [
     {
         # The SITE must count the walk in, not write the stamp raw.
         "name": "build-site-raw-set",
-        "src": MAIN,
-        "old": """        abort_wait = self.loop.create_task(abort.wait())
+        "src": CONTROLLER,
+        "old": """        abort_wait = self._host.loop.create_task(abort.wait())
         if walks_input:
-            self._mark_screen_read_started()
+            self._host.mark_screen_read_started()
 """,
-        "new": """        abort_wait = self.loop.create_task(abort.wait())
+        "new": """        abort_wait = self._host.loop.create_task(abort.wait())
         if walks_input:
-            self.screen_read_in_flight_since = time.monotonic()
+            # controller.py imports no time module at module level, so the
+            # mutant imports it under an alias (a bare name would raise
+            # NameError and read as caught).
+            import time as _mutant_time
+            self._host.screen_read_in_flight_since = _mutant_time.monotonic()
 """,
         "expect": ["test_the_build_walk_counts_its_round_trip"],
     },
     {
         "name": "click-site-raw-set",
-        "src": MAIN,
-        "old": """        self._mark_screen_read_started()
+        "src": CONTROLLER,
+        "old": """        self._host.mark_screen_read_started()
         try:
-            raw = await self.app.send_request(
+            raw = await self._host.app.send_request(
 """,
-        "new": """        self.screen_read_in_flight_since = time.monotonic()
+        "new": """        import time as _mutant_time
+        self._host.screen_read_in_flight_since = _mutant_time.monotonic()
         try:
-            raw = await self.app.send_request(
+            raw = await self._host.app.send_request(
 """,
         "expect": ["test_a_click_walk_finishing_keeps_a_build_walks_marker"],
     },
     {
         "name": "click-site-raw-clear",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """        finally:
-            self._mark_screen_read_finished()
+            self._host.mark_screen_read_finished()
 
         from shared.click_element import (
 """,
         "new": """        finally:
-            self.screen_read_in_flight_since = None
+            self._host.screen_read_in_flight_since = None
 
         from shared.click_element import (
 """,
@@ -515,7 +521,7 @@ MUTATIONS = [
         # catcher's own asyncio.wait_for(timeout=0.8) trips, and that
         # TimeoutError IS the defect the check prevents.
         "name": "wait-stale-check-dropped",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """        machine = getattr(self, "click_overlay_state", None)
         if machine is not None and (
             machine.state is OverlayState.CLOSED
@@ -534,7 +540,7 @@ MUTATIONS = [
     },
     {
         "name": "stale-check-closed-dropped",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """        if machine is not None and (
             machine.state is OverlayState.CLOSED
             or (machine.overlay_session_id, machine.paint_generation)
@@ -548,7 +554,7 @@ MUTATIONS = [
     },
     {
         "name": "stale-check-pair-dropped",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """            machine.state is OverlayState.CLOSED
             or (machine.overlay_session_id, machine.paint_generation)
             != (sid, gen)
@@ -896,7 +902,7 @@ MUTATIONS = [
         # skip-wait catcher parks on the open sentence and trips its own
         # 0.8 s wait_for, so its expected failure is the TimeoutError.
         "name": "auto-open-ungated",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": """        walks_input = action == "start_overlay_walk"
 """,
         "new": """        walks_input = True
@@ -1103,7 +1109,7 @@ def main():
     if "--check" in sys.argv[1:]:
         return check_only()
 
-    originals = {path: path.read_bytes() for path in (SP, MAIN, CE, ACT, APP)}
+    originals = {path: path.read_bytes() for path in (SP, MAIN, CONTROLLER, CE, ACT, APP)}
     texts = {}
     for path, raw in originals.items():
         newline = "\r\n" if b"\r\n" in raw else "\n"

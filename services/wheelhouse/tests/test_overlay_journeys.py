@@ -51,6 +51,7 @@ signal to delete the marker and let the journey stand on its own.
 from __future__ import annotations
 
 import asyncio
+import logging
 import pickle
 import queue as queue_mod
 import struct
@@ -145,9 +146,9 @@ async def _real_logic_controller(
     HERMETICITY (the reason for the patch below). ``LogicController.__init__``
     reads two real files off this machine's disk:
 
-      * main.py:1296-1303 -- ``_resolve_pending_counters_path()`` then
+      * ``LogicController.__init__`` -- ``_resolve_pending_counters_path()`` then
         ``ClickCounter(...).load_from_disk()``.
-      * main.py:1321 -- ``_load_declined_tuples()``.
+      * ``LogicController.__init__`` -- ``_load_declined_tuples()``.
 
     Both resolve through ``utils/system.py:34 get_user_data_dir()``, which in
     a source checkout returns ``services/wheelhouse/data`` (utils/system.py:52)
@@ -158,8 +159,8 @@ async def _real_logic_controller(
 
     The patch target is the ``utils.system`` MODULE ATTRIBUTE, and it must be
     exactly that module object. Both resolvers do a function-local
-    ``from utils.system import get_user_data_dir`` (main.py:10702 and
-    main.py:10688), so the name is looked up on the module at CALL time, which
+    ``from utils.system import get_user_data_dir`` (in
+    ``_resolve_pending_counters_path`` and ``_resolve_declined_path``), so the name is looked up on the module at CALL time, which
     is what makes patching work at all. ``utils.system`` and
     ``services.wheelhouse.utils.system`` are two DISTINCT module objects in
     this suite (the conftest puts both the repo root and the service directory
@@ -228,8 +229,8 @@ async def _real_logic_controller(
             # The two IPC background tasks by themselves, NOT app.start():
             # start() also builds a WebSocketManager and (optionally) opens a
             # real socket, neither of which any journey uses.
-            app._start_demuxer()
-            app._start_sender()
+            app.start_demuxer()
+            app.start_sender()
             yield JourneyRig(
                 controller=controller,
                 app=app,
@@ -421,26 +422,35 @@ def _summary(snapshot_id: str, *display_numbers: int) -> WalkSnapshotSummary:
     )
 
 
-def _paint_badges(
-    controller: LogicController, snapshot_id: str, *display_numbers: int,
+async def _paint_badges(
+    rig: "JourneyRig", snapshot_id: str, *display_numbers: int,
 ) -> tuple[int, int]:
     """Put the controller's OWN overlay machine into PAINTED with these badges.
 
-    Drives the real ``ClickOverlayStateMachine`` through its real transitions
-    (closed -> walk_in_flight -> paint_in_flight -> painted) with direct
-    ``apply`` calls, the same pure setup
-    tests/test_logic_overlay_integration.py:2003 ``_drive_to_painted`` and
-    tests/test_voice_overlay_routing.py use. No machine or cache is injected:
-    the ones built by the real ``__init__`` (main.py:1387 and :1419) are the
-    ones used, so the trap those fixtures document -- an empty
-    ``ClickSnapshotSummaryCache`` is FALSY, so ``cache or
+    Drives the real ``ClickOverlayStateMachine`` to paint_in_flight with
+    direct ``apply`` calls (closed -> walk_in_flight -> paint_in_flight), the
+    same pure setup tests/test_voice_overlay_routing.py uses, and then
+    delivers the paint ack the way the display does: an
+    ``overlay_state_changed`` dict through the public
+    ``handle_overlay_state_changed``. That handler is what records the pair
+    of the visible list, which a dispatched badge click then carries to
+    Input. No machine or cache is injected: the ones built by the real
+    ``__init__`` are the ones used, so the trap those fixtures document -- an
+    empty ``ClickSnapshotSummaryCache`` is FALSY, so ``cache or
     ClickSnapshotSummaryCache()`` silently discards an injected empty cache --
     cannot arise here.
+
+    Reaching painted with a pinned snapshot arms the snapshot keepalive, and
+    its first tick is immediate: a ``refresh_overlay_snapshot`` frame for
+    Input and an ``overlay_lease_renew`` message for the display. Both are
+    taken off the transport here, so the journey that follows starts from a
+    quiet buffer and a quiet GUI queue.
 
     Returns the (overlay_session_id, paint_generation) pair now on screen.
     """
 
-    machine = controller.click_overlay_state
+    controller = rig.controller
+    machine = controller.overlay.click_overlay_state
     machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
     session_id, generation = machine.overlay_session_id, machine.paint_generation
     machine.apply(
@@ -451,23 +461,24 @@ def _paint_badges(
             snapshot_id=snapshot_id,
         )
     )
-    machine.apply(
-        OverlayEvent(
-            OverlayEventKind.PAINT_ACK,
-            overlay_session_id=session_id,
-            paint_generation=generation,
-            paint_state=PaintAckState.PAINTED,
-        )
-    )
-    assert machine.state is OverlayState.PAINTED
-    controller.click_snapshot_summary_cache.put(
+    assert machine.state is OverlayState.PAINT_IN_FLIGHT
+    controller.overlay.click_snapshot_summary_cache.put(
         snapshot_id, _summary(snapshot_id, *display_numbers),
     )
-    # Production bookkeeping, called rather than imitated: this is what makes
-    # a dispatched click carry overlay_resolved_pair (main.py:8237, read at
-    # main.py:3579).
-    controller._reconcile_overlay_visible_painted_pair()
-    assert controller._overlay_visible_painted_pair == (session_id, generation)
+    await controller.overlay.handle_overlay_state_changed({
+        "action": "overlay_state_changed",
+        "state": "painted",
+        "overlay_session_id": session_id,
+        "paint_generation": generation,
+        "monitor_ids": [0],
+        "snapshot_id": snapshot_id,
+    })
+    assert machine.state is OverlayState.PAINTED
+    outstanding = await _drain_command_frames(rig)
+    assert {f[0] for f in outstanding} <= {"refresh_overlay_snapshot"}, (
+        f"unexpected commands sent to Input by the paint: {outstanding!r}"
+    )
+    await _drain_gui_queue(rig.state_to_gui_queue, settle_s=0.1)
     return session_id, generation
 
 
@@ -676,117 +687,9 @@ async def test_journey_rig_starts_with_no_declined_or_pending_state(journey_rig)
     assert controller.click_counter.snapshot_entries() == []
 
 
-async def test_journey_rig_starts_with_no_window_change_pending_and_numbers_removed_by_default(journey_rig):
-    """wh-numbers-stay-setting: a freshly built controller has no foreground
-    event waiting for the settle refire, and the shipped example config
-    (``overlay_keep_numbers = false``) gives a machine that removes numbers."""
-
-    controller = journey_rig.controller
-    assert controller._overlay_settle_refire_foreground is False
-    assert controller.click_overlay_state.keep_numbers is False
-
-
 # ---------------------------------------------------------------------------
 # Journey 1 -- two numbers spoken close together
 # ---------------------------------------------------------------------------
-
-
-async def test_journey_1_second_number_before_the_first_reply_never_reaches_input(
-    journey_rig,
-):
-    """Journey 1: the second click must not run against the old list.
-
-    Badges 16 and 17 are on screen. The user says "click sixteen"; the
-    command reaches Input. Before Input answers, the user says "click
-    seventeen". Input runs commands strictly in order, so a second command
-    admitted now would execute AFTER the first press has already changed the
-    screen -- badge 17 would name a different control by then. The guard at
-    main.py:3544-3565 (wh-overlay-slow-uia-stale-badges.8, merged as commit
-    7e7bca0e) refuses it loudly instead.
-
-    Everything the assertions read is a real production artifact: the frame
-    is the one the real sender chain wrote into real shared memory, de-framed
-    through production's ``_read_envelope``; the notice is on the real
-    ``multiprocessing.Queue`` the real ``StateManager`` owns.
-    """
-
-    controller = journey_rig.controller
-    command_ready_event = journey_rig.command_ready_event
-    session_id, generation = _paint_badges(
-        controller, "snap-journey-1", 16, 17,
-    )
-    # Anything the construction of the rig itself may have queued is not part
-    # of this journey.
-    await _drain_gui_queue(journey_rig.state_to_gui_queue, settle_s=0.1)
-
-    # --- the user says "click sixteen" -------------------------------------
-    await controller.forward_click_element(
-        _speak_click("sixteen"), "trace-sixteen",
-    )
-    await _await_frame(command_ready_event)
-
-    action, params, has_params, request_id, trace_id = _read_command_frame(
-        journey_rig.shm,
-    )
-
-    # ASSERTION 1: exactly one command reached the Input side, and it names
-    # the item badge 16 was painted for.
-    assert action == "click_snapshot_item"
-    assert has_params
-    assert params["snapshot_id"] == "snap-journey-1"
-    assert params["item_id"] == "snap-journey-1-item-16"
-    assert params["trace_id"] == "trace-sixteen"
-    assert trace_id == "trace-sixteen"
-    assert request_id is not None
-    # overlay_resolved_pair rides along so Input can refuse a click from a
-    # generation an earlier click already consumed (main.py:3690-3697).
-    assert params["overlay_session_id"] == session_id
-    assert params["paint_generation"] == generation
-
-    # Copy-then-clear, exactly as the Input loop does (input_proc.py:1066).
-    # This frees the frame, so a second command WOULD be delivered if Logic
-    # sent one -- which is what makes the next assertion about Logic and not
-    # about transport backpressure.
-    command_ready_event.clear()
-
-    # The first click is still awaiting its reply, and nothing ever answers.
-    assert controller._overlay_click_in_flight == (
-        "snap-journey-1", "snap-journey-1-item-16", "trace-sixteen",
-    )
-
-    # --- the user says "click seventeen" before any reply -------------------
-    await controller.forward_click_element(
-        _speak_click("seventeen"), "trace-seventeen",
-    )
-
-    # ASSERTION 2: no second command was sent.
-    await _assert_no_further_frame(
-        journey_rig,
-        window_s=0.3,
-        why=(
-            "a second click_snapshot_item frame reached Input while the "
-            "first click was still in flight"
-        ),
-    )
-
-    # ASSERTION 3: the second utterance produced a refusal notice on the real
-    # GUI state queue, carrying the reason the guard names.
-    actions = await _drain_gui_queue(journey_rig.state_to_gui_queue)
-    notices = [a for a in actions if a.get("action") == "show_click_notice"]
-    assert len(notices) == 1, (
-        f"expected exactly one click notice, got {actions!r}"
-    )
-    notice = notices[0]
-    assert notice["outcome"] == "execution_failed"
-    assert notice["reason"] == "overlay_click_in_flight"
-    assert notice["trace_id"] == "trace-seventeen"
-    assert notice["snapshot_id"] == "snap-journey-1"
-
-    # And the first click is still the one holding the guard -- the refusal
-    # did not disturb it.
-    assert controller._overlay_click_in_flight == (
-        "snap-journey-1", "snap-journey-1-item-16", "trace-sixteen",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +704,7 @@ async def test_journey_1_second_number_before_the_first_reply_never_reaches_inpu
 # CHANGES the foreground window, and that is the common case for 'click N'.
 # Cancelling here would make it behave like Option A, which David rejected."
 # Refusing a repaint against the wrong window is done by the INTEGRATION, at
-# the commit fence in ``_overlay_dispatch_build`` (main.py:6355-6396), through
+# the commit fence in the settle leg of ``_overlay_dispatch_build``, through
 # a full window-identity check. So this journey has two halves, one per
 # component, and a test written to the description's literal sentence would
 # have pinned the design that was rejected.
@@ -811,8 +714,15 @@ async def test_journey_1_second_number_before_the_first_reply_never_reaches_inpu
 # response queue, and is the following test.
 
 
-def _write_settling_config(tmp_path: Path) -> Path:
+def _write_settling_config(
+    tmp_path: Path, *, keep_numbers: bool = False,
+) -> Path:
     """A configuration whose ``[click]`` block turns the post-click settle on.
+
+    ``keep_numbers`` sets ``overlay_keep_numbers``. A spoken "click N" reaches
+    the settle only with it on: with it off, a successful click removes the
+    numbers before the settle can start (decision D1 of
+    wh-numbers-stay-setting).
 
     ``overlay_settle_after_click`` ships OFF (ui/click_config.py:223), and
     that stays true: this writes a file into a pytest ``tmp_path`` that
@@ -820,17 +730,19 @@ def _write_settling_config(tmp_path: Path) -> Path:
     shipped runtime default -- ``services/wheelhouse/config.toml`` and
     anything a user would experience -- not a value handed to a constructor
     inside a test. Reaching the settle path any other way is impossible:
-    main.py:4270 shows the whole path is inert with the flag off.
+    ``_maybe_defer_postclick_clear`` shows the whole path is inert with the
+    flag off.
 
     The rig is built from this file rather than by reaching in and setting
     the attribute, so the machine is the one the REAL factory
-    (``_build_overlay_state_machine``, main.py:458) produced from a REAL
+    (``make_click_overlay_state_machine`` in numbered_overlay/helpers.py) produced from a REAL
     ``ClickConfig`` -- the config-to-machine wiring is exercised, not assumed.
     """
 
     settling = tmp_path / "settling-config.toml"
     settling.write_text(
-        "[click]\nenabled = true\noverlay_settle_after_click = true\n",
+        "[click]\nenabled = true\noverlay_settle_after_click = true\n"
+        f"overlay_keep_numbers = {'true' if keep_numbers else 'false'}\n",
         encoding="utf-8",
     )
     return settling
@@ -864,15 +776,16 @@ async def test_journey_3a_a_dialog_opening_does_not_cancel_the_settling_read(
         data_dir, config_path=_write_settling_config(tmp_path),
     ) as rig:
         controller = rig.controller
-        machine = controller.click_overlay_state
+        machine = controller.overlay.click_overlay_state
         assert machine.settle_after_click, (
             "the real factory did not carry [click] overlay_settle_after_click "
-            "onto the machine; with the flag off main.py:4270 makes the whole "
+            "onto the machine; with the flag off _maybe_defer_postclick_clear "
+            "makes the whole "
             "settle path inert and this journey would pin nothing"
         )
 
-        session_id, generation = _paint_badges(
-            controller, "snap-journey-3", 3, 4,
+        session_id, generation = await _paint_badges(
+            rig, "snap-journey-3", 3, 4,
         )
 
         # --- the click succeeds, and the machine begins to settle -----------
@@ -937,13 +850,13 @@ async def test_journey_3a_a_dialog_opening_does_not_cancel_the_settling_read(
 #
 # WHAT IS REAL HERE. A real ``GuiManager``, built through its real
 # ``__init__``, which constructs a real ``OverlayPaintWindowManager`` on its
-# own (gui.py:1157-1167). The paint and clear lifecycle is the real one, the
+# own (``GuiManager.__init__`` in gui.py). The paint and clear lifecycle is the real one, the
 # badge surface is drawn by the real Qt rendering path
 # (``_render_monitor_surface`` -> ``QImage`` -> the real GDI DIB built by
 # ``shared/overlay_bitmap.py:build_layered_dib``), the DPI conversion is the
 # real ``resolve_overlay_paint_rect``, and the lease bookkeeping is the real
 # ``_arm_overlay_lease`` / ``_cancel_overlay_lease`` /
-# ``_on_overlay_lease_expired`` / ``_arm_teardown_retry_if_pending``.
+# ``on_overlay_lease_expired`` / ``_arm_teardown_retry_if_pending``.
 #
 # WHAT IS FAKED, and nothing else: the Win32 calls that put a window on the
 # PHYSICAL screen, and the enumeration of the physical screens themselves.
@@ -1019,7 +932,7 @@ class DisplayRig:
 def _fake_overlay_win32() -> tuple:
     """Stand-ins for the Win32 entry points that reach the physical screen.
 
-    ``CreateWindowExW`` (overlay_paint_window.py:852) makes the on-screen
+    ``CreateWindowExW`` (the window constructor in overlay_paint_window.py) makes the on-screen
     layered window; ``ShowWindow`` presents it; ``GetDC(None)`` /
     ``ReleaseDC`` acquire and release the screen DC the composite blits
     against (:884-894); ``DestroyWindow`` (:906) takes the window off.
@@ -1129,7 +1042,7 @@ def _real_display_process(
       * ``services/wheelhouse/config.toml`` -- ``gui_process_target`` reads
         the whole file with ``ConfigService().get_config()`` and hands it to
         ``GuiManager(config=...)``, which is where the overlay badge
-        appearance comes from (gui.py:1155-1167). ``config`` defaults to
+        appearance comes from (``GuiManager.__init__`` in gui.py). ``config`` defaults to
         ``None`` here, so the manager is built from the shipped
         ``ClickConfig`` defaults and nothing on this disk.
       * the monitors physically attached to this machine, and the Qt screen
@@ -1159,7 +1072,7 @@ def _real_display_process(
             )
         assert gui_manager._overlay_manager is not None, (
             "GuiManager could not build an OverlayPaintWindowManager; its "
-            "constructor swallows a ctypes failure (gui.py:1168) and leaves "
+            "constructor swallows a ctypes failure (the except block of GuiManager.__init__ in gui.py) and leaves "
             "the overlay unavailable, so a journey would assert nothing"
         )
         assert gui_manager._overlay_manager._user32 is user32, (
@@ -1170,11 +1083,11 @@ def _real_display_process(
         # Every QTimer(self) in __init__ returned the SAME patched mock, and
         # a mock never fires. Give the two timers these journeys depend on
         # their own controllable stand-in, wired to the REAL slots
-        # GuiManager.__init__ connects (gui.py:1182 and :1201).
-        lease_timer = _FakeQTimer(gui_manager._on_overlay_lease_expired)
-        teardown_timer = _FakeQTimer(gui_manager._on_overlay_teardown_retry)
-        gui_manager._overlay_lease_timer = lease_timer
-        gui_manager._overlay_teardown_retry_timer = teardown_timer
+        # GuiManager.__init__ connects (the slots belong to OverlayGuiMessages in overlay_gui/messages.py).
+        lease_timer = _FakeQTimer(gui_manager.overlay_messages.on_overlay_lease_expired)
+        teardown_timer = _FakeQTimer(gui_manager.overlay_messages.on_overlay_teardown_retry)
+        gui_manager.overlay_lease_timer = lease_timer
+        gui_manager.overlay_teardown_retry_timer = teardown_timer
         try:
             yield DisplayRig(
                 gui=gui_manager,
@@ -1221,57 +1134,6 @@ def display_rig(journey_rig, qapp, mock_editor_window):
 # ---------------------------------------------------------------------------
 
 
-def _paint_badges_awaiting_display(
-    controller: LogicController, snapshot_id: str, *display_numbers: int,
-):
-    """Drive the machine to PAINT_IN_FLIGHT and hand back its paint effect.
-
-    The sibling of ``_paint_badges``, and deliberately not a caller of it:
-    journey 1 needs a machine already in PAINTED, and these journeys need
-    the PAINT_ACK to arrive from the display process instead, so the two
-    stop at different states. Everything else is the same pure setup --
-    real transitions on the controller's OWN machine and cache.
-
-    Returns ``(overlay_session_id, paint_generation, dispatch_paint_effect)``.
-    The effect is the one the MACHINE emitted, not one built here, which is
-    what makes the dispatch fence at main.py:6702 (the pair plus the pinned
-    snapshot) a real gate rather than a formality.
-    """
-
-    from services.wheelhouse.click_overlay_state import EffectKind
-
-    machine = controller.click_overlay_state
-    # "show numbers" spoken over painted badges is a REFRESH: the machine
-    # bumps the paint generation and keeps the old badges up until the new
-    # paint is acked. Both entries land in a state whose BUILD_RESPONSE
-    # emits the DISPATCH_PAINT this helper hands back.
-    was_painted = machine.state is OverlayState.PAINTED
-    machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
-    session_id, generation = machine.overlay_session_id, machine.paint_generation
-    result = machine.apply(
-        OverlayEvent(
-            OverlayEventKind.BUILD_RESPONSE,
-            overlay_session_id=session_id,
-            paint_generation=generation,
-            snapshot_id=snapshot_id,
-        )
-    )
-    assert machine.state is (
-        OverlayState.REFRESH_IN_FLIGHT if was_painted
-        else OverlayState.PAINT_IN_FLIGHT
-    )
-    controller.click_snapshot_summary_cache.put(
-        snapshot_id, _summary(snapshot_id, *display_numbers),
-    )
-    paints = [
-        e for e in result.effects if e.kind is EffectKind.DISPATCH_PAINT
-    ]
-    assert len(paints) == 1, (
-        f"expected exactly one DISPATCH_PAINT effect, got {result.effects!r}"
-    )
-    return session_id, generation, paints[0]
-
-
 async def _await_true(predicate, *, timeout_s: float = 3.0, why: str) -> None:
     """Poll ``predicate`` until it holds, or fail. Never sleeps a fixed span."""
 
@@ -1285,7 +1147,7 @@ async def _await_true(predicate, *, timeout_s: float = 3.0, why: str) -> None:
 async def _pump_display(display, *, until, timeout_s: float = 3.0, why: str):
     """Run the display's REAL state-queue dispatch until ``until`` holds.
 
-    ``GuiManager._check_queues_and_events`` (gui.py:1607) is the production
+    ``GuiManager._check_queues_and_events`` (in gui.py) is the production
     consumer: it drains ``state_from_logic_queue`` and routes every action,
     ``paint_overlay`` / ``clear_overlay`` / ``reset_overlay`` included. It is
     normally driven by a QTimer, so a journey calls it directly. Called in a
@@ -1308,9 +1170,9 @@ def _feed_gui_commands_to_logic(controller: LogicController, commands) -> None:
 
     ``_build_gui_handler_map`` IS the production routing table, and the two
     statements below are the two production applies to each command
-    (main.py:10963-10970). They are written out here for the same reason
+    (in ``listen_for_gui_commands``). They are written out here for the same reason
     ``_read_command_frame`` writes out its three: the only production caller
-    is ``_listen_for_gui_commands``, a
+    is ``listen_for_gui_commands``, a
     ``while not self.shutdown_event.is_set()`` loop around a blocking
     ``asyncio.to_thread(queue.get, ...)`` call, which cannot be asked for
     exactly one message and cannot hand a journey the dict BEFORE Logic
@@ -1336,13 +1198,27 @@ def _badge_window_monitors(manager) -> list:
     """The manager's own record of which badge windows exist, by hmonitor.
 
     ``_windows`` is the dict ``_do_paint`` creates windows into and every
-    teardown path empties (overlay_paint_window.py:1918-1957, :3251-3277).
+    teardown path empties (``OverlayPaintWindowManager._do_paint`` in overlay_paint_window.py; ``OverlayPaintTeardown.destroy_all`` in overlay_paint/teardown.py).
     There is no public accessor -- ``teardown_pending`` and
     ``has_deferred_teardown_ack`` are the only public state -- so this reads
     the attribute, as the module's own unit tests do.
     """
 
     return sorted(manager._windows)
+
+
+def _composite_calls(display) -> int:
+    """How many times the display blitted a badge surface to a window.
+
+    ``composite_layered_window`` is the ``MagicMock`` that
+    ``_overlay_win32_faked`` puts in ``display.module``. Only a paint that
+    the display applied calls it: a paint that the handler drops, or that
+    the generation gate refuses, does not. A rise above the count read
+    before a pump is therefore the signal that THIS paint was applied, also
+    on a refresh where a badge window is already on the screen.
+    """
+
+    return display.module.composite_layered_window.call_count
 
 
 # ---------------------------------------------------------------------------
@@ -1365,7 +1241,7 @@ async def test_display_rig_reads_the_injected_config_and_topology(
     SOURCE 1 -- the service configuration file. The shipped display process
     reads the whole of it with ``ConfigService().get_config()`` and hands it
     to ``GuiManager(config=...)``, which derives the overlay badge
-    appearance from it (gui.py:1155-1167).
+    appearance from it (``GuiManager.__init__`` in gui.py).
 
     SOURCE 2 -- the monitors physically attached to this machine, read by
     ``overlay_paint_window._enumerate_native_monitors``. Without the seam a
@@ -1492,11 +1368,12 @@ async def _badges_onto_the_display(
     """Carry one overlay paint from Logic to the display and back.
 
     The whole round trip is production code over the journey's real
-    transport: the machine's own DISPATCH_PAINT effect goes through
-    ``_overlay_dispatch_paint`` (main.py:6611) onto the real
-    ``multiprocessing.Queue``; the display's real
+    transport: "show numbers" goes in through the public
+    ``handle_overlay_command``, the walk and the pin are answered over the
+    shared-memory transport, and the paint the machine then dispatches goes
+    onto the real ``multiprocessing.Queue``; the display's real
     ``_check_queues_and_events`` takes it off and routes it to
-    ``_handle_paint_overlay``, which drives the real paint lifecycle and
+    ``handle_paint_overlay``, which drives the real paint lifecycle and
     arms the real badge lease; the ``overlay_state_changed`` dict it returns
     goes back through production's own GUI-command dispatch, and the
     machine reaches PAINTED because the DISPLAY said so.
@@ -1505,21 +1382,60 @@ async def _badges_onto_the_display(
     screen.
     """
 
+    from tests.overlay_boundary_harness import FakeDesktop, NUMBERED_WINDOW
+
     controller = rig.controller
-    session_id, generation, paint_effect = _paint_badges_awaiting_display(
-        controller, snapshot_id, *display_numbers,
-    )
-    await controller._overlay_dispatch_paint(paint_effect, "trace-paint")
-    # The lease pair, not "a window exists": on a refresh a badge window is
-    # already up from the previous generation, so a window-existence
-    # predicate would be true before the pump and return without delivering
-    # anything. The lease pair carries the generation, so it can only become
-    # true once THIS paint has been applied.
+    machine = controller.overlay.click_overlay_state
+    # "show numbers" spoken over painted badges is a REFRESH: the machine
+    # bumps the paint generation and keeps the old badges up until the new
+    # paint is acked.
+    was_painted = machine.state is OverlayState.PAINTED
+    # Everything a previous paint left for Input (the immediate keepalive
+    # tick, and the unpin of a generation a refresh superseded), off the
+    # buffer first, so the next frame read is this build's walk.
+    outstanding = await _drain_command_frames(rig)
+    assert {f[0] for f in outstanding} <= {
+        "refresh_overlay_snapshot", "unpin_snapshot",
+    }, f"unexpected commands already queued for Input: {outstanding!r}"
+    with ExitStack() as desktop:
+        # The build reads the foreground window; the fake desktop answers
+        # with the window the walk reply says it read.
+        FakeDesktop([NUMBERED_WINDOW]).install(desktop)
+        await controller.overlay.handle_overlay_command(
+            "show", trace_id="trace-paint",
+        )
+        assert machine.state is (
+            OverlayState.REFRESH_IN_FLIGHT if was_painted
+            else OverlayState.WALK_IN_FLIGHT
+        )
+        session_id = machine.overlay_session_id
+        generation = machine.paint_generation
+        await _answer_input_request(
+            rig,
+            expect_action="start_overlay_walk",
+            build_reply=lambda params: _walk_reply(
+                params,
+                snapshot_id=snapshot_id,
+                summary=_summary(snapshot_id, *display_numbers),
+                read_from=_WINDOW_THE_USER_CLICKED_IN,
+            ),
+        )
+        await _await_true(
+            lambda: machine.pinned_snapshot_id == snapshot_id,
+            why="the build response never reached the machine",
+        )
+        await _answer_input_request(
+            rig, expect_action="pin_snapshot", build_reply=_pin_reply,
+        )
+    # The composite count, not "a window exists": on a refresh a badge
+    # window is already up from the previous generation, so a
+    # window-existence predicate would be true before the pump and return
+    # without delivering anything. The count read here rises only when the
+    # display applies the paint that this pump delivers.
+    composites_before = _composite_calls(display)
     await _pump_display(
         display,
-        until=lambda: display.gui._overlay_lease_pair == (
-            session_id, generation,
-        ),
+        until=lambda: _composite_calls(display) > composites_before,
         why="the display never applied the paint Logic sent",
     )
     assert _badge_window_monitors(display.manager) == [_FAKE_HMONITOR]
@@ -1535,7 +1451,6 @@ async def _badges_onto_the_display(
     # constant-to-constant assertion green, which is exactly the lease that
     # never removes anything. The sibling pin at journey 4 (the clear-ack
     # deadline) already uses a literal for this reason.
-    assert display.gui._overlay_lease_pair == (session_id, generation)
     assert display.lease_timer.interval_ms == 90_000
     # And the value has to keep working as a lease: Logic renews on the
     # keepalive tick (default 15 s), so an interval below that would fire
@@ -1559,7 +1474,7 @@ async def _badges_onto_the_display(
 
     _feed_gui_commands_to_logic(controller, acks)
     await _await_true(
-        lambda: controller.click_overlay_state.state is OverlayState.PAINTED,
+        lambda: controller.overlay.click_overlay_state.state is OverlayState.PAINTED,
         why="Logic never reached painted after the display acked the paint",
     )
     return session_id, generation
@@ -1570,8 +1485,23 @@ async def _badges_onto_the_display(
 # ---------------------------------------------------------------------------
 
 
+def _clear_fault_reports(caplog, *, levelname: str = "ERROR") -> list:
+    """The clear-ack watchdog's reports, as ``(session, generation)`` pairs.
+
+    The watchdog logs its report with the pair as the first two arguments of
+    the record; an ERROR record is what the error notifier turns into the
+    user-visible popup.
+    """
+
+    return [
+        tuple(r.args[:2]) for r in caplog.records
+        if r.levelname == levelname
+        and "badges may still be on the screen" in r.getMessage()
+    ]
+
+
 async def test_journey_4_a_lost_clear_lets_the_badge_lease_remove_the_numbers(
-    journey_rig, display_rig,
+    journey_rig, display_rig, caplog,
 ):
     """Journey 4: the numbers must not survive a clear that never arrives.
 
@@ -1580,7 +1510,7 @@ async def test_journey_4_a_lost_clear_lets_the_badge_lease_remove_the_numbers(
     close), and the message never reaches the display process -- a Full
     queue drops it with a warning, or the display is wedged. Nothing on the
     Logic side will try again: the clear-ack watchdog is report-only by
-    design (main.py:6837-6850), and the GUI-side badge lease is the remover
+    design (``_fire_overlay_clear_ack_deadline``), and the GUI-side badge lease is the remover
     of last resort (wh-overlay-slow-uia-stale-badges.9, merged as child .9).
 
     So this journey pins three things, in the order the user meets them:
@@ -1599,14 +1529,14 @@ async def test_journey_4_a_lost_clear_lets_the_badge_lease_remove_the_numbers(
     """
 
     import gui as gui_module
-    import services.wheelhouse.main as main_module
+    import services.wheelhouse.numbered_overlay.controller as overlay_module
 
     controller = journey_rig.controller
     manager = display_rig.manager
     # The two-module trap this file already documents for utils.system: if
     # the controller's class came from a different module object than the
     # one patched below, the deadline patch would silently miss.
-    assert type(controller).__module__ == main_module.__name__
+    assert type(controller.overlay).__module__ == overlay_module.__name__
     assert type(display_rig.gui).__module__ == gui_module.__name__
 
     session_id, generation = await _badges_onto_the_display(
@@ -1616,13 +1546,9 @@ async def test_journey_4_a_lost_clear_lets_the_badge_lease_remove_the_numbers(
     # --- the user says "hide numbers" --------------------------------------
     # The shipped deadline is 5 s against a 30 s per-test cap, with two more
     # waits after it; inject a short one rather than spend the budget.
-    assert main_module._OVERLAY_CLEAR_ACK_DEADLINE_MS == 5000
-    with patch.object(main_module, "_OVERLAY_CLEAR_ACK_DEADLINE_MS", 40):
+    assert overlay_module._OVERLAY_CLEAR_ACK_DEADLINE_MS == 5000
+    with patch.object(overlay_module, "_OVERLAY_CLEAR_ACK_DEADLINE_MS", 40):
         await controller.handle_overlay_command("hide", trace_id="trace-j4-hide")
-        await _await_true(
-            lambda: controller._overlay_pending_clear == (session_id, generation),
-            why="Logic never handed the dispatched clear to its ack watchdog",
-        )
 
         # --- the clear is LOST ---------------------------------------------
         # Taken off the queue and never delivered. Reading it first is the
@@ -1644,17 +1570,15 @@ async def test_journey_4_a_lost_clear_lets_the_badge_lease_remove_the_numbers(
         # ASSERTION 1: the numbers are still on the screen, and the display
         # still holds a lease over them -- while Logic has already closed.
         assert _badge_window_monitors(manager) == [_FAKE_HMONITOR]
-        assert display_rig.gui._overlay_lease_pair == (session_id, generation)
-        assert controller.click_overlay_state.state is OverlayState.CLOSED
+        assert display_rig.lease_timer.running
+        assert controller.overlay.click_overlay_state.state is OverlayState.CLOSED
 
-        # ASSERTION 2: Logic reports the loss. _report_overlay_clear_fault
-        # records the pair and logs at ERROR, which is what the error
-        # notifier turns into a user-visible popup -- independent of the GUI
-        # queue that just swallowed the clear.
+        # ASSERTION 2: Logic reports the loss. The clear-ack watchdog logs the
+        # pair at ERROR, which is what the error notifier turns into a
+        # user-visible popup -- independent of the GUI queue that just
+        # swallowed the clear.
         await _await_true(
-            lambda: controller._overlay_clear_fault_reported_pair == (
-                session_id, generation,
-            ),
+            lambda: _clear_fault_reports(caplog) == [(session_id, generation)],
             why=(
                 "the clear-ack watchdog never reported the lost clear; the "
                 "user would be left with numbers nothing admits to"
@@ -1670,7 +1594,6 @@ async def test_journey_4_a_lost_clear_lets_the_badge_lease_remove_the_numbers(
     assert not manager.teardown_pending
     assert not manager.has_deferred_teardown_ack
     # Nothing is left to lease, and the 2 s teardown retry has nothing to do.
-    assert display_rig.gui._overlay_lease_pair is None
     assert not display_rig.lease_timer.running
     assert not display_rig.teardown_timer.running
 
@@ -1690,10 +1613,9 @@ async def test_journey_4_a_lost_clear_lets_the_badge_lease_remove_the_numbers(
     # the expiry does not reopen anything or report a second fault.
     _feed_gui_commands_to_logic(controller, expiries)
     await _drain_gui_queue(journey_rig.state_to_gui_queue, settle_s=0.1)
-    assert controller.click_overlay_state.state is OverlayState.CLOSED
-    assert controller._overlay_clear_fault_reported_pair == (
-        session_id, generation,
-    )
+    assert controller.overlay.click_overlay_state.state is OverlayState.CLOSED
+    assert _clear_fault_reports(caplog) == [(session_id, generation)]
+    assert _clear_fault_reports(caplog, levelname="WARNING") == []
 
 
 # ---------------------------------------------------------------------------
@@ -1714,8 +1636,10 @@ async def _reach_death_step(rig: JourneyRig, display: DisplayRig, step: str):
     from one that was reset.
     """
 
+    # The first paint uses its own snapshot id, so the refresh below pins a
+    # new snapshot the way a re-walk does.
     session_id, generation = await _badges_onto_the_display(
-        rig, display, "snap-journey-6", 3, 4,
+        rig, display, "snap-journey-6-first", 3, 4,
     )
     assert (session_id, generation) == (1, 0)
     session_id, generation = await _badges_onto_the_display(
@@ -1729,9 +1653,8 @@ async def _reach_death_step(rig: JourneyRig, display: DisplayRig, step: str):
     controller = rig.controller
     if step == "badges_painted":
         # Nothing is in flight: the numbers are simply up, and the user is
-        # reading them when the process dies.
-        assert controller._overlay_click_in_flight is None
-        assert controller._overlay_pending_clear is None
+        # reading them when the process dies. Nothing was spoken after the
+        # paint, so no click and no clear was ever sent.
         return session_id, generation
 
     if step == "click_in_flight":
@@ -1754,8 +1677,9 @@ async def _reach_death_step(rig: JourneyRig, display: DisplayRig, step: str):
         action, params, _has, _rid, _tid = _read_command_frame(rig.shm)
         assert action == "click_snapshot_item"
         assert params["item_id"] == "snap-journey-6-item-3"
-        assert controller._overlay_click_in_flight == (
-            "snap-journey-6", "snap-journey-6-item-3", "trace-j6-click",
+        assert params["snapshot_id"] == "snap-journey-6"
+        assert (params["overlay_session_id"], params["paint_generation"]) == (
+            session_id, generation,
         )
         return session_id, generation
 
@@ -1763,22 +1687,39 @@ async def _reach_death_step(rig: JourneyRig, display: DisplayRig, step: str):
     # "hide numbers". Logic dispatched the clear onto the GUI queue and armed
     # the ack watchdog; the display has not been pumped, so the clear is
     # still queued and the badges are still up.
-    await controller.handle_overlay_command("hide", trace_id="trace-j6-hide")
-    # Ten seconds, not the three-second default, and the reason is production
-    # ordering rather than slowness. ``_dispatch_overlay_effects`` holds
-    # ``_overlay_effect_lock`` for a WHOLE batch (main.py:6090-6094), and the
-    # refresh above left an unpin batch inside it -- a ``send_request`` to an
-    # Input process that does not exist in this journey, which runs its full
-    # ``response_timeout_ms`` (3000 ms) before timing out
-    # (main.py:7540-7547). The hide's clear batch is FIFO behind it, so a
-    # three-second wait sits exactly on that boundary and fails
-    # intermittently. Nothing is slept: this returns the moment the lock
-    # frees.
-    await _await_true(
-        lambda: controller._overlay_pending_clear == (session_id, generation),
-        timeout_s=10.0,
-        why="Logic never handed the dispatched clear to its ack watchdog",
-    )
+    #
+    # The clear is observed where it leaves Logic: a spy on the GUI queue's
+    # ``put`` (``multiprocessing.Queue.put_nowait`` is ``self.put(obj,
+    # False)``, so production's put_nowait reaches it too) records the action
+    # and then calls the real ``put``, so the display still receives it.
+    gui_queue = controller.state_manager.state_to_gui_queue
+    real_put = gui_queue.put
+    sent_to_gui: list = []
+
+    def _recording_put(message, *args, **kwargs):
+        sent_to_gui.append(
+            message.get("action") if isinstance(message, dict) else message
+        )
+        return real_put(message, *args, **kwargs)
+
+    with patch.object(gui_queue, "put", _recording_put):
+        await controller.handle_overlay_command(
+            "hide", trace_id="trace-j6-hide",
+        )
+        # Ten seconds, not the three-second default, and the reason is
+        # production ordering rather than slowness. The overlay holds its
+        # effect lock for a WHOLE batch, and the refresh above left an unpin
+        # batch inside it -- a ``send_request`` to an Input process that does
+        # not exist in this journey, which runs its full
+        # ``response_timeout_ms`` (3000 ms) before timing out. The hide's
+        # clear batch is FIFO behind it, so a three-second wait sits exactly
+        # on that boundary and fails intermittently. Nothing is slept: this
+        # returns the moment the clear is put.
+        await _await_true(
+            lambda: "clear_overlay" in sent_to_gui,
+            timeout_s=10.0,
+            why="Logic never dispatched the clear to the display",
+        )
     return session_id, generation
 
 
@@ -1790,7 +1731,7 @@ async def _drain_command_frames(
     Production sends Input more than a journey's own utterance: reaching
     ``painted`` with a pinned snapshot arms the snapshot keepalive, and its
     FIRST tick is a ``call_soon`` rather than a full interval
-    (main.py:8331-8344), so a ``refresh_overlay_snapshot`` frame is already
+    (``_reconcile_overlay_keepalive_timer``), so a ``refresh_overlay_snapshot`` frame is already
     in the buffer by the time the journey speaks again. Copy-then-clear is
     what the Input command loop does with a frame (input_proc.py:1066), and
     clearing the event is what frees the buffer for the next one.
@@ -1815,7 +1756,7 @@ async def _drain_command_frames(
     "death_step", ["badges_painted", "click_in_flight", "clear_in_flight"],
 )
 async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finished_intent(
-    journey_rig, display_rig, dead_process, death_step,
+    journey_rig, display_rig, dead_process, death_step, caplog,
 ):
     """Journey 6: whichever process dies, whenever, recovery is the same.
 
@@ -1835,8 +1776,8 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
         alive that put them there. In the shipped launcher the supervisor
         kills the display too, which is strictly easier (a dead process
         cannot leave a window up); this journey tests the harder case,
-        which is the one ``_send_overlay_startup_reset`` was written for
-        (main.py:7356-7377 names it).
+        which is the one ``send_overlay_startup_reset`` was written for
+        (its docstring names it).
 
     HOW A RESTART IS MODELLED. The same supervisor loop iterates
     (launcher.py:789): a NEW ``SharedMemory`` block with ``create=True``
@@ -1851,11 +1792,12 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
 
       1. At the moment of death the numbers really ARE still on the screen,
          and the display applies nothing further -- its queue poll
-         short-circuits on the shutdown event (gui.py:1614-1616). Whatever
+         short-circuits on the shutdown event (the first check of the display's queue poll, in gui.py). Whatever
          Logic had queued dies queued.
       2. Logic reports no fault for an intentional exit. The clear-ack
          deadline callback can already be sitting on the loop when shutdown
-         lands, and its backstop (main.py:6943-6945) is what keeps a crash
+         lands, and its shutdown check in ``_fire_overlay_clear_ack_deadline``
+         is what keeps a crash
          from also popping an overlay error at the user.
       3. No half-finished intent crosses the restart: no click awaiting a
          reply, no clear awaiting an ack, no pinned snapshot, no session.
@@ -1873,7 +1815,7 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
 
     # --- a process dies ----------------------------------------------------
     # ``_shutdown_gui`` is replaced by a recorder: the real one calls
-    # ``QApplication.instance().quit()`` (gui.py:3782-3784) on the QApplication
+    # ``QApplication.instance().quit()`` (in the real ``_shutdown_gui`` of gui.py) on the QApplication
     # the whole test session shares. Recording the call is also the assertion
     # -- reaching it is the only way out of _check_queues_and_events once the
     # shutdown event is set.
@@ -1905,16 +1847,20 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
         assert len(clears) == 1, f"expected one queued clear, got {leftover!r}"
 
         # ASSERTION 2: an intentional exit is not an overlay fault. The
-        # deadline callback is invoked the way loop.call_later would invoke
-        # it (main.py:6880-6882), with shutdown already set.
-        controller._fire_overlay_clear_ack_deadline(
-            session_id, generation, "trace-j6-hide",
+        # clear-ack deadline was armed when the clear was dispatched, and
+        # nothing cancels it here, so its callback runs on the loop with
+        # shutdown already set. Waiting out the shipped deadline lets it run.
+        import services.wheelhouse.numbered_overlay.controller as overlay_module
+
+        assert overlay_module._OVERLAY_CLEAR_ACK_DEADLINE_MS == 5000
+        await asyncio.sleep(
+            overlay_module._OVERLAY_CLEAR_ACK_DEADLINE_MS / 1000.0 + 0.3,
         )
-        assert controller._overlay_pending_clear is None
-        assert controller._overlay_clear_fault_reported_pair is None, (
+        assert _clear_fault_reports(caplog) == [], (
             "a crash popped an overlay clear-fault error at the user; the "
             "application is exiting on purpose and there is nothing to fix"
         )
+        assert _clear_fault_reports(caplog, levelname="WARNING") == []
 
     # --- the launcher restarts the application -----------------------------
     # Same user-data directory, new everything else: a restart re-reads the
@@ -1932,13 +1878,35 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
         assert not new_controller.shutdown_event.is_set()
 
         # ASSERTION 3: no half-finished intent crossed the restart.
-        machine = new_controller.click_overlay_state
+        machine = new_controller.overlay.click_overlay_state
         assert machine.state is OverlayState.CLOSED
         assert machine.pinned_snapshot_id is None
-        assert new_controller._overlay_click_in_flight is None
-        assert new_controller._overlay_pending_clear is None
-        assert new_controller._overlay_clear_fault_reported_pair is None
-        assert new_controller._overlay_visible_painted_pair is None
+        # No click is awaiting a reply and no badge is current: "click
+        # three" after the restart goes by name. The foreground is a fake
+        # window, so the click reads no window of this machine.
+        from tests.overlay_boundary_harness import FakeDesktop, NUMBERED_WINDOW
+        from services.wheelhouse.shared.click_element import (
+            ClickElementResponse,
+        )
+
+        with ExitStack() as desktop:
+            FakeDesktop([NUMBERED_WINDOW]).install(desktop)
+            click = asyncio.ensure_future(
+                new_controller.forward_click_element(
+                    _speak_click("three"), "trace-j6-restarted-click",
+                )
+            )
+            await _answer_input_request(
+                restarted,
+                expect_action="click_element",
+                build_reply=lambda params: ClickElementResponse(
+                    status="ok", outcome="ok", reason=None,
+                    matched_names=(), snapshot_id=None,
+                    snapshot_summary=None, matched_name="three",
+                    trace_id=params.get("trace_id", ""),
+                ).to_dict(),
+            )
+            await asyncio.wait_for(click, 5.0)
 
         # --- the display side of the restart -------------------------------
         with ExitStack() as stack:
@@ -1970,13 +1938,11 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
                 assert _badge_window_monitors(survivor.manager) == [
                     _FAKE_HMONITOR
                 ]
-                assert survivor.gui._overlay_lease_pair == (
-                    session_id, generation,
-                )
+                assert survivor.lease_timer.running
 
             # The restarted Logic announces itself, once, at startup
-            # (main.py:11157 -> _send_overlay_startup_reset).
-            new_controller._send_overlay_startup_reset()
+            # (``LogicController.main`` -> ``send_overlay_startup_reset``).
+            new_controller.overlay.send_overlay_startup_reset()
 
             # ASSERTION 4: no numbers are left on the screen. For a display
             # that died this is already true before the pump -- the delivery
@@ -1990,14 +1956,13 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
                     "application restarted"
                 ),
             )
-            assert survivor.gui._overlay_lease_pair is None
             assert survivor.manager._pending_destroy == []
             assert not survivor.manager.teardown_pending
             assert not survivor.manager.has_deferred_teardown_ack
             assert not survivor.lease_timer.running
             assert not survivor.teardown_timer.running
             # The reset reports nothing back: there is no live pair to report
-            # on and the new Logic starts from closed (gui.py:2247-2254).
+            # on and the new Logic starts from closed (``OverlayGuiMessages.handle_reset_overlay`` in overlay_gui/messages.py).
             silence = await _drain_gui_queue(
                 survivor.commands_to_logic_queue, settle_s=0.1,
             )
@@ -2009,23 +1974,41 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
             # ASSERTION 5: the restarted Logic can paint again. Its first pair
             # is (1, 0) -- strictly OLDER than the (1, 1) the dead incarnation
             # left on the display's generation gate -- so this paint can only
-            # land if the gate was reset, not merely emptied of windows.
-            new_sid, new_gen, new_effect = _paint_badges_awaiting_display(
-                new_controller, "snap-journey-6-restarted", 5,
+            # land if the gate was reset, not merely emptied of windows. The
+            # paint comes from "show numbers" through the public entry, with
+            # the walk and the pin answered over the restarted transport.
+            FakeDesktop([NUMBERED_WINDOW]).install(stack)
+            await new_controller.overlay.handle_overlay_command(
+                "show", trace_id="trace-j6-restart",
             )
+            new_sid = machine.overlay_session_id
+            new_gen = machine.paint_generation
             assert (new_sid, new_gen) == (1, 0)
             assert (new_sid, new_gen) < (session_id, generation), (
                 "the restarted Logic did not renumber from zero, so this "
                 "journey is no longer testing the stale-gate case"
             )
-            await new_controller._overlay_dispatch_paint(
-                new_effect, "trace-j6-restart",
+            await _answer_input_request(
+                restarted,
+                expect_action="start_overlay_walk",
+                build_reply=lambda params: _walk_reply(
+                    params,
+                    snapshot_id="snap-journey-6-restarted",
+                    summary=_summary("snap-journey-6-restarted", 5),
+                    read_from=_WINDOW_THE_USER_CLICKED_IN,
+                ),
             )
+            await _await_true(
+                lambda: machine.pinned_snapshot_id == "snap-journey-6-restarted",
+                why="the restarted Logic never took the walk reply",
+            )
+            await _answer_input_request(
+                restarted, expect_action="pin_snapshot", build_reply=_pin_reply,
+            )
+            composites_before = _composite_calls(survivor)
             await _pump_display(
                 survivor,
-                until=lambda: survivor.gui._overlay_lease_pair == (
-                    new_sid, new_gen,
-                ),
+                until=lambda: _composite_calls(survivor) > composites_before,
                 why=(
                     "the restarted Logic's paint never reached the screen; a "
                     "generation gate carrying the dead incarnation's "
@@ -2044,6 +2027,48 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
             assert acks[0]["overlay_session_id"] == new_sid
             assert acks[0]["paint_generation"] == new_gen
             assert acks[0]["snapshot_id"] == "snap-journey-6-restarted"
+            # No clear-fault report from either incarnation.
+            assert _clear_fault_reports(caplog) == []
+
+            # ASSERTION 6: nothing of the dead incarnation's visible list
+            # crossed the restart. With the restarted paint acked, "click
+            # five" resolves against the restarted badges and carries the
+            # restarted pair -- (1, 0), not the dead incarnation's (1, 1).
+            _feed_gui_commands_to_logic(new_controller, acks)
+            await _await_true(
+                lambda: machine.state is OverlayState.PAINTED,
+                why="the restarted Logic never reached painted",
+            )
+            outstanding = await _drain_command_frames(restarted)
+            assert {f[0] for f in outstanding} <= {
+                "refresh_overlay_snapshot",
+            }, f"unexpected commands already queued for Input: {outstanding!r}"
+            five = asyncio.ensure_future(
+                new_controller.forward_click_element(
+                    _speak_click("five"), "trace-j6-restarted-five",
+                )
+            )
+            try:
+                sent = await _answer_input_request(
+                    restarted,
+                    expect_action="click_snapshot_item",
+                    build_reply=lambda params: ClickElementResponse(
+                        status="ok", outcome="ok", reason=None,
+                        matched_names=(), snapshot_id=params["snapshot_id"],
+                        snapshot_summary=None, matched_name="control 5",
+                        trace_id=params.get("trace_id", ""),
+                    ).to_dict(),
+                )
+                await asyncio.wait_for(five, 5.0)
+            finally:
+                if not five.done():
+                    five.cancel()
+                    await asyncio.gather(five, return_exceptions=True)
+            assert sent["snapshot_id"] == "snap-journey-6-restarted"
+            assert sent["item_id"] == "snap-journey-6-restarted-item-5"
+            assert (sent["overlay_session_id"], sent["paint_generation"]) == (
+                new_sid, new_gen,
+            )
 
             if dead_process != "display":
                 # Leave the survivor pointed back at its own rig's transport,
@@ -2055,31 +2080,6 @@ async def test_journey_6_a_crash_at_any_step_leaves_no_numbers_and_no_half_finis
 # ---------------------------------------------------------------------------
 # Answering the Input side over the real transport
 # ---------------------------------------------------------------------------
-
-
-class _ForegroundSampler:
-    """A stand-in for ``_capture_overlay_foreground_identity`` (main.py:8731).
-
-    The real method reads THIS MACHINE's foreground window -- it calls
-    ``win32gui.GetForegroundWindow()`` (main.py:8753) and resolves the pid,
-    process name and creation time from it. A journey that let it run would
-    compare a crafted reply against whatever window the person running the
-    suite happens to have in front, so the verdict would be theirs and not the
-    code's. That makes the patch a hermeticity requirement, not a convenience.
-
-    It COUNTS its calls as well as answering them, so a journey can prove the
-    fence really sampled through this seam rather than assert that it did: a
-    fence that never sampled would leave ``calls`` at zero while still
-    reaching whatever verdict the journey expected.
-    """
-
-    def __init__(self, identity) -> None:
-        self.identity = identity
-        self.calls = 0
-
-    def __call__(self):
-        self.calls += 1
-        return self.identity
 
 
 # The two windows journey 3b is about. They share a pid and a process name and
@@ -2100,6 +2100,36 @@ _THE_DIALOG_THE_CLICK_OPENED = ForegroundIdentity(
 )
 
 
+def _journey_3b_desktop():
+    """The fake desktop journey 3b runs on: the two windows above, as Win32 sees them.
+
+    The fake ``psutil.Process`` answers for the foreground window's pid, so
+    the dialog reports its own creation time while it is in front. The
+    numbers start over the window the user clicked in.
+    """
+
+    from tests.overlay_boundary_harness import FakeDesktop, Window
+
+    clicked_in = Window(
+        hwnd=_WINDOW_THE_USER_CLICKED_IN.hwnd,
+        pid=_WINDOW_THE_USER_CLICKED_IN.pid,
+        process_name=_WINDOW_THE_USER_CLICKED_IN.process_name,
+        class_name="JourneyMainWindow",
+        create_time_s=_WINDOW_THE_USER_CLICKED_IN.window_creation_time / 1000,
+    )
+    dialog = Window(
+        hwnd=_THE_DIALOG_THE_CLICK_OPENED.hwnd,
+        pid=_THE_DIALOG_THE_CLICK_OPENED.pid,
+        process_name=_THE_DIALOG_THE_CLICK_OPENED.process_name,
+        class_name="#32770",
+        create_time_s=_THE_DIALOG_THE_CLICK_OPENED.window_creation_time / 1000,
+    )
+    desktop = FakeDesktop(
+        [clicked_in, dialog], foreground_answers_for_its_pid=True,
+    )
+    return desktop, dialog
+
+
 async def _answer_input_request(rig: JourneyRig, *, expect_action, build_reply):
     """Read one Logic-to-Input command and answer it through the REAL demuxer.
 
@@ -2107,7 +2137,7 @@ async def _answer_input_request(rig: JourneyRig, *, expect_action, build_reply):
     ``send_request`` is not stubbed. It goes onto ``app.response_queue``
     (app.py:178) -- the same real ``multiprocessing.Queue`` the Input process
     writes to -- and the real demuxer task the rig started
-    (``_start_demuxer``, app.py:298) pops it, matches ``request_id`` against
+    (``start_demuxer``, app.py:298) pops it, matches ``request_id`` against
     ``response_futures`` (app.py:361-362) and resolves the awaiting Future. So
     the request id, the demux and the schema parse are all production's.
 
@@ -2182,14 +2212,17 @@ def _walk_reply(params, *, snapshot_id, summary, read_from) -> dict:
 # ---------------------------------------------------------------------------
 #
 # Half A pinned the state machine's half: a focus change does NOT cancel the
-# settling read (click_overlay_state.py:1301-1307 returns NO_OP). This half
-# pins where the refusal actually lives -- the INTEGRATION's commit fence in
-# ``_overlay_dispatch_build`` (main.py:6148). The settle leg is
-# main.py:6355-6396: ``if build_ok and is_settle:`` then
-# ``if not self._overlay_settle_read_is_current(reported, trace_id=...)``,
-# which on refusal clears the walking cue, sets ``build_ok = False`` and
-# ``snapshot_id = None``, and on acceptance stores
-# ``self._overlay_settle_read_identity = (snapshot_id, reported)``.
+# settling read (the FOCUS_CHANGE arm of ``_on_post_click_settling`` returns
+# NO_OP). This half pins where the refusal actually lives -- the
+# integration's commit fence, which compares the window the settle reply says
+# it read against the current foreground before the machine can paint it. On
+# refusal the build is treated as failed and the overlay closes; on
+# acceptance the reply is painted.
+#
+# The journey is driven through public calls only: "show numbers" and its
+# Input replies paint the badges, "click three" sends the badge click, the
+# click reply starts the settle, and the walk reply crosses the real response
+# queue. The foreground is the fake desktop's.
 #
 # TWO tests, not one with two sections, for the reason the three config parts
 # are three tests: a refusal-only test would pass against a fence that refused
@@ -2205,8 +2238,6 @@ class _SettleOutcome:
     actions: list
     machine_state: Any
     pinned_snapshot_id: Any
-    settle_read_identity: Any
-    foreground_samples: int
     session_id: int
     settle_generation: int
 
@@ -2217,72 +2248,121 @@ async def _drive_journey_3b(tmp_path: Path, *, read_from) -> _SettleOutcome:
     The ONLY difference between the two journeys below is ``read_from`` -- the
     window the crafted reply says it was read from -- so the shared driver is
     what makes the pair a controlled comparison rather than two tests that
-    happen to differ somewhere unstated. The current foreground is always
-    ``_THE_DIALOG_THE_CLICK_OPENED``: the click opened a dialog, which is the
-    common case for "click N" and the reason the machine does not cancel.
+    happen to differ somewhere unstated. The foreground at the settle reply is
+    always ``_THE_DIALOG_THE_CLICK_OPENED``: the click opened a dialog, which
+    is the common case for "click N" and the reason the machine does not
+    cancel.
     """
 
-    from services.wheelhouse.click_overlay_state import BuildReason, EffectKind
+    from services.wheelhouse.shared.click_element import ClickElementResponse
 
     data_dir = tmp_path / "journey-3b-data"
     data_dir.mkdir()
     async with _real_logic_controller(
-        data_dir, config_path=_write_settling_config(tmp_path),
+        data_dir,
+        config_path=_write_settling_config(tmp_path, keep_numbers=True),
     ) as rig:
         controller = rig.controller
-        machine = controller.click_overlay_state
+        machine = controller.overlay.click_overlay_state
         assert machine.settle_after_click, (
             "the real factory did not carry [click] overlay_settle_after_click "
-            "onto the machine; with the flag off main.py:4270 makes the whole "
-            "settle path inert and this journey would pin nothing"
+            "onto the machine; with the flag off the whole settle path is "
+            "inert and this journey would pin nothing"
         )
-        sampler = _ForegroundSampler(_THE_DIALOG_THE_CLICK_OPENED)
-        with patch.object(
-            controller, "_capture_overlay_foreground_identity", sampler,
-        ):
-            session_id, generation = _paint_badges(
-                controller, "snap-journey-3b", 3, 4,
+        with ExitStack() as stack:
+            desktop, dialog = _journey_3b_desktop()
+            desktop.install(stack)
+
+            # --- "show numbers" over the window the user will click in ------
+            await controller.overlay.handle_overlay_command(
+                "show", trace_id="trace-j3b-show",
             )
-            # Anything the rig's own construction queued is not this journey.
+            assert machine.state is OverlayState.WALK_IN_FLIGHT
+            session_id = machine.overlay_session_id
+            generation = machine.paint_generation
+            await _answer_input_request(
+                rig,
+                expect_action="start_overlay_walk",
+                build_reply=lambda params: _walk_reply(
+                    params,
+                    snapshot_id="snap-journey-3b",
+                    summary=_summary("snap-journey-3b", 3, 4),
+                    read_from=_WINDOW_THE_USER_CLICKED_IN,
+                ),
+            )
+            await _await_true(
+                lambda: machine.pinned_snapshot_id == "snap-journey-3b",
+                why="the show-numbers build response never reached the machine",
+            )
+            await _answer_input_request(
+                rig, expect_action="pin_snapshot", build_reply=_pin_reply,
+            )
+            await controller.overlay.handle_overlay_state_changed({
+                "action": "overlay_state_changed",
+                "state": "painted",
+                "overlay_session_id": session_id,
+                "paint_generation": generation,
+                "monitor_ids": [0],
+                "snapshot_id": "snap-journey-3b",
+            })
+            assert machine.state is OverlayState.PAINTED
+            # The keepalive's immediate first tick, and anything the paint put
+            # on the GUI queue, are not this journey.
+            outstanding = await _drain_command_frames(rig)
+            assert {f[0] for f in outstanding} <= {"refresh_overlay_snapshot"}, (
+                f"unexpected commands sent to Input by the paint: {outstanding!r}"
+            )
             await _drain_gui_queue(rig.state_to_gui_queue, settle_s=0.1)
 
-            # --- the click succeeds; the machine settles --------------------
-            completed = machine.apply(
-                OverlayEvent(OverlayEventKind.CLICK_COMPLETE)
+            # --- "click three": the click succeeds; the machine settles -----
+            click = asyncio.ensure_future(
+                controller.forward_click_element(
+                    _speak_click("three"), "trace-j3b-click",
+                )
             )
-            assert machine.state is OverlayState.POST_CLICK_SETTLING
-            settle_build = next(
-                e for e in completed.effects
-                if e.kind is EffectKind.DISPATCH_BUILD
+            try:
+                clicked = await _answer_input_request(
+                    rig,
+                    expect_action="click_snapshot_item",
+                    build_reply=lambda params: ClickElementResponse(
+                        status="ok", outcome="ok", reason=None,
+                        matched_names=("control 3",),
+                        snapshot_id=params.get("snapshot_id"),
+                        snapshot_summary=None, matched_name="control 3",
+                        trace_id=params.get("trace_id", ""),
+                    ).to_dict(),
+                )
+                await asyncio.wait_for(click, 5.0)
+            finally:
+                if not click.done():
+                    click.cancel()
+                    await asyncio.gather(click, return_exceptions=True)
+            assert clicked["item_id"] == "snap-journey-3b-item-3"
+            await _await_true(
+                lambda: machine.state is OverlayState.POST_CLICK_SETTLING,
+                why="the successful click never started the settle",
             )
-            assert settle_build.build_reason is BuildReason.SETTLE
             settle_generation = machine.paint_generation
             assert settle_generation == generation + 1
 
-            # --- the real performer, over the real transport ----------------
-            build_task = asyncio.ensure_future(
-                controller._overlay_dispatch_build(settle_build, "trace-j3b")
-            )
-            try:
-                sent = await _answer_input_request(
-                    rig,
-                    expect_action="start_overlay_walk",
-                    build_reply=lambda params: _walk_reply(
-                        params,
-                        snapshot_id="snap-journey-3b",
-                        summary=_summary("snap-journey-3b", 3, 4),
-                        read_from=read_from,
-                    ),
-                )
-                await build_task
-            finally:
-                if not build_task.done():
-                    build_task.cancel()
-                    await asyncio.gather(build_task, return_exceptions=True)
+            # --- the dialog the click opened takes the foreground -----------
+            desktop.bring_to_front(dialog)
 
-            # The commit feed is deferred through ``loop.call_soon`` (the
-            # ``_feed`` closure in main.py), and the effects it schedules run
-            # as their own task, so the drain below is what lets both run.
+            # --- the settle read, answered over the real transport ----------
+            sent = await _answer_input_request(
+                rig,
+                expect_action="start_overlay_walk",
+                build_reply=lambda params: _walk_reply(
+                    params,
+                    snapshot_id="snap-journey-3b",
+                    summary=_summary("snap-journey-3b", 3, 4),
+                    read_from=read_from,
+                ),
+            )
+
+            # The commit feed is deferred through ``loop.call_soon``, and the
+            # effects it schedules run as their own task, so the drain below
+            # is what lets both run.
             actions = await _drain_gui_queue(
                 rig.state_to_gui_queue, settle_s=0.5,
             )
@@ -2291,8 +2371,6 @@ async def _drive_journey_3b(tmp_path: Path, *, read_from) -> _SettleOutcome:
                 actions=actions,
                 machine_state=machine.state,
                 pinned_snapshot_id=machine.pinned_snapshot_id,
-                settle_read_identity=controller._overlay_settle_read_identity,
-                foreground_samples=sampler.calls,
                 session_id=session_id,
                 settle_generation=settle_generation,
             )
@@ -2302,7 +2380,7 @@ def _assert_the_settle_read_really_went_out(outcome: _SettleOutcome) -> None:
     """Both halves share this: the build Logic sent WAS the settle read.
 
     Without it a journey could pass on a build that was never a settle at all
-    -- and ``is_settle`` (main.py:6262) is what arms the whole fence, so a
+    -- and ``is_settle`` (set in ``_overlay_dispatch_build``) is what arms the whole fence, so a
     non-settle build would sail through it for a reason that has nothing to do
     with the window identity.
     """
@@ -2310,23 +2388,18 @@ def _assert_the_settle_read_really_went_out(outcome: _SettleOutcome) -> None:
     assert outcome.sent["scope"] == "focused_window"
     assert outcome.sent["settle"] is True, (
         "the settle flag was not on the wire, so the Input handler would walk "
-        "once instead of reading through the settle detector (main.py:6218)"
+        "once instead of reading through the settle detector (_overlay_dispatch_build sets it)"
     )
     assert outcome.sent["compare_snapshot_id"] == "snap-journey-3b", (
         "the read is compared against the pin that was on screen when the "
-        "user clicked (main.py:6219)"
+        "user clicked (_overlay_dispatch_build sets it)"
     )
     assert outcome.sent["overlay_session_id"] == outcome.session_id
     assert outcome.sent["paint_generation"] == outcome.settle_generation
-    assert outcome.foreground_samples >= 1, (
-        "the fence never sampled the current foreground, so whatever verdict "
-        "it reached was not reached by comparing windows (the "
-        "_capture_overlay_foreground_identity call at main.py:8671)"
-    )
 
 
 async def test_journey_3b_a_settle_read_from_a_window_the_user_left_never_paints(
-    tmp_path,
+    tmp_path, caplog,
 ):
     """Journey 3, half B: the fence refuses a reply read from the old window.
 
@@ -2344,6 +2417,9 @@ async def test_journey_3b_a_settle_read_from_a_window_the_user_left_never_paints
     that is not in front.
     """
 
+    caplog.set_level(
+        logging.INFO, logger="services.wheelhouse.numbered_overlay.controller",
+    )
     outcome = await _drive_journey_3b(
         tmp_path, read_from=_WINDOW_THE_USER_CLICKED_IN,
     )
@@ -2357,10 +2433,19 @@ async def test_journey_3b_a_settle_read_from_a_window_the_user_left_never_paints
         f"painted anyway: {paints!r}"
     )
 
-    # ASSERTION 2: no identity was carried to a pin. The acceptance leg is the
-    # only writer of this slot (main.py:6393), so a value here would mean the
-    # fence took the accepting branch.
-    assert outcome.settle_read_identity is None
+    # ASSERTION 2: the fence refused BECAUSE the windows differ. Its refusal
+    # record names the window the reply was read from and the window now in
+    # front, so the verdict was reached by comparing the two.
+    refusals = [
+        tuple(r.args[:6]) for r in caplog.records
+        if "the settle reply was read from hwnd=" in str(r.msg)
+    ]
+    assert refusals == [(
+        _WINDOW_THE_USER_CLICKED_IN.hwnd, _WINDOW_THE_USER_CLICKED_IN.pid,
+        _WINDOW_THE_USER_CLICKED_IN.process_name,
+        _THE_DIALOG_THE_CLICK_OPENED.hwnd, _THE_DIALOG_THE_CLICK_OPENED.pid,
+        _THE_DIALOG_THE_CLICK_OPENED.process_name,
+    )], f"expected one window-mismatch refusal, got {refusals!r}"
 
     # ASSERTION 3: the machine did not end up presenting the wrong window's
     # numbers. Fail-closed means CLOSED, with the pre-click pin given up.
@@ -2386,9 +2471,8 @@ async def test_journey_3b_a_settle_read_from_the_window_still_in_front_paints(
 
     The reply carries the SAME snapshot id the machine already has pinned,
     which is how Input says "nothing changed" (click_overlay_state.py:1257).
-    That leg repaints the pinned snapshot and emits no PIN_SNAPSHOT effect, so
-    the identity the fence stored is still in its slot at the end -- which is
-    what makes it observable here.
+    That leg repaints the pinned snapshot and sends no pin, so the window the
+    fence carried for a pin has no reader in this leg and is not asserted.
     """
 
     outcome = await _drive_journey_3b(
@@ -2406,12 +2490,6 @@ async def test_journey_3b_a_settle_read_from_the_window_still_in_front_paints(
     assert painted["paint_generation"] == outcome.settle_generation
     assert painted["snapshot_id"] == "snap-journey-3b"
     assert sorted(i["display_number"] for i in painted["items"]) == [3, 4]
-
-    # ASSERTION 2: the READ's window was carried to the pin rather than
-    # re-sampled (main.py:6393, consumed at main.py:7443-7450).
-    assert outcome.settle_read_identity == (
-        "snap-journey-3b", _THE_DIALOG_THE_CLICK_OPENED,
-    )
 
     # ASSERTION 3: the machine committed the repaint rather than closing.
     assert outcome.machine_state is OverlayState.PAINT_IN_FLIGHT
@@ -2495,26 +2573,27 @@ async def _journey_2_repaint(journey_rig):
     discriminating (review finding
     wh-overlay-slow-uia-stale-badges.12.1.3).
 
-    The patch stays open across the yield: a numbered click can reach
-    ``_capture_overlay_foreground_identity``, which reads this machine's
-    real foreground window.
+    The fake desktop stays installed across the yield: a build and a
+    numbered click read the foreground window through Win32 and psutil, and
+    the fake answers with the window the user clicked in
+    (``NUMBERED_WINDOW`` has the identity of ``_WINDOW_THE_USER_CLICKED_IN``)
+    instead of this machine's real foreground window.
     """
 
+    from tests.overlay_boundary_harness import FakeDesktop, NUMBERED_WINDOW
+
     controller = journey_rig.controller
-    machine = controller.click_overlay_state
-    sampler = _ForegroundSampler(_WINDOW_THE_USER_CLICKED_IN)
-    with patch.object(
-        controller, "_capture_overlay_foreground_identity", sampler,
-    ):
-        session_id, generation = _paint_badges(
-            controller, "snap-journey-2-before", 1, 2, 3,
+    machine = controller.overlay.click_overlay_state
+    with ExitStack() as desktop:
+        FakeDesktop([NUMBERED_WINDOW]).install(desktop)
+        session_id, generation = await _paint_badges(
+            journey_rig, "snap-journey-2-before", 1, 2, 3,
         )
-        await _drain_gui_queue(journey_rig.state_to_gui_queue, settle_s=0.1)
 
         # --- the numbers repaint while the user is mid-sentence -------------
-        controller._apply_overlay_event(
-            OverlayEvent(OverlayEventKind.SHOW_NUMBERS),
-            source="journey-2 repaint",
+        # "show numbers" spoken over painted badges is a refresh.
+        await controller.overlay.handle_overlay_command(
+            "show", trace_id="journey-2 repaint",
         )
         assert machine.state is OverlayState.REFRESH_IN_FLIGHT
         refresh_generation = machine.paint_generation
@@ -2537,15 +2616,14 @@ async def _journey_2_repaint(journey_rig):
         await _answer_input_request(
             journey_rig, expect_action="pin_snapshot", build_reply=_pin_reply,
         )
-        controller._apply_overlay_event(
-            OverlayEvent(
-                OverlayEventKind.PAINT_ACK,
-                overlay_session_id=session_id,
-                paint_generation=refresh_generation,
-                paint_state=PaintAckState.PAINTED,
-            ),
-            source="journey-2 paint ack",
-        )
+        await controller.overlay.handle_overlay_state_changed({
+            "action": "overlay_state_changed",
+            "state": "painted",
+            "overlay_session_id": session_id,
+            "paint_generation": refresh_generation,
+            "monitor_ids": [0],
+            "snapshot_id": "snap-journey-2-after",
+        })
         assert machine.state is OverlayState.PAINTED, (
             "the repaint never completed, so the journey would be about a "
             "refresh in flight rather than about numbers the user can see"
@@ -2554,10 +2632,10 @@ async def _journey_2_repaint(journey_rig):
         # change -- without this the refusal below could be right for the
         # wrong reason.
         assert machine.pinned_snapshot_id == "snap-journey-2-after"
-        before = controller.click_snapshot_summary_cache.resolve(
+        before = controller.overlay.click_snapshot_summary_cache.resolve(
             "snap-journey-2-before"
         ).summary
-        after = controller.click_snapshot_summary_cache.resolve(
+        after = controller.overlay.click_snapshot_summary_cache.resolve(
             "snap-journey-2-after"
         ).summary
         assert before is not None and after is not None
@@ -2576,7 +2654,7 @@ async def _journey_2_repaint(journey_rig):
         # Everything the repaint itself sent to Input, off the buffer first,
         # so ASSERTION 1 is about the click and only the click. Both actions
         # are snapshot-store bookkeeping the repaint generated: the immediate
-        # keepalive tick (main.py:8331-8344) and the unpin of the generation
+        # keepalive tick (``_reconcile_overlay_keepalive_timer``) and the unpin of the generation
         # the repaint superseded (click_overlay_state.py:1736). This is the
         # same drain-and-classify journey 6 does at ``click_in_flight``.
         #
@@ -2731,7 +2809,6 @@ async def test_journey_2_an_unchanged_badge_stays_clickable_across_that_repaint(
         )
 
 
-
 # ---------------------------------------------------------------------------
 # The speech side, for journeys 5 and 7
 # ---------------------------------------------------------------------------
@@ -2759,7 +2836,7 @@ def _real_speech_processor(rig: JourneyRig, tmp_path: Path):
     Measured 2026-08-29 with ``grep -n 'self\\.text_parser'
     speech/speech_processor.py``: eleven hits, one of them the constructor's
     own assignment, and the other ten all inside
-    ``_fire_trailing_action_for_word``, ``_consume_pending_bare_number``,
+    ``_fire_trailing_action_for_word``, ``consume_pending_bare_number``,
     ``_execute_command``, ``_process_remainder`` and
     ``_find_earliest_replacement`` -- command and replacement execution, none
     of which a plain dictated word reaches. The "gate released" half of
@@ -2841,21 +2918,19 @@ async def _dictate_and_collect_frames(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Waiting on wh-overlay-slow-uia-stale-badges.7 (refuse dictation "
-        "while WheelHouse reads the screen) and "
-        "wh-overlay-slow-uia-stale-badges.11 (bounded queue, stale-command "
-        "expiry, cancellation in the Input command loop). Today there is no "
-        "dictation gate at all: a case-insensitive grep for "
-        "'refuse.*dictat|dictat.*gate|gate.*dictat' over main.py and speech/ "
-        "matched nothing on 2026-08-29, and the first half of this journey "
-        "measures the consequence -- a word typed while the read is "
-        "outstanding. Strict on purpose: whoever lands child .7 deletes this "
-        "marker."
-    ),
-)
+# Until 2026-11-11 this journey carried a strict expected-failure marker
+# (wh-overlay-slow-uia-stale-badges.7 and .11), and it ended the read with a
+# private feed: it applied a build_ok=False BUILD_RESPONSE through
+# NumberedOverlayController._apply_overlay_event while the build still
+# waited for Input. The shipped app cannot do that. Its only BUILD_RESPONSE
+# comes from the _feed closure of
+# NumberedOverlayController._overlay_dispatch_build
+# (numbered_overlay/controller.py), after the build's wait has ended and its
+# finally has counted the read out of the dictation gate. The closed state
+# itself is reachable: "hide numbers" closes the machine while Input still
+# runs the read, and there dictation continues at once (LEAD DECISION 21 on
+# wh-full-refactor.3; the next test). This journey now ends the read through
+# the app's own expiry, and both assertions hold (wh-full-refactor.3.1).
 async def test_journey_5_a_destroyed_read_command_never_leaves_dictation_gated(
     journey_rig, tmp_path,
 ):
@@ -2879,13 +2954,13 @@ async def test_journey_5_a_destroyed_read_command_never_leaves_dictation_gated(
     processor = _real_speech_processor(journey_rig, tmp_path)
 
     # --- WheelHouse starts reading the screen ------------------------------
-    controller._apply_overlay_event(
-        OverlayEvent(OverlayEventKind.SHOW_NUMBERS),
-        source="journey-5 show numbers",
+    # The public entry the "show numbers" pattern calls.
+    await controller.handle_overlay_command(
+        "show", trace_id="journey-5 show numbers",
     )
-    assert controller.click_overlay_state.state is OverlayState.WALK_IN_FLIGHT
-    session_id = controller.click_overlay_state.overlay_session_id
-    generation = controller.click_overlay_state.paint_generation
+    assert controller.overlay.click_overlay_state.state is OverlayState.WALK_IN_FLIGHT
+    session_id = controller.overlay.click_overlay_state.overlay_session_id
+    generation = controller.overlay.click_overlay_state.paint_generation
     await _await_frame(journey_rig.command_ready_event)
     read_action, _params, _has, _rid, _trace = _read_command_frame(
         journey_rig.shm,
@@ -2907,19 +2982,19 @@ async def test_journey_5_a_destroyed_read_command_never_leaves_dictation_gated(
     )
 
     # --- the destroyed read expires ----------------------------------------
-    # The build-failure feed production's own ``_feed`` closure produces on a
-    # timeout, fed through the same entry point it uses.
-    controller._apply_overlay_event(
-        OverlayEvent(
-            OverlayEventKind.BUILD_RESPONSE,
-            overlay_session_id=session_id,
-            paint_generation=generation,
-            snapshot_id=None,
-            build_ok=False,
-        ),
-        source="journey-5 read expired",
+    # Nothing answers the read, so production's own expiry ends it: the
+    # request runs out its screen_read_timeout_ms (10000 ms by default) and
+    # the build fails. The session and generation are the ones the read
+    # went out under.
+    assert (
+        controller.overlay.click_overlay_state.overlay_session_id,
+        controller.overlay.click_overlay_state.paint_generation,
+    ) == (session_id, generation)
+    await _await_true(
+        lambda: controller.overlay.click_overlay_state.state is OverlayState.CLOSED,
+        timeout_s=15.0,
+        why="the destroyed read never expired",
     )
-    assert controller.click_overlay_state.state is OverlayState.CLOSED
 
     # ASSERTION 2: the gate did not stick. The same word now types.
     after = await _dictate_and_collect_frames(
@@ -2929,6 +3004,56 @@ async def test_journey_5_a_destroyed_read_command_never_leaves_dictation_gated(
         "dictation is still refused after the read command was destroyed; "
         "the gate has no release, so the user's voice is gone until they "
         f"restart (actions seen: {after!r})"
+    )
+
+
+async def test_journey_5_hide_numbers_while_the_read_is_outstanding_closes_and_types_the_next_word(
+    journey_rig, tmp_path,
+):
+    """Journey 5: "hide numbers" during the read closes, and the next word types.
+
+    This test asserts today's behavior, which LEAD DECISION 21 on
+    wh-full-refactor.3 keeps. "hide numbers" spoken while the screen read is
+    outstanding closes the machine at once. The build stops its wait and
+    counts the read out of the dictation gate, so the next dictated word is
+    sent, although Input has not answered the read.
+
+    The known cost: the Input command loop is sequential, so that word waits
+    behind the read in Input and can be typed late, in whatever window is in
+    front by then.
+    """
+
+    controller = journey_rig.controller
+    processor = _real_speech_processor(journey_rig, tmp_path)
+
+    await controller.handle_overlay_command(
+        "show", trace_id="journey-5 hide show numbers",
+    )
+    assert controller.overlay.click_overlay_state.state is OverlayState.WALK_IN_FLIGHT
+    await _await_frame(journey_rig.command_ready_event)
+    read_action, _params, _has, _rid, _trace = _read_command_frame(
+        journey_rig.shm,
+    )
+    assert read_action == "start_overlay_walk"
+    # Input has taken the read command, and it never answers it.
+    journey_rig.command_ready_event.clear()
+
+    await controller.handle_overlay_command(
+        "hide", trace_id="journey-5 hide hide numbers",
+    )
+    assert controller.overlay.click_overlay_state.state is OverlayState.CLOSED
+    # The next word comes in a later utterance, not in the same event-loop
+    # turn as the command: half a second is shorter than a pause between two
+    # spoken utterances.
+    await asyncio.sleep(0.5)
+
+    after = await _dictate_and_collect_frames(
+        journey_rig, processor, _A_DICTATED_WORD,
+    )
+    assert "intelligent_insert_text" in after, (
+        "the word after \"hide numbers\" was refused while Input still ran "
+        "the abandoned read; LEAD DECISION 21 keeps dictation open at once "
+        f"(actions seen: {after!r})"
     )
 
 
@@ -3025,11 +3150,11 @@ async def test_journey_7_a_slow_read_types_nothing_into_the_window_that_took_ove
 
         rig.app.send_request = _recording_send_request
 
-        controller._apply_overlay_event(
-            OverlayEvent(OverlayEventKind.SHOW_NUMBERS),
-            source="journey-7 slow read",
+        # The public entry the "show numbers" pattern calls.
+        await controller.handle_overlay_command(
+            "show", trace_id="journey-7 slow read",
         )
-        assert controller.click_overlay_state.state is (
+        assert controller.overlay.click_overlay_state.state is (
             OverlayState.WALK_IN_FLIGHT
         )
         await _await_frame(rig.command_ready_event)
@@ -3091,21 +3216,40 @@ async def test_journey_7_a_slow_read_types_nothing_into_the_window_that_took_ove
 # LogicController, with the paints read off a real multiprocessing queue
 # and the pointer actions read back out of real shared memory.
 #
-# The one seam is the monitor topology: `_grid_monitor_context`
-# (main.py:5110) is the blocking Win32 read, and its own docstring names it
-# a seam. A journey that enumerated this machine's monitors would assert
-# different rectangles on every desktop, so the topology is injected the
-# way DisplayRig above injects one.
+# The one fake is the monitor topology: the Win32 monitor and window reads
+# answer from a FakeMonitors (tests/mouse_grid_boundary_harness.py), which
+# the fixture journey_grid_monitors installs. A journey that enumerated this
+# machine's monitors would assert different rectangles on every desktop, so
+# the topology is injected the way DisplayRig above injects one.
 
 
 # A fixed two-monitor desktop in virtual-desktop physical pixels, the shape
 # GridEvent carries. The second monitor is deliberately a different size and
 # to the right of the first, so "grid next screen" cannot pass by painting
-# the same rectangle twice.
+# the same rectangle twice. These are the two default monitors of
+# FakeMonitors (PRIMARY and SECOND).
 def _grid_monitors():
     from services.wheelhouse.grid_overlay_state import GridRect
 
     return (GridRect(0, 0, 1920, 1080), GridRect(1920, 0, 2560, 1440))
+
+
+@pytest.fixture
+def journey_grid_monitors():
+    """Windows reports the two monitors of _grid_monitors().
+
+    The window rectangle of FakeMonitors lies on the first monitor, and with
+    no foreground window the grid falls back to the monitor at (0, 0), the
+    same first monitor; so the grid opens there either way.
+    """
+    from tests.mouse_grid_boundary_harness import FakeMonitors, Monitor
+
+    fake = FakeMonitors(monitors=[
+        Monitor(m.left, m.top, m.width, m.height) for m in _grid_monitors()
+    ])
+    with ExitStack() as stack:
+        fake.install(stack)
+        yield fake
 
 
 def _grid_speech_processor(rig: JourneyRig):
@@ -3203,8 +3347,11 @@ async def _say(
         # Logic dispatches pointer work in background tasks so speech stays
         # responsive. Include that work before placing the FIFO barrier;
         # otherwise a click can be enqueued behind the barrier and missed.
-        await asyncio.gather(
-            *getattr(rig.controller, "_pending_grid_mouse_actions", ()),
+        # The fence waits for every pending pointer task, then takes the
+        # pointer lock. The journeys never leave the channel suspect, so it
+        # sends no channel_probe.
+        await rig.controller.grid_pointer_channel_quiescent(
+            trace_id="journey-flush",
         )
         reply = await rig.app.send_request(barrier, {}, timeout_s=window_s)
         assert reply.get("status") == "ok", (
@@ -3264,7 +3411,7 @@ def _grid_gui_actions(rig: JourneyRig) -> list:
     The grid's paints do not cross the Logic-to-Input boundary; they go to
     the GUI process on ``state_to_gui_queue`` as ``paint_grid`` /
     ``paint_grid_pin`` / ``clear_grid`` dicts, and a click notice arrives on
-    the same queue as ``show_click_notice`` (main.py:9713). A real
+    the same queue as ``show_click_notice`` (``forward_click_notice``). A real
     ``multiprocessing.Queue`` is used rather than a list double for the
     reason this file's own docstring gives: it proves the payload can be
     PICKLED, which the shipped spawn start method actually requires.
@@ -3299,14 +3446,12 @@ def _grid_gui_names(rig: JourneyRig) -> list:
 
 
 async def test_grid_say_waits_for_processing_after_collection_clock_expires(
-    journey_rig, monkeypatch,
+    journey_rig, journey_grid_monitors, monkeypatch,
 ):
     """A descheduled collector must not silently cancel 'show grid'."""
     from threading import Event
 
     rig = journey_rig
-    monitors = _grid_monitors()
-    rig.controller._grid_monitor_context = lambda: (monitors, monitors[0])
     processor = _grid_speech_processor(rig)
     # Hold the real feeder until the drain offers a blocking read. A zero-
     # timeout poll cannot see a paint still held in the feeder's buffer.
@@ -3431,7 +3576,9 @@ def test_grid_gui_collection_waits_for_feeder_delivery(monkeypatch):
 # and patterns.toml carries the unnested ^((click|tap)[.!?]?)$ -- so the
 # marker was strict for exactly this day and deleting it is the signal it
 # was written to give.
-async def test_grid_journey_a_show_refine_then_click(journey_rig):
+async def test_grid_journey_a_show_refine_then_click(
+    journey_rig, journey_grid_monitors,
+):
     """Grid journey A: "show grid", "three", "click".
 
     The whole point of the sequence is that each utterance depends on the
@@ -3443,7 +3590,6 @@ async def test_grid_journey_a_show_refine_then_click(journey_rig):
 
     rig = journey_rig
     monitors = _grid_monitors()
-    rig.controller._grid_monitor_context = lambda: (monitors, monitors[0])
     machine = rig.controller.grid_overlay_state
     processor = _grid_speech_processor(rig)
 
@@ -3513,10 +3659,12 @@ async def test_grid_journey_a_show_refine_then_click(journey_rig):
 # ---------------------------------------------------------------------------
 
 
-async def test_grid_journey_b_next_screen_walks_the_desktop(journey_rig):
+async def test_grid_journey_b_next_screen_walks_the_desktop(
+    journey_rig, journey_grid_monitors,
+):
     """Grid journey B: the closed no-op, then two monitors and the wrap.
 
-    The closed case is asserted FIRST and on purpose. main.py:5289 makes
+    The closed case is asserted FIRST and on purpose. ``handle_grid_command`` makes
     "grid next screen" with the grid closed a silent no-op that is still
     CONSUMED, so the failure it guards against is not a crash -- it is the
     words "grid next screen" being typed into the user's document.
@@ -3524,7 +3672,6 @@ async def test_grid_journey_b_next_screen_walks_the_desktop(journey_rig):
 
     rig = journey_rig
     monitors = _grid_monitors()
-    rig.controller._grid_monitor_context = lambda: (monitors, monitors[0])
     machine = rig.controller.grid_overlay_state
     processor = _grid_speech_processor(rig)
 
@@ -3533,7 +3680,7 @@ async def test_grid_journey_b_next_screen_walks_the_desktop(journey_rig):
     typed = [a for a, _p, _h, _r, _t in frames if a == "intelligent_insert_text"]
     assert typed == [], (
         "'grid next screen' with the grid closed was typed as text; "
-        "main.py:5289 makes it a consumed no-op"
+        "handle_grid_command makes it a consumed no-op"
     )
     assert not machine.is_open
     assert _grid_gui_names(rig) == [], (
@@ -3574,7 +3721,9 @@ async def test_grid_journey_b_next_screen_walks_the_desktop(journey_rig):
 # ---------------------------------------------------------------------------
 
 
-async def test_grid_journey_c_dismiss_clears_the_screen(journey_rig):
+async def test_grid_journey_c_dismiss_clears_the_screen(
+    journey_rig, journey_grid_monitors,
+):
     """Grid journey C: "show grid" then "dismiss grid".
 
     Two things must BOTH happen, and either alone would be satisfied by a
@@ -3585,8 +3734,6 @@ async def test_grid_journey_c_dismiss_clears_the_screen(journey_rig):
     """
 
     rig = journey_rig
-    monitors = _grid_monitors()
-    rig.controller._grid_monitor_context = lambda: (monitors, monitors[0])
     machine = rig.controller.grid_overlay_state
     processor = _grid_speech_processor(rig)
 
@@ -3627,7 +3774,7 @@ async def _answer_grid_action(
     ``MouseActionResponse`` (shared/mouse_action.py:72) rather than a
     hand-written dict, so this journey cannot craft a payload the real
     handler could never emit -- Logic parses it with exactly that
-    classmethod (main.py:5843). It goes onto the real
+    classmethod (in the grid's pointer send). It goes onto the real
     ``app.response_queue`` and is matched to its Future by the real
     demuxer, the same path ``_answer_input_request`` above documents.
 
@@ -3666,7 +3813,7 @@ async def _answer_grid_action(
 
 
 async def test_grid_journey_d_mark_then_drag_reports_a_stuck_button(
-    journey_rig,
+    journey_rig, journey_grid_monitors,
 ):
     """Grid journey D: "show grid", "one", "mark", "nine", "drag".
 
@@ -3677,7 +3824,8 @@ async def test_grid_journey_d_mark_then_drag_reports_a_stuck_button(
     is already pinned three layers down
     (tests/test_win_mouse_primitives.py:604-701 against a FakeUser32) and
     the Input handler's propagation one layer down
-    (tests/test_ui/test_mouse_pointer_handlers.py:255). What no test showed
+    (test_mp_7_release_failed_reaches_logic_unchanged in
+    tests/test_mouse_grid_requirements_u7.py). What no test showed
     is that a user who SPEAKS the two words is told about it: this journey
     fails the drag the way Input reports a refused release and asserts the
     distinct notice reaches the GUI.
@@ -3688,8 +3836,6 @@ async def test_grid_journey_d_mark_then_drag_reports_a_stuck_button(
     """
 
     rig = journey_rig
-    monitors = _grid_monitors()
-    rig.controller._grid_monitor_context = lambda: (monitors, monitors[0])
     machine = rig.controller.grid_overlay_state
     processor = _grid_speech_processor(rig)
 
@@ -3835,10 +3981,12 @@ async def _say_and_record(rig: JourneyRig, processor, words: list) -> tuple:
     call the real methods, so the frames and the GUI dicts still travel the
     production path and are read back below.
 
-    The overlay's clear and unpin are performed by a background task
-    (``_perform_overlay_effects`` schedules it), so the spy on it collects
-    those tasks and the utterance is not finished until they are. Their
-    ``unpin_snapshot`` request gets the reply the Input handler sends.
+    The overlay's clear and unpin are performed by a background task that
+    the overlay starts through the host's public
+    ``create_task_with_error_handling`` under the name ``OverlayEffects``.
+    The spy on that factory collects those tasks, and the utterance is not
+    finished until they are. Their ``unpin_snapshot`` request gets the reply
+    the Input handler sends.
     """
     from services.wheelhouse.shared.pin_snapshot import PinSnapshotResponse
 
@@ -3852,7 +4000,7 @@ async def _say_and_record(rig: JourneyRig, processor, words: list) -> tuple:
     real_send_command = rig.app.send_command
     real_send_request = rig.app.send_request
     real_put = gui_queue.put
-    real_perform = controller._perform_overlay_effects
+    real_create_task = controller.create_task_with_error_handling
 
     async def send_command(payload, params=None):
         action = payload.get("action") if isinstance(payload, dict) else payload
@@ -3875,9 +4023,10 @@ async def _say_and_record(rig: JourneyRig, processor, words: list) -> tuple:
         order.append(("gui", _gui_name(message)))
         return real_put(message, *args, **kwargs)
 
-    def perform(effects, *, trace_id):
-        task = real_perform(effects, trace_id=trace_id)
-        if task is not None:
+    def create_task(coro, *args, **kwargs):
+        task = real_create_task(coro, *args, **kwargs)
+        name = args[0] if args else kwargs.get("task_name")
+        if name == "OverlayEffects" and task is not None:
             effect_tasks.append(task)
         return task
 
@@ -3919,9 +4068,9 @@ async def _say_and_record(rig: JourneyRig, processor, words: list) -> tuple:
         stack.enter_context(patch.object(rig.app, "send_command", send_command))
         stack.enter_context(patch.object(rig.app, "send_request", send_request))
         stack.enter_context(patch.object(gui_queue, "put", put))
-        stack.enter_context(
-            patch.object(controller, "_perform_overlay_effects", perform)
-        )
+        stack.enter_context(patch.object(
+            controller, "create_task_with_error_handling", create_task,
+        ))
         tasks = [
             asyncio.create_task(speak_and_flush()),
             asyncio.create_task(collect()),
@@ -3975,15 +4124,15 @@ async def test_escape_command_with_numbers_shown_presses_escape_then_hides_them(
     rig = journey_rig
     controller = rig.controller
     processor = _grid_speech_processor(rig)
-    _paint_badges(controller, "snap-escape", 1, 2, 3)
+    await _paint_badges(rig, "snap-escape", 1, 2, 3)
     words = _ESCAPE_PHRASES[phrase][0]
 
     order, frames, gui = await _say_and_record(rig, processor, words)
 
     _assert_key_first(phrase, order, frames)
-    assert controller.click_overlay_state.state is OverlayState.CLOSED, (
+    assert controller.overlay.click_overlay_state.state is OverlayState.CLOSED, (
         f"{phrase!r} left the numbers in state "
-        f"{controller.click_overlay_state.state.value}; the Escape command "
+        f"{controller.overlay.click_overlay_state.state.value}; the Escape command "
         "must hide them"
     )
     assert ("gui", "clear_overlay") in order[1:], (
@@ -3998,11 +4147,9 @@ async def test_escape_command_with_numbers_shown_presses_escape_then_hides_them(
 
 @pytest.mark.parametrize("phrase", list(_ESCAPE_PHRASES), ids=_ESCAPE_IDS)
 async def test_escape_command_with_grid_shown_presses_escape_then_hides_it(
-    journey_rig, phrase,
+    journey_rig, journey_grid_monitors, phrase,
 ):
     rig = journey_rig
-    monitors = _grid_monitors()
-    rig.controller._grid_monitor_context = lambda: (monitors, monitors[0])
     machine = rig.controller.grid_overlay_state
     processor = _grid_speech_processor(rig)
     await _say(rig, processor, ["show", "grid"])
@@ -4042,7 +4189,7 @@ async def test_escape_command_with_nothing_shown_presses_escape_quietly(
     rig = journey_rig
     controller = rig.controller
     processor = _grid_speech_processor(rig)
-    assert controller.click_overlay_state.state is OverlayState.CLOSED
+    assert controller.overlay.click_overlay_state.state is OverlayState.CLOSED
     assert not controller.grid_overlay_state.is_open
     words, key_action, _params = _ESCAPE_PHRASES[phrase]
 
@@ -4083,7 +4230,7 @@ async def test_other_press_commands_keep_the_numbers_and_the_grid(
     rig = journey_rig
     controller = rig.controller
     processor = _grid_speech_processor(rig)
-    _paint_badges(controller, "snap-press", 1, 2)
+    await _paint_badges(rig, "snap-press", 1, 2)
 
     order, frames, gui = await _say_and_record(rig, processor, words)
 
@@ -4094,5 +4241,5 @@ async def test_other_press_commands_keep_the_numbers_and_the_grid(
     action, params, _h, _r, _t = frames[0]
     assert action == key_action
     assert _key_fields(params, key_params) == key_params, params
-    assert controller.click_overlay_state.state is OverlayState.PAINTED
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAINTED
     assert _gui_action_names(gui) == [], gui

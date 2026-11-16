@@ -2196,15 +2196,13 @@ class TestAChildThatDiesAfterItsMonitorGaveUp:
         launcher._notify.assert_called_once_with(
             "Google", "Failed to start - try restarting Wheelhouse", 1
         )
-        # Two callers, one call each: the monitor's slow-start branch
-        # hid the dialog at its deadline, and the watch hides it again
-        # when the child dies. The count is what makes this docstring's
-        # "all three" true, because the whole path runs here and a
-        # single-call assertion could not tell the two apart. The
-        # watch's own call is pinned by itself in
-        # test_the_watch_hides_the_working_dialog_for_its_own_launch
+        # One caller: the monitor's slow-start branch keeps the dialog at
+        # its deadline and only changes its text, so the one hide is the
+        # watch's, sent when the child dies
+        # (wh-loading-dialog-until-ready). Before that change the
+        # monitor hid the dialog too, and this count was 2
         # (wh-provider-late-death-watch.1.4).
-        assert launcher._hide_working.call_count == 2
+        launcher._hide_working.assert_called_once_with(1)
 
     def test_the_watch_hides_the_working_dialog_for_its_own_launch(
         self, tmp_path
@@ -2212,10 +2210,12 @@ class TestAChildThatDiesAfterItsMonitorGaveUp:
         """The third leg of the in-window match, pinned on its own.
 
         The acceptance-criterion test above runs the whole path through
-        `_monitor_startup`, whose slow-start branch hides the dialog
-        too, so no assertion there can name which caller made a given
-        call. Calling the watch directly leaves one caller, so
-        `assert_called_once_with` names the watch's own hide.
+        `_monitor_startup`. Its slow-start branch used to hide the
+        dialog too, so no assertion there could name which caller made
+        a given call; it now keeps the dialog
+        (wh-loading-dialog-until-ready). Calling the watch directly
+        still leaves exactly one caller, so `assert_called_once_with`
+        names the watch's own hide.
 
         Without this the hide could be deleted from the watch's report
         block and every test in this class still passed: the two
@@ -2388,8 +2388,97 @@ class TestAChildThatDiesAfterItsMonitorGaveUp:
         )
 
         launcher._provider_stopped.assert_not_called()
-        launcher._notify.assert_not_called()
+        # The loading dialog stays on the screen after the startup
+        # limit, so the end of this watch is where it must go. One
+        # notice tells the user what to do; it is not the "Failed to
+        # start" notice, and no stop is reported, because the child is
+        # still alive (wh-loading-dialog-until-ready, boss ruling R1).
+        launcher._hide_working.assert_called_once_with(1)
+        launcher._notify.assert_called_once_with(
+            "Google",
+            "Google did not start, so Wheelhouse cannot hear you. "
+            "To restart Wheelhouse, choose Restart Wheelhouse in the "
+            "Wheelhouse tray menu.",
+            1,
+        )
+
+    def test_the_watch_limit_of_a_replaced_launch_changes_no_dialog(
+        self, tmp_path
+    ):
+        """A watch whose launch is not current hides nothing at its limit.
+
+        The dialog and the notices belong to the launch that replaced
+        this one (wh-loading-dialog-until-ready, acceptance item 5).
+        """
+        launcher = self._watching_launcher(tmp_path, {"google": 1}, 2)
+        launcher._late_death_watch_limit = 0.05
+        signal = _slot(launcher, 1)
+
+        launcher._watch_for_late_death(
+            "google", "Google", signal, _live_subprocess(), 1
+        )
+
         launcher._hide_working.assert_not_called()
+        launcher._notify.assert_not_called()
+        launcher._provider_stopped.assert_not_called()
+
+    def test_the_watch_limit_of_a_reported_launch_is_silent(self, tmp_path):
+        """A launch that another party reported gets no second notice.
+
+        A late failure that the provider could not name claims the
+        report and leaves the slot event clear, so the watch reaches its
+        limit. That party already ended the dialog and the launch
+        (wh-loading-dialog-until-ready).
+        """
+        launcher = self._watching_launcher(tmp_path, {"google": 1}, 1)
+        launcher._late_death_watch_limit = 0.05
+        signal = _slot(launcher, 1)
+        signal.reported = True
+
+        launcher._watch_for_late_death(
+            "google", "Google", signal, _live_subprocess(), 1
+        )
+
+        launcher._hide_working.assert_not_called()
+        launcher._notify.assert_not_called()
+
+    def test_a_ready_that_lands_at_the_watch_limit_keeps_the_notice_away(
+        self, tmp_path
+    ):
+        """A ready between the last poll and the limit check is not a failure.
+
+        The watch returns on a set slot at each poll, so only a ready
+        that lands after the last poll reaches `_end_watch_at_limit`.
+        Its own check under the lock is the only thing that stops a
+        "did not start" notice for a provider that just became ready.
+        Calling it directly makes that window certain
+        (wh-loading-dialog-until-ready).
+        """
+        launcher = self._watching_launcher(tmp_path, {"google": 1}, 1)
+        signal = _slot(launcher, 1)
+        signal.event.set()
+
+        launcher._end_watch_at_limit("Google", signal, 1)
+
+        launcher._hide_working.assert_not_called()
+        launcher._notify.assert_not_called()
+
+    def test_the_notice_names_the_tray_item_with_its_exact_words(self):
+        """The notice must name a tray item that exists.
+
+        The notice tells the user to choose "Restart Wheelhouse". The
+        tray menu builds that item in gui.py, once for each tray
+        implementation; a rename there must fail this test
+        (wh-loading-dialog-until-ready, acceptance item 4).
+        """
+        from pathlib import Path
+
+        gui_source = (
+            Path(__file__).resolve().parent.parent / "gui.py"
+        ).read_text(encoding="utf-8")
+
+        assert 'QAction("Restart Wheelhouse"' in gui_source
+        assert 'pystray.MenuItem("Restart Wheelhouse"' in gui_source
 
     def test_a_ready_that_lands_while_the_watch_polls_is_no_failure(
         self, tmp_path
@@ -3271,7 +3360,14 @@ class TestTheDialogNamesTheLaunchItBelongsTo:
 
         launcher._hide_working.assert_called_once_with(1)
 
-    def test_the_slow_start_branch_dismisses_its_own_launch(self, tmp_path):
+    def test_the_slow_start_branch_keeps_its_own_launchs_dialog(self, tmp_path):
+        """At the limit, a live provider keeps the dialog of its launch.
+
+        The dialog used to hide here, and the screen then showed nothing
+        while the provider went on loading and WheelHouse could not hear.
+        The dialog now stays, with a text that addresses the same launch
+        (wh-loading-dialog-until-ready, acceptance item 1).
+        """
         launcher = _launcher(tmp_path)
         launcher._launch_generations = {"google": 1}
         launcher._current_launch_generation = 1
@@ -3279,15 +3375,126 @@ class TestTheDialogNamesTheLaunchItBelongsTo:
         launcher._subprocesses = {"google": proc}
         launcher._provider_stopped = MagicMock()
         launcher._hide_working = MagicMock()
+        launcher._show_working = MagicMock()
         launcher._notify = MagicMock()
-        launcher._late_death_watch_limit = 0.0
+        launcher._late_death_poll_interval = 0.01
+        launcher._late_death_watch_limit = 30.0
+
+        try:
+            launcher._monitor_startup(
+                "google", "Google", timeout=0.01, generation=1, process=proc
+            )
+
+            launcher._hide_working.assert_not_called()
+            launcher._show_working.assert_called_once_with(
+                "Loading Google takes longer than usual. "
+                "Wheelhouse cannot hear you yet.",
+                1,
+            )
+        finally:
+            # The provider goes ready, which ends the watch.
+            _slot(launcher, 1).event.set()
+            _join_late_death_watches(launcher)
+        launcher._notify.assert_not_called()
+
+    def test_a_replaced_launchs_slow_start_changes_no_dialog(self, tmp_path):
+        """A launch that is not current sends no text change and no hide.
+
+        The dialog belongs to the launch that replaced this one
+        (wh-loading-dialog-until-ready, acceptance item 5).
+        """
+        launcher = _launcher(tmp_path)
+        launcher._launch_generations = {"google": 1}
+        launcher._current_launch_generation = 2
+        proc = _live_subprocess()
+        launcher._subprocesses = {"google": proc}
+        launcher._provider_stopped = MagicMock()
+        launcher._hide_working = MagicMock()
+        launcher._show_working = MagicMock()
+        launcher._notify = MagicMock()
+        launcher._late_death_poll_interval = 0.01
+        launcher._late_death_watch_limit = 0.05
 
         launcher._monitor_startup(
             "google", "Google", timeout=0.01, generation=1, process=proc
         )
         _join_late_death_watches(launcher)
 
-        launcher._hide_working.assert_called_once_with(1)
+        launcher._show_working.assert_not_called()
+        launcher._hide_working.assert_not_called()
+        launcher._notify.assert_not_called()
+
+    def test_a_ready_that_lands_before_the_text_change_keeps_it_away(
+        self, tmp_path
+    ):
+        """A slot that is already set refuses the text change.
+
+        The ready path sets the slot under the lock and only then asks
+        the GUI to hide the dialog. The text change is decided under the
+        same lock, so a show sent after that hide cannot bring the dialog
+        back with nothing left to hide it
+        (wh-loading-dialog-until-ready).
+        """
+        launcher = _launcher(tmp_path)
+        launcher._launch_generations = {"google": 1}
+        launcher._current_launch_generation = 1
+        launcher._show_working = MagicMock()
+        signal = launcher._open_launch_signal(1)
+        signal.event.set()
+
+        shown = launcher._show_slow_start_text("Google", signal, 1)
+
+        assert shown is False
+        launcher._show_working.assert_not_called()
+
+    def test_a_reported_launch_refuses_the_text_change(self, tmp_path):
+        """A launch that another party already reported gets no text change.
+
+        A failure that the provider could not name sets no slot event,
+        but it claims the report and the websocket manager hides the
+        dialog (wh-loading-dialog-until-ready).
+        """
+        launcher = _launcher(tmp_path)
+        launcher._launch_generations = {"google": 1}
+        launcher._current_launch_generation = 1
+        launcher._show_working = MagicMock()
+        signal = launcher._open_launch_signal(1)
+        signal.reported = True
+
+        shown = launcher._show_slow_start_text("Google", signal, 1)
+
+        assert shown is False
+        launcher._show_working.assert_not_called()
+
+    def test_a_watch_that_cannot_start_hides_the_dialog(self, tmp_path):
+        """No watch means nothing would ever end the dialog.
+
+        The text change goes out before the watch starts, so a refused
+        thread start must take the dialog away again
+        (wh-loading-dialog-until-ready, boss ruling R1).
+        """
+        import threading
+        from unittest.mock import patch
+
+        launcher = _launcher(tmp_path)
+        generation = _stamp_launch(launcher, "google")
+        proc = _live_subprocess()
+        launcher._subprocesses = {"google": proc}
+        launcher._provider_stopped = MagicMock()
+        launcher._hide_working = MagicMock()
+        launcher._show_working = MagicMock()
+        launcher._notify = MagicMock()
+
+        with patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("no threads")
+        ):
+            with pytest.raises(RuntimeError):
+                launcher._monitor_startup(
+                    "google", "Google", timeout=0.01,
+                    generation=generation, process=proc,
+                )
+
+        launcher._hide_working.assert_called_once_with(generation)
 
     def test_the_slow_start_branch_ends_its_own_launchs_starting_state(
         self, tmp_path

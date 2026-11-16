@@ -12,8 +12,10 @@ is already off.
 
 Covers:
 - a WakeWordDetectedEvent after each way listening goes off: the user's
-  toggle, startup with SPEECH_ENABLED_ON_STARTUP false, the idle pause, sound
-  from this computer, Sonos playback, and an interaction-mode switch
+  toggle, startup with SPEECH_ENABLED_ON_STARTUP false, the idle pause,
+  Sonos playback, and an interaction-mode switch (sound from this computer
+  is the exception since wh-playback-disable-fails.1; see
+  test_wake_word_sound_pause.py)
 - the "stop listening" pattern, its action function, and its catalog entry
 - saying "stop listening" while listening is already off
 - the toggle, the wake word, and the new action share one enabling method
@@ -81,10 +83,12 @@ def _off_by_switch_to_toggle(sm):
 _WAYS_LISTENING_GOES_OFF = [
     pytest.param(_off_by_toggle, id="user-toggle"),
     pytest.param(_off_by_idle, id="idle"),
-    pytest.param(_off_by_sound, id="sound"),
     pytest.param(_off_by_sonos, id="sonos"),
     pytest.param(_off_by_switch_to_toggle, id="mode-switch-toggle"),
 ]
+# Sound from this computer is not in this list either: during the sound
+# pause the wake word changes nothing (wh-playback-disable-fails.1, which
+# changed part of ruling R1). test_wake_word_sound_pause.py covers that.
 # A switch INTO push-to-talk mode is not in this list: in push-to-talk mode
 # the wake word ends only the idle pause (boss ruling option 2, 11:14
 # 2026-09-22). TestWakeWordInPushToTalkMode covers that mode.
@@ -244,8 +248,12 @@ class TestWakeWordInPushToTalkMode:
         mock_websocket_manager.set_transcription_status.assert_called_once_with(False)
 
     @pytest.mark.asyncio
+    # The sound pause is not here: during it the wake word also changes no
+    # flag, but it tells the provider again that listening is off and writes
+    # the sound-pause log line (wh-playback-disable-fails.1.1.3; see
+    # TestWakeWordDuringTheSoundPauseInPushToTalkMode in
+    # test_wake_word_sound_pause.py).
     @pytest.mark.parametrize("how", [
-        pytest.param(_off_by_sound, id="sound"),
         pytest.param(_off_by_sonos, id="sonos"),
         pytest.param(lambda sm: None, id="mode-switch-only"),
     ])
@@ -286,7 +294,7 @@ class TestSharedEnableAndDisable:
 
     @pytest.mark.asyncio
     async def test_the_wake_word_enables_through_the_shared_method(self, sm):
-        _off_by_sound(sm)
+        _off_by_toggle(sm)
         sm.enable_speech_clearing_pauses = Mock()
 
         await _wake_word(sm)

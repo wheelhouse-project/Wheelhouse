@@ -189,12 +189,13 @@ class TestWakeWordModeFiltering:
             loop.close()
 
     @pytest.mark.asyncio
-    async def test_wake_word_clears_audio_suppression(self):
-        """A wake word ends the sound pause, as the floating button does.
+    async def test_wake_word_leaves_audio_suppression(self):
+        """A wake word does not end the sound pause.
 
-        wh-wake-word-stop-listening (boss ruling R1): the wake word turns
-        listening on whatever switched it off, and clears every pause. The
-        pause is cleared, not suspended for a window.
+        wh-playback-disable-fails.1 (David's option 2, 2026-11-10) took the
+        sound pause out of ruling R1 of wh-wake-word-stop-listening: the
+        sound itself can say the wake word. The speech toggle still ends
+        the sound pause.
         """
         ws = _make_ws_manager()
         sm, bus, gui_queue, loop = _make_state_manager(ws_manager=ws)
@@ -205,8 +206,8 @@ class TestWakeWordModeFiltering:
 
             await bus.publish(WakeWordDetectedEvent(keyword="computer"))
 
-            assert sm._speech_suppressed_by_audio is False
-            assert sm.speech_enabled is True
+            assert sm._speech_suppressed_by_audio is True
+            assert sm.speech_enabled is False
         finally:
             loop.close()
 
@@ -413,20 +414,32 @@ class TestIdleSuppressionWithWakeWordInteraction:
 
     @pytest.mark.asyncio
     async def test_wake_word_during_multiple_suppressions(self):
-        """Wake word clears the idle and the sound pause together."""
+        """Wake word clears the idle and the Sonos pause together, and
+        clears nothing while the sound pause holds
+        (wh-playback-disable-fails.1)."""
         ws = _make_ws_manager()
         sm, bus, gui_queue, loop = _make_state_manager(ws_manager=ws)
         try:
             sm._speech_enabled = True
+            sm._speech_suppressed_by_idle = True
+            sm._speech_suppressed_by_sonos = True
+            assert sm.speech_enabled is False
+
+            await bus.publish(WakeWordDetectedEvent(keyword="computer"))
+
+            assert sm._speech_suppressed_by_idle is False
+            assert sm._speech_suppressed_by_sonos is False
+            assert sm.speech_enabled is True
+
             sm._speech_suppressed_by_idle = True
             sm._speech_suppressed_by_audio = True
             assert sm.speech_enabled is False
 
             await bus.publish(WakeWordDetectedEvent(keyword="computer"))
 
-            assert sm._speech_suppressed_by_idle is False
-            assert sm._speech_suppressed_by_audio is False
-            assert sm.speech_enabled is True
+            assert sm._speech_suppressed_by_idle is True
+            assert sm._speech_suppressed_by_audio is True
+            assert sm.speech_enabled is False
         finally:
             loop.close()
 

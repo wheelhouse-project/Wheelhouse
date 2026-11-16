@@ -477,6 +477,13 @@ class StateManager:
         reasons (shared_stt.wake_word_detector.WAKE_WORD_ARMED_REASONS). A
         wake word heard while listening is already on changes nothing.
 
+        One exception, in toggle mode and in push-to-talk mode: while the
+        sound pause is active, the wake word changes nothing and writes one
+        log line, because the sound itself
+        can say the wake word (wh-playback-disable-fails.1). The speech
+        toggle still ends the sound pause. After the sound stops, the wake
+        word ends the other pauses as before.
+
         In push-to-talk mode the wake word ends only the idle pause and the
         mode stays push-to-talk; during any other pause it changes nothing
         (boss ruling option 2, 11:14 2026-09-22). Unlike the button, it never
@@ -493,6 +500,40 @@ class StateManager:
             if self.websocket_manager:
                 message = self.websocket_manager.set_transcription_status(
                     False, reason="exclusive_speaker"
+                )
+                self.loop.create_task(self.websocket_manager.broadcast(message))
+            return
+        if self._speech_suppressed_by_audio and self._audio_suppression_active and not self._ptt_audio_override:
+            # The computer plays sound. The sound itself can say the wake
+            # word, and the audio monitor starts the sound pause again only
+            # after it sees quiet and then new sound, so the wake word must
+            # not end this pause (wh-playback-disable-fails.1, David's
+            # option 2 of 2026-11-10; the speech toggle still ends it). A
+            # video can say the wake word many times, so the app writes one
+            # log line and shows no notice (boss ruling). This check comes
+            # before the push-to-talk branch, because the sound pause holds
+            # listening off in that mode too, and the push-to-talk wake word
+            # would otherwise end the idle pause (wh-playback-disable-fails.1.1.3).
+            # A push-to-talk hold lifts the sound pause (_ptt_audio_override),
+            # so a wake word during a hold does not come here.
+            logger.info(
+                f"[WAKE WORD] Wake word '{event.keyword}' ignored: "
+                f"the computer plays sound (sound pause active)"
+            )
+            # The provider may already have turned transcription on for this
+            # wake word, so tell it again that listening is off. The reason
+            # names the pause that holds listening off, so the detector stays
+            # armed (ruling R2 unchanged).
+            if self.websocket_manager:
+                reason = self._engine_status_reason(False, None)
+                if self._speech_interaction_mode == "push_to_talk":
+                    # In push-to-talk mode _engine_status_reason returns the
+                    # call site's reason (None), which disarms the detector.
+                    # The sound pause armed it with "audio" when it started
+                    # (set_speech_suppressed_by_audio), so send that reason.
+                    reason = "audio"
+                message = self.websocket_manager.set_transcription_status(
+                    False, reason=reason
                 )
                 self.loop.create_task(self.websocket_manager.broadcast(message))
             return

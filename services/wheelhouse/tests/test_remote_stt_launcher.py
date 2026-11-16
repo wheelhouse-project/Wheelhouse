@@ -851,7 +851,13 @@ launcher = "launcher.py"
             assert working_calls[0] == ("show", "Loading Google Cloud STT")
 
     def test_sends_hide_working_on_timeout(self, services_dir, app_data_dir):
-        """Timeout sends hide_working before failure notification."""
+        """A provider that is dead at the limit still hides the dialog.
+
+        The hide at the limit now belongs only to a provider that is no
+        longer running. A provider that is alive and not ready keeps the
+        dialog on the screen (wh-loading-dialog-until-ready), so this
+        test names the dead child that it depends on.
+        """
         from stt.remote_stt_launcher import RemoteSTTLauncher
 
         launcher = RemoteSTTLauncher(
@@ -865,6 +871,9 @@ launcher = "launcher.py"
             show=lambda msg, generation: working_calls.append(("show", msg)),
             hide=lambda generation: working_calls.append(("hide",)),
         )
+        dead_proc = MagicMock()
+        dead_proc.poll.return_value = 1
+        launcher._subprocesses["google_stt"] = dead_proc
 
         # start_provider establishes the starting state before spawning
         # (wh-google-creds-file-picker.1.10); simulate that reset here
@@ -874,7 +883,7 @@ launcher = "launcher.py"
         # Call monitor directly with very short timeout
         launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=0.1)
 
-        assert ("hide",) in working_calls
+        assert working_calls == [("hide",)]
 
     def test_sends_hide_working_on_popen_failure(self, services_dir, app_data_dir):
         """Popen failure sends hide_working."""
@@ -958,18 +967,73 @@ startup_timeout_seconds = 180
         fake_proc.poll.return_value = None
         launcher._subprocesses["google_stt"] = fake_proc
 
+        # Stamped the way start_provider stamps a launch, so the monitor
+        # has a slot and can hand the child to the late-death watch. The
+        # watch stays on the child far longer than this test runs.
+        launcher._launch_generations["google_stt"] = 1
+        launcher._current_launch_generation = 1
+        signal = launcher._open_launch_signal(1)
+        launcher._late_death_poll_interval = 0.01
+        launcher._late_death_watch_limit = 30.0
+
         # Simulate start_provider's synchronous reset
         # (wh-google-creds-file-picker.1.10).
         launcher._provider_ready_event.clear()
 
+        try:
+            launcher._monitor_startup(
+                "google_stt", "Google Cloud STT", timeout=0.1,
+                generation=1, process=fake_proc,
+            )
+
+            # No failure notification when subprocess is alive
+            assert all("Failed to start" not in msg for _, msg in notifications), (
+                f"Unexpected failure notification: {notifications}"
+            )
+            # The dialog stays on the screen until the provider is ready,
+            # and its text says that WheelHouse cannot hear yet
+            # (wh-loading-dialog-until-ready).
+            assert working_calls == [(
+                "show",
+                "Loading Google Cloud STT takes longer than usual. "
+                "Wheelhouse cannot hear you yet.",
+            )]
+        finally:
+            # The provider goes ready, which ends the watch.
+            signal.event.set()
+            for thread in launcher._late_death_watch_threads:
+                thread.join(timeout=15)
+
+    def test_a_slow_start_with_no_watch_still_hides_the_dialog(
+        self, services_dir, app_data_dir
+    ):
+        """A dialog that nothing watches must not stay on the screen.
+
+        The late-death watch is what ends the dialog for a provider that
+        stays alive and never becomes ready. A launch with no slot to
+        watch gets no watch, so the dialog hides at the limit as it did
+        before (wh-loading-dialog-until-ready, boss ruling R1).
+        """
+        from stt.remote_stt_launcher import RemoteSTTLauncher
+
+        launcher = RemoteSTTLauncher(
+            services_dir=services_dir, app_data_dir=app_data_dir, ws_port=5500,
+        )
+        working_calls = []
+        launcher.set_working_callback(
+            show=lambda msg, generation: working_calls.append(("show", msg)),
+            hide=lambda generation: working_calls.append(("hide",)),
+        )
+        fake_proc = MagicMock()
+        fake_proc.poll.return_value = None
+        launcher._subprocesses["google_stt"] = fake_proc
+        launcher._provider_ready_event.clear()
+
+        # No launch stamped: the monitor has no slot, so no watch starts.
         launcher._monitor_startup("google_stt", "Google Cloud STT", timeout=0.1)
 
-        # No failure notification when subprocess is alive
-        assert all("Failed to start" not in msg for _, msg in notifications), (
-            f"Unexpected failure notification: {notifications}"
-        )
-        # Working dialog must still be hidden so the UI doesn't hang
-        assert ("hide",) in working_calls
+        assert working_calls == [("hide",)]
+        assert launcher._late_death_watch_threads == []
 
     def test_sends_failure_notification_when_subprocess_dead_after_timeout(
         self, services_dir, app_data_dir

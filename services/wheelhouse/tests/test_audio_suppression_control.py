@@ -5,9 +5,9 @@ provider to stop transcribing. The pause ends when the sound stops, and
 nothing the user says can shorten it.
 
 Covers:
-- a wake word during a sound pause turns listening on and clears every
-  pause, the way the floating button does (wh-wake-word-stop-listening,
-  boss ruling R1)
+- a wake word during a sound pause changes nothing: listening stays off
+  and every pause stays (wh-playback-disable-fails.1, which changed part
+  of ruling R1 of wh-wake-word-stop-listening)
 - the state manager carries no recovery window
 - a pause sends no notification (the listening-paused notice was removed by
   wh-audio-pause-notice-repeats)
@@ -63,18 +63,19 @@ async def _wake_word(sm, keyword="computer"):
 # -----------------------------------------------------------------------
 
 class TestWakeWordDuringASoundPause:
-    """A wake word during a sound pause turns listening on.
+    """A wake word during a sound pause changes nothing.
 
-    wh-audio-suppression-auto made the sound pause run to its end, and a
-    wake word could not shorten it. David asked on 2026-09-22 for the wake
-    word to turn listening on whatever switched it off; boss ruling R1 makes
-    it do what the floating button does while listening is off, which has
-    always cleared the sound pause. There is still no recovery window: the
-    pause is cleared, not suspended for a number of seconds.
+    David asked on 2026-09-22 for the wake word to turn listening on
+    whatever switched it off (wh-wake-word-stop-listening, boss ruling R1).
+    On 2026-11-10 he chose to take the sound pause out of that rule: the
+    sound itself can say the wake word, and the audio monitor starts the
+    pause again only after quiet and new sound (wh-playback-disable-fails.1).
+    The speech toggle still ends the sound pause. There is still no
+    recovery window. test_wake_word_sound_pause.py holds the full set.
     """
 
     @pytest.mark.asyncio
-    async def test_a_wake_word_during_a_sound_pause_turns_listening_on(
+    async def test_a_wake_word_during_a_sound_pause_leaves_listening_off(
         self, sm, mock_websocket_manager, mock_gui_queue
     ):
         _sound_starts(sm)
@@ -84,24 +85,25 @@ class TestWakeWordDuringASoundPause:
 
         await _wake_word(sm)
 
-        assert sm.speech_enabled is True
-        mock_websocket_manager.set_transcription_status.assert_called_once_with(True)
-        mock_websocket_manager.broadcast.assert_called_once()
-        mock_gui_queue.put_nowait.assert_called()
+        assert sm.speech_enabled is False
+        mock_websocket_manager.set_transcription_status.assert_called_once_with(
+            False, reason="audio"
+        )
+        mock_gui_queue.put_nowait.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_a_wake_word_during_idle_and_sound_pauses_clears_both(
+    async def test_a_wake_word_during_idle_and_sound_pauses_clears_neither(
         self, sm
     ):
-        """One wake word ends the idle pause and the sound pause together."""
+        """The wake word ends no pause while the sound pause holds."""
         _sound_starts(sm)
         sm._speech_suppressed_by_idle = True
 
         await _wake_word(sm)
 
-        assert sm._speech_suppressed_by_idle is False
-        assert sm._speech_suppressed_by_audio is False
-        assert sm.speech_enabled is True
+        assert sm._speech_suppressed_by_idle is True
+        assert sm._speech_suppressed_by_audio is True
+        assert sm.speech_enabled is False
 
     def test_the_state_manager_has_no_recovery_window(self, sm):
         assert not hasattr(StateManager, "audio_recovery_window_open")

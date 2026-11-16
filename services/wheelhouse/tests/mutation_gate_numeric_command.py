@@ -34,6 +34,12 @@ speech/actions.py (the number conversion in number_digits):
 
 speech/config/patterns.toml (the pattern entry):
   trigger-word-changed          The entry matches another word.
+  numeral-synonym-dropped       The entry accepts "numeric" only, so
+                                "numeral seven" is dictated
+                                (wh-numeral-synonym).
+  in-sentence-pattern-added     A second entry without ^ makes "numeral N"
+                                work inside a sentence, which David ruled
+                                out (wh-numeral-synonym).
   whole-utterance-flag-off      The entry no longer owns the whole
                                 utterance, so a two-word number is cut at
                                 the first word.
@@ -141,11 +147,32 @@ REGISTRY_GONE = """\
 """
 
 ENTRY_TRIGGER = """\
-pattern = '''^numeric (\\d+)$'''
+pattern = '''^(?:numeric|numeral) (\\d+)$'''
 """
 
 ENTRY_OTHER_TRIGGER = """\
-pattern = '''^numerical (\\d+)$'''
+pattern = '''^(?:numerical|numeral) (\\d+)$'''
+"""
+
+ENTRY_NO_SYNONYM = """\
+pattern = '''^numeric (\\d+)$'''
+"""
+
+ENTRY_END = """\
+    { function = "number_digits", params = ["g1"] }
+]
+"""
+
+ENTRY_END_PLUS_INLINE = """\
+    { function = "number_digits", params = ["g1"] }
+]
+
+[[pattern]]
+pattern = '''\\b(?:numeric|numeral) (\\d+)\\b'''
+doc_id = "numeric-digits-inline"
+actions = [
+    { function = "number_digits", params = ["g1"] }
+]
 """
 
 ENTRY_FLAG = """\
@@ -159,7 +186,7 @@ whole_utterance_only = false
 """
 
 ENTRY_NO_WIDEN = """\
-pattern = '''^numeric ([0-9]+)$'''
+pattern = '''^(?:numeric|numeral) ([0-9]+)$'''
 """
 
 ENTRY_ACTION = """\
@@ -240,6 +267,24 @@ MUTATIONS = [
         "expect": ALL_PIPELINE + [
             "test_exactly_one_entry_with_the_agreed_fields",
         ],
+    },
+    {
+        "name": "numeral-synonym-dropped",
+        "src": PATTERNS,
+        "old": ENTRY_TRIGGER,
+        "new": ENTRY_NO_SYNONYM,
+        "expect": [
+            "test_numeral_seven_types_7",
+            "test_numeral_digit_types_the_same_digit",
+            "test_exactly_one_entry_with_the_agreed_fields",
+        ],
+    },
+    {
+        "name": "in-sentence-pattern-added",
+        "src": PATTERNS,
+        "old": ENTRY_END,
+        "new": ENTRY_END_PLUS_INLINE,
+        "expect": ["test_numeral_inside_a_sentence_is_not_a_command"],
     },
     {
         "name": "whole-utterance-flag-off",

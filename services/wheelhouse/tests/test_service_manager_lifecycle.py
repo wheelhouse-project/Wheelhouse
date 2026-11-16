@@ -226,6 +226,38 @@ class TestInitializeServices:
     @patch("service_manager.SpeechHandler")
     @patch("service_manager.PluginRegistry")
     @patch("service_manager.RemoteSTTLauncher")
+    def test_mouse_clicks_and_wheel_steps_reach_the_numbered_overlay(
+        self, mock_launcher_cls, mock_plugin_cls, mock_speech_cls,
+        mock_mouse_cls, mock_audio_cls, mock_bravia_cls, service_manager
+    ):
+        """initialize_services gives the mouse handler the overlay's entry
+        for clicks and wheel steps (wh-overlay-refresh-after-mouse, RW-37).
+
+        main.py builds the LogicController (and its overlay) and calls
+        set_logic_controller before controller.main runs
+        initialize_services, so the overlay exists at this point.
+        """
+        service_manager.config_service.get.side_effect = _config_get_side_effect({
+            "stt.mode": "remote",
+        })
+        mock_launcher = MagicMock()
+        mock_launcher.discover_providers.return_value = []
+        mock_launcher_cls.return_value = mock_launcher
+        logic_controller = MagicMock()
+        service_manager.set_logic_controller(logic_controller)
+
+        service_manager.initialize_services()
+
+        mock_mouse_cls.return_value.set_pointer_input_listener.assert_called_once_with(
+            logic_controller.overlay.note_pointer_input
+        )
+
+    @patch("service_manager.BraviaControl")
+    @patch("service_manager.AudioMonitor")
+    @patch("service_manager.MouseHandler")
+    @patch("service_manager.SpeechHandler")
+    @patch("service_manager.PluginRegistry")
+    @patch("service_manager.RemoteSTTLauncher")
     def test_creates_plugin_registry(
         self, mock_launcher_cls, mock_plugin_cls, mock_speech_cls,
         mock_mouse_cls, mock_audio_cls, mock_bravia_cls, service_manager

@@ -877,3 +877,149 @@ class TestARenameOverAHeldFile:
         # wrote it, and the temporary file is cleaned up by the finally.
         assert target.read_bytes() == b"OLD\n"
         assert list(tmp_path.glob("*.tmp")) == []
+
+
+def _stub_run(monkeypatch, mutant_result):
+    """Collection finds test_value; the baseline is green; the mutant run
+    returns mutant_result."""
+    monkeypatch.setattr(runner, "_collected_names",
+                        lambda service, test_file: {"test_value"})
+    monkeypatch.setattr(runner, "_clear_pycache", lambda service: None)
+    calls = {"n": 0}
+
+    def _run(service, test_file):
+        calls["n"] += 1
+        return _green() if calls["n"] == 1 else mutant_result
+
+    monkeypatch.setattr(runner, "_run_pytest", _run)
+    return calls
+
+
+class TestAnExpectedSurvivor:
+    """A gate declares a mutation that no test can catch as data.
+
+    The declaration is the key "survives" with the reason as its value. The
+    run passes when the declared mutation survives, and fails when it is
+    caught, because a catch shows that the reason is no longer true.
+    """
+
+    REASON = "Needs two guards removed at once"
+
+    def test_a_declared_survivor_that_survives_passes(
+            self, one_mutation, monkeypatch, capsys):
+        mutation, target, original = one_mutation
+        mutation["survives"] = self.REASON
+        _stub_run(monkeypatch, _green())
+
+        rc = runner.run([mutation], argv=[])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert f"expected survivor value-changed: {self.REASON}" in out
+        assert "SURVIVED value-changed" not in out
+        assert ("scope: ran 1 of 1 mutations, skipped 0 by name filter, "
+                "0 survivors, 0 errors, 1 expected survivors, "
+                "0 expected survivors caught") in out
+        assert target.read_bytes() == original
+
+    def test_a_declared_survivor_that_is_caught_fails(
+            self, one_mutation, monkeypatch, capsys):
+        mutation, target, original = one_mutation
+        mutation["survives"] = self.REASON
+        _stub_run(monkeypatch, _caught("test_value"))
+
+        rc = runner.run([mutation], argv=[])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "CAUGHT EXPECTED SURVIVOR value-changed by ['test_value']" in out
+        assert "0 expected survivors, 1 expected survivors caught" in out
+        assert target.read_bytes() == original
+
+    def test_a_failure_outside_the_expect_list_is_a_catch(
+            self, one_mutation, monkeypatch, capsys):
+        mutation, target, original = one_mutation
+        mutation["survives"] = self.REASON
+        _stub_run(monkeypatch, _caught("test_other"))
+
+        rc = runner.run([mutation], argv=[])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "CAUGHT EXPECTED SURVIVOR value-changed by ['test_other']" in out
+
+    def test_an_empty_expect_list_is_allowed(
+            self, one_mutation, monkeypatch, capsys):
+        mutation, target, original = one_mutation
+        mutation["survives"] = self.REASON
+        mutation["expect"] = []
+        _stub_run(monkeypatch, _green())
+
+        rc = runner.run([mutation], argv=[])
+
+        assert rc == 0
+        assert "expected survivor value-changed" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("reason", ["", "   ", None, 3])
+    def test_a_declaration_without_a_reason_is_refused(
+            self, one_mutation, monkeypatch, capsys, reason):
+        mutation, target, original = one_mutation
+        mutation["survives"] = reason
+        calls = _stub_run(monkeypatch, _green())
+
+        rc = runner.run([mutation], argv=[])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "value-changed: an expected survivor needs a reason" in out
+        assert calls["n"] == 0
+        assert target.read_bytes() == original
+
+    def test_a_gate_without_a_declaration_keeps_its_result_lines(
+            self, one_mutation, monkeypatch, capsys):
+        mutation, target, original = one_mutation
+        _stub_run(monkeypatch, _green())
+
+        rc = runner.run([mutation], argv=[])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert out.splitlines()[-2:] == [
+            "SURVIVED value-changed: expected ['test_value'] to fail; failed=[]",
+            "scope: ran 1 of 1 mutations, skipped 0 by name filter, "
+            "1 survivors, 0 errors",
+        ]
+
+    def test_the_check_counts_the_declared_survivors(
+            self, one_mutation, capsys):
+        mutation, target, original = one_mutation
+        mutation["survives"] = self.REASON
+
+        rc = runner.run([mutation], argv=["--check"])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert ("checked 1 patterns of 1, skipped 0 by name filter, 0 stale, "
+                "0 that do not compile, 1 expected survivors") in out
+
+    def test_the_check_refuses_a_declaration_without_a_reason(
+            self, one_mutation, capsys):
+        mutation, target, original = one_mutation
+        mutation["survives"] = ""
+
+        rc = runner.run([mutation], argv=["--check"])
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "value-changed: an expected survivor needs a reason" in out
+
+    def test_the_check_line_is_unchanged_without_a_declaration(
+            self, one_mutation, capsys):
+        mutation, target, original = one_mutation
+
+        rc = runner.run([mutation], argv=["--check"])
+
+        assert rc == 0
+        assert capsys.readouterr().out.splitlines()[-1] == (
+            "checked 1 patterns of 1, skipped 0 by name filter, 0 stale, "
+            "0 that do not compile")

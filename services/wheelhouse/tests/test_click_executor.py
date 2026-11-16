@@ -2614,14 +2614,14 @@ class TimedControl:
     """
 
     def __init__(self, clock: FakeClock, *, enabled_advance_s: float = 0.0) -> None:
-        self._clock = clock
+        self._fake_clock = clock
         self._enabled_advance_s = enabled_advance_s
         self.invoke_calls = 0
         self.bounds_reads = 0
 
     @property
     def CurrentIsEnabled(self) -> bool:
-        self._clock.advance(self._enabled_advance_s)
+        self._fake_clock.advance(self._enabled_advance_s)
         return True
 
     @property

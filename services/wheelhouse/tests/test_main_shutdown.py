@@ -4,6 +4,7 @@ Verifies that shutdown_services() is always called during shutdown,
 even when request_shutdown() runs first (the signal-handler path).
 """
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,8 +17,15 @@ class TestShutdownOrdering:
     def controller(self):
         """Create a minimal LogicController with mocked dependencies."""
         from main import LogicController
+        from services.wheelhouse.numbered_overlay.controller import (
+            NumberedOverlayController,
+        )
+        from services.wheelhouse.ui.click_config import ClickConfig
 
         ctrl = LogicController.__new__(LogicController)
+        # The public constructor, as main.py builds it.
+        ctrl.click_config = ClickConfig.from_raw({})
+        ctrl.overlay = NumberedOverlayController(ctrl, clock=time.monotonic)
         ctrl.shutdown_requested = False
         ctrl._shutdown_complete = False
         ctrl.shutdown_event = MagicMock()
@@ -98,21 +106,84 @@ class TestShutdownOrdering:
         controller.app.stop.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_shutdown_cancels_clear_ack_watchdog(self, controller):
+    async def test_shutdown_cancels_clear_ack_watchdog(self, controller, caplog):
         """wh-overlay-slow-uia-stale-badges.18.9: an armed clear-ack
         deadline must not survive into the slow service teardown -- a
         5000 ms fire during an intentional exit would report a false
         user-visible overlay clear fault. shutdown() cancels the timer,
         clears the pending slot, and reports nothing.
-        """
-        timer = MagicMock()
-        controller._overlay_pending_clear_timer = timer
-        controller._overlay_pending_clear = (2, 3)
-        controller._report_overlay_clear_fault = MagicMock()  # type: ignore[method-assign]
 
+        The deadline is armed the way the app arms it: badges are painted,
+        then "hide numbers" sends clear_overlay to the GUI. The event loop's
+        call_later hands back a MagicMock timer and keeps the callback, so
+        the test can see the cancel and can then run the callback as a
+        deadline that was already queued when shutdown began.
+        """
+        import logging
+
+        from services.wheelhouse.click_overlay_state import (
+            OverlayEvent,
+            OverlayEventKind,
+            OverlayState,
+            PaintAckState,
+        )
+
+        loop = asyncio.get_running_loop()
+        controller.loop = loop
+        controller.grid_overlay_state = None
+        controller.app.send_request = AsyncMock(return_value={"status": "ok"})
+        gui_messages: list = []
+        controller.state_manager.state_to_gui_queue.put_nowait = (
+            gui_messages.append
+        )
+
+        # Badges are painted (pure machine transitions; no effects run).
+        machine = controller.overlay.click_overlay_state
+        machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+        sid, gen = machine.overlay_session_id, machine.paint_generation
+        machine.apply(OverlayEvent(
+            OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+            paint_generation=gen, snapshot_id="snap-1",
+        ))
+        machine.apply(OverlayEvent(
+            OverlayEventKind.PAINT_ACK, overlay_session_id=sid,
+            paint_generation=gen, paint_state=PaintAckState.PAINTED,
+        ))
+        assert machine.state is OverlayState.PAINTED
+
+        # "hide numbers": the clear goes to the GUI and arms the deadline.
+        armed: list = []
+        real_call_later = loop.call_later
+
+        def _call_later(delay, callback, *args, **kwargs):
+            timer = MagicMock()
+            armed.append((delay, callback, args, timer))
+            return timer
+
+        loop.call_later = _call_later
+        try:
+            batch = await controller.overlay.handle_overlay_command(
+                "hide", "tr-hide",
+            )
+            assert batch is not None
+            await batch
+        finally:
+            loop.call_later = real_call_later
+        assert [m["action"] for m in gui_messages] == ["clear_overlay"]
+        deadlines = [a for a in armed if a[0] == 5.0]
+        assert len(deadlines) == 1, armed
+        _delay, callback, args, timer = deadlines[0]
+
+        caplog.set_level(logging.WARNING)
         await controller.shutdown()
 
         timer.cancel.assert_called_once()
-        assert controller._overlay_pending_clear_timer is None
-        assert controller._overlay_pending_clear is None
-        controller._report_overlay_clear_fault.assert_not_called()
+        # A deadline already queued on the loop when shutdown began fires
+        # after it: it must report nothing.
+        callback(*args)
+        reports = [
+            r for r in caplog.records
+            if r.levelno >= logging.WARNING
+            and "badges may still be on the screen" in r.getMessage()
+        ]
+        assert reports == []

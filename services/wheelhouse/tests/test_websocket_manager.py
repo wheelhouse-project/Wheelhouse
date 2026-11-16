@@ -456,7 +456,9 @@ class TestPercentSplitTimingRetraction:
     async def test_a_final_with_digits_breaks_the_stable_prefix(self, manager):
         """Stable "fifty", final "50 percent": a retraction marker is queued."""
         apply_itn = _load_apply_itn()
-        stable_text = apply_itn("fifty")
+        # The stable text is interim text: Parakeet passes interim=True there
+        # (wh-itn-lone-number-ten.1.1).
+        stable_text = apply_itn("fifty", interim=True)
         final_text = apply_itn("fifty percent")
 
         messages = [

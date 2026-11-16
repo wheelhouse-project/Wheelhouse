@@ -15,6 +15,17 @@ from unittest.mock import MagicMock, patch, PropertyMock
 _MOD = "ui.shadow_buffer"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_element_compare():
+    """Elements here are mocks; a real UIA compare on a mock overflows the stack.
+
+    Mock enclosing elements are child elements, never the focused control
+    (wh-line-start-space-capital.1.1).
+    """
+    with patch("ui.uia_text_reader.auto.ControlsAreSame", return_value=False):
+        yield
+
+
 def _make_buffer():
     """Create a ShadowBufferManager with UIA imports mocked."""
     from ui.shadow_buffer import ShadowBufferManager
@@ -500,7 +511,8 @@ class TestSynchronize:
 
 
 def _mock_prompt(mock_auto, doc_text, cursor_text, enclosing_class=None,
-                 enclosing_error=None):
+                 enclosing_error=None, enclosing_text=None,
+                 enclosing_text_error=None):
     """Mock a focused TextPattern control without TextPattern2.
 
     ``cursor_text`` is the text before the caret that the slow
@@ -532,6 +544,11 @@ def _mock_prompt(mock_auto, doc_text, cursor_text, enclosing_class=None,
     else:
         sel_range.GetEnclosingControl.return_value = MagicMock(ClassName=enclosing_class)
     text_pattern.GetSelection.return_value = [sel_range]
+    # The caret element's own range text (wh-line-start-space-capital).
+    if enclosing_text_error is not None:
+        text_pattern.pattern.RangeFromChild.side_effect = enclosing_text_error
+    elif enclosing_text is not None:
+        text_pattern.pattern.RangeFromChild.return_value.GetText.return_value = enclosing_text
 
     cursor_range = MagicMock()
     cursor_range.GetText.return_value = cursor_text
@@ -613,9 +630,276 @@ class TestEditorEmptyPlaceholder:
         assert buf._cursor_pos == 2
 
 
+class TestEmptyInputControlClass:
+    """wh-google-messages-first-word: the Google Messages web text box.
+
+    Brave reports the empty box as an EditControl whose own class is
+    "input is-empty" (after text it is "input"), with the placeholder
+    as document text. The caret element is the focused control itself.
+    """
+
+    @staticmethod
+    def _setup(mock_auto, doc_text, cursor_text, control_class):
+        _mock_prompt(mock_auto, doc_text=doc_text, cursor_text=cursor_text,
+                     enclosing_class=control_class)
+        mock_auto.GetFocusedControl.return_value.ClassName = control_class
+
+    @patch(f"{_MOD}.auto")
+    def test_empty_google_messages_box_reads_as_empty(self, mock_auto):
+        from ui.text_perfector import TextPerfector
+
+        self._setup(mock_auto, "Text message", "Text message", "input is-empty")
+        buf = _make_buffer()
+
+        with patch("ui.uia_text_reader.auto.ControlsAreSame", return_value=True):
+            assert buf.synchronize() is True
+        assert buf._buffer == ""
+        assert buf._cursor_pos == 0
+        assert TextPerfector().perfected_string("testing", **buf.get_context()) == "Testing"
+
+    @patch(f"{_MOD}.auto")
+    def test_google_messages_box_after_line_break_keeps_capital(self, mock_auto):
+        from ui.text_perfector import TextPerfector
+
+        self._setup(mock_auto, "testing\n", "testing\n", "input")
+        buf = _make_buffer()
+
+        with patch("ui.uia_text_reader.auto.ControlsAreSame", return_value=True):
+            assert buf.synchronize() is True
+        assert TextPerfector().perfected_string("hello", **buf.get_context()) == "Hello"
+
+    @patch(f"{_MOD}.auto")
+    def test_google_messages_box_with_text_keeps_space(self, mock_auto):
+        from ui.text_perfector import TextPerfector
+
+        self._setup(mock_auto, "Hello there", "Hello there", "input")
+        buf = _make_buffer()
+
+        with patch("ui.uia_text_reader.auto.ControlsAreSame", return_value=True):
+            assert buf.synchronize() is True
+        assert buf._buffer == "Hello there"
+        assert TextPerfector().perfected_string("world", **buf.get_context()) == " world"
+
+
+class TestCaretInNewEmptyParagraph:
+    """wh-line-start-space-capital: a caret in a new empty paragraph.
+
+    In tiptap in Chromium, UIA reports that caret at the END of the
+    previous paragraph, before the paragraph line break. The caret's
+    enclosing element carries the class token 'is-empty'.
+    """
+
+    @patch(f"{_MOD}.auto")
+    def test_period_line_puts_caret_after_line_break(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.", enclosing_class="is-empty")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf.get_context()["preceding_chars"] == ".\n"
+        assert buf._buffer == "Hello world.\n"
+        assert buf._cursor_pos == 13
+
+    @patch(f"{_MOD}.auto")
+    def test_line_without_period_puts_caret_after_line_break(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="It should not be there\n",
+                     cursor_text="It should not be there",
+                     enclosing_class="is-empty")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf.get_context()["preceding_chars"] == "e\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_placeholder_text_is_removed_from_buffer(self, mock_auto):
+        _mock_prompt(
+            mock_auto,
+            doc_text="Hello world.\nType / for commands\n",
+            cursor_text="Hello world.\nType / for commands",
+            enclosing_class="is-empty",
+            enclosing_text="Type / for commands\n",
+        )
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf.get_context()["preceding_chars"] == ".\n"
+        assert "Type / for commands" not in buf._buffer
+        # The caret sits right after the first line break; the empty line's
+        # own trailing break stays after it.
+        assert buf._buffer == "Hello world.\n\n"
+        assert buf._cursor_pos == 13
+
+    @patch(f"{_MOD}.auto")
+    def test_missing_line_break_is_inserted(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.",
+                     cursor_text="Hello world.", enclosing_class="is-empty")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._buffer == "Hello world.\n"
+        assert buf._cursor_pos == 13
+
+    @patch(f"{_MOD}.auto")
+    def test_class_without_is_empty_keeps_today_read(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.",
+                     enclosing_class="tiptap ProseMirror",
+                     enclosing_text="Hello world.")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._buffer == "Hello world.\n"
+        assert buf._cursor_pos == 12
+        assert buf.get_context()["preceding_chars"] == "d."
+
+    @patch(f"{_MOD}.auto")
+    def test_is_empty_token_must_match_exactly(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.", enclosing_class="not-is-empty-x")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._cursor_pos == 12
+
+    @patch(f"{_MOD}.auto")
+    def test_element_text_error_keeps_line_break_rule_without_stripping(self, mock_auto):
+        import _ctypes as real_ctypes
+
+        _mock_prompt(
+            mock_auto, doc_text="Hello world.\n", cursor_text="Hello world.",
+            enclosing_class="is-empty",
+            enclosing_text_error=real_ctypes.COMError(-2147418113, "operation failed", None),
+        )
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf.get_context()["preceding_chars"] == ".\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_claude_box_empty_paragraph_without_class(self, mock_auto):
+        """Measured in the Claude desktop box: class '', own text '\\n'."""
+        _mock_prompt(mock_auto, doc_text="Hello world\n",
+                     cursor_text="Hello world", enclosing_class="",
+                     enclosing_text="\n")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._cursor_pos == 12
+        assert buf._buffer == "Hello world\n"
+        assert buf.get_context()["preceding_chars"] == "d\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_mid_line_own_text_keeps_today_read(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.", enclosing_class="",
+                     enclosing_text="Hello world.")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._cursor_pos == 12
+        assert buf.get_context()["preceding_chars"] == "d."
+
+    @patch(f"{_MOD}.auto")
+    def test_argument_error_without_class_keeps_today_read(self, mock_auto):
+        import ctypes
+
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.", enclosing_class="",
+                     enclosing_text_error=ctypes.ArgumentError("argument 1"))
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._cursor_pos == 12
+        assert buf.get_context()["preceding_chars"] == "d."
+
+    @patch(f"{_MOD}.auto")
+    def test_argument_error_with_class_still_applies_rule(self, mock_auto):
+        import ctypes
+
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.", enclosing_class="is-empty",
+                     enclosing_text_error=ctypes.ArgumentError("argument 1"))
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf.get_context()["preceding_chars"] == ".\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_empty_text_before_caret_is_read_without_error(self, mock_auto):
+        """An empty first paragraph: nothing before the caret, own text only a break."""
+        _mock_prompt(mock_auto, doc_text="\n", cursor_text="",
+                     enclosing_class="", enclosing_text="\n")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._cursor_pos == 0
+        assert buf._buffer == "\n"
+        assert buf.get_context()["preceding_chars"] == ""
+
+    @patch(f"{_MOD}.auto")
+    def test_caret_at_end_of_line_with_text_node_keeps_today_read(self, mock_auto):
+        """Measured in the Claude box: caret at the END of line 1 with an empty
+        line 2 below. The enclosing control is the text node of line 1
+        (class '', own text 'Hello world', not a line break)."""
+        _mock_prompt(mock_auto, doc_text="Hello world\n",
+                     cursor_text="Hello world", enclosing_class="",
+                     enclosing_text="Hello world")
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._cursor_pos == 11
+        assert buf._buffer == "Hello world\n"
+        assert buf.get_context()["preceding_chars"] == "ld"
+
+    @patch(f"{_MOD}.auto")
+    def test_selection_keeps_today_read(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.", enclosing_class="is-empty")
+        focused = mock_auto.GetFocusedControl.return_value
+        text_pattern = focused.GetPattern(mock_auto.PatternId.TextPattern)
+        text_pattern.GetSelection.return_value[0].GetText.return_value = "ld"
+        buf = _make_buffer()
+
+        assert buf.synchronize() is True
+        assert buf._cursor_pos == 12
+        assert buf._buffer == "Hello world.\n"
+
+
 # ===========================================================================
 # Adversarial / Edge Cases
 # ===========================================================================
+
+class TestSingleElementEditorLineStart:
+    """wh-line-start-space-capital.1.1: enclosing element IS the focused control."""
+
+    @patch(f"{_MOD}.auto")
+    def test_single_element_editor_keeps_today_read(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.",
+                     cursor_text="Hello world.", enclosing_class="is-empty",
+                     enclosing_text="\n")
+        buf = _make_buffer()
+
+        with patch("ui.uia_text_reader.auto.ControlsAreSame",
+                   return_value=True) as same:
+            assert buf.synchronize() is True
+
+        assert buf._buffer == "Hello world."
+        assert buf._cursor_pos == 12
+        assert same.called
+        assert same.call_args.args[1] is mock_auto.GetFocusedControl.return_value
+
+    @patch(f"{_MOD}.auto")
+    def test_child_element_still_gets_line_start_rule(self, mock_auto):
+        _mock_prompt(mock_auto, doc_text="Hello world.\n",
+                     cursor_text="Hello world.", enclosing_class="is-empty")
+        buf = _make_buffer()
+
+        with patch("ui.uia_text_reader.auto.ControlsAreSame",
+                   return_value=False):
+            assert buf.synchronize() is True
+
+        assert buf._cursor_pos == 13
+
 
 class TestAdversarial:
     """Adversarial scenarios and edge cases."""

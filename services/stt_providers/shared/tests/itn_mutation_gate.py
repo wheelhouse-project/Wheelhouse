@@ -19,7 +19,7 @@ deleted for that reason. The three pass-through canaries ("", "hello
 world", "no numbers here") are equally unkillable and are kept on
 purpose as regression canaries.
 
-One hundred and ten mutations, all inside
+One hundred and twenty-six mutations, all inside
 shared_stt/transcript_rules.py.
 Each one loosens a real guard rather than deleting a line a later
 branch would catch anyway.
@@ -390,8 +390,8 @@ SELECTION = ["tests/test_transcript_rules.py"]
 MUTATIONS = [
     (
         "M01-a-lone-number-word-converts",
-        "    if len(words) < 2:\n        return None\n",
-        "    if len(words) < 1:\n        return None\n",
+        "    if len(words) < 2 and not (\n",
+        "    if len(words) < 1 and not (\n",
         ["test_command_words_stay_words"],
     ),
     (
@@ -502,7 +502,9 @@ MUTATIONS = [
     ),
     (
         "M18-the-cardinal-rule-is-not-wired-in",
-        "    cardinal = _try_cardinal(records, run, end)\n",
+        "    cardinal = _try_cardinal(\n"
+        "        records, run, end, lone_ten_up=lone_ten_up, interim=interim\n"
+        "    )\n",
         "    cardinal = None\n",
         ["test_cardinal_phrases"],
     ),
@@ -1142,6 +1144,137 @@ MUTATIONS = [
         "            break\n",
         "        if True:\n            break\n",
         ["test_percent_phrases"],
+    ),
+    # wh-itn-lone-number-ten: one lone word from ten to ninety converts.
+    # M01 above stays the guard for the words below ten; M111 to M122
+    # prove the threshold, the scale-word exclusion, the "literal"
+    # condition and the two shapes of a lone word that stay words.
+    (
+        "M111-a-lone-unit-word-converts",
+        "_LONE_CONVERTIBLE = {**_ITN_TEENS, **_ITN_TENS}\n",
+        "_LONE_CONVERTIBLE = {**_ITN_UNITS, **_ITN_TEENS, **_ITN_TENS}\n",
+        [
+            "test_a_lone_word_below_ten_stays_a_word",
+            "test_a_lone_seven_inside_a_sentence_stays_a_word",
+            "test_command_words_stay_words",
+        ],
+    ),
+    (
+        "M112-a-lone-scale-word-converts",
+        "_LONE_CONVERTIBLE = {**_ITN_TEENS, **_ITN_TENS}\n",
+        "_LONE_CONVERTIBLE = {**_ITN_TEENS, **_ITN_TENS, **_ITN_SCALES}\n",
+        ["test_a_lone_scale_word_stays_a_word"],
+    ),
+    (
+        "M113-a-lone-teen-word-stays-a-word",
+        "_LONE_CONVERTIBLE = {**_ITN_TEENS, **_ITN_TENS}\n",
+        "_LONE_CONVERTIBLE = {**_ITN_TENS}\n",
+        [
+            "test_a_lone_word_from_ten_up_types_as_digits",
+            "test_a_lone_ten_inside_a_sentence_types_as_digits",
+        ],
+    ),
+    (
+        "M114-a-lone-tens-word-stays-a-word",
+        "_LONE_CONVERTIBLE = {**_ITN_TEENS, **_ITN_TENS}\n",
+        "_LONE_CONVERTIBLE = {**_ITN_TEENS}\n",
+        ["test_a_lone_word_from_ten_up_types_as_digits"],
+    ),
+    (
+        "M115-the-literal-condition-is-removed",
+        "    lone_ten_up = _LITERAL_WORD.search(text) is None\n",
+        "    lone_ten_up = True\n",
+        ["test_an_utterance_with_literal_keeps_a_lone_word"],
+    ),
+    (
+        "M116-the-literal-match-is-a-substring-match",
+        '_LITERAL_WORD = re.compile(r"\\bliteral\\b", re.IGNORECASE)\n',
+        '_LITERAL_WORD = re.compile(r"literal", re.IGNORECASE)\n',
+        ["test_a_word_that_only_contains_literal_does_not_stop_conversion"],
+    ),
+    (
+        "M117-the-literal-match-is-case-sensitive",
+        '_LITERAL_WORD = re.compile(r"\\bliteral\\b", re.IGNORECASE)\n',
+        '_LITERAL_WORD = re.compile(r"\\bliteral\\b")\n',
+        ["test_an_utterance_with_literal_keeps_a_lone_word"],
+    ),
+    (
+        "M118-the-cardinal-rule-ignores-the-literal-flag",
+        "        lone_ten_up\n"
+        "        and _lone_word_converts(records, words[0], end, interim=interim)\n",
+        "        True\n"
+        "        and _lone_word_converts(records, words[0], end, interim=interim)\n",
+        ["test_an_utterance_with_literal_keeps_a_lone_word"],
+    ),
+    (
+        "M119-the-literal-flag-also-stops-a-multi-word-number",
+        "    if len(words) < 2 and not (\n",
+        "    if (len(words) < 2 or not lone_ten_up) and not (\n",
+        ["test_literal_still_converts_a_multi_word_number"],
+    ),
+    (
+        "M120-a-lone-word-behind-point-converts",
+        "    if _leading_fraction_before(records, end - 1):\n"
+        "        return False\n",
+        "    if False:\n        return False\n",
+        [
+            "test_a_fraction_tail_or_compound_ordinal_front_stays_a_word",
+            "test_percent_phrases",
+        ],
+    ),
+    (
+        "M121-a-tens-word-before-an-ordinal-unit-converts",
+        "        and records[end].low in _ITN_ORDINAL_UNITS\n",
+        "        and False\n",
+        ["test_a_fraction_tail_or_compound_ordinal_front_stays_a_word"],
+    ),
+    (
+        "M122-a-tens-word-before-a-spoken-zero-converts",
+        "        and records[end].low in _ITN_OH_WORDS\n"
+        "    ):\n"
+        "        # \"twenty oh five\" was all words",
+        "        and False\n"
+        "    ):\n"
+        "        # \"twenty oh five\" was all words",
+        ["test_a_tens_word_before_a_spoken_zero_stays_a_word"],
+    ),
+    # wh-itn-lone-number-ten.1.1: in interim text a tens word that is
+    # the last word stays a word. M123 removes the guard, M124 removes
+    # its last-word condition, M125 widens it from the tens words to
+    # every lone word, and M126 is apply_itn ignoring its keyword.
+    (
+        "M123-the-interim-guard-is-removed",
+        "        interim\n"
+        "        and word in _ITN_TENS\n",
+        "        False\n"
+        "        and word in _ITN_TENS\n",
+        [
+            "test_a_trailing_tens_word_stays_a_word",
+            "test_trailing_punctuation_or_space_still_counts_as_last",
+        ],
+    ),
+    (
+        "M124-the-interim-guard-ignores-the-last-word-condition",
+        "        and not any(record.core for record in records[end:])\n",
+        "        and True\n",
+        ["test_every_other_interim_result_is_the_final_result"],
+    ),
+    (
+        "M125-the-interim-guard-also-keeps-a-teen-word",
+        "        interim\n"
+        "        and word in _ITN_TENS\n",
+        "        interim\n"
+        "        and True\n",
+        ["test_every_other_interim_result_is_the_final_result"],
+    ),
+    (
+        "M126-apply-itn-ignores-the-interim-keyword",
+        "                records, index, lone_ten_up=lone_ten_up, interim=interim\n",
+        "                records, index, lone_ten_up=lone_ten_up\n",
+        [
+            "test_a_trailing_tens_word_stays_a_word",
+            "test_trailing_punctuation_or_space_still_counts_as_last",
+        ],
     ),
 ]
 

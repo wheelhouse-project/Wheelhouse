@@ -109,6 +109,39 @@ class TestNumericThroughThePipeline:
         ), _inserted(harness)
 
 
+class TestNumeralIsASynonymOfNumeric:
+    """Bead wh-numeral-synonym: "numeral N" does what "numeric N" does.
+
+    David 2026-11-12 12:24 (question 1, option b): a synonym only. The
+    command stays whole-utterance, and no in-sentence pattern is added.
+    """
+
+    @pytest.mark.asyncio
+    async def test_numeral_seven_types_7(self, harness):
+        assert await _typed_by(harness, ["numeral", "seven"]) == ["7"]
+
+    @pytest.mark.asyncio
+    async def test_numeral_digit_types_the_same_digit(self, harness):
+        assert await _typed_by(harness, ["numeral", "7"]) == ["7"]
+
+    @pytest.mark.asyncio
+    async def test_numeric_seven_still_types_7(self, harness):
+        assert await _typed_by(harness, ["numeric", "seven"]) == ["7"]
+
+    @pytest.mark.asyncio
+    async def test_literal_numeral_seven_types_the_words(self, harness):
+        typed = await _typed_by(harness, ["literal", "numeral", "seven"])
+
+        assert "".join(typed).strip() == "numeral seven", typed
+
+    @pytest.mark.asyncio
+    async def test_numeral_inside_a_sentence_is_not_a_command(self, harness):
+        """The command is whole-utterance: the word stays dictated text."""
+        typed = await _typed_by(harness, ["item", "numeral", "one"])
+
+        assert "".join(typed).strip().lower() == "item numeral one", typed
+
+
 _ONES = (
     "zero one two three four five six seven eight nine ten eleven twelve "
     "thirteen fourteen fifteen sixteen seventeen eighteen nineteen"
@@ -189,7 +222,7 @@ class TestNumericPatternEntry:
 
         assert len(entries) == 1, entries
         entry = entries[0]
-        assert entry["pattern"] == r"^numeric (\d+)$"
+        assert entry["pattern"] == r"^(?:numeric|numeral) (\d+)$"
         assert entry["whole_utterance_only"] is True
         assert entry["actions"] == [
             {"function": "number_digits", "params": ["g1"]}

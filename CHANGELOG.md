@@ -5,7 +5,26 @@ All notable changes to Wheelhouse are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.3] - 2026-11-07
+## [1.4.4] - 2026-11-16
+
+### Changed
+
+- While the numbers show, Wheelhouse now moves them after you click the mouse or turn its main scroll wheel. It moves the numbers to the new positions of the controls about half a second after the last click or wheel movement. Wheelhouse does the same after the scroll commands. Before, the numbers could stay at their old positions after a page scrolled. If a page changes by itself, or you scroll with the keyboard, say "show numbers" again.
+- The "Loading [engine name]" window now stays on the screen until the speech engine is ready. Before, the window closed at the start-time limit of the engine (90 seconds by default), also when the engine was still loading. Wheelhouse could not hear you during that time, and the screen did not show it. Now, at the limit, the text of the window changes to "Loading [engine name] takes longer than usual. Wheelhouse cannot hear you yet." The window is tall enough to show all of the text. The window closes when the engine is ready. If the engine is still not ready 5 minutes after the limit, the window closes and a notice says "[engine name] did not start, so Wheelhouse cannot hear you. To restart Wheelhouse, choose Restart Wheelhouse in the Wheelhouse tray menu."
+- While sound that the computer plays keeps listening paused, the wake word "computer" no longer turns listening on. The word "computer" can be part of the sound itself. To turn listening on while the sound plays, click the floating button or the tray icon. In push-to-talk mode, the wake word now changes nothing while this pause is active. The help for "stop listening" in the Pattern Manager and the help document now says this.
+- With the Parakeet speech engine, a single dictated number word from ten to ninety now types as digits. For example, "buy ten apples" types "buy 10 apples", and "twelve" types "12". The number words one to nine stay words. Some forms also stay words, for example "twenty first" and "twenty oh five". To keep a single number word as you said it, start with "literal". For example, "literal ten" types "ten".
+- "numeral" now works the same as "numeric". For example, "numeral seven" types "7". As with "numeric", the command works only when it is the whole utterance.
+- Wheelhouse now types dictation faster when the computer is slow. Before, Wheelhouse asked Windows for the control that has the focus before each word. On a slow computer, each request could take several seconds. Now Wheelhouse asks one time for each utterance, and again when another window comes to the front.
+- The help document, the install guide, the setting descriptions, and the website now use shorter sentences and simpler words. No command or setting changed. The description of `startup_timeout_seconds` in the `[ai.runtime]` section now says the correct thing: after this time, Wheelhouse stops the AI server.
+- The help document now explains numbers in your own patterns. In advanced mode, write `(\d+)` where a number goes in the trigger. Wheelhouse then accepts the number as digits or as words, so "delete 3" and "delete three" both work.
+- The website now says that Wheelhouse works in English. It also says that the speech engine can write some other European languages, but that Wheelhouse does not support them yet. Before, the website said "Wheelhouse works in English only."
+
+### Fixed
+
+- In the Google Messages website, the first word that you dictate into an empty message box no longer gets a space before it. The first word now starts with a capital letter. Before, "testing" was typed as " testing".
+- In the message box of the Claude desktop app, and in some other text boxes, dictation at the start of a new empty line no longer starts with a space. The first word now starts with a capital letter.
+
+## [1.4.3] - 2026-11-08
 
 ### Fixed
 

@@ -228,6 +228,17 @@ class AppAdapter:
             patch("ui.shadow_buffer.auto",
                   new=self._make_mock_shadow_buffer_auto()),
 
+            # wh-line-start-space-capital.1.1: synchronize calls
+            # read_empty_line_placeholder, which compares the caret element
+            # with the focused control through the REAL uiautomation module
+            # (ui.uia_text_reader.auto is not mocked). A real ControlsAreSame
+            # on two MagicMock elements overflows the stack and kills pytest
+            # (0xC00000FD), which no except clause catches. Both import paths
+            # of uia_text_reader share the one uiautomation module object, so
+            # one patch covers both.
+            patch("ui.uia_text_reader.auto.ControlsAreSame",
+                  return_value=False),
+
             # wh-wxkp: Unicode delivery boundary. type_string_verified would
             # fire real Win32 SendInput; record instead (returns the
             # (success, chars_sent, error) triple).
@@ -352,10 +363,11 @@ class AppAdapter:
             # utils.win_input_sender INSIDE the function body, so the
             # patches above -- which all name the ui_action_handler module
             # -- cannot intercept them. The patch must therefore name the
-            # provider module. UIActionHandler stores _win32_click_point,
-            # _win32_move_pointer and _win32_drag_pointer in
-            # _mouse_click_seam, _mouse_move_seam and _mouse_drag_seam, and
-            # click_point, move_pointer and perform_drag call them; the
+            # provider module. UIActionHandler passes _win32_click_point,
+            # _win32_move_pointer and _win32_drag_pointer to
+            # MousePointerActions, which stores them in mouse_click_seam,
+            # mouse_move_seam and mouse_drag_seam, and its click_point,
+            # move_pointer and perform_drag call them; the
             # by-name and snapshot click paths give ClickExecutor
             # _win32_coordinate_click, _win32_gesture_click and
             # _win32_root_window_at_point. The adapter's empty config

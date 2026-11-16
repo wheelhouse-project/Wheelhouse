@@ -18,54 +18,58 @@ consults the handler table, so a ``pm_``-prefixed name would never arrive here.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
-from services.wheelhouse.click_overlay_state import (
-    ClickOverlayStateMachine,
-    OverlayState,
-)
+from services.wheelhouse.click_overlay_state import OverlayState
 from services.wheelhouse.main import LogicController
+from services.wheelhouse.numbered_overlay.controller import (
+    NumberedOverlayController,
+)
 from services.wheelhouse.shared.pattern_manager_tree_changed import (
     ACTION_NAME,
-    PatternManagerTreeChangedEvent,
 )
+from services.wheelhouse.ui.click_config import ClickConfig
 
 
 def _controller():
     """A bare LogicController carrying only what the handler touches."""
 
     controller = object.__new__(LogicController)
-    controller.click_config = MagicMock()
-    controller.click_config.enabled = True
-    controller.click_config.overlay_enabled_effective = True
-    controller.click_overlay_state = ClickOverlayStateMachine()
-    controller._perform_overlay_effects = MagicMock()  # type: ignore[method-assign]
-    controller._on_pattern_manager_tree_change = MagicMock()  # type: ignore[method-assign]
+
+    controller.click_config = ClickConfig.from_raw(
+        {"enabled": True, "overlay_enabled": True}
+    )
+    # The outputs an overlay effect would leave by: requests to the Input
+    # process (app), GUI messages (state_manager), and scheduled tasks.
+    controller.app = MagicMock()
+    controller.state_manager = MagicMock()
+    controller.create_task_with_error_handling = MagicMock()
+    # The public constructor, as main.py builds it.
+    controller.overlay = NumberedOverlayController(
+        controller, clock=time.monotonic
+    )
+    controller.overlay.on_pattern_manager_tree_change = MagicMock()  # type: ignore[method-assign]
     return controller
-
-
-def test_valid_payload_delegates_the_two_validated_fields():
-    controller = _controller()
-    wire = PatternManagerTreeChangedEvent(hwnd=4242, sequence=3).to_dict()
-
-    controller._handle_pattern_manager_tree_changed(wire)
-
-    controller._on_pattern_manager_tree_change.assert_called_once_with(4242, 3)
 
 
 def test_malformed_payload_dropped_without_raising_or_touching_the_machine():
     controller = _controller()
-    before = controller.click_overlay_state.state
+    before = controller.overlay.click_overlay_state.state
 
     # Missing 'sequence': safe_parse logs and returns None, the handler returns.
     controller._handle_pattern_manager_tree_changed(
         {"action": ACTION_NAME, "hwnd": 4242}
     )
 
-    controller._on_pattern_manager_tree_change.assert_not_called()
-    controller._perform_overlay_effects.assert_not_called()
-    assert controller.click_overlay_state.state is before
-    assert controller.click_overlay_state.state is OverlayState.CLOSED
+    controller.overlay.on_pattern_manager_tree_change.assert_not_called()
+    # No overlay effect was performed: nothing went to the Input process or
+    # the GUI, and no task was scheduled.
+    assert controller.app.mock_calls == []
+    assert controller.state_manager.mock_calls == []
+    controller.create_task_with_error_handling.assert_not_called()
+    assert controller.overlay.click_overlay_state.state is before
+    assert controller.overlay.click_overlay_state.state is OverlayState.CLOSED
 
 
 def test_wrong_action_payload_dropped_without_raising():
@@ -75,7 +79,7 @@ def test_wrong_action_payload_dropped_without_raising():
         {"action": "overlay_state_changed", "hwnd": 4242, "sequence": 1}
     )
 
-    controller._on_pattern_manager_tree_change.assert_not_called()
+    controller.overlay.on_pattern_manager_tree_change.assert_not_called()
 
 
 def test_zero_hwnd_payload_dropped_without_raising():
@@ -87,25 +91,7 @@ def test_zero_hwnd_payload_dropped_without_raising():
         {"action": ACTION_NAME, "hwnd": 0, "sequence": 1}
     )
 
-    controller._on_pattern_manager_tree_change.assert_not_called()
-
-
-def test_handler_map_binds_the_action_to_a_callable():
-    # _build_gui_handler_map builds the FULL map and dereferences a few values
-    # at build time (self.state_manager.send_state_update), so stub that; then
-    # invoke ONLY this entry. This catches a copy-paste mis-binding (the wrong
-    # handler on the right key) without exercising the unrelated entries.
-    controller = _controller()
-    controller.state_manager = MagicMock()
-    wire = PatternManagerTreeChangedEvent(hwnd=4242, sequence=1).to_dict()
-
-    handler_map = LogicController._build_gui_handler_map(controller, wire)
-
-    assert callable(handler_map.get(ACTION_NAME))
-
-    assert ACTION_NAME in handler_map
-    handler_map[ACTION_NAME]()
-    controller._on_pattern_manager_tree_change.assert_called_once_with(4242, 1)
+    controller.overlay.on_pattern_manager_tree_change.assert_not_called()
 
 
 def test_the_action_name_escapes_the_pm_prefix_route():

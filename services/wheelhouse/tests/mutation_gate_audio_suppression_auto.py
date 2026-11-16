@@ -14,9 +14,8 @@ once. So this gate keeps the runner's pattern checks, byte-exact restoration
 and interrupt handling, and replaces only the layer that starts pytest:
 ``_run_pytest``, ``_collected_names``, ``_failed_names`` and ``_clear_pycache``.
 
-The branch's guard tests live in nine selections across three services, and the
-runner runs one selection per mutation, so a behaviour guarded in two services
-(a wake word during a sound pause) is two mutations with the same replacement.
+The branch's guard tests live in eight selections across two services, and the
+runner runs one selection per mutation.
 
 THREE FALSE VERDICTS THIS LAUNCHER REFUSES TO REPORT
 ----------------------------------------------------
@@ -241,8 +240,7 @@ STARTUP_TESTS = (WHEELHOUSE, "tests/test_audio_suppression_startup.py")
 MENU_TESTS = (WHEELHOUSE, ("tests/test_gui.py", "-k", "TestRemovedMenuItems"))
 REMOVED_TESTS = (WHEELHOUSE, "tests/test_audio_suppression_controls_removed.py")
 RETRACTION_TESTS = (WHEELHOUSE, "tests/test_retraction_policy.py")
-CONTROL_TESTS = (WHEELHOUSE, "tests/test_audio_suppression_control.py")
-FLOW_TESTS = (WORKTREE, "tests/integration/test_wake_word_flow.py")
+SOUND_PAUSE_TESTS = (WHEELHOUSE, "tests/test_wake_word_sound_pause.py")
 DETECTOR_TESTS = (SHARED, "tests/test_wake_word_detector.py")
 HELP_TESTS = (WHEELHOUSE, "tests/test_audio_suppression_help.py")
 
@@ -669,13 +667,18 @@ pattern = '''^click to talk mode$'''
 """,
         ["test_no_shipped_pattern_calls_an_audio_suppression_action"]),
 
-    # -- The wake word ends the sound pause (wh-wake-word-stop-listening) ---
-    # These two replaced "a-wake-word-ends-the-sound-pause" and its flow
-    # twin: boss ruling R1 reversed the behaviour they guarded, so the
-    # wake word now clears the sound pause the way the floating button
-    # does, and the mutations break that instead.
+    # -- The speech toggle ends the sound pause -----------------------------
+    # enable_speech_clearing_pauses clears the sound flag. The speech toggle
+    # calls it, and so does the wake word when the sound pause does not
+    # apply (a sound flag left set while the startup decision is off).
+    # Until wh-playback-disable-fails.1 this mutation was
+    # "the-wake-word-leaves-the-sound-pause", with a twin in
+    # tests/integration/test_wake_word_flow.py. That change stopped the wake
+    # word from ending the sound pause and renamed the tests that caught
+    # the twins, so the catchers now live in tests/test_wake_word_sound_pause.py
+    # and the flow twin, which no flow test catches any more, is gone.
     mutation(
-        "the-wake-word-leaves-the-sound-pause", CONTROL_TESTS, STATE_MANAGER,
+        "the-toggle-leaves-the-sound-pause", SOUND_PAUSE_TESTS, STATE_MANAGER,
         """\
         self._set_speech_enabled_explicitly(True)
         self._speech_suppressed_by_audio = False
@@ -685,22 +688,8 @@ pattern = '''^click to talk mode$'''
         self._set_speech_enabled_explicitly(True)
         self._speech_suppressed_by_sonos = False
 """,
-        ["test_a_wake_word_during_a_sound_pause_turns_listening_on",
-         "test_a_wake_word_during_idle_and_sound_pauses_clears_both"]),
-    mutation(
-        "the-wake-word-leaves-the-sound-pause-in-the-flow", FLOW_TESTS,
-        STATE_MANAGER,
-        """\
-        self._set_speech_enabled_explicitly(True)
-        self._speech_suppressed_by_audio = False
-        self._speech_suppressed_by_sonos = False
-""",
-        """\
-        self._set_speech_enabled_explicitly(True)
-        self._speech_suppressed_by_sonos = False
-""",
-        ["test_wake_word_clears_audio_suppression",
-         "test_wake_word_during_multiple_suppressions"]),
+        ["test_the_toggle_turns_listening_on",
+         "test_with_the_startup_decision_off_sound_does_not_stop_the_wake_word"]),
     mutation(
         "the-stable-transcript-gate-comes-back", RETRACTION_TESTS, WEBSOCKET,
         "                        # Extract delta (new words since last stable)\n",

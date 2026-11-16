@@ -153,6 +153,9 @@ Run it from services/wheelhouse, and never while a test suite is running in
 the same worktree -- this file rewrites the sources that suite is importing:
 
     uv run python tests/mutation_gate_continuous_scroll.py
+    uv run python tests/mutation_gate_continuous_scroll.py --check
+
+--check changes no file and runs no test except --collect-only.
 """
 
 import os
@@ -1613,6 +1616,39 @@ def _edits(mutation):
     return [(mutation["target"], mutation["old"], mutation["new"])]
 
 
+def _build_mutant(mutation, sources):
+    """Apply every edit of one mutation to a copy of the sources.
+
+    Returns (changed, problem, kind). ``changed`` maps each edited target to
+    its mutated text. ``problem`` is None on success, else a message, and
+    ``kind`` is "stale" for a pattern that does not match exactly once, or
+    "nocompile" for a mutant that does not parse. Both the full sweep and
+    --check build their mutants here, so the two cannot disagree on what a
+    pattern match or a compile failure is (wh-gate-check-mode-missing).
+
+    Each edit is applied to the working copy the previous one produced, so
+    two edits in the same file both land, and the exactly-one-match rule is
+    tested against the text the edit really sees.
+    """
+    working = dict(sources)
+    for target, old, new in _edits(mutation):
+        count = working[target].count(old)
+        if count != 1:
+            return None, f"pattern matched {count} times, need 1", "stale"
+        working[target] = working[target].replace(old, new, 1)
+    changed = {
+        target: source for target, source in working.items()
+        if source != sources[target]
+    }
+    for target, mutated in changed.items():
+        if target.suffix == ".py":
+            try:
+                compile(mutated, str(target), "exec")
+            except SyntaxError as exc:
+                return None, f"mutant does not compile: {exc}", "nocompile"
+    return changed, None, None
+
+
 def _run_pytest(test_files):
     """Run every named test file in ONE pytest process.
 
@@ -1800,7 +1836,8 @@ def main(argv):
     # lets the mutations for the others run now and the rest run after. The
     # scope line at the end says which subset ran, so a partial run cannot be
     # read as a full sweep.
-    selected = list(argv[1:])
+    check_only = "--check" in argv[1:]
+    selected = [a for a in argv[1:] if a != "--check"]
     if selected:
         known = {m["name"] for m in MUTATIONS}
         unknown = [name for name in selected if name not in known]
@@ -1831,6 +1868,24 @@ def main(argv):
 
     errors, survivors, caught = [], [], []
 
+    if check_only:
+        # --check changes no file and runs no test except --collect-only. It
+        # answers in seconds whether every pattern still matches once and
+        # every mutant still compiles. Output form and exit codes match
+        # mutation_gate_loading_dialog_until_ready.py: the "checked N
+        # patterns" line, a PRE-FLIGHT ERRORS block, exit 2 on any problem.
+        stale = nocompile = 0
+        for mutation in mutations:
+            _, problem, kind = _build_mutant(mutation, sources)
+            if problem:
+                stale += kind == "stale"
+                nocompile += kind == "nocompile"
+                errors.append(f"{mutation['name']}: {problem}")
+        print(
+            f"checked {len(mutations)} patterns, {stale} stale or ambiguous, "
+            f"{nocompile} that do not compile"
+        )
+
     # Every expected test name must exist before the first mutation. A name
     # that no longer exists can never appear in the failed set, so a genuine
     # catch would be reported as a survivor.
@@ -1858,9 +1913,18 @@ def main(argv):
                 errors.append(f"{mutation['name']}: no such test {name}")
     errors.extend(_coverage_errors(existing))
     if errors:
+        if check_only:
+            print("\n=== PRE-FLIGHT ERRORS ===")
+            for e in errors:
+                print("  " + e)
+            return 2
         for e in errors:
             print(f"ERROR {e}")
         return 1
+    if check_only:
+        print("\n--check: patterns match once, mutants compile, catcher "
+              "names exist.")
+        return 0
 
     # A suite that is already red reports every mutation as caught for a
     # reason unrelated to the mutation. The baseline covers exactly what
@@ -1875,41 +1939,10 @@ def main(argv):
     try:
         for mutation in mutations:
             name = mutation["name"]
-            # Each edit is applied to the working copy the previous one
-            # produced, so two edits in the same file both land, and the
-            # exactly-one-match rule is tested against the text the edit
-            # really sees.
-            working = dict(sources)
-            refused = False
-            for target, old, new in _edits(mutation):
-                count = working[target].count(old)
-                if count != 1:
-                    errors.append(
-                        f"{name}: pattern matched {count} times, need 1"
-                    )
-                    print(f"ERROR {name}: pattern matched {count} times")
-                    refused = True
-                    break
-                working[target] = working[target].replace(old, new, 1)
-            if refused:
-                continue
-
-            changed = {
-                target: source for target, source in working.items()
-                if source != sources[target]
-            }
-            for target, mutated in changed.items():
-                if target.suffix == ".py":
-                    try:
-                        compile(mutated, str(target), "exec")
-                    except SyntaxError as exc:
-                        errors.append(
-                            f"{name}: mutant does not compile: {exc}"
-                        )
-                        print(f"ERROR {name}: mutant does not compile")
-                        refused = True
-                        break
-            if refused:
+            changed, problem, kind = _build_mutant(mutation, sources)
+            if problem:
+                errors.append(f"{name}: {problem}")
+                print(f"ERROR {name}: {problem}")
                 continue
 
             for target, mutated in changed.items():

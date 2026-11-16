@@ -18,7 +18,7 @@ Transport: GuiManager.send_command puts the dict produced by
 ``GrantPromptNoClickedEvent.to_dict()`` -- shape
 ``{"action": "grant_prompt_no_clicked", "process_name": ...,
 "class_name": ..., "control_type": ...}`` -- onto
-commands_to_logic_queue. ``LogicController._listen_for_gui_commands``
+commands_to_logic_queue. ``LogicController.listen_for_gui_commands``
 routes the action via its handler_map; the handler validates with
 :func:`safe_parse` (wh-uf54) so a malformed payload is logged and
 dropped rather than crashing the listener.

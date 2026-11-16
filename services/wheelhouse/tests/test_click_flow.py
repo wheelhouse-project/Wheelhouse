@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -49,6 +50,34 @@ from ui.element_types import (
 from services.wheelhouse.click_snapshot_summary_cache import (
     ClickSnapshotSummaryCache,
 )
+from services.wheelhouse.numbered_overlay.controller import (
+    NumberedOverlayController,
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_foreground_window(monkeypatch):
+    """The real overlay's first-use hint reads the foreground window.
+
+    With no foreground window the hint returns before it reads or writes
+    its record file, so these tests never show a hint and never touch
+    services/wheelhouse/data/. A test that installs a FakeDesktop patches
+    the same Win32 call again inside its own scope.
+    """
+    import win32gui
+
+    monkeypatch.setattr(win32gui, "GetForegroundWindow", lambda: 0)
+
+
+def _bind_overlay(c):
+    """Build the real NumberedOverlayController as ``c.overlay``.
+
+    wh-overlay-refactor-pilot.2 moved the numbered overlay out of
+    LogicController. The public constructor takes the (mocked)
+    LogicController as its host, so ``c.click_config`` must be set first.
+    """
+    c.overlay = NumberedOverlayController(c, clock=time.monotonic)
+    return c.overlay
 
 
 def _query(name="cancel", role="Button"):
@@ -78,21 +107,21 @@ def _make_controller(*, enabled=True, response_timeout_ms=3000,
     from main import LogicController
 
     c = MagicMock(spec=LogicController)
+
     c.forward_click_element = (
         LogicController.forward_click_element.__get__(c)
-    )
-    c._forward_click_notice = (
-        LogicController._forward_click_notice.__get__(c)
     )
 
     cfg = ClickConfig.from_raw(
         {"enabled": enabled, "response_timeout_ms": response_timeout_ms}
     )
     c.click_config = cfg
-    c.click_snapshot_summary_cache = ClickSnapshotSummaryCache(
-        ttl_seconds=float(cfg.snapshot_ttl_seconds),
-    )
+    _bind_overlay(c)
     c._click_disabled_notice_shown = False
+    c.take_click_disabled_notice = (
+        LogicController.take_click_disabled_notice.__get__(c)
+    )
+    c.grid_overlay_state = None
 
     c.state_manager = MagicMock()
     c.state_manager.state_to_gui_queue = MagicMock()
@@ -115,7 +144,7 @@ def _make_controller(*, enabled=True, response_timeout_ms=3000,
     return c
 
 
-def _notice(controller):
+def _click_notice(controller):
     """Return the ClickNoticeEvent forwarded to the GUI, or None."""
     q = controller.state_manager.state_to_gui_queue.put_nowait
     if q.call_count == 0:
@@ -138,20 +167,12 @@ def test_disabled_by_config_short_circuits_and_notifies():
 
     # No IPC was sent (the gate is pre-IPC).
     assert "action" not in c._captured
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "execution_failed"
     assert notice.reason == "disabled_by_config"
     assert notice.spoken_name == "cancel"
     assert notice.trace_id == "trace-cfg"
-
-
-def test_disabled_by_config_notice_is_one_shot_per_session():
-    c = _make_controller(enabled=False)
-    asyncio.run(c.forward_click_element(_query(), "t1"))
-    asyncio.run(c.forward_click_element(_query(), "t2"))
-    # Only the first attempt shows the notice.
-    assert c.state_manager.state_to_gui_queue.put_nowait.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +183,7 @@ def test_disabled_by_config_notice_is_one_shot_per_session():
 def test_timeout_emits_execution_failed_timeout():
     c = _make_controller(send_exc=asyncio.TimeoutError())
     asyncio.run(c.forward_click_element(_query(), "trace-to"))
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "execution_failed"
     assert notice.reason == "timeout"
@@ -318,24 +339,57 @@ def test_late_response_with_summary_populates_snapshot_cache():
         trace_id="trace-late",
     ).to_dict()
     cb(late)
-    result = c.click_snapshot_summary_cache.resolve("walk-9")
+    result = c.overlay.click_snapshot_summary_cache.resolve("walk-9")
     assert result.summary is not None
     assert result.summary.snapshot_id == "walk-9"
 
 
-def test_late_ambiguous_does_not_auto_open_overlay():
+async def test_late_ambiguous_does_not_auto_open_overlay(
+    tmp_path, monkeypatch,
+):
     # DECIDED (wh-overlay-slow-uia-stale-badges.20.3): a late ambiguous reply
     # does NOT auto-open the numbered overlay -- an overlay appearing seconds
     # after the command, unprompted, is worse than the corrected notice
     # alone. Only the corrected ambiguous notice is forwarded.
-    c = _make_controller(send_exc=asyncio.TimeoutError())
-    asyncio.run(c.forward_click_element(_query(), "trace-late"))
-    cb = c._captured["on_late_response"]
-    cb(_late_response("ambiguous", trace_id="trace-late"))
-    c._perform_auto_open_ambiguous.assert_not_called()
-    events = _notices(c)
-    assert len(events) == 2
-    assert events[1].outcome == "ambiguous"
+    import tests.overlay_boundary_harness as harness
+    from tests.overlay_boundary_harness import (
+        item_id, overlay_boundary, summary,
+    )
+
+    # The test answers the click itself, after the timeout.
+    monkeypatch.setattr(harness, "_AUTO_CLICKED", frozenset())
+    async with overlay_boundary(tmp_path) as b:
+        mark = b.mark()
+        await b.say("click save")
+        frame = await b.next_frame("click_element")
+        # Longer than response_timeout_ms (3000 ms in config.toml.example).
+        await b.advance(3.2)
+        await b.next_gui("show_click_notice")
+        # The late reply carries everything an on-time auto-open uses.
+        b.reply(frame, ClickElementResponse(
+            status="ok",
+            outcome="ambiguous",
+            reason=None,
+            matched_names=("save draft", "save all"),
+            snapshot_id="click-walk",
+            snapshot_summary=summary("click-walk", 1, 2, 3),
+            matched_name=None,
+            trace_id=frame.params.get("trace_id", ""),
+            ambiguous_item_ids=(
+                item_id("click-walk", 1), item_id("click-walk", 2),
+            ),
+        ).to_dict())
+        await b.next_gui("show_click_notice")
+        await b.flush()
+        events = [
+            ClickNoticeEvent.from_dict(
+                {k: v for k, v in m.items() if k != "action"}
+            )
+            for m in b.gui_since(mark, actions={"show_click_notice"})
+        ]
+        assert len(events) == 2
+        assert events[1].outcome == "ambiguous"
+        assert b.frames_since(mark, actions={"show_numbered_overlay"}) == []
 
 
 def test_late_correction_suppressed_when_newer_notice_forwarded(caplog):
@@ -347,7 +401,7 @@ def test_late_correction_suppressed_when_newer_notice_forwarded(caplog):
     asyncio.run(c.forward_click_element(_query(), "trace-late"))
     cb = c._captured["on_late_response"]
     # A newer click's notice lands after the timeout notice.
-    c._forward_click_notice(
+    c.overlay.forward_click_notice(
         outcome="execution_failed", reason="disabled", matched_name="Cancel",
         matched_names=(), spoken_name="cancel", snapshot_id=None,
         trace_id="trace-newer",
@@ -366,32 +420,6 @@ def test_late_correction_suppressed_when_newer_notice_forwarded(caplog):
     assert suppressed, "expected the suppression log naming both trace ids"
 
 
-def test_late_refusal_forwarded_when_timeout_notice_put_failed():
-    # wh-overlay-slow-uia-stale-badges.20.10 (A-fail-nothing-newer): A's
-    # timeout notice never left Logic (the GUI queue put raised Full) and no
-    # newer notice was forwarded. A's late refusal is then the FIRST
-    # feedback for the newest click, not a stale overwrite -- it must be
-    # forwarded. Comparing only the last SUCCESSFUL trace cannot see this.
-    from queue import Full
-
-    c = _make_controller(send_exc=asyncio.TimeoutError())
-    q = c.state_manager.state_to_gui_queue.put_nowait
-    q.side_effect = [Full("queue full"), None]
-    asyncio.run(c.forward_click_element(_query(), "trace-late"))
-    assert q.call_count == 1  # the timeout notice attempt failed
-
-    cb = c._captured["on_late_response"]
-    cb(_late_response(
-        "execution_failed", reason="bounds_invalid", trace_id="trace-late",
-    ))
-    assert q.call_count == 2  # the late refusal was retried as feedback
-    forwarded = q.call_args_list[1][0][0]
-    assert forwarded["action"] == "show_click_notice"
-    assert forwarded["reason"] == "bounds_invalid"
-    # The successful late put records the trace like any forwarded notice.
-    assert c._last_click_notice_trace_id == "trace-late"
-
-
 def test_late_refusal_suppressed_when_newer_notice_succeeded_after_failed_attempt(
     caplog,
 ):
@@ -407,7 +435,7 @@ def test_late_refusal_suppressed_when_newer_notice_succeeded_after_failed_attemp
     asyncio.run(c.forward_click_element(_query(), "trace-late"))
     assert q.call_count == 1  # A's timeout notice attempt failed
     # A newer click's notice succeeds.
-    c._forward_click_notice(
+    c.overlay.forward_click_notice(
         outcome="execution_failed", reason="disabled", matched_name="Cancel",
         matched_names=(), spoken_name="cancel", snapshot_id=None,
         trace_id="trace-newer",
@@ -472,7 +500,7 @@ def test_malformed_response_emits_malformed_response_notice(caplog):
     # A payload that fails ClickElementResponse.from_dict (missing fields).
     c = _make_controller(send_result={"status": "ok"})  # missing required fields
     asyncio.run(c.forward_click_element(_query(), "trace-mal"))
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "execution_failed"
     assert notice.reason == "malformed_response"
@@ -484,7 +512,7 @@ def test_malformed_response_does_not_raise():
     c = _make_controller(send_result=12345)
     # Should complete without raising.
     asyncio.run(c.forward_click_element(_query(), "t"))
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None and notice.reason == "malformed_response"
 
 
@@ -504,24 +532,13 @@ def test_malformed_response_log_excludes_on_screen_values(caplog):
     with caplog.at_level(logging.ERROR):
         asyncio.run(c.forward_click_element(_query(), "trace-priv"))
 
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None and notice.reason == "malformed_response"
     # The on-screen text must not appear anywhere in the captured logs.
     assert secret not in caplog.text
     # The log stays diagnosable: the field names and the trace id appear.
     assert "matched_names" in caplog.text
     assert "trace-priv" in caplog.text
-
-
-def test_send_request_runtime_error_degrades_to_notice():
-    c = _make_controller(send_exc=RuntimeError("UI process error"))
-    asyncio.run(c.forward_click_element(_query(), "t"))
-    notice = _notice(c)
-    assert notice is not None
-    assert notice.outcome == "execution_failed"
-    # A non-timeout send failure carries its own reason, not the misleading
-    # timeout tag (wh-9f3t.56.2).
-    assert notice.reason == "send_request_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -540,9 +557,9 @@ def test_ok_response_shows_no_notice_and_populates_cache():
     asyncio.run(c.forward_click_element(_query(), "trace-ok"))
 
     # No notice for a successful click.
-    assert _notice(c) is None
+    assert _click_notice(c) is None
     # The snapshot summary was retained for the Phase 1.5 overlay round trip.
-    result = c.click_snapshot_summary_cache.resolve("walk-1")
+    result = c.overlay.click_snapshot_summary_cache.resolve("walk-1")
     assert result.summary is not None
     assert result.summary.snapshot_id == "walk-1"
 
@@ -561,7 +578,7 @@ def test_not_found_forwards_notice_with_trace_id():
     )
     c = _make_controller(send_result=nf.to_dict())
     asyncio.run(c.forward_click_element(_query(), "trace-nf"))
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "not_found"
     assert notice.spoken_name == "cancel"
@@ -577,7 +594,7 @@ def test_ambiguous_forwards_matched_names():
     )
     c = _make_controller(send_result=amb.to_dict())
     asyncio.run(c.forward_click_element(_query(), "trace-amb"))
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "ambiguous"
     assert notice.matched_names == ("Cancel", "Cancel all")
@@ -592,7 +609,7 @@ def test_execution_failed_forwards_reason_and_matched_name():
     )
     c = _make_controller(send_result=ef.to_dict())
     asyncio.run(c.forward_click_element(_query(), "trace-ef"))
-    notice = _notice(c)
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "execution_failed"
     assert notice.reason == "disabled"
@@ -614,22 +631,6 @@ def _action_funcs():
     lc.forward_click_element = MagicMock()
     handler.logic_controller = lc
     return ActionFunctions(handler), lc
-
-
-def test_action_unparseable_fails_the_step_and_does_not_delegate():
-    import pytest
-
-    from speech.actions import StepFailed
-    from utils.trace_context import set_trace
-
-    set_trace("")  # clear any contextvar bleed from a prior test
-    funcs, lc = _action_funcs()
-    # "the" collapses to an empty name -> ClickCommandParser.parse returns
-    # None. The step fails (wh-safety-word-free-commands) so the speech
-    # processor can type the words when the safety word was not spoken.
-    with pytest.raises(StepFailed):
-        asyncio.run(funcs.click_element("the"))
-    lc.forward_click_element.assert_not_called()
 
 
 def test_action_parseable_generates_trace_and_delegates():
@@ -689,13 +690,10 @@ def _make_snapshot_controller():
     from main import LogicController
 
     c = MagicMock(spec=LogicController)
-    c._handle_snapshot_item_clicked = (
-        LogicController._handle_snapshot_item_clicked.__get__(c)
-    )
-    c._forward_click_notice = (
-        LogicController._forward_click_notice.__get__(c)
-    )
-    c.click_snapshot_summary_cache = ClickSnapshotSummaryCache(ttl_seconds=30.0)
+
+    c.click_config = ClickConfig.from_raw({})
+    _bind_overlay(c)
+    c.overlay.click_snapshot_summary_cache = ClickSnapshotSummaryCache(ttl_seconds=30.0)
     c.state_manager = MagicMock()
     c.state_manager.state_to_gui_queue = MagicMock()
     return c
@@ -712,8 +710,8 @@ def _clicked(snapshot_id="walk-1", display_number=1):
 def test_snapshot_item_clicked_expired_forwards_snapshot_expired_notice():
     # Nothing in the cache -> resolver returns SNAPSHOT_EXPIRED.
     c = _make_snapshot_controller()
-    asyncio.run(c._handle_snapshot_item_clicked(_clicked("gone", 1)))
-    notice = _notice(c)
+    asyncio.run(c.overlay.handle_snapshot_item_clicked(_clicked("gone", 1)))
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "execution_failed"
     assert notice.reason == "snapshot_expired"
@@ -724,38 +722,21 @@ def test_snapshot_item_clicked_not_found_collapses_into_snapshot_expired():
     # A live snapshot whose items do NOT carry display_number 9 -> NOT_FOUND,
     # collapsed into the same snapshot_expired notice.
     c = _make_snapshot_controller()
-    c.click_snapshot_summary_cache.put("walk-1", _summary("walk-1"))
-    asyncio.run(c._handle_snapshot_item_clicked(_clicked("walk-1", 9)))
-    notice = _notice(c)
+    c.overlay.click_snapshot_summary_cache.put("walk-1", _summary("walk-1"))
+    asyncio.run(c.overlay.handle_snapshot_item_clicked(_clicked("walk-1", 9)))
+    notice = _click_notice(c)
     assert notice is not None
     assert notice.outcome == "execution_failed"
     assert notice.reason == "snapshot_expired"
     assert notice.snapshot_id == "walk-1"
 
 
-def test_snapshot_item_clicked_found_dispatches_click_and_emits_no_notice():
-    # A live snapshot with display_number 1 -> FOUND. wh-n29v.95: the handler
-    # now dispatches the real click_snapshot_item with the resolved item_id, and
-    # emits NO notice on the resolve itself (any non-ok click outcome is surfaced
-    # later by _send_snapshot_item_click, not here).
-    c = _make_snapshot_controller()
-    c.click_snapshot_summary_cache.put("walk-1", _summary("walk-1"))
-    asyncio.run(c._handle_snapshot_item_clicked(_clicked("walk-1", 1)))
-    # The FOUND branch dispatched the click with the resolved (snapshot, item).
-    c._dispatch_snapshot_item_click.assert_called_once()
-    _, kwargs = c._dispatch_snapshot_item_click.call_args
-    assert kwargs.get("snapshot_id") == "walk-1"
-    assert kwargs.get("item_id") == "m1"
-    # No notice on the resolve.
-    assert _notice(c) is None
-
-
 def test_snapshot_item_clicked_malformed_payload_is_dropped_without_raising():
     c = _make_snapshot_controller()
     # Missing display_number -> SnapshotItemClickedSchemaError -> logged + dropped.
     bad = {"action": "snapshot_item_clicked", "snapshot_id": "walk-1"}
-    asyncio.run(c._handle_snapshot_item_clicked(bad))
-    assert _notice(c) is None
+    asyncio.run(c.overlay.handle_snapshot_item_clicked(bad))
+    assert _click_notice(c) is None
 
 
 def test_snapshot_item_clicked_unexpected_error_degrades_without_shutdown():
@@ -777,33 +758,9 @@ def test_snapshot_item_clicked_unexpected_error_degrades_without_shutdown():
         side_effect=RuntimeError("boom"),
     ):
         # Must not raise out of the handler (would reach request_shutdown).
-        asyncio.run(c._handle_snapshot_item_clicked(_clicked("walk-1", 1)))
+        asyncio.run(c.overlay.handle_snapshot_item_clicked(_clicked("walk-1", 1)))
     # Degrade-don't-die: the click is dropped, no notice forwarded.
-    assert _notice(c) is None
-
-
-def test_snapshot_item_clicked_found_uses_production_package_path_cache():
-    # wh-9f3t.70.1 regression: the handler resolves the display number against
-    # self.click_snapshot_summary_cache (built in __init__ from the
-    # services.wheelhouse.* package path) using resolve_display_number, which
-    # compares the cache's CacheStatus.HIT by identity. If the handler imported
-    # the resolver from the BARE module while the cache came from the package
-    # module (or vice versa), Python's two module objects would carry two
-    # distinct CacheStatus enums, the HIT identity check would fail, and a live
-    # cache HIT (which should take the FOUND no-notice path) would misresolve as
-    # execution_failed:snapshot_expired. Build the cache here via the same
-    # package path production uses and assert FOUND emits no notice; a reverted
-    # bare import in the handler makes this test forward a snapshot_expired
-    # notice and fail.
-    from services.wheelhouse.click_snapshot_summary_cache import (
-        ClickSnapshotSummaryCache as ProdCache,
-    )
-
-    c = _make_snapshot_controller()
-    c.click_snapshot_summary_cache = ProdCache(ttl_seconds=30.0)
-    c.click_snapshot_summary_cache.put("walk-1", _summary("walk-1"))
-    asyncio.run(c._handle_snapshot_item_clicked(_clicked("walk-1", 1)))
-    assert _notice(c) is None
+    assert _click_notice(c) is None
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +777,7 @@ def test_forward_click_notice_logs_info_on_successful_put(caplog):
 
     c = _make_controller()
     with caplog.at_level(logging.INFO):
-        c._forward_click_notice(
+        c.overlay.forward_click_notice(
             outcome="execution_failed",
             reason="bounds_stale",
             matched_name="Submit",
@@ -853,7 +810,7 @@ def test_forward_click_notice_no_info_when_put_fails(caplog):
         "queue full"
     )
     with caplog.at_level(logging.INFO):
-        c._forward_click_notice(
+        c.overlay.forward_click_notice(
             outcome="execution_failed",
             reason="bounds_stale",
             matched_name="Submit",

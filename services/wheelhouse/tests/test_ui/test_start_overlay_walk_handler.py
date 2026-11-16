@@ -652,10 +652,13 @@ def test_screen_read_deadline_uses_its_own_key_not_the_click_walk_bound(handler)
 def test_walk_deadline_falls_back_to_handler_entry_without_dequeue(handler):
     # When no command_dequeue_monotonic is threaded in (a direct call, e.g. a
     # unit test or a caller that predates the plumbing), the deadline still
-    # anchors -- at this handler's entry instant via time.monotonic() -- so the
-    # walk is always bounded. Mirrors click_element's fallback.
+    # anchors -- at this handler's entry instant, read from the clock that
+    # OverlaySnapshotActions receives -- so the walk is always bounded.
+    # Mirrors click_element's fallback. Requirement row IW-80; no boundary
+    # test reaches it, because the harness always adds the dequeue time.
     from ui.click_config import ClickConfig
     from ui.element_finder import OverlayWalkResult
+    from ui.overlay_snapshot_actions import OverlaySnapshotActions
 
     cfg = ClickConfig.from_raw({})
     handler._click_config = cfg
@@ -665,9 +668,11 @@ def test_walk_deadline_falls_back_to_handler_entry_without_dequeue(handler):
         outcome="no_targets", reason=None, snapshot=None, summary=None,
     )
     handler._click_element_finder = finder
+    handler.overlay_snapshots = OverlaySnapshotActions(
+        handler, clock=lambda: 500.0
+    )
 
-    with patch(f"{_MOD}._capture_click_foreground", return_value=_foreground()), \
-         patch(f"{_MOD}.time.monotonic", return_value=500.0):
+    with patch(f"{_MOD}._capture_click_foreground", return_value=_foreground()):
         handler.start_overlay_walk(
             scope="focused_window",
             overlay_session_id=1,

@@ -817,8 +817,11 @@ class SherpaOfflineEngine:
         # strips punctuation and collapses "p.m." to "pm", which is the
         # shape the ITN clock rule reads. Parakeet already emits digits,
         # so apply_itn also has to leave existing numerals alone
-        # (wh-shared-itn-parakeet).
-        text = apply_itn(normalize_transcript(text))
+        # (wh-shared-itn-parakeet). interim=True keeps a trailing tens
+        # word ("backspace twenty") a word, because the next decode can
+        # still add to it and WheelHouse waits for a count only while it
+        # is a word (wh-itn-lone-number-ten.1.1).
+        text = apply_itn(normalize_transcript(text), interim=True)
         current_words = text.split() if text else []
 
         self._update_stability(current_words)

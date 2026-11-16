@@ -20,11 +20,10 @@ browser list (not the narrow default fallback).
 
 from __future__ import annotations
 
-import asyncio
 import tomllib
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -343,99 +342,118 @@ class TestEvaluateSplit:
 # ---------------------------------------------------------------------------
 
 
-def _make_controller(record_path: Path, *, flag_enabled: bool,
-                     browser_processes=(), browser_processes_extend=()) -> Any:
-    """Build a LogicController with only the attributes the hint hook reads.
+# The hint hook is reached the way a user reaches it: a by-name "click save"
+# through the real speech path into LogicController.forward_click_element,
+# with the foreground window on the harness's fake desktop.
+BROWSER = "chrome.exe"
 
-    Bypasses the heavy __init__ via object.__new__ so the test drives the REAL
-    hint methods (the bound _maybe_show_first_use_hint / _first_use_hint_tracker
-    / _forward_first_use_hint), not a re-implementation. The GUI state queue is
-    a MagicMock so we can assert what the hook enqueues. Returns Any so the
-    dynamic test-only attributes (set via setattr) do not trip the typed
-    LogicController surface in pyright.
+
+def _window(process_name: str):
+    from tests.overlay_boundary_harness import Window
+
+    return Window(
+        hwnd=0x6C01, pid=6301, process_name=process_name,
+        class_name="HintTestWindow", create_time_s=1_700_000_200.0,
+    )
+
+
+@asynccontextmanager
+async def _hint_boundary(tmp_path: Path, record_path: Path, *,
+                         flag_enabled: bool, process_name: str = BROWSER,
+                         browser_processes_extend=()):
+    """A harness Logic process whose hint record lives at ``record_path``.
+
+    The foreground window belongs to ``process_name``. The [click] config
+    sets ``enable_screen_reader_flag`` and ``browser_processes_extend``; the
+    ``browser_processes`` list is the one config.toml.example ships, which
+    holds chrome.exe.
     """
-    from main import LogicController
+    import services.wheelhouse.click_first_use_hint as hint_module
+    from tests.overlay_boundary_harness import (
+        OTHER_WINDOW, overlay_boundary, write_config,
+    )
 
-    controller: Any = object.__new__(LogicController)
-    setattr(controller, "_first_use_hint", None)
-    # _first_use_hint_path is the documented test-override hook read via getattr
-    # in _resolve_first_use_hint_path; it is not a declared instance attribute.
-    setattr(controller, "_first_use_hint_path", record_path)
-    click_config = MagicMock()
-    click_config.enable_screen_reader_flag = flag_enabled
-    click_config.browser_processes = tuple(browser_processes)
-    click_config.browser_processes_extend = tuple(browser_processes_extend)
-    setattr(controller, "click_config", click_config)
-    state_manager = MagicMock()
-    state_manager.state_to_gui_queue = MagicMock()
-    setattr(controller, "state_manager", state_manager)
-    return controller
+    config = write_config(
+        tmp_path,
+        enable_screen_reader_flag=flag_enabled,
+        browser_processes_extend=list(browser_processes_extend),
+    )
+    # The production default record path, moved under tmp_path.
+    with patch.object(hint_module, "default_hint_path", lambda: record_path):
+        async with overlay_boundary(
+            tmp_path, config_path=config,
+            windows=(_window(process_name), OTHER_WINDOW),
+        ) as b:
+            yield b
 
 
-def _enqueued_actions(controller: Any) -> list:
-    """Return the list of action strings the hook put on the GUI queue."""
-    queue: Any = controller.state_manager.state_to_gui_queue
-    return [
-        call.args[0]["action"]
-        for call in queue.put_nowait.call_args_list
-    ]
+async def _click(b) -> None:
+    """One by-name click; the harness answers it with an ok reply."""
+
+    await b.say("click save")
+    await b.next_frame("click_element")
+
+
+async def _hints(b, mark) -> list:
+    """Every click_first_use_hint message the GUI received since ``mark``."""
+
+    await b.flush()
+    return b.gui_since(mark, actions={"click_first_use_hint"})
 
 
 class TestLogicHook:
-    def test_eligible_click_enqueues_hint_action_once(self, record_path: Path):
-        controller = _make_controller(
-            record_path, flag_enabled=False,
-            browser_processes=("chrome.exe",),
-        )
-        controller._resolve_foreground_process_name = lambda: "chrome.exe"
-
-        async def drive():
+    async def test_eligible_click_enqueues_hint_action_once(
+        self, tmp_path: Path, record_path: Path,
+    ):
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=False,
+        ) as b:
+            mark = b.mark()
             # Five eligible clicks; the one-shot hint enqueues exactly once.
             for _ in range(5):
-                await controller._maybe_show_first_use_hint("trace-1")
+                await _click(b)
+            hints = await _hints(b, mark)
 
-        asyncio.run(drive())
-
-        actions = _enqueued_actions(controller)
-        assert actions.count("click_first_use_hint") == 1
+        assert len(hints) == 1
         # The enqueued payload carries the verbatim wording.
-        first_call = controller.state_manager.state_to_gui_queue.put_nowait.call_args_list[0]
-        assert first_call.args[0]["message"] == HINT_TEXT
+        assert hints[0]["message"] == HINT_TEXT
 
-    def test_no_hint_when_flag_enabled(self, record_path: Path):
-        controller = _make_controller(
-            record_path, flag_enabled=True,
-            browser_processes=("chrome.exe",),
-        )
-        controller._resolve_foreground_process_name = lambda: "chrome.exe"
+    async def test_no_hint_when_flag_enabled(
+        self, tmp_path: Path, record_path: Path,
+    ):
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=True,
+        ) as b:
+            mark = b.mark()
+            await _click(b)
+            assert await _hints(b, mark) == []
 
-        asyncio.run(controller._maybe_show_first_use_hint("trace-2"))
+    async def test_no_hint_for_non_browser_process(
+        self, tmp_path: Path, record_path: Path,
+    ):
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=False,
+            process_name="notepad.exe",
+        ) as b:
+            mark = b.mark()
+            await _click(b)
+            assert await _hints(b, mark) == []
 
-        assert _enqueued_actions(controller) == []
+    async def test_no_hint_when_foreground_unresolvable(
+        self, tmp_path: Path, record_path: Path,
+    ):
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=False,
+        ) as b:
+            # No foreground window.
+            b.desktop.foreground = 0
+            mark = b.mark()
+            await _click(b)
+            assert await _hints(b, mark) == []
 
-    def test_no_hint_for_non_browser_process(self, record_path: Path):
-        controller = _make_controller(
-            record_path, flag_enabled=False,
-            browser_processes=("chrome.exe",),
-        )
-        controller._resolve_foreground_process_name = lambda: "notepad.exe"
-
-        asyncio.run(controller._maybe_show_first_use_hint("trace-3"))
-
-        assert _enqueued_actions(controller) == []
-
-    def test_no_hint_when_foreground_unresolvable(self, record_path: Path):
-        controller = _make_controller(
-            record_path, flag_enabled=False,
-            browser_processes=("chrome.exe",),
-        )
-        controller._resolve_foreground_process_name = lambda: ""
-
-        asyncio.run(controller._maybe_show_first_use_hint("trace-4"))
-
-        assert _enqueued_actions(controller) == []
-
-    def test_tracker_built_with_clickconfig_browser_list(self, record_path: Path):
+    async def test_tracker_built_with_clickconfig_browser_list(
+        self, tmp_path: Path, record_path: Path,
+    ):
         # Guards the wh-9f3t.60.3 regression: the tracker must be constructed
         # with the ClickConfig browser list (browser_processes +
         # browser_processes_extend), NOT the narrow DEFAULT_BROWSER_PROCESS_NAMES
@@ -443,79 +461,85 @@ class TestLogicHook:
         # default set and assert the hint fires for it.
         custom = "mycustombrowser.exe"
         assert custom not in DEFAULT_BROWSER_PROCESS_NAMES
-        controller = _make_controller(
-            record_path, flag_enabled=False,
-            browser_processes=(),
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=False, process_name=custom,
             browser_processes_extend=(custom,),
-        )
-        controller._resolve_foreground_process_name = lambda: custom
+        ) as b:
+            mark = b.mark()
+            await _click(b)
+            assert len(await _hints(b, mark)) == 1
 
-        asyncio.run(controller._maybe_show_first_use_hint("trace-5"))
-
-        assert _enqueued_actions(controller).count("click_first_use_hint") == 1
-
-    def test_recorded_short_circuits_before_foreground_read(self, record_path: Path):
+    async def test_recorded_short_circuits_before_foreground_read(
+        self, tmp_path: Path, record_path: Path,
+    ):
         # Once the record exists on disk, the hook must NOT even call the
         # (blocking) foreground resolver -- the recorded_shown short-circuit.
+        # The hint's resolver is the only foreground read a by-name click
+        # makes, so the click must read the foreground window zero times.
+        import win32gui
+
         assert mark_hint_shown(record_path) is True
-        controller = _make_controller(
-            record_path, flag_enabled=False,
-            browser_processes=("chrome.exe",),
-        )
-        resolver_calls = {"n": 0}
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=False,
+        ) as b:
+            foreground = win32gui.GetForegroundWindow
+            reads = {"n": 0}
 
-        def _resolver():
-            resolver_calls["n"] += 1
-            return "chrome.exe"
+            def _counted():
+                reads["n"] += 1
+                return foreground()
 
-        controller._resolve_foreground_process_name = _resolver
+            mark = b.mark()
+            with patch.object(win32gui, "GetForegroundWindow", _counted):
+                await _click(b)
+            assert reads["n"] == 0
+            assert await _hints(b, mark) == []
 
-        asyncio.run(controller._maybe_show_first_use_hint("trace-6"))
-
-        assert resolver_calls["n"] == 0
-        assert _enqueued_actions(controller) == []
-
-    def test_failed_enqueue_does_not_commit_display_and_retries(self, record_path: Path):
+    async def test_failed_enqueue_does_not_commit_display_and_retries(
+        self, tmp_path: Path, record_path: Path,
+    ):
         # wh-9f3t.61.2: if the GUI enqueue fails on the first eligible click,
         # the tracker must NOT mark displayed -- the next eligible click retries
         # the show -- and the record must NOT be written for a hint never seen.
-        controller = _make_controller(
-            record_path, flag_enabled=False,
-            browser_processes=("chrome.exe",),
-        )
-        controller._resolve_foreground_process_name = lambda: "chrome.exe"
-        queue = controller.state_manager.state_to_gui_queue
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=False,
+        ) as b:
+            queue = b.state_to_gui_queue
+            real_put = queue.put_nowait
 
-        # First click: enqueue raises -> forward returns False -> no commit.
-        queue.put_nowait.side_effect = RuntimeError("queue full")
-        asyncio.run(controller._maybe_show_first_use_hint("trace-a"))
-        # The hint was never delivered, so the durable record is absent.
-        assert record_path.exists() is False
-        assert load_hint_shown(record_path) is False
+            def _hint_put_fails(message, *args, **kwargs):
+                if message.get("action") == "click_first_use_hint":
+                    raise RuntimeError("queue full")
+                return real_put(message, *args, **kwargs)
 
-        # Second click: queue recovers -> the show RETRIES and is delivered.
-        queue.put_nowait.side_effect = None
-        queue.put_nowait.reset_mock()
-        asyncio.run(controller._maybe_show_first_use_hint("trace-b"))
-        assert _enqueued_actions(controller).count("click_first_use_hint") == 1
+            # First click: enqueue raises -> forward returns False -> no commit.
+            mark = b.mark()
+            with patch.object(queue, "put_nowait", _hint_put_fails):
+                await _click(b)
+                assert await _hints(b, mark) == []
+            # The hint was never delivered, so the durable record is absent.
+            assert record_path.exists() is False
+            assert load_hint_shown(record_path) is False
 
-    def test_committed_display_then_counts_persist(self, record_path: Path):
+            # Second click: queue recovers -> the show RETRIES and is delivered.
+            mark = b.mark()
+            await _click(b)
+            assert len(await _hints(b, mark)) == 1
+
+    async def test_committed_display_then_counts_persist(
+        self, tmp_path: Path, record_path: Path,
+    ):
         # After a successful first delivery, subsequent eligible clicks are
         # COUNT verdicts that advance the persistence counter; the third one
         # records "shown" to disk (any-browser counting, wh-9f3t.61.2).
-        controller = _make_controller(
-            record_path, flag_enabled=False,
-            browser_processes=("chrome.exe",),
-        )
-        controller._resolve_foreground_process_name = lambda: "chrome.exe"
-
-        async def drive(n):
-            for _ in range(n):
-                await controller._maybe_show_first_use_hint("trace-c")
-
-        # 1 display + SUBSEQUENT_CLICK_THRESHOLD count clicks.
-        asyncio.run(drive(1 + SUBSEQUENT_CLICK_THRESHOLD))
-        # Exactly one notice was enqueued (one-shot).
-        assert _enqueued_actions(controller).count("click_first_use_hint") == 1
+        async with _hint_boundary(
+            tmp_path, record_path, flag_enabled=False,
+        ) as b:
+            mark = b.mark()
+            # 1 display + SUBSEQUENT_CLICK_THRESHOLD count clicks.
+            for _ in range(1 + SUBSEQUENT_CLICK_THRESHOLD):
+                await _click(b)
+            # Exactly one notice was enqueued (one-shot).
+            assert len(await _hints(b, mark)) == 1
         # And the record is now persisted so it never reappears.
         assert load_hint_shown(record_path) is True

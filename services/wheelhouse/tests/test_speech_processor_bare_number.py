@@ -655,8 +655,8 @@ class TestTheNumberFillerOpensTheHold:
 # ============================================================================
 #
 # Three separate layers read the overlay state: hold time
-# (_maybe_hold_bare_number), extension time (_bare_number_extends) and
-# consume time (_consume_pending_bare_number). Every test above drives one
+# (maybe_hold_bare_number), extension time (bare_number_extends) and
+# consume time (consume_pending_bare_number). Every test above drives one
 # overlay state for the whole utterance, so the three layers are
 # indistinguishable there and the later two mask the first. Only a
 # TRANSITION separates them (wh-click-number-dictation.1.5).
@@ -825,17 +825,40 @@ class TestSpokenClickNumberWhilePainted:
             words if utterance is None else utterance
         )
 
-    # A payload the hold refuses is typed by the DICTATE branch BEFORE the
-    # deferred end_utterance, which restores the user's clipboard. A
-    # payload the hold wrongly accepts is typed by the consume's fallback
-    # AFTER that end_utterance, so the ordering is what tells "refused"
-    # from "held, then dictated anyway" -- the consume re-derives every
-    # guard from the held text, so the typed text alone cannot.
+    # Typed text leaves before the deferred end_utterance, which restores
+    # the user's clipboard. That holds for a payload the hold refuses (the
+    # DICTATE branch types it) and, since wh-full-refactor.4.2, for a
+    # payload the hold accepts and the consume's fallback then types: the
+    # end marker sends the end only after the consume. So the order no
+    # longer tells "refused" from "held, then dictated anyway", and the
+    # consume re-derives every guard from the held text, so the typed text
+    # alone cannot either. _held_at_consume tells them apart: it records
+    # what the hold kept at the moment the end marker starts the consume.
     DICTATED_BEFORE_END = ["intelligent_insert_text", "end_utterance"]
+    NOTHING_HELD = [None]
 
     @staticmethod
     def _ipc_order(app):
         return [action["action"] for action in app.actions]
+
+    @staticmethod
+    def _held_at_consume(proc):
+        """Record the held bare-number words when the end marker consumes.
+
+        The seam is the end marker's consume of a tail its own
+        finalization armed: it runs after the hold decision and before
+        the consume. The returned list gets one entry per end marker.
+        """
+        seen = []
+        original = proc._consume_finalization_armed_tail
+
+        async def record_then_consume(*args, **kwargs):
+            held = proc._pending_bare_number_words
+            seen.append(list(held) if held else None)
+            await original(*args, **kwargs)
+
+        proc._consume_finalization_armed_tail = record_then_consume
+        return seen
 
     @pytest.mark.parametrize("words", [
         ["click", "74"],
@@ -877,34 +900,40 @@ class TestSpokenClickNumberWhilePainted:
     async def test_click_plus_anything_else_still_dictates(self, words):
         proc, app, parser = make_processor(OverlayState.PAINTED)
         self._finalized_buffer(proc, words)
+        held = self._held_at_consume(proc)
         await proc.process_word_event(end_marker())
         assert parser.executed == []
         assert app.inserted_texts() == [" ".join(words)]
         assert self._ipc_order(app) == self.DICTATED_BEFORE_END
+        assert held == self.NOTHING_HELD
 
     async def test_the_spoken_click_dictates_when_the_overlay_is_closed(self):
         proc, app, parser = make_processor(OverlayState.CLOSED)
         self._finalized_buffer(proc, ["click", "74"])
+        held = self._held_at_consume(proc)
         await proc.process_word_event(end_marker())
         assert parser.executed == []
         assert app.inserted_texts() == ["click 74"]
         assert self._ipc_order(app) == self.DICTATED_BEFORE_END
+        assert held == self.NOTHING_HELD
 
     async def test_the_spoken_click_must_be_the_whole_utterance(self):
         proc, app, parser = make_processor(OverlayState.PAINTED)
         self._finalized_buffer(
             proc, ["click", "74"], utterance=["hello", "click", "74"],
         )
+        held = self._held_at_consume(proc)
         await proc.process_word_event(end_marker())
         assert parser.executed == []
         assert app.inserted_texts() == ["click 74"]
         assert self._ipc_order(app) == self.DICTATED_BEFORE_END
+        assert held == self.NOTHING_HELD
 
     async def test_a_bare_badge_number_must_be_the_whole_utterance(self):
         """wh-overlay-count-homophones.1.3: the bare half of that rule.
 
         The DICTATE-branch check that clicks a multi-word badge number
-        shares _payload_is_the_whole_utterance with the spoken-click
+        shares payload_is_the_whole_utterance with the spoken-click
         hold above. Without the share it would click badge 112 here --
         "one twelve" parses and badges are showing -- and the user's
         "hello" would vanish with the rest of the sentence.
@@ -913,10 +942,12 @@ class TestSpokenClickNumberWhilePainted:
         self._finalized_buffer(
             proc, ["one", "twelve"], utterance=["hello", "one", "twelve"],
         )
+        held = self._held_at_consume(proc)
         await proc.process_word_event(end_marker())
         assert parser.executed == []
         assert app.inserted_texts() == ["one twelve"]
         assert self._ipc_order(app) == self.DICTATED_BEFORE_END
+        assert held == self.NOTHING_HELD
 
     # wh-number-badge-problems.1.4: local STT appends terminal punctuation
     # to the last word of an utterance ("click 74."), which is why
@@ -945,10 +976,12 @@ class TestSpokenClickNumberWhilePainted:
     async def test_a_punctuated_spoken_click_dictates_with_its_punctuation(self):
         proc, app, parser = make_processor(OverlayState.CLOSED)
         self._finalized_buffer(proc, ["click", "74."])
+        held = self._held_at_consume(proc)
         await proc.process_word_event(end_marker())
         assert parser.executed == []
         assert app.inserted_texts() == ["click 74."]
         assert self._ipc_order(app) == self.DICTATED_BEFORE_END
+        assert held == self.NOTHING_HELD
 
     async def test_a_punctuated_click_that_does_not_match_keeps_its_punctuation(
         self,
@@ -963,47 +996,43 @@ class TestSpokenClickNumberWhilePainted:
     # wh-number-badge-problems.1.3: every dictation fallback of the spoken
     # click must type what was spoken, in the one string the pre-fix
     # finalization typed. The hold is armed here the way the buffer timer
-    # arms it (a finalized "click 74" with no end marker yet), so a later
-    # word, the next utterance, the overlay closing, or a click pattern
-    # that does not match can each prove the fallback content.
-
-    async def test_a_later_word_flushes_the_spoken_click_as_it_was_spoken(self):
-        proc, app, parser = make_processor(OverlayState.PAINTED)
-        proc._words_this_utterance = ["click", "74"]
-        assert proc._maybe_hold_bare_number("click 74") is True
-        await proc.process_word_event(word("please"))
-        assert parser.executed == []
-        assert app.inserted_texts() == ["click 74", "please"]
-
-    async def test_the_next_utterance_flushes_a_spoken_click_that_lost_its_end_marker(self):
-        proc, app, parser = make_processor(OverlayState.PAINTED)
-        proc._words_this_utterance = ["click", "74"]
-        assert proc._maybe_hold_bare_number("click 74") is True
-        await proc.process_word_event(word("hello", start=True))
-        assert parser.executed == []
-        assert app.inserted_texts() == ["click 74", "hello"]
+    # arms it (a finalized "click 74" with no end marker yet), so the
+    # overlay closing or a click pattern that does not match can each prove
+    # the fallback content. A later word and the next utterance are the
+    # boundary tests BN-15e and BN-15f in
+    # test_overlay_stack_requirements_s3.py.
 
     async def test_the_overlay_closing_between_hold_and_consume_types_the_spoken_click(self):
         proc, app, parser = make_processor(OverlayState.PAINTED)
         self._finalized_buffer(proc, ["click", "74"])
-        original_send = proc._send_pending_utterance_end
+        # wh-full-refactor.4.2: the seam between hold and consume is the
+        # end marker's consume itself. It used to be the deferred
+        # end_utterance send, which now runs after the consume.
+        held = self._held_at_consume(proc)
+        original_consume = proc._consume_finalization_armed_tail
 
-        async def send_and_close_the_overlay():
+        async def close_the_overlay_then_consume(*args, **kwargs):
             proc.logic_controller.click_overlay_state.state = OverlayState.CLOSED
-            await original_send()
+            await original_consume(*args, **kwargs)
 
-        proc._send_pending_utterance_end = send_and_close_the_overlay
+        proc._consume_finalization_armed_tail = close_the_overlay_then_consume
         await proc.process_word_event(end_marker())
+        assert held == [["click 74"]]
         assert parser.executed == []
         assert app.inserted_texts() == ["click 74"]
+        assert self._ipc_order(app) == self.DICTATED_BEFORE_END
 
     async def test_a_click_pattern_that_does_not_match_types_the_spoken_click(self):
         proc, app, parser = make_processor(OverlayState.PAINTED)
         parser.result = False
         self._finalized_buffer(proc, ["click", "number", "74"])
+        held = self._held_at_consume(proc)
         await proc.process_word_event(end_marker())
+        assert held == [["click number 74"]]
         assert parser.executed == ["click 74"]
         assert app.inserted_texts() == ["click number 74"]
+        # The consume typed the held words, and end_utterance follows them.
+        assert self._ipc_order(app) == self.DICTATED_BEFORE_END
 
 
 # ============================================================================

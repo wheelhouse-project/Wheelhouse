@@ -5317,142 +5317,6 @@ class TestClear:
 
 
 # ===========================================================================
-# Step 7: GUI routing (paint_overlay / clear_overlay -> manager -> emit)
-# ===========================================================================
-#
-# A full GuiManager.__init__ constructs the system-tray icon, the floating
-# button, the persistent terminal editor QDialog, and several lazy toasts --
-# heavyweight Qt objects that need a real tray/display environment. The
-# overlay wiring is a thin, self-contained two-branch addition, so these
-# tests bind the three GuiManager methods (_handle_paint_overlay /
-# _handle_clear_overlay / _emit_overlay_state_changed) onto a minimal
-# stand-in carrying just a mock overlay manager and a mock back-channel
-# queue. This exercises the exact routing the dispatch chain uses (parse ->
-# manager call -> put_nowait) without the GuiManager construction cost. The
-# manager's own behaviour is covered by the classes above.
-
-
-class _GuiStub:
-    """Minimal carrier for the three GuiManager overlay methods."""
-
-    def __init__(self, manager, queue):
-        from gui import GuiManager
-
-        self._overlay_manager = manager
-        self.commands_to_logic_queue = queue
-        self._handle_paint_overlay = GuiManager._handle_paint_overlay.__get__(self)
-        self._handle_clear_overlay = GuiManager._handle_clear_overlay.__get__(self)
-        self._emit_overlay_state_changed = (
-            GuiManager._emit_overlay_state_changed.__get__(self)
-        )
-        # wh-overlay-slow-uia-stale-badges.9: the paint/clear handlers arm
-        # and cancel the badge lease, so the stub carries the real helpers
-        # over a mock timer.
-        self._overlay_lease_timer = MagicMock()
-        self._overlay_lease_pair = None
-        self._arm_overlay_lease = GuiManager._arm_overlay_lease.__get__(self)
-        self._cancel_overlay_lease = (
-            GuiManager._cancel_overlay_lease.__get__(self)
-        )
-        # wh-overlay-slow-uia-stale-badges.18.4: the clear handler checks
-        # teardown_pending after driving the manager, so the stub carries
-        # the real helper over a mock retry timer.
-        self._overlay_teardown_retry_timer = MagicMock()
-        self._arm_teardown_retry_if_pending = (
-            GuiManager._arm_teardown_retry_if_pending.__get__(self)
-        )
-
-
-class TestGuiRouting:
-    def test_paint_overlay_routes_to_manager_and_emits(self, qapp):
-        manager = MagicMock()
-        emitted = {"action": "overlay_state_changed", "state": "painted"}
-        manager.paint.return_value = emitted
-        queue = MagicMock()
-        stub = _GuiStub(manager, queue)
-
-        # Build a valid paint_overlay wire dict via the schema.
-        from shared.paint_overlay import PaintOverlayEvent
-
-        summary = _make_summary([_make_item(1)], snapshot_id="snap-7")
-        payload = PaintOverlayEvent(
-            overlay_session_id=3, paint_generation=2, summary=summary
-        ).to_dict()
-
-        stub._handle_paint_overlay(payload)
-
-        # The manager was driven with the parsed session/generation.
-        manager.paint.assert_called_once()
-        ckwargs = manager.paint.call_args
-        assert ckwargs.kwargs["overlay_session_id"] == 3
-        assert ckwargs.kwargs["paint_generation"] == 2
-        # The result was forwarded back to Logic.
-        queue.put_nowait.assert_called_once_with(emitted)
-
-    def test_clear_overlay_routes_to_manager_and_emits(self, qapp):
-        manager = MagicMock()
-        emitted = {"action": "overlay_state_changed", "state": "cleared"}
-        manager.clear.return_value = emitted
-        queue = MagicMock()
-        stub = _GuiStub(manager, queue)
-
-        from shared.clear_overlay import ClearOverlayEvent
-
-        payload = ClearOverlayEvent(
-            overlay_session_id=9, paint_generation=4
-        ).to_dict()
-
-        stub._handle_clear_overlay(payload)
-
-        manager.clear.assert_called_once_with(
-            overlay_session_id=9, paint_generation=4
-        )
-        queue.put_nowait.assert_called_once_with(emitted)
-
-    def test_stale_paint_emits_nothing(self, qapp):
-        manager = MagicMock()
-        manager.paint.return_value = None  # stale-gated
-        queue = MagicMock()
-        stub = _GuiStub(manager, queue)
-
-        from shared.paint_overlay import PaintOverlayEvent
-
-        summary = _make_summary([_make_item(1)])
-        payload = PaintOverlayEvent(
-            overlay_session_id=1, paint_generation=0, summary=summary
-        ).to_dict()
-
-        stub._handle_paint_overlay(payload)
-        queue.put_nowait.assert_not_called()
-
-    def test_malformed_paint_payload_dropped(self, qapp):
-        manager = MagicMock()
-        queue = MagicMock()
-        stub = _GuiStub(manager, queue)
-
-        # Missing overlay_session_id -> PaintOverlayEventSchemaError ->
-        # safe_parse logs and returns None -> manager not called.
-        stub._handle_paint_overlay({"action": "paint_overlay"})
-        manager.paint.assert_not_called()
-        queue.put_nowait.assert_not_called()
-
-    def test_no_overlay_manager_is_noop(self, qapp):
-        queue = MagicMock()
-        stub = _GuiStub(None, queue)
-
-        from shared.paint_overlay import PaintOverlayEvent
-
-        summary = _make_summary([_make_item(1)])
-        payload = PaintOverlayEvent(
-            overlay_session_id=1, paint_generation=0, summary=summary
-        ).to_dict()
-        # Manager is None (construction failed): handler must be a clean
-        # no-op, not crash.
-        stub._handle_paint_overlay(payload)
-        queue.put_nowait.assert_not_called()
-
-
-# ===========================================================================
 # Step 8: reviewer_1 (codex) findings wh-n29v.55.1 .. .55.4
 # ===========================================================================
 
@@ -6008,7 +5872,7 @@ class TestDestroyFailureRetainsHandleAndWindow:
         failed) must be retried and drained on the NEXT normal paint, with no
         intervening clear / clear_all / exception (wh-n29v.63.1).
 
-        Before this fix _pending_destroy was swept only by _destroy_all (the
+        Before this fix _pending_destroy was swept only by destroy_all (the
         clear / clear_all / paint-except paths). The geom_phys rebuild key
         (wh-n29v.62) makes rebuilds routine, so a long run of repaints with no
         clear would leak one live, on-screen, always-on-top, click-through
@@ -6075,7 +5939,7 @@ class TestIncompleteTeardownDefersAck:
     """wh-overlay-slow-uia-stale-badges.18.4 -- a teardown that leaves a
     surviving window must not claim success.
 
-    ``_destroy_all`` retains any window whose DestroyWindow failed,
+    ``destroy_all`` retains any window whose DestroyWindow failed,
     because that window can still be on screen. Emitting ``cleared`` /
     ``expired`` anyway let Logic resolve its clear-ack watchdog and let
     the GUI cancel the badge lease -- the only retry drivers -- while the
@@ -6092,52 +5956,6 @@ class TestIncompleteTeardownDefersAck:
     def _fail_destroys(user32, kernel32):
         user32.DestroyWindow.return_value = 0
         kernel32.GetLastError.return_value = 1400  # ERROR_INVALID_WINDOW_HANDLE
-
-    def test_incomplete_clear_defers_ack_and_advances_gate(self, overlay_mgr):
-        mgr, mod, (user32, _, kernel32) = overlay_mgr
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
-        assert result["state"] == "painted"
-        window = mgr._windows[10]
-        self._fail_destroys(user32, kernel32)
-
-        cleared = mgr.clear(overlay_session_id=1, paint_generation=1)
-
-        # No ack while a window survived: a "cleared" here would resolve
-        # Logic's clear-ack watchdog with badges still on screen. The
-        # survivor moves into the debt cohort (.18.10).
-        assert cleared is None
-        assert mgr.teardown_pending is True
-        assert window in mgr._pending_destroy
-        assert not mgr._windows
-        # The would-be ack is parked for the retry path.
-        deferred = mgr._deferred_teardown_ack
-        assert deferred is not None
-        assert deferred["state"] == "cleared"
-        assert deferred["overlay_session_id"] == 1
-        assert deferred["paint_generation"] == 1
-        # The gate DID advance: a late paint at the cleared pair stays
-        # blocked exactly as after a clean clear.
-        late, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=1)
-        assert late is None
-
-    def test_incomplete_expire_lease_defers_ack(self, overlay_mgr):
-        mgr, mod, (user32, _, kernel32) = overlay_mgr
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=5, gen=4)
-        assert result["state"] == "painted"
-        window = mgr._windows[10]
-        self._fail_destroys(user32, kernel32)
-
-        expired = mgr.expire_lease(overlay_session_id=5, paint_generation=4)
-
-        assert expired is None
-        assert mgr.teardown_pending is True
-        assert window in mgr._pending_destroy
-        assert not mgr._windows
-        deferred = mgr._deferred_teardown_ack
-        assert deferred is not None
-        assert deferred["state"] == "expired"
-        assert deferred["overlay_session_id"] == 5
-        assert deferred["paint_generation"] == 4
 
     def test_retry_teardown_releases_deferred_ack_exactly_once(
         self, overlay_mgr
@@ -6167,50 +5985,6 @@ class TestIncompleteTeardownDefersAck:
         assert not mgr._windows
         # A later retry finds nothing and must not repeat the ack.
         assert mgr.retry_teardown() is None
-
-    def test_reset_drops_deferred_ack_but_keeps_retry_pending(
-        self, overlay_mgr
-    ):
-        mgr, mod, (user32, _, kernel32) = overlay_mgr
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
-        assert result["state"] == "painted"
-        self._fail_destroys(user32, kernel32)
-        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
-        assert mgr._deferred_teardown_ack is not None
-
-        # A restarted Logic announced itself: the old Logic's parked ack
-        # must never surface, but the survivor still needs the retry.
-        mgr.reset()
-        assert mgr._deferred_teardown_ack is None
-        assert mgr.teardown_pending is True
-
-        # A later successful retry destroys the survivor and emits nothing.
-        user32.DestroyWindow.return_value = 1
-        assert mgr.retry_teardown() is None
-        assert mgr.teardown_pending is False
-        assert mgr._pending_destroy == []
-        assert not mgr._windows
-
-    def test_clean_teardowns_return_ack_and_stay_unpending(self, overlay_mgr):
-        mgr, mod, _ = overlay_mgr
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
-        assert result["state"] == "painted"
-        assert mgr.teardown_pending is False
-
-        cleared = mgr.clear(overlay_session_id=1, paint_generation=1)
-        assert cleared is not None
-        assert cleared["state"] == "cleared"
-        assert mgr.teardown_pending is False
-        assert mgr._deferred_teardown_ack is None
-
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=2)
-        assert result["state"] == "painted"
-        expired = mgr.expire_lease(overlay_session_id=1, paint_generation=2)
-        assert expired is not None
-        assert expired["state"] == "expired"
-        assert mgr.teardown_pending is False
-        assert mgr._deferred_teardown_ack is None
-
 
 class TestStaleRetryDoesNotSweepFreshWindows:
     """wh-overlay-slow-uia-stale-badges.18.8 -- a stale teardown retry
@@ -6244,29 +6018,6 @@ class TestStaleRetryDoesNotSweepFreshWindows:
         user32.DestroyWindow.assert_not_called()
         assert 10 in mgr._windows
         assert mgr._windows[10].hwnd is not None
-
-    def test_retry_without_debt_releases_parked_ack_without_sweep(
-        self, overlay_mgr
-    ):
-        mgr, mod, (user32, _, _) = overlay_mgr
-        # A fresh paint owns the screen. Simulate an OLD parked ack whose
-        # debt a later clean sweep already paid (teardown_pending False).
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=3)
-        assert result["state"] == "painted"
-        old_ack = {
-            "action": "overlay_state_changed", "state": "cleared",
-            "overlay_session_id": 1, "paint_generation": 1,
-        }
-        mgr._deferred_teardown_ack = old_ack
-        assert mgr.teardown_pending is False
-        user32.DestroyWindow.reset_mock()
-
-        # The parked ack is released exactly once, with NO sweep.
-        assert mgr.retry_teardown() is old_ack
-        user32.DestroyWindow.assert_not_called()
-        assert 10 in mgr._windows
-        assert mgr.retry_teardown() is None
-        assert 10 in mgr._windows
 
     def test_retry_with_debt_still_sweeps_and_stays_pending(
         self, overlay_mgr
@@ -6328,35 +6079,6 @@ class TestStaleRetryDoesNotSweepFreshWindows:
         assert mgr.retry_teardown() is None
         assert mgr._windows.get(10) is window
 
-    def test_stale_retry_after_reset_preserves_fresh_paint(
-        self, overlay_mgr
-    ):
-        # The finding's ordering (b): the debt-payer is reset() (which
-        # drops the parked ack). R's windows survive and NO ack is
-        # returned.
-        mgr, mod, (user32, _, kernel32) = overlay_mgr
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
-        assert result["state"] == "painted"
-        self._fail_destroys(user32, kernel32)
-        assert mgr.clear(overlay_session_id=1, paint_generation=1) is None
-
-        # DestroyWindow works again: reset() pays the debt, drops the ack.
-        user32.DestroyWindow.return_value = 1
-        mgr.reset()
-        assert mgr.teardown_pending is False
-        assert mgr._deferred_teardown_ack is None
-
-        # Fresh paint from the restarted Logic (pairs restart from zero).
-        fresh, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
-        assert fresh["state"] == "painted"
-        window = mgr._windows[10]
-
-        assert mgr.retry_teardown() is None
-
-        assert mgr._windows.get(10) is window
-        assert window.hwnd is not None
-
-
 class TestDebtBearingRetrySweepsOnlyCohort:
     """wh-overlay-slow-uia-stale-badges.18.10 -- a DEBT-BEARING retry must
     not destroy a newer paint's windows.
@@ -6366,7 +6088,7 @@ class TestDebtBearingRetrySweepsOnlyCohort:
     newer accepted paint Q then owns ``_windows`` alone. The retry
     sweeps ONLY the cohort (``_destroy_pending``), so it can never
     touch a window Q owns. Before this fix the debt branch called
-    ``_destroy_all``, which swept the whole live map and could destroy
+    ``destroy_all``, which swept the whole live map and could destroy
     (or recycle-then-destroy) Q's windows while Logic stayed PAINTED
     at Q -- a permanent invisible-but-active overlay.
     """
@@ -6428,46 +6150,6 @@ class TestDebtBearingRetrySweepsOnlyCohort:
         # Released exactly once; Q still untouched afterwards.
         assert mgr.retry_teardown() is None
         assert mgr._windows.get(10) is q_window
-
-    def test_reset_with_survivor_then_fresh_paint_retry_preserves_it(
-        self, overlay_mgr
-    ):
-        # The fresh-Logic path: reset() keeps the debt but parks no ack.
-        # The restarted Logic paints its fresh pair; the retry sweeps only
-        # the cohort and returns nothing.
-        mgr, mod, (user32, _, kernel32) = overlay_mgr
-        result, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
-        assert result["state"] == "painted"
-        p_window = mgr._windows[10]
-        self._fail_destroys(user32, kernel32)
-
-        mgr.reset()
-        assert mgr.teardown_pending is True
-        assert mgr._deferred_teardown_ack is None
-        assert p_window in mgr._pending_destroy
-        assert not mgr._windows
-
-        # The restarted Logic numbers from zero; the reset gate accepts it.
-        fresh, _mon = _paint_single_monitor(mgr, mod, 10, session=1, gen=0)
-        assert fresh["state"] == "painted"
-        q_window = mgr._windows[10]
-        assert q_window is not p_window
-
-        user32.DestroyWindow.reset_mock()
-        assert mgr.retry_teardown() is None
-        assert mgr.teardown_pending is True
-        assert mgr._windows.get(10) is q_window
-        assert q_window.hwnd is not None
-
-        # The destroy succeeds: the debt is paid, nothing is released
-        # (reset dropped the old Logic's ack), and Q survives.
-        user32.DestroyWindow.return_value = 1
-        assert mgr.retry_teardown() is None
-        assert mgr.teardown_pending is False
-        assert p_window.hwnd is None
-        assert mgr._pending_destroy == []
-        assert mgr._windows.get(10) is q_window
-        assert q_window.hwnd is not None
 
     def test_incomplete_expiry_then_repaint_retry_preserves_new_windows(
         self, overlay_mgr

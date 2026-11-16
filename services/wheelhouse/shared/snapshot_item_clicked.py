@@ -20,7 +20,7 @@ Transport: GuiManager.send_command puts a dict produced by
 ``SnapshotItemClickedEvent.to_dict()`` -- shape
 ``{"action": "snapshot_item_clicked", "snapshot_id": "...",
 "display_number": N}`` -- onto the existing commands_to_logic_queue.
-``LogicController._listen_for_gui_commands`` routes the action via its
+``LogicController.listen_for_gui_commands`` routes the action via its
 handler_map; the handler validates the schema with :func:`safe_parse`
 (wh-uf54) so a malformed payload is logged and dropped rather than
 crashing the GUI command listener.
@@ -61,7 +61,7 @@ class SnapshotItemClickedEvent:
         The returned dict is the action payload that GuiManager.send_command
         puts onto commands_to_logic_queue; the ``"action"`` key carries
         ``ACTION_NAME`` so the existing dispatch in
-        ``_listen_for_gui_commands`` can route it.
+        ``listen_for_gui_commands`` can route it.
         """
 
         return {

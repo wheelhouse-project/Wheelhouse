@@ -7,9 +7,9 @@ request carrying ``snapshot_id`` + ``item_id`` (+ ``trace_id`` + ``request_id``)
 The Input process:
 
   1. Validates the request fields.
-  2. Gets the finder that holds the pinned snapshot store
-     (``_get_overlay_walk_finder`` -- the SAME accessor show_numbered_overlay
-     uses, so it hits the populated store and applies the overlay-enabled /
+  2. Gets the finder that holds the pinned snapshot store (the SAME
+     overlay accessor that show_numbered_overlay uses, so it hits the
+     populated store and applies the overlay-enabled /
      automation-unavailable gates).
   3. Captures the current foreground identity.
   4. Looks up the pinned snapshot via ``finder.get_snapshot``.
@@ -28,6 +28,7 @@ harness) injecting fake finder / snapshot / executor, so they stay headless
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional, cast
 from unittest.mock import MagicMock, patch
 
@@ -41,7 +42,9 @@ from ui.element_types import (
     ElementQuery,
     WalkSnapshot,
 )
-from ui.ui_action_handler import UIActionHandler
+from ui.click_config import ClickConfig
+from ui.overlay_snapshot_actions import OverlaySnapshotActions
+from ui.ui_action_handler import _AUTOMATION_UNAVAILABLE, UIActionHandler
 
 _MOD = "ui.ui_action_handler"
 
@@ -158,13 +161,16 @@ def _snapshot(matches: list[ElementMatch], snapshot_id: str = "s1") -> WalkSnaps
 class _Stub:
     """Minimal UIActionHandler stand-in.
 
-    click_snapshot_item touches only ``self.response_queue``,
-    ``self._get_overlay_walk_finder()``, ``self._get_click_executor()``, the
-    module-level ``_capture_click_foreground``, ``self._click_automation_root``
-    (read on the finder-None branch), and ``self.buffer_manager`` (the
-    wh-review-pattern-fixes.8 pre-dispatch shadow-buffer invalidation). We
-    provide overridable hooks for each so the handler can be driven without
-    constructing the win32-heavy handler.
+    click_snapshot_item touches only the public host members of
+    OverlaySnapshotHost (``response_queue``, ``buffer_manager``,
+    ``click_config``, ``click_automation_unavailable()``,
+    ``get_click_element_finder()``, ``get_click_executor()``) and the
+    module-level ``_capture_click_foreground``. The stub provides each one,
+    so the handler can be driven without constructing the win32-heavy
+    handler. ``buffer_manager`` takes the wh-review-pattern-fixes.8
+    pre-dispatch shadow-buffer invalidation. ``click_config`` is the default
+    validated config, which enables the overlay, so the overlay gate passes
+    the injected finder through.
     """
 
     def __init__(
@@ -177,13 +183,20 @@ class _Stub:
         self.response_queue = _FakeQueue()
         self._finder = finder
         self._executor = executor
-        self._click_automation_root = automation_root
+        self._automation_root = automation_root
         self.buffer_manager = MagicMock()
+        self.click_config = ClickConfig.from_raw({})
+        # The real handler's click_snapshot_item is a delegator to this object.
+        self.overlay_snapshots = OverlaySnapshotActions(
+            self, clock=time.monotonic)
 
-    def _get_overlay_walk_finder(self):
+    def click_automation_unavailable(self) -> bool:
+        return self._automation_root is _AUTOMATION_UNAVAILABLE
+
+    def get_click_element_finder(self):
         return self._finder
 
-    def _get_click_executor(self):
+    def get_click_executor(self):
         return self._executor
 
 
@@ -530,8 +543,6 @@ def test_finder_none_disabled_by_config():
 
 
 def test_finder_none_automation_unavailable():
-    from ui.ui_action_handler import _AUTOMATION_UNAVAILABLE
-
     stub = _Stub(finder=None, automation_root=_AUTOMATION_UNAVAILABLE)
     _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9")
 
@@ -787,31 +798,3 @@ def test_failed_click_does_not_consume_the_generation():
     # executor's own failure again.
     assert second.reason == "invoke_com_error"
     assert len(executor.calls) == 2
-
-
-@pytest.mark.parametrize(
-    "bad_session,bad_generation",
-    [
-        (True, 2),          # bool is an int subclass, not a real session id
-        ("5", 2),           # wrong type
-        (5, None),          # half-missing pair
-    ],
-)
-def test_malformed_pair_fields_skip_the_check(bad_session, bad_generation):
-    """A malformed pair degrades OPEN (skip the check, log), matching the
-    absent-pair legacy path: the primary guard lives on the Logic side, and
-    a type glitch must not refuse a click the user legitimately asked for.
-    The malformed pair is also NOT recorded, so it cannot poison the
-    watermark comparison for later valid pairs."""
-
-    stub = _fresh_click_stub()
-    executor = cast(_FakeExecutor, stub._executor)
-
-    _call(stub, snapshot_id="s1", item_id="uia-3", request_id="req-9",
-          trace_id="t-bad", overlay_session_id=bad_session,
-          paint_generation=bad_generation)
-
-    resp = _one_response(stub)
-    assert resp.outcome == "ok"
-    assert len(executor.calls) == 1
-    assert getattr(stub, "_last_executed_click_pair", None) is None

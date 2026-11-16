@@ -148,7 +148,7 @@ class Recording:
     def click_point(self, x, y, button="left", click_count=1):
         """Record a mouse-grid click and report that it landed.
 
-        wh-review-pattern-fixes.42: ``UIActionHandler._mouse_click_seam``
+        wh-review-pattern-fixes.42: ``MousePointerActions.mouse_click_seam``
         holds ``_win32_click_point``, which imports
         ``utils.win_input_sender.click_point`` inside the function body. An
         unpatched call moves and clicks the real mouse.

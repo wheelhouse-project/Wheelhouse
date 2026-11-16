@@ -12,7 +12,7 @@ Two defects found by the 2026-07-10 wheelhouse.log investigation:
   through a fire-and-forget pre-warm future and the unconditional
   shutdown ended an 18-hour session while the user was idle.
 
-* wh-logic-exit-hang: ``_listen_for_gui_commands`` parked a
+* wh-logic-exit-hang: ``listen_for_gui_commands`` parked a
   default-executor worker thread in an unbounded
   ``commands_from_gui_queue.get()``. Once the GUI process (the only
   producer) exits during shutdown, nothing can unblock that thread;
@@ -172,7 +172,7 @@ async def test_gui_listener_worker_thread_releases_queue_after_shutdown():
     commands = _RecordingQueue()
 
     task = asyncio.create_task(
-        LogicController._listen_for_gui_commands(controller, commands)
+        LogicController.listen_for_gui_commands(controller, commands)
     )
     try:
         # Let the listener start and park its worker on the empty queue.

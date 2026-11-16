@@ -45,6 +45,43 @@ by the installer from the sherpa-onnx release assets. Model license
 details are published with the model by its upstream maintainers
 (NVIDIA NeMo / k2-fsa sherpa-onnx).
 
+## Copied source code
+
+One third-party file is copied into the Wheelhouse development
+repository. It is a release tool: the help-document build uses it, and
+the Wheelhouse application does not. The public release does not
+include it, because the release export removes `scripts/release/`.
+
+| File | Source | License |
+|------|--------|---------|
+| `scripts/release/helpdoc/ste_check.py` | [Dodaios/ste80-humanizer](https://github.com/Dodaios/ste80-humanizer), `scripts/ste_check.py` at commit `6a69c447a3eb24c7d403aea5fc04f965ad6dafcc`, unchanged | MIT |
+
+The license of that file:
+
+```
+MIT License
+
+Copyright (c) 2026 Dodaios
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Inventory
 
 The dependency license audit backing this file was last run on

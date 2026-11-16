@@ -1801,15 +1801,14 @@ class ActionFunctions:
                 # same check as the non-deferred path in
                 # LogicController.forward_click_element
                 # (wh-click-off-notice-once).
-                if lc._click_disabled_notice_shown:
+                if not lc.take_click_disabled_notice():
                     logger.debug(
                         "click_element: disabled by config; notice already "
                         "shown this session (trace_id=%s)",
                         kwargs.get("trace_id"),
                     )
                     return
-                lc._click_disabled_notice_shown = True
-            lc._forward_click_notice(**kwargs)
+            lc.forward_click_notice(**kwargs)
 
         return StepFailed(text, show=show)
 

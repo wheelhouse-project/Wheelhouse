@@ -196,8 +196,7 @@ def map_foreground_event(
     ``dismisses_numbers`` (wh-numbers-stay-setting) is True when the caller
     decided that the user moved to another application window. The decision
     needs Win32 reads and Logic's process list, so it lives in
-    ``LogicController._foreground_change_dismisses_numbers``; this mapper only
-    carries the answer. The menu mapper, the Pattern Manager decision and the
+    ``NumberedOverlayController``; this mapper only carries the answer. The menu mapper, the Pattern Manager decision and the
     browser timer never set it.
     """
     return OverlayEvent(

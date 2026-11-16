@@ -167,6 +167,16 @@ class ServiceManager:
         """Sets the logic controller after initialization to break circular dependency."""
         self.logic_controller = logic_controller
 
+    def overlay_pointer_input_listener(self):
+        """The numbered overlay's entry for mouse clicks and wheel steps.
+
+        ``NumberedOverlayController.note_pointer_input`` of the Logic
+        controller, or None before ``set_logic_controller`` has run
+        (wh-overlay-refresh-after-mouse).
+        """
+        overlay = getattr(self.logic_controller, "overlay", None)
+        return getattr(overlay, "note_pointer_input", None)
+
     def initialize_services(self):
         """:flow: Application Lifecycle
         :step: 4
@@ -209,6 +219,11 @@ class ServiceManager:
         )
         
         self.mouse_handler = MouseHandler(self.loop, self.config_service, self.app, self.audio_monitor, self.bravia_control, self.software_dimmer, self.event_bus)
+        # wh-overlay-refresh-after-mouse: clicks and wheel steps reach the
+        # numbered overlay, which reads the numbers again after they stop.
+        self.mouse_handler.set_pointer_input_listener(
+            self.overlay_pointer_input_listener()
+        )
         self.speech_handler = SpeechHandler(self.app, self.logic_controller, self.config_service)
         
         # Initialize plugin system

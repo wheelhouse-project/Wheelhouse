@@ -76,7 +76,7 @@ class TestHeldTailStorage:
         assert proc._held_tail.kind.name == "BARE_NUMBER"
         assert proc._pending_bare_number_words == ["twenty"]
         # The extend path mutates the held list in place
-        # (_extend_bare_number_hold does held.append(text)); the
+        # (extend_bare_number_hold does held.append(text)); the
         # property must hand back the live list, not a copy.
         proc._pending_bare_number_words.append("three")
         assert proc._held_tail.words == ["twenty", "three"]

@@ -20,7 +20,7 @@ split-site-sends-end-early, remainder-site-sends-end-early,
 marker-branch-post-consume-send-dropped, punctuated-rematch-dropped).
 Mutations whose code outlived the split were retargeted to the tests
 that still depend on that code. One more, flag-driven-split-dropped
-(the flagged-last-word arm of _utterance_end_is_confirmed), lost its
+(the flagged-last-word arm of utterance_end_is_confirmed), lost its
 only catcher with the split: measured by applying it and running all six
 files, 0 failures. BOSS RULING 02:27 2026-09-27 (Q3) restored it, with a
 new catcher in the badge-click suite: a multi-word badge number whose
@@ -61,7 +61,7 @@ speech/speech_processor.py:
                                "xray" (review finding .3.1.2).
   marker-active-never-set      The end-marker branch stops declaring
                                its finalization context.
-  flag-driven-split-dropped    _utterance_end_is_confirmed stops
+  flag-driven-split-dropped    utterance_end_is_confirmed stops
                                counting a flagged last real word as a
                                confirmed end, so the in-process
                                bridge's finalization types a
@@ -160,6 +160,7 @@ sys.stdout.reconfigure(line_buffering=True)
 SERVICE = Path(__file__).resolve().parent.parent
 ROUTER = SERVICE / "speech" / "router.py"
 PROC = SERVICE / "speech" / "speech_processor.py"
+BARE_HOLDS = SERVICE / "speech" / "bare_number_holds.py"
 
 WHOLE = "tests/test_whole_utterance_finalization.py"
 GAPS = "tests/test_router_gaps.py"
@@ -271,7 +272,7 @@ MUTATIONS = [
         # them; the else arm this mutation removes is unchanged.
         "old": """            await self._flush_pending_replacement_prefix_as_dictation()
         else:
-            await self._consume_pending_bare_number()
+            await self.bare_number_holds.consume_pending_bare_number()
 """,
         "new": """            await self._flush_pending_replacement_prefix_as_dictation()
         else:
@@ -334,13 +335,13 @@ MUTATIONS = [
     },
     {
         "name": "flag-driven-split-dropped",
-        "src": PROC,
+        "src": BARE_HOLDS,
         "files": [GRID],
         # Removes the flagged-last-word arm from the helper's return. Its
         # first catcher was the trailing-command split (removed by
         # wh-remove-trailing-submit); BOSS RULING 02:27 2026-09-27 (Q3)
         # gave it the badge-click catcher below.
-        "old": """        return self._marker_finalization_active or (
+        "old": """        return self._host.marker_finalization_active or (
             word_event is not None
             and word_event.end_of_utterance
             and bool(word_event.word)
@@ -350,7 +351,7 @@ MUTATIONS = [
             and not word_event.is_lifecycle_reset_marker
         )
 """,
-        "new": """        return self._marker_finalization_active
+        "new": """        return self._host.marker_finalization_active
 """,
         "expect": [
             "test_a_flagged_last_word_confirms_the_end_and_clicks_the_badge",
@@ -600,11 +601,32 @@ def error_lines(output):
     ]
 
 
+def _build_mutant(mut, text):
+    """Return (mutated, problem, kind) for one mutation against its source.
+
+    ``kind`` is "stale" for a pattern that does not match exactly once and
+    "nocompile" for a mutant that does not parse. The full sweep and --check
+    both build mutants here, so they cannot disagree (wh-gate-check-mode-missing).
+    """
+    count = text.count(mut["old"])
+    if count != 1:
+        return None, f"pattern matched {count} times, expected 1", "stale"
+    mutated = text.replace(mut["old"], mut["new"], 1)
+    try:
+        compile(mutated, str(mut["src"]), "exec")
+    except SyntaxError as exc:
+        return None, f"mutated source does not compile: {exc}", "nocompile"
+    return mutated, None, None
+
+
 def main():
+    argv = sys.argv[1:]
+    check_only = "--check" in argv
+    argv = [a for a in argv if a != "--check"]
     mutations = MUTATIONS
     skipped = 0
-    if len(sys.argv) > 2 and sys.argv[1] == "--only":
-        wanted = set(sys.argv[2].split(","))
+    if len(argv) > 1 and argv[0] == "--only":
+        wanted = set(argv[1].split(","))
         known = {m["name"] for m in MUTATIONS}
         unknown = wanted - known
         if unknown:
@@ -612,13 +634,13 @@ def main():
             return 1
         mutations = [m for m in MUTATIONS if m["name"] in wanted]
         skipped = len(MUTATIONS) - len(mutations)
-    elif len(sys.argv) > 1:
-        print(f"ERROR unrecognized arguments: {sys.argv[1:]}")
+    elif argv:
+        print(f"ERROR unrecognized arguments: {argv}")
         return 1
 
     originals = {}
     texts = {}
-    for src in (ROUTER, PROC):
+    for src in (ROUTER, PROC, BARE_HOLDS):
         raw = src.read_bytes()
         originals[src] = raw
         newline = "\r\n" if b"\r\n" in raw else "\n"
@@ -634,6 +656,23 @@ def main():
 
     errors, caught, survived = [], [], []
 
+    if check_only:
+        # --check changes no file and runs no test except --collect-only.
+        # Output form and exit codes match
+        # mutation_gate_loading_dialog_until_ready.py: the "checked N
+        # patterns" line, a PRE-FLIGHT ERRORS block, exit 2 on any problem.
+        stale = nocompile = 0
+        for mut in mutations:
+            _, problem, kind = _build_mutant(mut, texts[mut["src"]][0])
+            if problem:
+                stale += kind == "stale"
+                nocompile += kind == "nocompile"
+                errors.append(f"{mut['name']}: {problem}")
+        print(
+            f"checked {len(mutations)} patterns, {stale} stale or ambiguous, "
+            f"{nocompile} that do not compile"
+        )
+
     real_names = collect_names()
     print(f"collected {len(real_names)} test names in {', '.join(ALL_FILES)}")
     for mut in mutations:
@@ -643,9 +682,18 @@ def main():
                     f"{mut['name']}: expected test {name!r} does not exist"
                 )
     if errors:
+        if check_only:
+            print("\n=== PRE-FLIGHT ERRORS ===")
+            for line in errors:
+                print("  " + line)
+            return 2
         for line in errors:
             print("ERROR", line)
         return 1
+    if check_only:
+        print("\n--check: patterns match once, mutants compile, catcher "
+              "names exist.")
+        return 0
 
     baseline = _pytest(*ALL_FILES, *PYTEST_ARGS)
     if baseline.returncode != 0:
@@ -657,20 +705,9 @@ def main():
     for mut in mutations:
         src = mut["src"]
         text = texts[src][0]
-        count = text.count(mut["old"])
-        if count != 1:
-            errors.append(
-                f"{mut['name']}: pattern matched {count} times, expected 1"
-            )
-            print("ERROR", errors[-1])
-            continue
-        mutated = text.replace(mut["old"], mut["new"], 1)
-        try:
-            compile(mutated, str(src), "exec")
-        except SyntaxError as exc:
-            errors.append(
-                f"{mut['name']}: mutated source does not compile: {exc}"
-            )
+        mutated, problem, _kind = _build_mutant(mut, text)
+        if problem:
+            errors.append(f"{mut['name']}: {problem}")
             print("ERROR", errors[-1])
             continue
         src.write_bytes(mutated.encode("utf-8"))

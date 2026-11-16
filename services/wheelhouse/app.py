@@ -359,8 +359,8 @@ class WheelHouseApp:
             # to avoid chicken-and-egg problem with initialization order
         else:
             self.websocket_manager = WebSocketManager(asyncio.get_running_loop(), text_handler=text_handler)
-        self._start_demuxer()
-        self._start_sender()
+        self.start_demuxer()
+        self.start_sender()
         
         self.ws_port = await self.websocket_manager.start(host, port)
         logger.info(f"WebSocket server started on port {self.ws_port}")
@@ -384,12 +384,12 @@ class WheelHouseApp:
         logger.info("WheelHouseApp background tasks stopped.")
 
 
-    def _start_demuxer(self) -> None:
+    def start_demuxer(self) -> None:
         if self.demuxer_task is None or self.demuxer_task.done():
             self.demuxer_task = asyncio.create_task(self._demux_loop())
             logger.info("Response demuxer task started.")
 
-    def _start_sender(self) -> None:
+    def start_sender(self) -> None:
         if self._sender_task is None or self._sender_task.done():
             self._sender_task = asyncio.create_task(self._sender_loop())
             logger.info("Outbound sender task started.")

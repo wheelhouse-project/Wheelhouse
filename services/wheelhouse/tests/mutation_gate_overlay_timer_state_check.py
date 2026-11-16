@@ -28,8 +28,9 @@ here removes exactly one of them.
 
   armed-state-check-dropped     The callback no longer compares the state it
                                 was armed for against the machine's current
-                                state, so a stale TIMEOUT is fed. All four
-                                same-pair families catch it.
+                                state, so a stale TIMEOUT is fed. The LC-48
+                                boundary test catches it: the paint deadline
+                                comes due as the painted ack commits.
   armed-state-read-from-the-bookkeeping
                                 The check is present but compares against
                                 ``_overlay_armed_timer_state`` instead of the
@@ -37,8 +38,9 @@ here removes exactly one of them.
                                 rewrites that field, and neither has run at
                                 the racing instant, so the comparison always
                                 passes and every family gets through. This is
-                                the plausible wrong fix, and the four families
-                                are what tell it from the right one.
+                                the plausible wrong fix, and the LC-48
+                                boundary test is what tells it from the right
+                                one.
   none-armed-state-fires        The state comparison is made to tolerate a
                                 None armed state, so a timer armed with no
                                 state fires on no evidence that the machine
@@ -57,15 +59,22 @@ here removes exactly one of them.
                                 live timer's handle and that timer can no
                                 longer be cancelled.
 
-All six must be caught. Pattern-not-found, an ambiguous pattern, a mutation
+The first two must be caught. The other four are declared expected
+survivors with the key "survives" and a reason (wh-full-refactor.3.1): the
+old tests that caught them drove the machine into an order no boundary test
+can produce, and the stage deleted them. An expected survivor
+passes only when its whole selection stays green; any failed test prints
+"CAUGHT EXPECTED SURVIVOR" and the gate exits 1, because that test shows the
+reason is no longer true. Pattern-not-found, an ambiguous pattern, a mutation
 that does not compile, a per-mutation timeout, a suite-timeout abort, a
 skipped catcher and a missing expected test name are reported as errors,
 never as a verdict. A mutant write that fails is an error too, and a restore
-that cannot be proved stops the sweep outright: main.py is the live Logic
+that cannot be proved stops the sweep outright: the controller module is the live Logic
 source, and a mutant left in it is read as real code by every later run
 (wh-overlay-timer-cancel-race.2.1). ``--check`` verifies every pattern
 matches exactly once in the current source and that every mutant compiles,
-without running a test.
+without running a test, and refuses an expected survivor whose reason is
+blank.
 """
 
 import os
@@ -77,10 +86,11 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 
 SERVICE = Path(__file__).resolve().parent.parent
-SRC = SERVICE / "main.py"
+SRC = SERVICE / "numbered_overlay" / "controller.py"
 
 INTEGRATION = "tests/test_logic_overlay_integration.py"
-ALL_FILES = [INTEGRATION]
+LIFECYCLE = "tests/test_overlay_requirements_lifecycle.py"
+ALL_FILES = [INTEGRATION, LIFECYCLE]
 
 # -v prints one line per test, which is what names a SKIPPED catcher; -rf
 # keeps the FAILED summary lines failed_names() reads.
@@ -118,24 +128,23 @@ _STATE_HALF = (
 )
 
 # --- catcher names -------------------------------------------------------
-WALK_TO_PAINT = "test_a_ready_walk_timeout_does_not_close_a_successful_build"
-WALK_TO_PAUSED = (
-    "test_a_ready_walk_timeout_does_not_error_a_pause_during_the_walk"
+# wh-full-refactor.3.1: the boundary test that replaces the six old catchers.
+PAINT_DUE_AS_ACK_COMMITS = (
+    "test_lc_48_paint_deadline_due_as_the_painted_ack_commits_closes_nothing"
 )
-PAINT_TO_PAINTED = (
-    "test_a_ready_paint_timeout_does_not_error_a_completed_paint"
-)
-REFRESH_TO_PAINTED = (
-    "test_a_ready_refresh_timeout_does_not_error_a_resolved_refresh"
-)
-SUPERSEDED_ARM = (
-    "test_a_stale_callback_does_not_clear_a_later_timers_bookkeeping"
-)
-NO_ARMED_STATE = "test_a_timer_armed_with_no_state_does_not_fire"
 
-FOUR_FAMILIES = [
-    WALK_TO_PAINT, WALK_TO_PAUSED, PAINT_TO_PAINTED, REFRESH_TO_PAINTED,
-]
+SELECTION = list(ALL_FILES)
+
+# The reason for the three arm-id mutations, from the stage inventory
+# (wh-full-refactor.3.1, result 4b T1). Read at 5fc9b13c: every
+# _arm_timer( call in click_overlay_state.py that re-arms the same state
+# follows _bump_generation or starts a new session, and the others arm a
+# different state.
+_SAME_PAIR_REARM = (
+    "Needs a second ARM_TIMER for the same state at the same pair while the "
+    "first callback is queued: every same-state re-arm in "
+    "click_overlay_state.py follows _bump_generation or a new session"
+)
 
 MUTATIONS = [
     {
@@ -146,8 +155,8 @@ MUTATIONS = [
         "name": "armed-state-check-dropped",
         "old": _STATE_CHECK,
         "new": "        pass\n",
-        "selection": ALL_FILES,
-        "expect": FOUR_FAMILIES,
+        "selection": SELECTION,
+        "expect": [PAINT_DUE_AS_ACK_COMMITS],
     },
     {
         # The plausible wrong fix. ``_overlay_armed_timer_state`` still holds
@@ -165,8 +174,8 @@ MUTATIONS = [
             + "        if recorded is not armed_state:\n"
             + "            return\n"
         ),
-        "selection": ALL_FILES,
-        "expect": FOUR_FAMILIES,
+        "selection": SELECTION,
+        "expect": [PAINT_DUE_AS_ACK_COMMITS],
     },
     {
         # There is no separate None branch to remove: the state comparison
@@ -180,15 +189,21 @@ MUTATIONS = [
             "is not armed_state:\n"
             "            return\n"
         ),
-        "selection": ALL_FILES,
-        "expect": [NO_ARMED_STATE],
+        "selection": SELECTION,
+        "expect": [],
+        "survives": (
+            "Needs an ARM_TIMER built with timer_state None: _arm_timer in "
+            "click_overlay_state.py is the only ARM_TIMER builder, and every "
+            "call passes an OverlayState member"
+        ),
     },
     {
         "name": "arm-id-check-dropped",
         "old": _ARM_ID_CHECK,
         "new": "        pass\n",
-        "selection": ALL_FILES,
-        "expect": [SUPERSEDED_ARM],
+        "selection": SELECTION,
+        "expect": [],
+        "survives": _SAME_PAIR_REARM,
     },
     {
         # The id generator, not the check that reads it: every arm then
@@ -197,8 +212,9 @@ MUTATIONS = [
         "name": "arm-id-never-advances",
         "old": _ARM_ID_ADVANCE,
         "new": '        arm_id = getattr(self, "_overlay_timer_arm_id", 0)\n',
-        "selection": ALL_FILES,
-        "expect": [SUPERSEDED_ARM],
+        "selection": SELECTION,
+        "expect": [],
+        "survives": _SAME_PAIR_REARM,
     },
     {
         # A MOVE, not an added copy: the clears leave their place above the
@@ -208,8 +224,9 @@ MUTATIONS = [
         "name": "bookkeeping-cleared-first",
         "old": _ID_CHECK_THEN_CLEARS,
         "new": _CLEARS + _ARM_ID_CHECK,
-        "selection": ALL_FILES,
-        "expect": [SUPERSEDED_ARM],
+        "selection": SELECTION,
+        "expect": [],
+        "survives": _SAME_PAIR_REARM,
     },
 ]
 
@@ -275,11 +292,36 @@ def _build_mutant(text: str, newline: str, mut: dict):
     return mutated, None
 
 
+def _declaration_problems(mutations):
+    """Name each mutation whose expected-survivor declaration has no reason.
+
+    The same rule as the shared runner (stt_providers/shared/tests/
+    mutation_gate_runner.py): a declaration without a reason hides a
+    survivor and says nothing about why, so it is refused before any file
+    is mutated.
+    """
+    problems = []
+    for mut in mutations:
+        if "survives" not in mut:
+            continue
+        reason = mut["survives"]
+        if not isinstance(reason, str) or not reason.strip():
+            problems.append(f"{mut['name']}: an expected survivor needs a reason")
+    return problems
+
+
+def _declared(mutations):
+    return sum(1 for mut in mutations if "survives" in mut)
+
+
 def check_only():
     raw = SRC.read_bytes()
     text = raw.decode("utf-8")
     newline = _newline_of(raw)
     stale, non_compiling = [], []
+    invalid = _declaration_problems(MUTATIONS)
+    for problem in invalid:
+        print("ERROR", problem)
     for mut in MUTATIONS:
         mutant, error = _build_mutant(text, newline, mut)
         if error is None:
@@ -289,11 +331,15 @@ def check_only():
         else:
             stale.append(error)
         print("ERROR", error)
-    print(
+    line = (
         f"checked {len(MUTATIONS)} patterns, {len(stale)} stale, "
         f"{len(non_compiling)} that do not compile"
     )
-    return 1 if stale or non_compiling else 0
+    # The line keeps its old form when no mutation declares a survivor.
+    if _declared(MUTATIONS):
+        line += f", {_declared(MUTATIONS)} expected survivors"
+    print(line)
+    return 1 if stale or non_compiling or invalid else 0
 
 
 def _restore(path: Path, original: bytes) -> bool:
@@ -398,11 +444,17 @@ def main():
     mutations = _selected(sys.argv[1:])
     if mutations is None:
         return 1
+    invalid = _declaration_problems(mutations)
+    if invalid:
+        for problem in invalid:
+            print("ERROR", problem)
+        return 1
 
     original = SRC.read_bytes()
     text = original.decode("utf-8")
     newline = _newline_of(original)
     errors, caught, survived = [], [], []
+    expected, expected_caught = [], []
 
     real_names = collect_names()
     print(f"collected {len(real_names)} test names in {ALL_FILES}")
@@ -451,7 +503,7 @@ def main():
                 # mutation would run against it, and so would any other
                 # session sharing the checkout, so the sweep stops here
                 # instead of piling verdicts on top of a corrupt tree.
-                print("ERROR stopping the sweep; restore main.py by hand")
+                print("ERROR stopping the sweep; restore numbered_overlay/controller.py by hand")
                 break
             continue
         assert result is not None
@@ -466,6 +518,24 @@ def main():
             print("ERROR", errors[-1])
             continue
         missing = [n for n in mut["expect"] if n not in got]
+        if "survives" in mut:
+            # An expected survivor must leave its whole selection green. A
+            # failed test, named or not, catches the mutation, so the
+            # reason is no longer true and the declaration must go.
+            if result.returncode == 0:
+                expected.append(mut["name"])
+                print(f"expected survivor {mut['name']}: {mut['survives']}")
+            elif got:
+                expected_caught.append(mut["name"])
+                print(
+                    f"CAUGHT EXPECTED SURVIVOR {mut['name']} by {sorted(got)}"
+                )
+            else:
+                errors.append(
+                    f"{mut['name']}: exit {result.returncode} with no FAILED line"
+                )
+                print("ERROR", errors[-1])
+            continue
         if result.returncode == 0 or missing:
             survived.append(mut["name"])
             print(
@@ -479,8 +549,16 @@ def main():
     print()
     names = ", ".join(mut["name"] for mut in mutations)
     print(f"scope: {len(mutations)} mutations, none skipped: {names}")
-    print(f"caught {len(caught)}, survived {len(survived)}, errors {len(errors)}")
-    return 1 if survived or errors else 0
+    line = f"caught {len(caught)}, survived {len(survived)}, errors {len(errors)}"
+    # The line keeps its old form when no selected mutation declares a
+    # survivor, so a run of an older table prints what it always printed.
+    if _declared(mutations):
+        line += (
+            f", {len(expected)} expected survivors, "
+            f"{len(expected_caught)} expected survivors caught"
+        )
+    print(line)
+    return 1 if survived or errors or expected_caught else 0
 
 
 if __name__ == "__main__":

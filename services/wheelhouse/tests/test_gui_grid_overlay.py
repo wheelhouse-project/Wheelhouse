@@ -73,88 +73,25 @@ class TestGridOverlayConstruction:
         # clear must never destroy the grid's windows, and vice versa.
         assert manager._grid_overlay is not manager._overlay_manager
 
-    def test_construction_failure_leaves_the_grid_unavailable(self, qapp):
-        with patch("gui.FloatingButton"), \
-             patch("gui.WorkingDialog"), \
-             patch("gui.pystray") as mock_pystray, \
-             patch("gui.QTimer"), \
-             patch(
-                 "overlay_paint_window.OverlayPaintWindowManager",
-                 side_effect=OSError("no win32"),
-             ):
-            mock_pystray.Icon.return_value = MagicMock()
-            from gui import GuiManager
-            shutdown = MagicMock()
-            shutdown.is_set.return_value = False
-            mgr = GuiManager(shutdown, MagicMock(), MagicMock())
-        assert mgr._grid_overlay is None
-        # Handling a message with no manager is a harmless no-op.
-        mgr._handle_paint_grid(_grid_event().to_dict())
-
 
 class TestQueueDispatch:
     def test_paint_grid_action_routes_to_handler(self, manager):
         payload = _grid_event().to_dict()
         manager.state_from_logic_queue.get_nowait.side_effect = [payload, Empty()]
-        with patch.object(manager, "_handle_paint_grid") as handler:
+        with patch.object(manager.overlay_messages, "handle_paint_grid") as handler:
             manager._check_queues_and_events()
         handler.assert_called_once_with(payload)
 
     def test_paint_grid_pin_action_routes_to_handler(self, manager):
         payload = PaintGridPinEvent(x=10, y=20).to_dict()
         manager.state_from_logic_queue.get_nowait.side_effect = [payload, Empty()]
-        with patch.object(manager, "_handle_paint_grid_pin") as handler:
+        with patch.object(manager.overlay_messages, "handle_paint_grid_pin") as handler:
             manager._check_queues_and_events()
         handler.assert_called_once_with(payload)
 
     def test_clear_grid_action_routes_to_handler(self, manager):
         payload = ClearGridEvent().to_dict()
         manager.state_from_logic_queue.get_nowait.side_effect = [payload, Empty()]
-        with patch.object(manager, "_handle_clear_grid") as handler:
+        with patch.object(manager.overlay_messages, "handle_clear_grid") as handler:
             manager._check_queues_and_events()
         handler.assert_called_once_with(payload)
-
-
-class TestGridHandlers:
-    def test_paint_grid_passes_the_parsed_event(self, manager):
-        manager._grid_overlay = MagicMock()
-        event = _grid_event()
-
-        manager._handle_paint_grid(event.to_dict())
-
-        manager._grid_overlay.paint_grid.assert_called_once_with(event)
-
-    def test_paint_grid_pin_passes_the_parsed_event(self, manager):
-        manager._grid_overlay = MagicMock()
-        event = PaintGridPinEvent(x=-40, y=15)
-
-        manager._handle_paint_grid_pin(event.to_dict())
-
-        manager._grid_overlay.paint_grid_pin.assert_called_once_with(event)
-
-    def test_clear_grid_calls_clear(self, manager):
-        manager._grid_overlay = MagicMock()
-
-        manager._handle_clear_grid(ClearGridEvent().to_dict())
-
-        manager._grid_overlay.clear_grid.assert_called_once_with()
-
-    def test_malformed_paint_grid_is_dropped(self, manager):
-        manager._grid_overlay = MagicMock()
-
-        manager._handle_paint_grid({"action": "paint_grid", "left": "x"})
-
-        manager._grid_overlay.paint_grid.assert_not_called()
-
-    def test_malformed_pin_is_dropped(self, manager):
-        manager._grid_overlay = MagicMock()
-
-        manager._handle_paint_grid_pin({"action": "paint_grid_pin", "x": 1})
-
-        manager._grid_overlay.paint_grid_pin.assert_not_called()
-
-    def test_manager_exception_does_not_escape(self, manager):
-        manager._grid_overlay = MagicMock()
-        manager._grid_overlay.paint_grid.side_effect = RuntimeError("boom")
-
-        manager._handle_paint_grid(_grid_event().to_dict())

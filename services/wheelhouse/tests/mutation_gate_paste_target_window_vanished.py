@@ -407,6 +407,16 @@ def _real(name):
 # refuses otherwise, because source.replace(old, new, 1) would edit some
 # other part of the file and the round would report a survivor for code
 # nothing touched.
+#
+# Commit 4a0ce228 (wh-dictation-paste-loss-load.1.7) wrapped the retry
+# loop of _execute_insert_with_ack in
+# ``with self.clipboard.copy_retry_budget():``, which indented every line
+# of the loop by four more spaces. Every handler excerpt from inside that
+# loop below carries the new indentation. A single-line excerpt with the
+# old indentation still matched as the tail of the longer line, so it
+# reported no error while its replacement text sat at the wrong depth;
+# that is how the-captured-program-name-is-taken-from-the-retry came to
+# produce a mutant that does not compile.
 # ---------------------------------------------------------------------
 
 # The probe's one decisive line. ``if not hwnd: / return False / try:``
@@ -452,21 +462,21 @@ _FIELD_SET = "            target_window_gone = hwnd_no_longer_exists(target_hwnd
 # the part of this expression most likely to be reworded, and a pattern
 # that held it would go stale on a purely editorial change. The tuple
 # itself is quoted separately below, because one mutation attacks it.
-_WILL_RETRY = """                will_retry = (
-                    attempt == 0
-                    and not result.success
-                    and result.delivered_nothing
-                    and result.target_window_gone
-                    and isinstance(
+_WILL_RETRY = """                    will_retry = (
+                        attempt == 0
+                        and not result.success
+                        and result.delivered_nothing
+                        and result.target_window_gone
+                        and isinstance(
 """
 
 # The allow-list tuple inside that isinstance call, with its trailing
 # comma, which is what makes the four lines name one place.
-_WILL_RETRY_TYPES = """                        (
-                            UnicodeFirstStrategy,
-                            StandardStrategy,
-                            ClipboardOnlyStrategy,
-                        ),
+_WILL_RETRY_TYPES = """                            (
+                                UnicodeFirstStrategy,
+                                StandardStrategy,
+                                ClipboardOnlyStrategy,
+                            ),
 """
 
 # ---------------------------------------------------------------------
@@ -511,17 +521,17 @@ _STANDARD_RETURNS = _STANDARD_COMBINE + """        if shadow_result.clipboard_di
 # The RejectedInsertionStrategy write in _execute_insert_with_ack. It is
 # UNCONDITIONAL on purpose, and the two comment lines above it are what
 # separate it from the identical write in raw_insert_text.
-_REJECTED_WRITE = """                    # nothing was written, so the shadow buffer's mirror of
-                    # the target is still whatever it was.
-                    self._used_simple_paste = True
+_REJECTED_WRITE = """                        # nothing was written, so the shadow buffer's mirror of
+                        # the target is still whatever it was.
+                        self._used_simple_paste = True
 """
 
 # The retry decision's own read of that boolean. The logger call below
 # it is what makes this pattern name one place; the bookkeeping block
 # reads the same name two lines differently indented.
-_RETRY_BREAK = """                if not will_retry:
-                    break
-                logger.info(
+_RETRY_BREAK = """                    if not will_retry:
+                        break
+                    logger.info(
 """
 
 # The one write of the per-utterance retraction gate on the
@@ -536,34 +546,34 @@ _RETRY_BREAK = """                if not will_retry:
 # SimplePasteStrategy branch above and from the two parallel writes in
 # raw_insert_text, all three of which now read
 # ``if not (result.delivered_nothing and result.target_window_gone):``.
-_GATE_WRITE = """                    if not will_retry and not (
-                        result.delivered_nothing and result.target_window_gone
-                    ):
-                        self._used_simple_paste = True
+_GATE_WRITE = """                        if not will_retry and not (
+                            result.delivered_nothing and result.target_window_gone
+                        ):
+                            self._used_simple_paste = True
 """
 
 # The invalidate that must keep running for BOTH attempts, with the
 # elif after it, which is what makes the pattern name one place -- the
 # file holds twenty-one other invalidate calls.
-_INVALIDATE = """                    self.buffer_manager.invalidate()
-                elif isinstance(strategy, RejectedInsertionStrategy):
+_INVALIDATE = """                        self.buffer_manager.invalidate()
+                    elif isinstance(strategy, RejectedInsertionStrategy):
 """
 
 # The option-2 guard's three decision lines, quoted separately so each
 # mutation names the one part it attacks.
-_GUARD_HEAD = "                if attempt == 1 and (\n"
+_GUARD_HEAD = "                    if attempt == 1 and (\n"
 
-_GUARD_EMPTY = "                    not context.process_name\n"
+_GUARD_EMPTY = "                        not context.process_name\n"
 
 _GUARD_COMPARE = (
-    "                    or context.process_name != captured_process_name\n"
+    "                        or context.process_name != captured_process_name\n"
 )
 
 # The guard's refusal and the assignment that follows it. Replacing the
 # break here is what tests the ORDER: the refusal has to happen before
 # remember_target runs.
-_GUARD_REFUSAL = """                    break
-                captured_process_name = context.process_name
+_GUARD_REFUSAL = """                        break
+                    captured_process_name = context.process_name
 """
 
 # wh-lost-word-neighbour-paths.1.4: the guard that stops a retraction
@@ -571,11 +581,11 @@ _GUARD_REFUSAL = """                    break
 # retry chose. The set site sits inside the retry loop, immediately after
 # remember_target; the gate sits in retract() after the SimplePaste gate.
 _REBIND_CREDIT = (
-    "                        if held_credit and not back_at_credited:\n"
+    "                            if held_credit and not back_at_credited:\n"
 )
 
 _REBIND_FLAG = (
-    "                            self._retry_rebound_target = True\n"
+    "                                self._retry_rebound_target = True\n"
 )
 
 # wh-lost-word-neighbour-paths.1.5: the record of which window each
@@ -609,11 +619,11 @@ _RETURN_MATCH = (
 # is indented for the retry loop and wraps its condition over three
 # lines, the second is the same test written on one line at method
 # indent, and the third is distinguished by the comment line above it.
-_SIMPLE_ACK_WRITE = """                if isinstance(strategy, SimplePasteStrategy):
-                    if not (
-                        result.delivered_nothing and result.target_window_gone
-                    ):
-                        self._used_simple_paste = True
+_SIMPLE_ACK_WRITE = """                    if isinstance(strategy, SimplePasteStrategy):
+                        if not (
+                            result.delivered_nothing and result.target_window_gone
+                        ):
+                            self._used_simple_paste = True
 """
 
 _RAW_SIMPLE_WRITE = """        if isinstance(strategy, SimplePasteStrategy):
@@ -627,10 +637,16 @@ _RAW_CLIPBOARD_WRITE = """            # the target cannot be confirmed.
             # Review wh-kox5.3: invalidate the shadow buffer; see the
 """
 
+# The third line is what separates start_utterance's clear from the
+# identical two lines at the end of end_utterance. Commit 534e4862
+# (wh-dictation-paste-loss-load) inserted the current_utterance_id
+# assignment and its comment after reset_paste_counter, so that comment
+# is now the neighbouring line; the wh-9weum comment this pattern used
+# to quote sits three lines further down.
 _START_CLEAR = (
     "        self._credited_target_hwnds.clear()\n"
     "        self.clipboard.reset_paste_counter()\n"
-    "        # wh-9weum Phase 1: clear the soft-fallback strategy's\n"
+    "        # wh-dictation-paste-loss-load: the paste check's warning lines\n"
 )
 
 
@@ -716,7 +732,7 @@ MUTATIONS = [
         "name": "any-strategy-may-retry",
         "target": HANDLER,
         "old": _WILL_RETRY_TYPES,
-        "new": "                        object,\n",
+        "new": "                            object,\n",
         "expect": [
             _live("test_another_strategy_that_fails_is_never_retried"),
             # A real strategy that is deliberately off the allow-list,
@@ -780,7 +796,7 @@ MUTATIONS = [
         "name": "the-superseded-attempt-closes-the-gate",
         "target": HANDLER,
         "old": _GATE_WRITE,
-        "new": "                    self._used_simple_paste = True\n",
+        "new": "                        self._used_simple_paste = True\n",
         "expect": [
             _gate("test_a_superseded_attempt_leaves_the_delivered_word_"
                   "retractable"),
@@ -792,7 +808,7 @@ MUTATIONS = [
         "name": "the-clipboard-only-branch-stops-closing-the-gate",
         "target": HANDLER,
         "old": _GATE_WRITE,
-        "new": "                    self._used_simple_paste = False\n",
+        "new": "                        self._used_simple_paste = False\n",
         # wh-lost-word-neighbour-paths: one of the two tests whose names
         # moved is a valid catcher again, and the other is still not.
         #
@@ -876,9 +892,9 @@ MUTATIONS = [
         "target": HANDLER,
         "old": _INVALIDATE,
         "new": _INVALIDATE.replace(
-            "                    self.buffer_manager.invalidate()\n",
-            "                    if not will_retry:\n"
             "                        self.buffer_manager.invalidate()\n",
+            "                        if not will_retry:\n"
+            "                            self.buffer_manager.invalidate()\n",
         ),
         "expect": [
             _gate("test_the_superseded_attempt_keeps_its_clipboard_"
@@ -907,7 +923,7 @@ MUTATIONS = [
         "name": "the-program-comparison-is-gone",
         "target": HANDLER,
         "old": _GUARD_COMPARE,
-        "new": "                    or False\n",
+        "new": "                        or False\n",
         "expect": [
             _program("test_a_new_target_in_another_application_does_not_"
                      "get_the_word"),
@@ -919,7 +935,7 @@ MUTATIONS = [
         "name": "the-empty-program-name-is-accepted",
         "target": HANDLER,
         "old": _GUARD_EMPTY,
-        "new": "                    False\n",
+        "new": "                        False\n",
         "expect": [
             _program("test_a_capture_that_names_no_application_refuses_"
                      "the_retry"),
@@ -930,8 +946,8 @@ MUTATIONS = [
         "target": HANDLER,
         "old": _GUARD_HEAD,
         "new": (
-            "                captured_process_name = context.process_name\n"
-            "                if attempt == 1 and (\n"
+            "                    captured_process_name = context.process_name\n"
+            "                    if attempt == 1 and (\n"
         ),
         "expect": [
             _program("test_a_new_target_in_another_application_does_not_"
@@ -947,8 +963,8 @@ MUTATIONS = [
         "name": "the-program-check-stops-refusing",
         "target": HANDLER,
         "old": _GUARD_REFUSAL,
-        "new": _GUARD_REFUSAL.replace("                    break\n",
-                                      "                    pass\n"),
+        "new": _GUARD_REFUSAL.replace("                        break\n",
+                                      "                        pass\n"),
         "expect": [
             _program("test_a_new_target_in_another_application_does_not_"
                      "get_the_word"),
@@ -1105,8 +1121,8 @@ MUTATIONS = [
         "name": "an-empty-word-still-closes-the-gate",
         "target": HANDLER,
         "old": _GATE_WRITE,
-        "new": """                    if not will_retry:
-                        self._used_simple_paste = True
+        "new": """                        if not will_retry:
+                            self._used_simple_paste = True
 """,
         # This reverts BOTH terms now, not one. The mutation below
         # reverts only the window term, which is the narrower defect.
@@ -1139,8 +1155,8 @@ MUTATIONS = [
         "name": "the-empty-word-exemption-ignores-the-window",
         "target": HANDLER,
         "old": _GATE_WRITE,
-        "new": """                    if not will_retry and not result.delivered_nothing:
-                        self._used_simple_paste = True
+        "new": """                        if not will_retry and not result.delivered_nothing:
+                            self._used_simple_paste = True
 """,
         # Only the live-window tests can catch this. Every test whose
         # attempt reports window_gone=True behaves identically under
@@ -1161,10 +1177,10 @@ MUTATIONS = [
         "name": "the-rejected-insert-stops-closing-the-gate",
         "target": HANDLER,
         "old": _REJECTED_WRITE,
-        "new": """                    # nothing was written, so the shadow buffer's mirror of
-                    # the target is still whatever it was.
-                    if not result.delivered_nothing:
-                        self._used_simple_paste = True
+        "new": """                        # nothing was written, so the shadow buffer's mirror of
+                        # the target is still whatever it was.
+                        if not result.delivered_nothing:
+                            self._used_simple_paste = True
 """,
         "expect": [
             _rejected("test_a_rejected_insert_closes_the_gate_although_it_"
@@ -1184,7 +1200,7 @@ MUTATIONS = [
         "target": HANDLER,
         "old": _REBIND_FLAG,
         "new": (
-            "                            self._retry_rebound_target = False\n"
+            "                                self._retry_rebound_target = False\n"
         ),
         "expect": [
             _rebind("test_an_earlier_credited_word_blocks_retraction_"
@@ -1207,7 +1223,7 @@ MUTATIONS = [
         "name": "the-rebinding-guard-ignores-the-credit",
         "target": HANDLER,
         "old": _REBIND_CREDIT,
-        "new": "                        if True:\n",
+        "new": "                            if True:\n",
         "expect": [
             _rebind("test_a_rebinding_with_nothing_credited_yet_still_"
                     "retracts"),
@@ -1305,7 +1321,8 @@ MUTATIONS = [
         "old": _START_CLEAR,
         "new": (
             "        self.clipboard.reset_paste_counter()\n"
-            "        # wh-9weum Phase 1: clear the soft-fallback strategy's\n"
+            "        # wh-dictation-paste-loss-load: the paste check's warning "
+            "lines\n"
         ),
         "expect": [
             _returning("test_both_utterance_boundaries_clear_the_credited_"
@@ -1349,8 +1366,8 @@ MUTATIONS = [
         "target": HANDLER,
         "old": _SIMPLE_ACK_WRITE,
         "new": (
-            "                if isinstance(strategy, SimplePasteStrategy):\n"
-            "                    self._used_simple_paste = True\n"
+            "                    if isinstance(strategy, SimplePasteStrategy):\n"
+            "                        self._used_simple_paste = True\n"
         ),
         "expect": [
             _empty_word("test_a_simple_paste_word_that_proved_nothing_"

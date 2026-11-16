@@ -39,7 +39,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import threading
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from pynput import mouse
 
@@ -108,6 +108,9 @@ class MouseHandler:
         
         self.pynput_listener = None
         self._pynput_thread = None
+        # wh-overlay-refresh-after-mouse: hears each click and wheel step on
+        # the hook thread; None until ServiceManager connects the overlay.
+        self.pointer_input_listener: Optional[Callable[[bool, bool], None]] = None
 
         self.brightness_accumulator = 0.0  # Accumulator for fractional brightness changes
         
@@ -230,19 +233,57 @@ class MouseHandler:
                 logger.error(f"Error in process_hid_events: {e}", exc_info=True)
                 await asyncio.sleep(0.1)
 
-    def on_click(self, x: int, y: int, button: Any, pressed: bool) -> None:
-        """Mouse click event handler (currently no-op).
-        
-        Reserved for future mouse click-based brightness/volume controls.
-        """
-        pass
+    def set_pointer_input_listener(
+        self, listener: Optional[Callable[[bool, bool], None]],
+    ) -> None:
+        """Set the callable that hears each mouse click and wheel step.
 
-    def on_scroll(self, x: int, y: int, dx: int, dy: int) -> None:
-        """Mouse scroll wheel event handler (currently no-op).
-        
-        Scroll wheel functionality delegated to HID thumb wheel processing.
+        wh-overlay-refresh-after-mouse: ServiceManager connects the numbered
+        overlay's ``note_pointer_input`` here, so the overlay can read its
+        numbers again after the user clicks or scrolls. ``listener(click,
+        injected)`` runs on the pynput hook thread; see ``on_click``.
         """
-        pass
+        self.pointer_input_listener = listener
+
+    def on_click(
+        self, x: int, y: int, button: Any, pressed: bool,
+        injected: bool = False,
+    ) -> None:
+        """Mouse button press or release: tell the pointer-input listener.
+
+        Runs inside pynput's WH_MOUSE_LL hook procedure, so the click waits
+        for this method; see ``_report_pointer_input``. ``injected`` is True
+        for an event a program sent (SendInput), as pynput 1.8 reports it.
+        The coordinates are not used and are never logged.
+        """
+        self._report_pointer_input(True, injected)
+
+    def on_scroll(
+        self, x: int, y: int, dx: int, dy: int, injected: bool = False,
+    ) -> None:
+        """Mouse wheel step: tell the pointer-input listener.
+
+        Runs inside the hook procedure like ``on_click``. The thumb wheel
+        does not come here; it arrives as HID reports (``process_hid_events``).
+        """
+        self._report_pointer_input(False, injected)
+
+    def _report_pointer_input(self, click: bool, injected: bool) -> None:
+        """Hand one click or wheel event to the listener. Never raises, never logs.
+
+        Windows waits for the hook procedure before it passes the event on,
+        and pynput stops the listener when an exception leaves a callback
+        (pynput/_util/__init__.py ``_emitter``). So this method writes no log
+        line and lets nothing out, and the listener must do no more than
+        read a flag and post one call to the Logic loop
+        (wh-overlay-refresh-after-mouse, acceptance item 5).
+        """
+        try:
+            listener = self.pointer_input_listener
+            if listener is not None:
+                listener(click, bool(injected))
+        except Exception:  # noqa: BLE001 -- nothing may leave the hook
+            pass
 
     def on_move(self, x: int, y: int) -> None:
         """Mouse movement event handler.

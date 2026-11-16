@@ -19,7 +19,27 @@ def gate(tmp_path, monkeypatch):
         spec.loader.exec_module(module)
     module.EVIDENCE = tmp_path / "evidence"
     module.UNSAFE_MARKER = module.EVIDENCE / "cleanup-unconfirmed.json"
+    # The shared runner refuses every launch while any cleanup-pending.json sits
+    # under its own evidence root; without this line a marker left by an earlier
+    # run in the real folder fails the tests that launch or restore.
+    module.runner.EVIDENCE_ROOT = tmp_path / "runner-evidence"
     return module
+
+
+def test_greedy_class_gate_reads_pending_marker_only_from_its_own_folder(gate, tmp_path):
+    """A cleanup-pending.json left in the real evidence folder must not reach these tests.
+
+    The shared runner refuses every launch while any cleanup-pending.json sits
+    under runner.EVIDENCE_ROOT. The fixture must point that root into tmp_path,
+    or an earlier run's leftover marker fails four unrelated tests.
+    """
+    root = gate.runner.EVIDENCE_ROOT
+    assert tmp_path in root.resolve().parents, f"runner evidence root is not isolated: {root}"
+    leftover = root / "earlier-run" / "cleanup-pending.json"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("{}", encoding="utf-8")
+    with pytest.raises(OSError, match="Process cleanup unconfirmed"):
+        gate.runner._admit_execution()
 
 
 def test_greedy_class_check_never_spawns_or_writes(gate, monkeypatch, tmp_path):

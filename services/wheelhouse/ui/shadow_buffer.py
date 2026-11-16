@@ -52,6 +52,12 @@ import time
 import uiautomation as auto
 import _ctypes
 from utils.timing import log_perf_time
+from ui.uia_text_reader import (
+    _LINE_BREAKS,
+    apply_line_start_rule,
+    is_empty_input_control,
+    read_empty_line_placeholder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +125,10 @@ class ShadowBufferManager:
                 # caret at the line start. "is-empty" alone also marks an
                 # empty paragraph inside a non-empty editor; that text is
                 # real, so it keeps the normal read.
-                if self._is_editor_empty(sel_range):
+                # wh-google-messages-first-word: the Google Messages web box
+                # marks its empty state on the focused control's own class.
+                if (self._is_editor_empty(sel_range)
+                        or is_empty_input_control(focused_control)):
                     with self._lock:
                         self._buffer = ""
                         self._cursor_pos = 0
@@ -143,6 +152,17 @@ class ShadowBufferManager:
                     )
                     cursor_pos = len(cursor_range.GetText(-1))
 
+                # wh-line-start-space-capital: a caret in a new empty
+                # paragraph is reported at the end of the previous one.
+                if sel_len == 0:
+                    placeholder = read_empty_line_placeholder(
+                        sel_range, text_pattern, focused_control
+                    )
+                    if placeholder is not None:
+                        full_text, cursor_pos = self._place_caret_after_line_break(
+                            full_text, cursor_pos, placeholder
+                        )
+
                 with self._lock:
                     self._buffer = full_text
                     self._cursor_pos = cursor_pos
@@ -158,6 +178,25 @@ class ShadowBufferManager:
             logger.error(f"Shadow Buffer synchronization failed: {e}", exc_info=True)
             self.invalidate()
             return False
+
+    @staticmethod
+    def _place_caret_after_line_break(full_text, cursor_pos, placeholder):
+        """Move the caret past the line break before an empty paragraph.
+
+        Removes the placeholder text before the caret, then moves the
+        caret past the next line break, inserting one when the text has
+        none there. Returns (buffer, cursor).
+        """
+        before, needs_break = apply_line_start_rule(
+            full_text[:cursor_pos], placeholder
+        )
+        after = full_text[cursor_pos:]
+        cursor = len(before)
+        if needs_break:
+            if after[:1] and after[0] in _LINE_BREAKS:
+                return before + after, cursor + 1
+            return before + "\n" + after, cursor + 1
+        return before + after, cursor
 
     @staticmethod
     def _is_editor_empty(sel_range) -> bool:

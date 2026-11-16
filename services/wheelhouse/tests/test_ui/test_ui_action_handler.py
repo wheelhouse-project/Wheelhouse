@@ -35,6 +35,7 @@ class _CarriesAControl:
     def __repr__(self):
         return "<a CapturedTarget that names a control>"
 
+from ui.click_config import ClickConfig
 from ui.context import UIContext
 from ui.strategies.base import InsertionResult
 
@@ -3102,8 +3103,12 @@ class TestVoiceMutationInvalidatesShadowBuffer:
             clicked_via="invoke",
         )
 
-        with patch.object(handler, "_get_overlay_walk_finder",
-                          return_value=finder), \
+        # The overlay gate reads the public host members: the finder and an
+        # enabled [click] config (the defaults enable the overlay).
+        with patch.object(handler, "get_click_element_finder",
+                          return_value=finder),              patch.object(type(handler), "click_config",
+                          new_callable=PropertyMock,
+                          return_value=ClickConfig.from_raw({})), \
              patch.object(handler, "_get_click_executor",
                           return_value=executor), \
              patch(f"{_MOD}._capture_click_foreground",
@@ -3125,8 +3130,12 @@ class TestVoiceMutationInvalidatesShadowBuffer:
         finder.get_snapshot.return_value = None
         finder.describe_snapshot_miss.return_value = "ttl_expired"
 
-        with patch.object(handler, "_get_overlay_walk_finder",
-                          return_value=finder), \
+        # The overlay gate reads the public host members: the finder and an
+        # enabled [click] config (the defaults enable the overlay).
+        with patch.object(handler, "get_click_element_finder",
+                          return_value=finder),              patch.object(type(handler), "click_config",
+                          new_callable=PropertyMock,
+                          return_value=ClickConfig.from_raw({})), \
              patch(f"{_MOD}._capture_click_foreground",
                    return_value=_FakeClickForeground()):
             handler.click_snapshot_item(
@@ -3209,17 +3218,36 @@ class TestVoiceMutationInvalidatesShadowBuffer:
         assert buffer.is_valid is True
 
     # ------------------------------------------------------------------
-    # click_point / perform_drag (mouse-grid SendInput seams)
+    # click_point / click_at_pointer / perform_drag (mouse-grid SendInput
+    # seams, public attributes of handler.mouse_pointer)
     # ------------------------------------------------------------------
 
     def test_click_point_invalidates_shadow_buffer(self, handler):
         buffer = _valid_real_buffer()
         handler.buffer_manager = buffer
-        handler._mouse_click_seam = MagicMock(return_value=(True, None))
+        handler.mouse_pointer.mouse_click_seam = MagicMock(
+            return_value=(True, None),
+        )
 
         handler.click_point(x=10, y=20, request_id="req-1")
 
-        handler._mouse_click_seam.assert_called_once()
+        handler.mouse_pointer.mouse_click_seam.assert_called_once()
+        assert buffer.is_valid is False
+
+    def test_click_at_pointer_invalidates_shadow_buffer(self, handler):
+        """A click at the pointer can move focus too (row MP-31)."""
+        buffer = _valid_real_buffer()
+        handler.buffer_manager = buffer
+        handler.mouse_pointer.pointer_position_seam = MagicMock(
+            return_value=(5, 6),
+        )
+        handler.mouse_pointer.mouse_click_seam = MagicMock(
+            return_value=(True, None),
+        )
+
+        handler.click_at_pointer(request_id="req-1")
+
+        handler.mouse_pointer.mouse_click_seam.assert_called_once()
         assert buffer.is_valid is False
 
     def test_click_point_disabled_by_config_keeps_buffer_valid(self, handler):
@@ -3228,23 +3256,27 @@ class TestVoiceMutationInvalidatesShadowBuffer:
 
         buffer = _valid_real_buffer()
         handler.buffer_manager = buffer
-        handler._mouse_click_seam = MagicMock(return_value=(True, None))
+        handler.mouse_pointer.mouse_click_seam = MagicMock(
+            return_value=(True, None),
+        )
         handler._click_config = ClickConfig.from_raw({"enabled": False})
 
         handler.click_point(x=10, y=20, request_id="req-1")
 
-        handler._mouse_click_seam.assert_not_called()
+        handler.mouse_pointer.mouse_click_seam.assert_not_called()
         assert buffer.is_valid is True
 
     def test_perform_drag_invalidates_shadow_buffer(self, handler):
         buffer = _valid_real_buffer()
         handler.buffer_manager = buffer
-        handler._mouse_drag_seam = MagicMock(return_value=(True, None))
+        handler.mouse_pointer.mouse_drag_seam = MagicMock(
+            return_value=(True, None),
+        )
 
         handler.perform_drag(start_x=1, start_y=2, end_x=3, end_y=4,
                              request_id="req-1")
 
-        handler._mouse_drag_seam.assert_called_once()
+        handler.mouse_pointer.mouse_drag_seam.assert_called_once()
         assert buffer.is_valid is False
 
     # ------------------------------------------------------------------

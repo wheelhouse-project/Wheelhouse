@@ -182,7 +182,8 @@ class OverlayEvent:
         instead of refreshing them, as Windows Voice Access does. Ignored
         for other kinds, and ignored when ``keep_numbers`` is ``True``. A
         successful click does not use this field: Logic applies
-        ``hide_numbers`` for it (``LogicController._feed_click_complete_refresh``).
+        ``hide_numbers`` for it (the post-click refresh of
+        ``NumberedOverlayController``).
     """
 
     kind: OverlayEventKind
@@ -491,8 +492,8 @@ class ClickOverlayStateMachine:
 
         wh-pin-snapshot-contract-break-detection: the machine is pure (no
         logging), so a detected over-pin records a description here and the
-        integration layer (``LogicController._perform_overlay_effects``)
-        consumes it after each apply and logs the warning. ``None`` means no
+        integration layer (``NumberedOverlayController``) consumes it after
+        each apply and logs the warning. ``None`` means no
         break since the last consume. Consuming clears the slot so one break
         is surfaced exactly once.
         """
@@ -1560,8 +1561,9 @@ class ClickOverlayStateMachine:
                 # pair of the list the user actually read. The GUI arms its
                 # badge lease at the newer pair the paint presented, and Logic
                 # renews at the older recorded pair, which the renew rule
-                # accepts (same session, pair <= armed -- gui.py
-                # _handle_overlay_lease_renew, wh-overlay-slow-uia-stale
+                # accepts (same session, pair <= armed --
+                # OverlayGuiMessages.handle_overlay_lease_renew in
+                # overlay_gui/messages.py, wh-overlay-slow-uia-stale
                 # -badges.18.5).
                 #
                 # AUDIT THE DELIVERY (wh-overlay-slow-uia-stale-badges.21.3).

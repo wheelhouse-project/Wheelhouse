@@ -74,7 +74,7 @@ from functools import partial
 
 # --- Qt and PySide6 Imports ---
 from PySide6.QtWidgets import QApplication, QWidget, QMenu, QDialog, QLabel, QVBoxLayout, QFrame
-from PySide6.QtCore import Qt, QTimer, QPoint, Signal, QObject
+from PySide6.QtCore import Qt, QTimer, QPoint, QRect, Signal, QObject
 from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QAction, QFont, QPixmap, QGuiApplication
 
 # --- System Tray Imports ---
@@ -87,6 +87,11 @@ from PIL import Image, ImageDraw
 # Calling plyer from here again would walk around that measurement, and
 # the failure is silent -- see utils/notice_text.py.
 from utils.notice_text import send_notice
+
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from overlay_paint_window import OverlayPaintWindowManager
 
 logger = logging.getLogger(__name__)
 
@@ -1101,6 +1106,15 @@ class FloatingButton(QWidget):
         self.context_menu_requested.emit(event.globalPos())
 
 
+# The dot animation of WorkingDialog shows no dot, then one, two, and
+# three dots. The dialog measures its text in each of these states.
+_WORKING_DIALOG_DOT_STATES = 4
+
+# Qt's QWIDGETSIZE_MAX, the largest size of a widget. PySide6 does not
+# export the constant.
+_QWIDGETSIZE_MAX = (1 << 24) - 1
+
+
 class WorkingDialog(QDialog):
     """Always-on-top dialog shown during long-running operations.
 
@@ -1145,7 +1159,20 @@ class WorkingDialog(QDialog):
         self._message_label = QLabel("")
         self._message_label.setFont(QFont("Segoe UI", 11))
         self._message_label.setStyleSheet("color: rgb(40, 40, 40); background: transparent; border: none;")
+        # The text wraps inside the width of the plaque. The text that a
+        # provider shows after its startup limit is too long for one
+        # line, and without the wrap it made the dialog wider than the
+        # plaque (wh-loading-dialog-until-ready).
+        self._message_label.setWordWrap(True)
+        # The dots can add one more line to a wrapped text. The text
+        # starts at the top of its area, so the lines above stay in place
+        # when that happens (wh-loading-dialog-text-height).
+        self._message_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
         message_layout.addWidget(self._message_label)
+        self._message_frame = message_frame
+        self._message_layout = message_layout
 
         # --- Main layout ---
         main_layout = QVBoxLayout(self)
@@ -1153,6 +1180,7 @@ class WorkingDialog(QDialog):
         main_layout.setSpacing(0)
         main_layout.addWidget(image_label)
         main_layout.addWidget(message_frame)
+        self._main_layout = main_layout
 
         # Dot animation timer
         self._dot_timer = QTimer(self)
@@ -1175,16 +1203,83 @@ class WorkingDialog(QDialog):
         self._dot_count = 0
         self._message_label.setText(message)
         self._dot_timer.start(400)
-        if not self.isVisible():
+        if self.isVisible():
+            # A longer text can need more lines than the dialog has. The
+            # dialog grows in height, and its centre stays where it was
+            # (wh-loading-dialog-until-ready). The width stays: the text
+            # wraps inside it.
+            centre = self.geometry().center()
+            self._fit_text(self.width())
+            geometry = self.geometry()
+            geometry.moveCenter(centre)
+            self.move(geometry.topLeft())
+        else:
             # Center on primary screen
             screen = QApplication.primaryScreen()
             if screen:
                 geo = screen.availableGeometry()
-                self.adjustSize()
+                self._fit_text(self.sizeHint().width())
                 x = geo.x() + (geo.width() - self.width()) // 2
                 y = geo.y() + (geo.height() - self.height()) // 2
                 self.move(x, y)
             self.show()
+
+    def _fit_text(self, width: int) -> None:
+        """Give the dialog `width` and the height that its text needs.
+
+        The height comes from the wrapped text itself: the font metrics
+        measure the message with no dot up to three dots, wrapped at the
+        width of the text area, and the text area gets the tallest of the
+        four heights. Its height is fixed to that value, so the dialog
+        keeps its size while the dots move.
+
+        The text area cannot rely on the size that Qt keeps for the
+        frame around it. `QLabel.setText` changes that size only through
+        a layout event that Qt posts for later, so `adjustSize` in the
+        same call used the size of the old text, and the dialog did not
+        grow for the text after the startup limit
+        (wh-loading-dialog-text-height). `updateGeometry` on the frame
+        drops the old size now.
+
+        Args:
+            width: The width of the dialog, in pixels.
+        """
+        label = self._message_label
+        label.setMinimumHeight(0)
+        label.setMaximumHeight(_QWIDGETSIZE_MAX)
+        # A first pass gives the text area its width at this dialog width.
+        self._lay_out(width)
+
+        text_width = label.contentsRect().width()
+        metrics = label.fontMetrics()
+        needed = max(
+            metrics.boundingRect(
+                QRect(0, 0, text_width, _QWIDGETSIZE_MAX),
+                int(Qt.TextFlag.TextWordWrap),
+                self._base_message + "." * dots,
+            ).height()
+            for dots in range(_WORKING_DIALOG_DOT_STATES)
+        )
+        frame_height = label.height() - label.contentsRect().height()
+        label.setFixedHeight(needed + frame_height)
+        self._lay_out(width)
+
+    def _lay_out(self, width: int) -> None:
+        """Resize the dialog to `width` and its layout height, and place its parts.
+
+        `updateGeometry` on the frame drops the size that Qt keeps for
+        the old text. `activate` sets the smallest size of the dialog
+        before the resize, so an old, larger smallest size does not hold
+        the dialog taller than its text. The two `setGeometry` calls
+        place the parts now: a hidden dialog places them only when it
+        shows, and `_fit_text` measures the text area before that.
+        """
+        layout = self._main_layout
+        self._message_frame.updateGeometry()
+        layout.activate()
+        self.resize(width, layout.totalHeightForWidth(width))
+        layout.setGeometry(self.contentsRect())
+        self._message_layout.setGeometry(self._message_frame.contentsRect())
 
     def hide_working(self, owner: str | None = None) -> None:
         """Hide the dialog and stop dot animation.
@@ -1252,7 +1347,7 @@ class WorkingDialog(QDialog):
 
     def _animate_dots(self) -> None:
         """Cycle the dot animation: '' -> '.' -> '..' -> '...' -> ''."""
-        self._dot_count = (self._dot_count + 1) % 4
+        self._dot_count = (self._dot_count + 1) % _WORKING_DIALOG_DOT_STATES
         dots = "." * self._dot_count
         self._message_label.setText(f"{self._base_message}{dots}")
 
@@ -1493,14 +1588,18 @@ class GuiManager(QObject):
         # cancelled by an accepted clear or a reset_overlay. On expiry the
         # GUI destroys the badge windows itself (Logic stopped talking) and
         # reports state="expired" back on commands_to_logic_queue.
-        self._overlay_lease_timer = QTimer(self)
-        self._overlay_lease_timer.setSingleShot(True)
-        self._overlay_lease_timer.timeout.connect(
-            self._on_overlay_lease_expired
+        # wh-full-refactor.7.2: the overlay and grid window messages (area
+        # G2) live in overlay_gui/messages.py. Built before the two timers
+        # below, which connect to it. Imported here, not at module load,
+        # because overlay_gui/messages.py imports three constants of gui.py.
+        from overlay_gui.messages import OverlayGuiMessages
+
+        self.overlay_messages = OverlayGuiMessages(self)
+        self.overlay_lease_timer = QTimer(self)
+        self.overlay_lease_timer.setSingleShot(True)
+        self.overlay_lease_timer.timeout.connect(
+            self.overlay_messages.on_overlay_lease_expired
         )
-        # The (overlay_session_id, paint_generation) pair the lease covers,
-        # or None when no lease is active.
-        self._overlay_lease_pair: tuple[int, int] | None = None
 
         # wh-overlay-slow-uia-stale-badges.18.4: the teardown retry.
         # Single-shot; armed whenever a clear / lease expiry / reset left
@@ -1512,10 +1611,10 @@ class GuiManager(QObject):
         # ERROR; the deferred cleared/expired ack then arrives after a
         # later successful retry as bookkeeping. That is the designed
         # behavior, not a bug.
-        self._overlay_teardown_retry_timer = QTimer(self)
-        self._overlay_teardown_retry_timer.setSingleShot(True)
-        self._overlay_teardown_retry_timer.timeout.connect(
-            self._on_overlay_teardown_retry
+        self.overlay_teardown_retry_timer = QTimer(self)
+        self.overlay_teardown_retry_timer.setSingleShot(True)
+        self.overlay_teardown_retry_timer.timeout.connect(
+            self.overlay_messages.on_overlay_teardown_retry
         )
 
         # wh-grid-paint-mode: the mouse grid's paint window manager. Logic
@@ -2122,20 +2221,20 @@ class GuiManager(QObject):
                     # is finished, so clear the walking cue here too (the
                     # primary clear is Logic's active:False message).
                     self.button.set_walk_cue(False)
-                    self._handle_paint_overlay(message)
+                    self.overlay_messages.handle_paint_overlay(message)
                 elif action == "clear_overlay":
                     # wh-n29v.53: Logic asks the GUI to tear down the
                     # numbered overlay.
                     # wh-n29v.117 backstop: a teardown ends any in-flight
                     # walk, so clear the walking cue here too.
                     self.button.set_walk_cue(False)
-                    self._handle_clear_overlay(message)
+                    self.overlay_messages.handle_clear_overlay(message)
                 elif action == "overlay_lease_renew":
                     # wh-overlay-slow-uia-stale-badges.9: Logic's keepalive
                     # tick renews the badge lease while its machine sits in
                     # painted. Side-channel dict, no shared/ schema (the
                     # walk-cue precedent, wh-n29v.117).
-                    self._handle_overlay_lease_renew(message)
+                    self.overlay_messages.handle_overlay_lease_renew(message)
                 elif action == "reset_overlay":
                     # wh-overlay-slow-uia-stale-badges.9: a (re)started
                     # Logic announces itself. Tear down any badges a dead
@@ -2143,19 +2242,19 @@ class GuiManager(QObject):
                     # the new Logic's from-zero pair numbering can paint.
                     # A reset also ends any in-flight walk cue.
                     self.button.set_walk_cue(False)
-                    self._handle_reset_overlay(message)
+                    self.overlay_messages.handle_reset_overlay(message)
                 elif action == "paint_grid":
                     # wh-grid-paint-mode: Logic asks the GUI to draw the
                     # mouse grid over one rectangle on one monitor.
-                    self._handle_paint_grid(message)
+                    self.overlay_messages.handle_paint_grid(message)
                 elif action == "paint_grid_pin":
                     # wh-grid-paint-mode: Logic asks the GUI to draw the
                     # drag-anchor pin ("mark"). It coexists with the grid.
-                    self._handle_paint_grid_pin(message)
+                    self.overlay_messages.handle_paint_grid_pin(message)
                 elif action == "clear_grid":
                     # wh-grid-paint-mode: Logic asks the GUI to tear the
                     # mouse grid down, pin included.
-                    self._handle_clear_grid(message)
+                    self.overlay_messages.handle_clear_grid(message)
                 elif action == "overlay_walk_cue":
                     # wh-n29v.117: a small "walking" progress cue on the
                     # floating button while a numbered-overlay walk is in
@@ -2511,367 +2610,6 @@ class GuiManager(QObject):
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "show_click_notice failed: %s", exc, exc_info=True,
-            )
-
-    def _handle_paint_overlay(self, message: dict) -> None:
-        """Drive the overlay manager for a paint_overlay action (wh-n29v.53).
-
-        Parses the inbound dict via ``PaintOverlayEvent.from_dict`` (a
-        malformed payload is logged and dropped, never raised, so a
-        version-skewed sender cannot crash the GUI loop -- wh-uf54), calls
-        the overlay manager, and forwards the returned
-        ``overlay_state_changed`` dict back to Logic on
-        ``commands_to_logic_queue``. A stale-gated paint returns ``None``
-        and emits nothing.
-        """
-        if self._overlay_manager is None:
-            return
-        try:
-            from shared.ipc_schema_validation import safe_parse
-            from shared.paint_overlay import PaintOverlayEvent
-
-            event = safe_parse(
-                PaintOverlayEvent.from_dict, message, log_label="paint_overlay",
-            )
-            if event is None:
-                return  # already logged
-            result = self._overlay_manager.paint(
-                event.summary,
-                overlay_session_id=event.overlay_session_id,
-                paint_generation=event.paint_generation,
-            )
-            if result is not None:
-                # wh-overlay-slow-uia-stale-badges.9: the paint presented
-                # (or failed partway, which can also leave windows), so
-                # badges may be on screen -- arm the lease. A stale-gated
-                # paint (None) presented nothing; any active lease belongs
-                # to the overlay already on screen and must keep running.
-                self._arm_overlay_lease(
-                    (event.overlay_session_id, event.paint_generation),
-                    _OVERLAY_LEASE_DEFAULT_MS,
-                )
-            self._emit_overlay_state_changed(result)
-        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
-            logger.warning(
-                "paint_overlay handling failed: %s", exc, exc_info=True,
-            )
-
-    def _handle_clear_overlay(self, message: dict) -> None:
-        """Drive the overlay manager for a clear_overlay action (wh-n29v.53).
-
-        Parses the inbound dict via ``ClearOverlayEvent.from_dict`` (a
-        malformed payload is logged and dropped, never raised -- wh-uf54),
-        tears down all overlay windows, and forwards the returned
-        ``overlay_state_changed`` dict (``state="cleared"``) back to Logic.
-        """
-        if self._overlay_manager is None:
-            return
-        try:
-            from shared.ipc_schema_validation import safe_parse
-            from shared.clear_overlay import ClearOverlayEvent
-
-            event = safe_parse(
-                ClearOverlayEvent.from_dict, message, log_label="clear_overlay",
-            )
-            if event is None:
-                return  # already logged
-            result = self._overlay_manager.clear(
-                overlay_session_id=event.overlay_session_id,
-                paint_generation=event.paint_generation,
-            )
-            if result is not None:
-                # wh-overlay-slow-uia-stale-badges.9: the badges are gone,
-                # so nothing is left to lease. A STALE clear (None) tore
-                # down nothing -- the newer overlay's lease keeps running.
-                # An INCOMPLETE clear (also None, teardown_pending True)
-                # left a survivor: the lease keeps covering it while the
-                # retry timer finishes the teardown (.18.4).
-                self._cancel_overlay_lease()
-            self._arm_teardown_retry_if_pending()
-            self._emit_overlay_state_changed(result)
-        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
-            logger.warning(
-                "clear_overlay handling failed: %s", exc, exc_info=True,
-            )
-
-    # ------------------------------------------------------------------
-    # Numbered-overlay badge lease (wh-overlay-slow-uia-stale-badges.9)
-    # ------------------------------------------------------------------
-
-    def _arm_overlay_lease(self, pair: tuple[int, int], lease_ms: int) -> None:
-        """Start (or restart) the badge lease for ``pair``.
-
-        The interval is clamped to Qt's signed-32-bit ceiling
-        (``_QT_TIMER_MAX_INTERVAL_MS``) so ``QTimer.start`` can never raise
-        ``OverflowError`` on an oversized renew.
-        """
-        self._overlay_lease_pair = pair
-        self._overlay_lease_timer.start(
-            min(int(lease_ms), _QT_TIMER_MAX_INTERVAL_MS)
-        )
-
-    def _cancel_overlay_lease(self) -> None:
-        """Stop the badge lease; no badges remain to watch."""
-        self._overlay_lease_pair = None
-        self._overlay_lease_timer.stop()
-
-    def _handle_overlay_lease_renew(self, message: dict) -> None:
-        """Re-arm the badge lease for a Logic keepalive renew.
-
-        Side-channel dict (no shared/ schema -- the walk-cue precedent),
-        so validation is local and defensive (bool excluded -- it is an
-        int subclass). The lease audits that Logic is ALIVE and believes
-        this session's badges are visible -- not that Logic's view of the
-        generation matches the GUI's. So a renew is accepted when its
-        session id equals the armed lease pair's session id AND its
-        (sid, gen) pair is <= the armed pair
-        (wh-overlay-slow-uia-stale-badges.18.5): a renew from an OLDER
-        view of the same session (a late or failed refresh paint armed
-        the lease at a newer pair while Logic fell back to its prior
-        visible pair) still proves liveness, and the exact-pair rule made
-        the 60 s lease kill visible badges in that divergence. A renew
-        for a pair NEWER than the armed lease stays rejected -- the GUI
-        never presented that pair; Logic's visible-pair renew (.18.2)
-        covers that direction. A different session id is rejected in both
-        generation directions. The re-arm keeps the ARMED pair, so a
-        later expiry tears down under the pair the generation gate
-        painted. A malformed ``lease_ms`` falls back to the default
-        rather than dropping the renew: a healthy Logic is talking, so
-        keep the lease alive.
-        """
-        try:
-            if self._overlay_lease_pair is None:
-                return
-            sid = message.get("overlay_session_id")
-            gen = message.get("paint_generation")
-            if isinstance(sid, bool) or not isinstance(sid, int):
-                return
-            if isinstance(gen, bool) or not isinstance(gen, int):
-                return
-            armed_sid, armed_gen = self._overlay_lease_pair
-            if sid != armed_sid or (sid, gen) > (armed_sid, armed_gen):
-                return
-            lease_ms = message.get("lease_ms")
-            if isinstance(lease_ms, bool) or not isinstance(lease_ms, int) \
-                    or lease_ms <= 0:
-                lease_ms = _OVERLAY_LEASE_DEFAULT_MS
-            self._arm_overlay_lease((armed_sid, armed_gen), lease_ms)
-        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
-            logger.warning(
-                "overlay_lease_renew handling failed: %s", exc, exc_info=True,
-            )
-
-    def _on_overlay_lease_expired(self) -> None:
-        """The badge lease ran out: Logic stopped renewing.
-
-        Either Logic crashed / hung, or its clear_overlay never arrived
-        (a Full queue drops it with only a warning). Tear the badges down
-        so they cannot outlive Logic's intent, and report
-        ``state="expired"`` so a live Logic can reconcile (its machine
-        closes from ``painted``; everywhere else the ack is bookkeeping).
-        ``expire_lease`` returns None when the armed pair lost a race with
-        a newer paint/clear -- then the newer overlay owns the screen and
-        nothing is reported.
-        """
-        try:
-            pair = self._overlay_lease_pair
-            self._overlay_lease_pair = None
-            if pair is None or self._overlay_manager is None:
-                return
-            logger.warning(
-                "numbered-overlay badge lease expired for pair %s; "
-                "tearing the badges down GUI-side", pair,
-            )
-            result = self._overlay_manager.expire_lease(
-                overlay_session_id=pair[0], paint_generation=pair[1],
-            )
-            self._arm_teardown_retry_if_pending()
-            self._emit_overlay_state_changed(result)
-        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
-            logger.warning(
-                "overlay lease expiry handling failed: %s", exc, exc_info=True,
-            )
-
-    def _handle_reset_overlay(self, message: dict) -> None:
-        """A (re)started Logic announced itself: start the overlay fresh.
-
-        Destroys any badge windows a previous Logic left behind and resets
-        the manager's generation gate (a restarted Logic numbers its pairs
-        from zero, which the old high-water mark would gate forever). Also
-        cancels the lease -- there is no Logic intent left to watch. No
-        event is emitted; the new Logic starts from ``closed``.
-        """
-        try:
-            self._cancel_overlay_lease()
-            if self._overlay_manager is None:
-                return
-            self._overlay_manager.reset()
-            # reset() dropped any deferred ack (the old Logic is gone),
-            # but a survivor its destroy attempt failed on still needs
-            # the retry (.18.4).
-            self._arm_teardown_retry_if_pending()
-        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
-            logger.warning(
-                "reset_overlay handling failed: %s", exc, exc_info=True,
-            )
-
-    def _arm_teardown_retry_if_pending(self) -> None:
-        """Arm or stop the teardown retry timer to match the manager.
-
-        Called after every clear / expire_lease / reset drive into the
-        overlay manager (wh-overlay-slow-uia-stale-badges.18.4): when a
-        DestroyWindow failed, a badge window may still be on screen, and
-        the retry timer is the mechanism that finishes the teardown.
-
-        The stop branch (wh-overlay-slow-uia-stale-badges.18.8): a clean
-        teardown pays the debt an EARLIER incomplete teardown armed the
-        timer for. Left armed, that stale single-shot fire would arrive
-        after a fresh paint took the screen (``retry_teardown`` itself
-        no longer sweeps without debt; this stop is the timer-side half
-        of the same fix). The timer stays armed while a deferred ack is
-        still parked, so a fire can release it as late bookkeeping --
-        the accepted residual.
-        """
-        if self._overlay_manager is None:
-            return
-        if self._overlay_manager.teardown_pending:
-            self._overlay_teardown_retry_timer.start(
-                _OVERLAY_TEARDOWN_RETRY_MS
-            )
-        elif not self._overlay_manager.has_deferred_teardown_ack:
-            self._overlay_teardown_retry_timer.stop()
-
-    def _on_overlay_teardown_retry(self) -> None:
-        """Retry destroying badge windows an incomplete teardown left.
-
-        Drives ``retry_teardown`` (wh-overlay-slow-uia-stale-badges.18.4):
-        a clean sweep releases the deferred cleared/expired ack, which is
-        forwarded to Logic as late bookkeeping (its clear-ack watchdog
-        already fired its truthful ERROR at 5000 ms -- designed behavior,
-        not a bug); a still-failing sweep re-arms the timer. Unbounded
-        2 s retries are fine -- a repeated no-op is cheap.
-
-        A released CLEARED ack whose pair exactly matches the armed lease
-        also cancels the lease (.18.6): the clean sweep is the same
-        badges-are-gone proof that makes a direct clean clear cancel it,
-        and a stranded lease would later fire expire_lease over an empty
-        screen and report a spurious expired ack. Exact-match only: an
-        old parked cleared ack must not cancel a newer overlay's lease,
-        and a deferred EXPIRED ack's own expiry already dropped its
-        lease.
-        """
-        try:
-            if self._overlay_manager is None:
-                return
-            ack = self._overlay_manager.retry_teardown()
-            if ack is not None:
-                if ack.get("state") == "cleared" and (
-                    ack.get("overlay_session_id"),
-                    ack.get("paint_generation"),
-                ) == self._overlay_lease_pair:
-                    self._cancel_overlay_lease()
-                self._emit_overlay_state_changed(ack)
-            if self._overlay_manager.teardown_pending:
-                self._overlay_teardown_retry_timer.start(
-                    _OVERLAY_TEARDOWN_RETRY_MS
-                )
-        except Exception as exc:  # noqa: BLE001 - overlay is non-critical
-            logger.warning(
-                "overlay teardown retry failed: %s", exc, exc_info=True,
-            )
-
-    def _handle_paint_grid(self, message: dict) -> None:
-        """Drive the grid manager for a paint_grid action (wh-grid-paint-mode).
-
-        Parses the inbound dict via ``PaintGridEvent.from_dict`` (a malformed
-        payload is logged and dropped, never raised, so a version-skewed
-        sender cannot crash the GUI loop -- wh-uf54) and hands the event
-        straight to the manager. Nothing is sent back to Logic: the grid has
-        no in-flight build phase and no generation pair to acknowledge.
-        """
-        if self._grid_overlay is None:
-            return
-        try:
-            from shared.ipc_schema_validation import safe_parse
-            from shared.paint_grid import PaintGridEvent
-
-            event = safe_parse(
-                PaintGridEvent.from_dict, message, log_label="paint_grid",
-            )
-            if event is None:
-                return  # already logged
-            self._grid_overlay.paint_grid(event)
-        except Exception as exc:  # noqa: BLE001 - the grid is non-critical
-            logger.warning(
-                "paint_grid handling failed: %s", exc, exc_info=True,
-            )
-
-    def _handle_paint_grid_pin(self, message: dict) -> None:
-        """Drive the grid manager for a paint_grid_pin action
-        (wh-grid-paint-mode).
-
-        Same defensive parse as ``_handle_paint_grid``. The pin does not
-        replace the grid -- the manager repaints both -- so no clear is sent
-        first.
-        """
-        if self._grid_overlay is None:
-            return
-        try:
-            from shared.ipc_schema_validation import safe_parse
-            from shared.paint_grid_pin import PaintGridPinEvent
-
-            event = safe_parse(
-                PaintGridPinEvent.from_dict, message,
-                log_label="paint_grid_pin",
-            )
-            if event is None:
-                return  # already logged
-            self._grid_overlay.paint_grid_pin(event)
-        except Exception as exc:  # noqa: BLE001 - the grid is non-critical
-            logger.warning(
-                "paint_grid_pin handling failed: %s", exc, exc_info=True,
-            )
-
-    def _handle_clear_grid(self, message: dict) -> None:
-        """Drive the grid manager for a clear_grid action
-        (wh-grid-paint-mode).
-
-        ``ClearGridEvent`` carries no fields, but it is still parsed so a
-        payload addressed to a different action can never tear the grid down.
-        One clear removes the grid AND the pin.
-        """
-        if self._grid_overlay is None:
-            return
-        try:
-            from shared.ipc_schema_validation import safe_parse
-            from shared.clear_grid import ClearGridEvent
-
-            event = safe_parse(
-                ClearGridEvent.from_dict, message, log_label="clear_grid",
-            )
-            if event is None:
-                return  # already logged
-            self._grid_overlay.clear_grid()
-        except Exception as exc:  # noqa: BLE001 - the grid is non-critical
-            logger.warning(
-                "clear_grid handling failed: %s", exc, exc_info=True,
-            )
-
-    def _emit_overlay_state_changed(self, result) -> None:
-        """Forward an overlay_state_changed dict back to Logic (wh-n29v.53).
-
-        ``result`` is the manager's ``overlay_state_changed`` wire dict, or
-        ``None`` for a stale-gated paint (nothing to report). A Full queue
-        is logged and dropped rather than raised.
-        """
-        if not result:
-            return
-        try:
-            self.commands_to_logic_queue.put_nowait(result)
-        except Full:
-            logger.warning(
-                "overlay_state_changed: commands_to_logic_queue Full; "
-                "dropping the overlay state report",
             )
 
     def _on_try_anyway_clicked(self) -> None:
@@ -3816,7 +3554,7 @@ class GuiManager(QObject):
         :description: Queues command dictionary to logic process via IPC
         :data_in: Command dictionary with 'action' key
         :data_out: Command placed in commands_to_logic_queue
-        :notes: IPC transport layer using multiprocessing.Queue for cross-process communication. Uses put_nowait() to avoid blocking GUI thread. If queue is full, command is dropped with warning log. This is the outbound half of bidirectional GUI↔Logic IPC. Queue is consumed by main.py's _listen_for_gui_commands() in logic process.
+        :notes: IPC transport layer using multiprocessing.Queue for cross-process communication. Uses put_nowait() to avoid blocking GUI thread. If queue is full, command is dropped with warning log. This is the outbound half of bidirectional GUI↔Logic IPC. Queue is consumed by main.py's listen_for_gui_commands() in logic process.
         """
         # An acknowledged settings write, set_config_value or
         # set_config_values, takes the staged path: a request ID, pending
@@ -3834,6 +3572,24 @@ class GuiManager(QObject):
     @property
     def settings_pending(self):
         return bool(self._settings_requests)
+
+    @property
+    def overlay_manager(self) -> Optional["OverlayPaintWindowManager"]:
+        """The numbered-overlay paint window manager, or None.
+
+        None when its construction failed. OverlayGuiMessages
+        (overlay_gui/messages.py) reads it through this property.
+        """
+        return self._overlay_manager
+
+    @property
+    def grid_overlay(self) -> Optional["OverlayPaintWindowManager"]:
+        """The mouse-grid paint window manager, or None.
+
+        None when its construction failed. OverlayGuiMessages
+        (overlay_gui/messages.py) reads it through this property.
+        """
+        return self._grid_overlay
 
     def _settings_show_status(self, text):
         """Show a settings failure notice for 15 s, in the box and in Windows.
@@ -4937,7 +4693,8 @@ class GuiManager(QObject):
         visible consequence is badges that no longer match the rows, and a bare
         ``put_nowait`` would raise ``Full`` into the Qt signal instead. A Full
         queue is logged and dropped, the same posture
-        ``_emit_overlay_state_changed`` takes.
+        ``OverlayGuiMessages._emit_overlay_state_changed``
+        (overlay_gui/messages.py) takes.
         """
         try:
             self.commands_to_logic_queue.put_nowait(command)

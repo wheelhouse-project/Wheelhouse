@@ -28,7 +28,7 @@ Transport: the dialog emits its ``tree_changed`` Qt signal carrying the dict
 produced by :meth:`PatternManagerTreeChangedEvent.to_dict` -- shape
 ``{"action": "pattern_manager_tree_changed", "hwnd": ..., "sequence": ...}``
 -- and the GUI manager puts it onto the existing commands_to_logic_queue.
-``LogicController._listen_for_gui_commands`` routes the action via its
+``LogicController.listen_for_gui_commands`` routes the action via its
 handler map; the handler validates the payload with :func:`safe_parse`, so a
 malformed payload is logged and dropped rather than crashing the listener.
 
@@ -72,7 +72,7 @@ class PatternManagerTreeChangedEvent:
 
         The returned dict is the action payload the GUI puts onto
         commands_to_logic_queue; the ``"action"`` key carries ``ACTION_NAME``
-        so the dispatch in ``_listen_for_gui_commands`` can route it.
+        so the dispatch in ``listen_for_gui_commands`` can route it.
         """
 
         return {

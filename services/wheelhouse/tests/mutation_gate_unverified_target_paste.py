@@ -583,14 +583,14 @@ MUTATIONS = [
             {
                 "target": HANDLER,
                 "old": (
-                    "                    # the target is still whatever it "
-                    "was.\n"
-                    "                    self._used_simple_paste = True\n"
+                    "                        # the target is still whatever "
+                    "it was.\n"
+                    "                        self._used_simple_paste = True\n"
                 ),
                 "new": (
-                    "                    # the target is still whatever it "
-                    "was.\n"
-                    "                    pass\n"
+                    "                        # the target is still whatever "
+                    "it was.\n"
+                    "                        pass\n"
                 ),
             },
             {

@@ -46,8 +46,8 @@ The fix has two halves, and the mutations break each piece of them:
   mark-never-called             ``_apply_overlay_event`` no longer calls the
                                 marking helper.
   pair-check-dropped            The pair-equality check in the helper is
-                                disabled. EXPECTED TO SURVIVE as an
-                                equivalent mutant: ``apply`` rejects a
+                                disabled. A declared expected survivor
+                                (key "survives") as an equivalent mutant: ``apply`` rejects a
                                 mismatched pair as STALE_GENERATION before
                                 any state handler reads the mark, so the only
                                 difference is one extra foreground read and
@@ -56,7 +56,11 @@ The fix has two halves, and the mutations break each piece of them:
                                 pair shows up as a catch.
   timeout-half-of-failed-check-dropped
                                 A TIMEOUT is no longer a failure to the
-                                helper, so it is never marked.
+                                helper, so it is never marked. A declared
+                                expected survivor (wh-full-refactor.3.1): an
+                                unanswered refresh always fails first as a
+                                failed build response, so the machine
+                                TIMEOUT it marks never arrives first.
   window-left-close-fires-no-notice
                                 ``_refresh_window_left_to_closed`` no longer
                                 fires the standalone failure notice.
@@ -86,7 +90,15 @@ that fails is an error too, and a restore that cannot be proved stops the
 sweep outright: both targets are live source files, and a mutant left in one
 is read as real code by every later run. ``--check`` verifies every pattern
 matches exactly once in the current source and that every mutant compiles,
-without running a test.
+without running a test, and refuses an expected survivor whose reason is
+blank.
+
+EXPECTED SURVIVORS (wh-full-refactor.3.1). A mutation with the key
+"survives" names no catcher and carries the reason it survives. It passes
+only when its whole selection stays green; any failed test prints "CAUGHT
+EXPECTED SURVIVOR" and the gate exits 1, because that test shows the reason
+is no longer true. The old tests in INTEGRATION that this gate named as
+catchers were deleted by the overlay refactor.
 """
 
 import os
@@ -101,11 +113,16 @@ sys.stdout.reconfigure(line_buffering=True)
 SERVICE = Path(__file__).resolve().parent.parent
 STATE_SRC = SERVICE / "click_overlay_state.py"
 MAIN_SRC = SERVICE / "main.py"
+CONTROLLER_SRC = SERVICE / "numbered_overlay" / "controller.py"
 
 STATE_TESTS = "tests/test_click_overlay_state.py"
 INTEGRATION = "tests/test_logic_overlay_integration.py"
 ALL_FILES = [STATE_TESTS, INTEGRATION]
-
+# wh-full-refactor.3.1: the boundary test files whose tests replace the
+# deleted catchers. Names are collected, and the baseline runs, over all four.
+LIFECYCLE = "tests/test_overlay_requirements_lifecycle.py"
+REWALK = "tests/test_overlay_requirements_rewalk.py"
+COLLECT_FILES = ALL_FILES + [LIFECYCLE, REWALK]
 # -v prints one line per test, which is what names a SKIPPED catcher; -rf
 # prints the short-summary FAILED lines failed_names() reads.
 PYTEST_ARGS = ["-p", "no:randomly", "-v", "-rf"]
@@ -188,11 +205,6 @@ STATE_AUTO_OPEN = (
 STATE_AUTO_HIDDEN = (
     "test_refresh_failure_after_window_left_while_auto_hidden_stays_paused"
 )
-_INTEG = "test_refresh_failure_clears_numbers_only_when_visible_window_left"
-INTEG_LEFT_BUILD = f"{_INTEG}[window-left-build_failed]"
-INTEG_LEFT_TIMEOUT = f"{_INTEG}[window-left-timeout]"
-INTEG_UNKNOWN_BUILD = f"{_INTEG}[foreground-unknown-build_failed]"
-INTEG_UNKNOWN_TIMEOUT = f"{_INTEG}[foreground-unknown-timeout]"
 _STATE_RESTART = "test_paint_restart_clears_abandoned_paint_before_build"
 STATE_RESTART_SHOW = f"{_STATE_RESTART}[show-numbers]"
 STATE_RESTART_FOCUS = f"{_STATE_RESTART}[focus-change]"
@@ -201,17 +213,21 @@ _STATE_FAILED_READ = (
 )
 STATE_FAILED_READ_BUILD = f"{_STATE_FAILED_READ}[build_failed]"
 STATE_FAILED_READ_TIMEOUT = f"{_STATE_FAILED_READ}[timeout]"
-_INTEG_RESTART = (
-    "test_failed_read_after_restart_in_paint_in_flight_leaves_no_numbers"
-)
-INTEG_RESTART_ALL = [
-    f"{_INTEG_RESTART}[{kind}-{ending}]"
-    for kind in ("focus-change", "show-numbers")
-    for ending in ("build_failed", "timeout")
-]
 INTEG_NEW_WALK_PAINT = (
     "test_new_walk_paint_after_restart_clear_passes_the_gui_gate"
 )
+# The boundary tests that replace the deleted INTEGRATION catchers.
+_LC_22 = "test_lc_22_failed_refresh_after_window_left_clears_and_closes"
+LC_22_BUILD_FAILED = f"{_LC_22}[execution_failed]"
+LC_22_TIMEOUT = f"{_LC_22}[timeout]"
+_LC_45 = (
+    "test_lc_45_failed_refresh_with_no_readable_foreground_keeps_the_numbers"
+)
+LC_45_ALL = [f"{_LC_45}[execution_failed]", f"{_LC_45}[timeout]"]
+RW_2_RESTART = (
+    "test_rw_2_foreground_during_first_paint_clears_unpins_and_restarts"
+)
+LC_9_RESTART = "test_lc_9_show_during_first_paint_clears_unpins_and_restarts"
 
 MUTATIONS = [
     {
@@ -219,8 +235,8 @@ MUTATIONS = [
         "file": STATE_SRC,
         "old": _BUILD_FAILED_ARM,
         "new": "            if not event.build_ok:\n",
-        "selection": ALL_FILES,
-        "expect": [STATE_BUILD_FAILED, INTEG_LEFT_BUILD],
+        "selection": ALL_FILES + [LIFECYCLE],
+        "expect": [STATE_BUILD_FAILED, LC_22_BUILD_FAILED],
     },
     {
         "name": "timeout-arm-falls-back",
@@ -230,7 +246,6 @@ MUTATIONS = [
         "selection": ALL_FILES,
         "expect": [
             STATE_TIMEOUT, STATE_TIMEOUT_AFTER_BUILD_OK, STATE_AUTO_OPEN,
-            INTEG_LEFT_TIMEOUT,
         ],
     },
     {
@@ -243,57 +258,69 @@ MUTATIONS = [
     },
     {
         # Differs from the fix only for a None answer, so only the
-        # foreground-unknown cases can catch it.
+        # foreground-unknown cases can catch it. The same code change as the
+        # overlay gate's lc-45-unknown-foreground-clears.
         "name": "unknown-foreground-clears",
-        "file": MAIN_SRC,
+        "file": CONTROLLER_SRC,
         "old": _FOREGROUND_CHECK,
         "new": (
             "        if self._overlay_refresh_visible_window_is_foreground("
             "machine):\n"
         ),
-        "selection": [INTEGRATION],
-        "expect": [INTEG_UNKNOWN_BUILD, INTEG_UNKNOWN_TIMEOUT],
+        "selection": [INTEGRATION, LIFECYCLE],
+        "expect": LC_45_ALL,
     },
     {
         "name": "unknown-foreground-clears-window-left-keeps",
-        "file": MAIN_SRC,
+        "file": CONTROLLER_SRC,
         "old": _FOREGROUND_CHECK,
         "new": (
             "        if self._overlay_refresh_visible_window_is_foreground(machine) "
             "is not None:\n"
         ),
-        "selection": [INTEGRATION],
-        "expect": [
-            INTEG_LEFT_BUILD, INTEG_LEFT_TIMEOUT,
-            INTEG_UNKNOWN_BUILD, INTEG_UNKNOWN_TIMEOUT,
-        ],
+        "selection": [INTEGRATION, LIFECYCLE],
+        "expect": [LC_22_BUILD_FAILED, LC_22_TIMEOUT, *LC_45_ALL],
     },
     {
         # ``pass``, not a deleted line, so every mutation keeps one shape.
         "name": "mark-never-called",
-        "file": MAIN_SRC,
+        "file": CONTROLLER_SRC,
         "old": _MARK_CALL,
         "new": "        pass\n",
-        "selection": [INTEGRATION],
-        "expect": [INTEG_LEFT_BUILD, INTEG_LEFT_TIMEOUT],
+        "selection": [INTEGRATION, LIFECYCLE],
+        "expect": [LC_22_BUILD_FAILED],
     },
     {
-        # Expected to survive: see the module docstring. No test is named,
-        # so a green run reads as a survivor and a red run as a catch.
+        # A declared expected survivor: see the module docstring.
         "name": "pair-check-dropped",
-        "file": MAIN_SRC,
+        "file": CONTROLLER_SRC,
         "old": _PAIR_CHECK,
         "new": "        if False:\n",
         "selection": [INTEGRATION],
         "expect": [],
+        "survives": (
+            "Equivalent mutant: apply rejects a mismatched pair as "
+            "STALE_GENERATION before any state handler reads the mark, so "
+            "the only difference is one extra foreground read and one INFO "
+            "log line"
+        ),
     },
     {
         "name": "timeout-half-of-failed-check-dropped",
-        "file": MAIN_SRC,
+        "file": CONTROLLER_SRC,
         "old": _FAILED_CHECK_HEAD,
         "new": "        failed = (\n",
-        "selection": [INTEGRATION],
-        "expect": [INTEG_LEFT_TIMEOUT],
+        "selection": [INTEGRATION, LIFECYCLE],
+        "expect": [],
+        "survives": (
+            "Case 4 order: Needs the machine refresh TIMEOUT to arrive before "
+            "the build send's own reply wait ends; the send waits "
+            "screen_read_timeout_ms and the machine deadline is "
+            "screen_read_timeout_ms + PRE_WALK_MARGIN_MS, so an unanswered "
+            "refresh always fails first as BUILD_RESPONSE build_ok=False (the "
+            "reason the overlay gate gives for "
+            "lc-14-walk-timeout-without-notice)"
+        ),
     },
     {
         "name": "window-left-close-fires-no-notice",
@@ -331,11 +358,11 @@ MUTATIONS = [
             _RESTART_HEAD + _RESTART_UNPIN + _RESTART_BUMP + _RESTART_STATE
             + _RESTART_BUILD + _RESTART_TAIL
         ),
-        "selection": ALL_FILES,
+        "selection": ALL_FILES + [REWALK, LIFECYCLE],
         "expect": [
             STATE_RESTART_SHOW, STATE_RESTART_FOCUS,
             STATE_FAILED_READ_BUILD, STATE_FAILED_READ_TIMEOUT,
-            *INTEG_RESTART_ALL, INTEG_NEW_WALK_PAINT,
+            RW_2_RESTART, LC_9_RESTART, INTEG_NEW_WALK_PAINT,
         ],
     },
     {
@@ -348,11 +375,11 @@ MUTATIONS = [
             _RESTART_HEAD + _RESTART_BUMP + _RESTART_CLEAR + _RESTART_UNPIN
             + _RESTART_STATE + _RESTART_BUILD + _RESTART_TAIL
         ),
-        "selection": ALL_FILES,
+        "selection": ALL_FILES + [REWALK],
         "expect": [
             STATE_RESTART_SHOW, STATE_RESTART_FOCUS,
             STATE_FAILED_READ_BUILD, STATE_FAILED_READ_TIMEOUT,
-            *INTEG_RESTART_ALL, INTEG_NEW_WALK_PAINT,
+            RW_2_RESTART, INTEG_NEW_WALK_PAINT,
         ],
     },
     {
@@ -422,7 +449,7 @@ def _node_name(node_part: str) -> str:
 
 def collect_names():
     """Real test names, so a renamed test cannot read as a survivor."""
-    out = _pytest(*ALL_FILES, "--collect-only", "-q", "-p", "no:randomly")
+    out = _pytest(*COLLECT_FILES, "--collect-only", "-q", "-p", "no:randomly")
     names = set()
     for line in out.stdout.splitlines():
         if "::" in line:
@@ -488,9 +515,34 @@ def _originals():
     return out
 
 
+def _declaration_problems(mutations):
+    """Name each mutation whose expected-survivor declaration has no reason.
+
+    The same rule as the shared runner (stt_providers/shared/tests/
+    mutation_gate_runner.py): a declaration without a reason hides a
+    survivor and says nothing about why, so it is refused before any file
+    is mutated.
+    """
+    problems = []
+    for mut in mutations:
+        if "survives" not in mut:
+            continue
+        reason = mut["survives"]
+        if not isinstance(reason, str) or not reason.strip():
+            problems.append(f"{mut['name']}: an expected survivor needs a reason")
+    return problems
+
+
+def _declared(mutations):
+    return sum(1 for mut in mutations if "survives" in mut)
+
+
 def check_only():
     originals = _originals()
     stale, non_compiling = [], []
+    invalid = _declaration_problems(MUTATIONS)
+    for problem in invalid:
+        print("ERROR", problem)
     for mut in MUTATIONS:
         raw = originals[mut["file"]]
         _mutant, error = _build_mutant(
@@ -503,11 +555,15 @@ def check_only():
         else:
             stale.append(error)
         print("ERROR", error)
-    print(
+    line = (
         f"checked {len(MUTATIONS)} patterns, {len(stale)} stale, "
         f"{len(non_compiling)} that do not compile"
     )
-    return 1 if stale or non_compiling else 0
+    # The line keeps its old form when no mutation declares a survivor.
+    if _declared(MUTATIONS):
+        line += f", {_declared(MUTATIONS)} expected survivors"
+    print(line)
+    return 1 if stale or non_compiling or invalid else 0
 
 
 def _write_with_retry(path: Path, data: bytes) -> None:
@@ -616,12 +672,18 @@ def main():
     mutations = _selected(sys.argv[1:])
     if mutations is None:
         return 1
+    invalid = _declaration_problems(mutations)
+    if invalid:
+        for problem in invalid:
+            print("ERROR", problem)
+        return 1
 
     originals = _originals()
     errors, caught, survived = [], [], []
+    expected, expected_caught = [], []
 
     real_names = collect_names()
-    print(f"collected {len(real_names)} test names in {ALL_FILES}")
+    print(f"collected {len(real_names)} test names in {COLLECT_FILES}")
     for mut in mutations:
         for name in mut["expect"]:
             if name not in real_names:
@@ -634,7 +696,7 @@ def main():
         return 1
 
     _clear_bytecode()
-    baseline = _pytest(*ALL_FILES, *PYTEST_ARGS)
+    baseline = _pytest(*COLLECT_FILES, *PYTEST_ARGS)
     if baseline.returncode != 0:
         print("ERROR baseline is not green; refusing to start")
         print(baseline.stdout[-3000:])
@@ -676,6 +738,28 @@ def main():
             errors.append(f"{mut['name']}: expected catcher skipped: {skipped}")
             print("ERROR", errors[-1])
             continue
+        if "survives" in mut:
+            # An expected survivor must leave its whole selection green. A
+            # failed test, named or not, catches the mutation, so the reason
+            # is no longer true and the declaration must go.
+            if result.returncode == 0:
+                expected.append(mut["name"])
+                print(f"expected survivor {mut['name']}: {mut['survives']}")
+                continue
+            got = failed_lines(result.stdout)
+            if got:
+                expected_caught.append(mut["name"])
+                print(f"CAUGHT EXPECTED SURVIVOR {mut['name']} by {sorted(got)}")
+                for name in sorted(got):
+                    print(f"         {got[name]}")
+            else:
+                errors.append(
+                    f"{mut['name']}: exit {result.returncode} with no FAILED "
+                    "line in the short summary"
+                )
+                print("ERROR", errors[-1])
+                print(result.stdout[-3000:])
+            continue
         # Exit code first: 0 means no test failed, and a green run prints no
         # short-summary section at all.
         if result.returncode == 0:
@@ -711,8 +795,16 @@ def main():
     print(
         f"scope: ran {len(mutations)} of {len(MUTATIONS)} mutations: {names}"
     )
-    print(f"caught {len(caught)}, survived {len(survived)}, errors {len(errors)}")
-    return 1 if survived or errors else 0
+    line = f"caught {len(caught)}, survived {len(survived)}, errors {len(errors)}"
+    # The line keeps its old form when no selected mutation declares a
+    # survivor, so a run of an older table prints what it always printed.
+    if _declared(mutations):
+        line += (
+            f", {len(expected)} expected survivors, "
+            f"{len(expected_caught)} expected survivors caught"
+        )
+    print(line)
+    return 1 if survived or errors or expected_caught else 0
 
 
 if __name__ == "__main__":

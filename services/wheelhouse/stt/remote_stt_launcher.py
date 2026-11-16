@@ -1428,14 +1428,18 @@ class RemoteSTTLauncher:
                 f"but subprocess is still alive. Suppressing failure notification -- "
                 f"provider is likely still warming up (wh-v0q)."
             )
-            # Hide the working dialog so the UI doesn't hang forever. The provider
-            # will still send its own ready/error notifications when it finishes
-            # warming up.
-            if self.launch_is_current(generation):
-                self._hide_working(generation)
+            # The dialog stays on the screen. The provider opens the
+            # microphone only after its model load, so until it is ready
+            # WheelHouse cannot hear, and a hidden dialog let the user
+            # speak into nothing (wh-restart-first-phrases-lost). The
+            # text changes below, after the starting state ends, and the
+            # dialog then ends through the ready path, a death that the
+            # late-death watch sees, or the end of that watch
+            # (wh-loading-dialog-until-ready).
+            #
             # End this launch's starting state, or it never ends. The
-            # dialog is already hidden, so the user believes startup is
-            # over, but `is_starting` stayed true for the rest of the
+            # dialog no longer says that startup is over, but
+            # `is_starting` stayed true for the rest of the
             # session and the websocket manager's startup suppression
             # then swallowed every later non-exempt notice from this
             # provider. The provider's own ready is the only other path
@@ -1489,9 +1493,20 @@ class RemoteSTTLauncher:
                     # the watch's own `finally`
                     # (wh-launch-signal-eviction).
                     self._claim_launch_signal(generation)
+                # Before the watch starts, not after: a watch whose
+                # limit is already over would hide the dialog first, and
+                # this text change would then bring it back with nothing
+                # left to end it (wh-loading-dialog-until-ready).
+                self._show_slow_start_text(display_name, signal, generation)
                 try:
                     watch.start()
                 except BaseException:
+                    # No watch runs, so nothing would end the dialog that
+                    # the text change above kept on the screen. Hide it
+                    # as this branch did before the dialog stayed
+                    # (wh-loading-dialog-until-ready, boss ruling R1).
+                    if self.launch_is_current(generation):
+                        self._hide_working(generation)
                     # The hold above is released by the watch's own
                     # `finally`, which a thread that never ran never
                     # reaches. A leaked hold is permanent -- every
@@ -1505,6 +1520,12 @@ class RemoteSTTLauncher:
                     # above drops it at the next append.
                     self._release_launch_signal(generation)
                     raise
+            elif self.launch_is_current(generation):
+                # No slot or no child to watch, so no watch starts and
+                # nothing would ever end the dialog. It hides here, as
+                # it did before the dialog stayed on the screen
+                # (wh-loading-dialog-until-ready, boss ruling R1).
+                self._hide_working(generation)
         elif undeclared_failure:
             logger.warning(
                 f"Provider {provider_name} did not send ready notification "
@@ -1566,6 +1587,47 @@ class RemoteSTTLauncher:
                 provider_name, may_wait=True, generation=generation
             )
 
+    def _show_slow_start_text(
+        self,
+        display_name: str,
+        signal: "_LaunchSignal",
+        generation: Optional[int],
+    ) -> bool:
+        """Change the dialog text for a provider that passed its limit.
+
+        The loading dialog stays on the screen while the provider is
+        alive and not ready, so the text now says that WheelHouse cannot
+        hear yet (wh-loading-dialog-until-ready).
+
+        The decision and the queue put are ONE step under the signal
+        lock. The ready path and a declared failure set the slot event
+        under this lock, and only after that does the websocket manager
+        ask the GUI to hide the dialog. A failure the provider could not
+        name claims the report under this lock before the same hide. So
+        either this show reaches the queue before that hide, and the
+        hide ends the dialog, or this check sees the set event or the
+        claimed report and sends nothing. Without the lock, a show sent
+        after that hide would bring the dialog back with nothing left to
+        end it. The put is `put_nowait` and never blocks, which is the
+        condition `_end_starting_state` names for holding this lock.
+
+        Returns:
+            True when the text change was sent.
+        """
+        with self._launch_signals_lock:
+            if (
+                signal.event.is_set()
+                or signal.reported
+                or not self.launch_is_current(generation)
+            ):
+                return False
+            self._show_working(
+                f"Loading {display_name} takes longer than usual. "
+                f"Wheelhouse cannot hear you yet.",
+                generation,
+            )
+            return True
+
     def _watch_for_late_death(
         self,
         provider_name: str,
@@ -1603,8 +1665,9 @@ class RemoteSTTLauncher:
         The startup monitor decides its whole outcome at its deadline,
         and the slow-start branch is the one that decides nothing: a
         child still alive there is assumed to be warming up (wh-v0q), so
-        the monitor hides the working dialog and returns without
-        claiming a report. Nothing then watched that child, so a
+        the monitor returns without claiming a report. The working dialog
+        stays on the screen, and this watch is what ends it for a child
+        that never speaks (wh-loading-dialog-until-ready). Nothing then watched that child, so a
         provider dying a moment later left the user with a dead engine
         selected, no failure notice, and a dialog that had already
         closed (wh-launch-generation.2.10).
@@ -1615,7 +1678,8 @@ class RemoteSTTLauncher:
         watch returns silently -- that is what keeps the slow-start
         benefit intact. A non-None exit code before that is the late
         death, reported below. The limit ends a watch over a child that
-        neither speaks nor exits.
+        neither speaks nor exits, and takes the dialog away with one
+        notice (`_end_watch_at_limit`).
 
         The report is CLAIMED under the lock before it is made. The
         monitor left this slot closed and unclaimed, which is how a late
@@ -1659,6 +1723,7 @@ class RemoteSTTLauncher:
                     f"within {self._late_death_watch_limit}s of its startup "
                     f"timeout"
                 )
+                self._end_watch_at_limit(display_name, signal, generation)
                 return
 
         with self._launch_signals_lock:
@@ -1710,6 +1775,49 @@ class RemoteSTTLauncher:
             )
         self._provider_stopped(
             provider_name, may_wait=True, generation=generation
+        )
+
+    def _end_watch_at_limit(
+        self,
+        display_name: str,
+        signal: "_LaunchSignal",
+        generation: Optional[int],
+    ) -> None:
+        """Take the dialog away when the late-death watch gives up.
+
+        The loading dialog stays on the screen after the startup limit
+        while the provider is alive and not ready. This watch is the
+        last party that can end it for a provider that never speaks and
+        never exits, and a dialog that nobody can close must not stay
+        with nothing left to watch it. One notice then tells the user
+        what to do (wh-loading-dialog-until-ready, boss ruling R1).
+
+        No stop is reported: the child is still alive, and this watch
+        has nothing true to say about its health. A launch that another
+        party already reported, or that went ready while this watch
+        polled, ended its dialog through that party.
+
+        crewcut: the decision is read under the lock and the notice is
+        sent after it, because `_notify` ends in a Win32 notification
+        of unbounded duration (see `launch_is_current`). A ready that
+        lands between the two still gets this notice. Removing that
+        needs a notice that carries its launch and a GUI that drops
+        one whose launch went ready.
+        """
+        with self._launch_signals_lock:
+            if (
+                signal.event.is_set()
+                or signal.reported
+                or not self.launch_is_current(generation)
+            ):
+                return
+            self._hide_working(generation)
+        self._notify(
+            display_name,
+            f"{display_name} did not start, so Wheelhouse cannot hear you. "
+            f"To restart Wheelhouse, choose Restart Wheelhouse in the "
+            f"Wheelhouse tray menu.",
+            generation,
         )
 
     def discover_providers(self) -> list[dict]:

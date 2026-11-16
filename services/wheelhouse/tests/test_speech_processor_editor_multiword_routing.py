@@ -571,7 +571,7 @@ async def test_one_editor_correction_writes_one_restore_log_line(caplog):
 async def test_the_utterance_record_keeps_the_spoken_form_after_the_pass():
     """The editor text carries "%" and the word record keeps "percent".
 
-    ``_payload_is_the_whole_utterance`` compares ``_words_this_utterance``
+    ``payload_is_the_whole_utterance`` compares ``_words_this_utterance``
     token for token with a later spoken payload. The record is built
     from the corrected final as spoken, so a payload spoken as the words
     still matches while the editor holds the symbol.
@@ -597,4 +597,4 @@ async def test_the_utterance_record_keeps_the_spoken_form_after_the_pass():
         "word 'percent' and not the symbol the editor holds. Record: "
         f"{proc._words_this_utterance!r}"
     )
-    assert proc._payload_is_the_whole_utterance("growth was 50 percent")
+    assert proc.bare_number_holds.payload_is_the_whole_utterance("growth was 50 percent")

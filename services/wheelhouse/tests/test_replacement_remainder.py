@@ -381,6 +381,11 @@ class TestTheTextOnlyReplacementPass:
             module, "_TEXT_REPLACEMENT_PASS_MAX_STEPS", 3,
         )
         with caplog.at_level(logging.WARNING, logger=module.__name__):
+            # Count only the records of the pass. The processor logs an
+            # INFO line when it is built, above this block; an earlier
+            # test file can leave the root logger at INFO or DEBUG, and
+            # then caplog keeps that line too.
+            caplog.clear()
             result = proc._apply_allowed_text_replacements(
                 "percent percent percent"
             )
@@ -405,6 +410,8 @@ class TestTheTextOnlyReplacementPass:
             module, "_TEXT_REPLACEMENT_PASS_MAX_STEPS", 3,
         )
         with caplog.at_level(logging.WARNING, logger=module.__name__):
+            # Count only the records of the pass; see the test above.
+            caplog.clear()
             result = proc._apply_allowed_text_replacements(
                 "percent percent percent percent percent"
             )

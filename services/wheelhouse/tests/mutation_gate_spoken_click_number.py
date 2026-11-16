@@ -13,7 +13,7 @@ the finalized command buffer "click 74" (or "tap 74", "click number 74",
 "click seventy four") must click badge 74 while the overlay shows badges,
 and every other multi-word payload must dictate as before.
 
-  handoff-dropped            _maybe_hold_bare_number no longer hands a
+  handoff-dropped            maybe_hold_bare_number no longer hands a
                              multi-word payload to the spoken-click hold
                              (catchers retargeted by .1.5; the entry's
                              own comment says why).
@@ -48,8 +48,14 @@ and every other multi-word payload must dictate as before.
   bare-consume-skips-strip   The consume's bare branch parses the raw held
                              words, so a punctuated bare hold opens and
                              then dictates.
+  hold-arm-sends-the-end-before-the-consume
+                             The hold arm sends the deferred end_utterance
+                             before the end marker consumes the hold, so a
+                             held click that types its words types them
+                             after end_utterance (wh-full-refactor.4.2).
 
-All fourteen must be caught. Pattern-not-found, an ambiguous pattern, a mutation
+The release-deadline entries at the end of MUTATIONS are listed there.
+Every mutation must be caught. Pattern-not-found, an ambiguous pattern, a mutation
 that does not compile, a per-mutation timeout, a suite-timeout abort, and an
 expected catcher that SKIPPED are reported as errors, never as a verdict.
 ``--check`` verifies every pattern matches exactly once in the current source
@@ -70,6 +76,15 @@ sys.stdout.reconfigure(line_buffering=True)
 
 SERVICE = Path(__file__).resolve().parent.parent
 SRC = SERVICE / "speech" / "speech_processor.py"
+# The spoken-click hold moved to BareNumberHolds (wh-full-refactor.4.3); an
+# entry that mutates a caller left in SpeechProcessor names "src": SRC.
+HOLDS = SERVICE / "speech" / "bare_number_holds.py"
+
+
+def _src_of(mut):
+    return mut.get("src", HOLDS)
+
+
 TEST_FILE = "tests/test_speech_processor_bare_number.py"
 CLASS = "TestSpokenClickNumberWhilePainted"
 CLASSES = (
@@ -142,19 +157,19 @@ PUNCTUATED = [
     "test_a_punctuated_click_that_does_not_match_keeps_its_punctuation",
 ]
 # wh-overlay-count-homophones.1.5: f4e91316 extracted this comparison
-# into _payload_is_the_whole_utterance. The mutation moves to the
+# into payload_is_the_whole_utterance. The mutation moves to the
 # spoken-click hold's CALL of that helper rather than the helper's
 # body, so it stays scoped to this hold exactly as before -- the
 # helper now serves the multi-word badge check too, and that path is
 # tested in tests/test_grid_number_badge_click.py.
 _WHOLE_CHECK = (
-    "        if not self._payload_is_the_whole_utterance(text):\n"
+    "        if not self.payload_is_the_whole_utterance(text):\n"
     "            return False\n"
 )
 # The overlay check and the hold line are byte-identical in the bare-number
 # hold; the spoken-click log line that follows makes this pattern unique.
 _HOLD_AND_LOG = (
-    "        self._pending_bare_number_words = [text]\n"
+    "        self._host.pending_bare_number_words = [text]\n"
     "        pipeline_logger.info(\n"
     '            "BARE-NUMBER candidate held from spoken click text=%r "\n'
 )
@@ -180,9 +195,9 @@ _IS_SPOKEN_CLICK_RETURN = (
     "            and tokens[0].casefold() in self._SPOKEN_CLICK_VERBS\n"
     "        )\n"
 )
+# wh-full-refactor.4.4 deleted the later-word and next-utterance tests; the
+# boundary tests test_bn_15e and test_bn_15f (S3 gate) took their place.
 FALLBACKS = [
-    "test_a_later_word_flushes_the_spoken_click_as_it_was_spoken",
-    "test_the_next_utterance_flushes_a_spoken_click_that_lost_its_end_marker",
     "test_the_overlay_closing_between_hold_and_consume_types_the_spoken_click",
     "test_a_click_pattern_that_does_not_match_types_the_spoken_click",
 ]
@@ -209,10 +224,12 @@ MUTATIONS = [
         # before that check and takes the payload first. The catchers
         # therefore move to two tests only the hold can satisfy: one that
         # the hold opened at all, and one that it kept the words as
-        # spoken.
+        # spoken. wh-full-refactor.4.4 deleted the second catcher (the
+        # later-word flush test); the test that a click pattern that does not
+        # match types the spoken click now checks the words as spoken.
         "expect": [
             "test_a_held_spoken_click_arms_a_release_deadline",
-            "test_a_later_word_flushes_the_spoken_click_as_it_was_spoken",
+            "test_a_click_pattern_that_does_not_match_types_the_spoken_click",
         ],
     },
     {
@@ -340,7 +357,8 @@ MUTATIONS = [
         # later edit could make it one, and an empty block is the
         # does-not-compile false pass the gate skill warns about.
         "name": "hold-arms-no-release-deadline",
-        "old": "                self._arm_spoken_click_release()\n",
+        "src": SRC,
+        "old": "                self.bare_number_holds.arm_spoken_click_release()\n",
         "new": "                pass\n",
         "expect": ARMED,
     },
@@ -348,8 +366,9 @@ MUTATIONS = [
         # The sentinel still reaches the queue, so only the test that
         # reads what the sentinel DOES can catch this one.
         "name": "sentinel-skips-the-spoken-click-release",
+        "src": SRC,
         "old": (
-            "            if self._is_spoken_click_hold("
+            "            if self.bare_number_holds.is_spoken_click_hold("
             "self._pending_bare_number_words):\n"
         ),
         "new": "            if False:\n",
@@ -366,6 +385,27 @@ MUTATIONS = [
             "        return len(tokens) >= 1\n"
         ),
         "expect": SCOPED_TO_SPOKEN_CLICK,
+    },
+    {
+        # wh-full-refactor.4.2: the hold arm sends the deferred
+        # end_utterance before the end marker consumes the hold, the old
+        # order. Only a test whose consume TYPES the held words can see
+        # it; the two below type them after a held click runs no click.
+        "name": "hold-arm-sends-the-end-before-the-consume",
+        "src": SRC,
+        "old": (
+            "                self.bare_number_holds.arm_spoken_click_release()\n"
+            "                return\n"
+        ),
+        "new": (
+            "                self.bare_number_holds.arm_spoken_click_release()\n"
+            "                await self._send_pending_utterance_end()\n"
+            "                return\n"
+        ),
+        "expect": [
+            "test_the_overlay_closing_between_hold_and_consume_types_the_spoken_click",
+            "test_a_click_pattern_that_does_not_match_types_the_spoken_click",
+        ],
     },
 ]
 
@@ -469,18 +509,18 @@ def _build_mutant(text: str, newline: str, mut: dict):
         return None, f"{mut['name']}: pattern matched {count} times, expected 1"
     mutated = text.replace(old, new, 1)
     try:
-        compile(mutated, str(SRC), "exec")
+        compile(mutated, str(_src_of(mut)), "exec")
     except SyntaxError as exc:
         return None, f"{mut['name']}: mutated source does not compile: {exc}"
     return mutated, None
 
 
 def check_only():
-    raw = SRC.read_bytes()
-    text = raw.decode("utf-8")
-    newline = _newline_of(raw)
     stale, non_compiling = [], []
     for mut in MUTATIONS:
+        raw = _src_of(mut).read_bytes()
+        text = raw.decode("utf-8")
+        newline = _newline_of(raw)
         mutant, error = _build_mutant(text, newline, mut)
         if error is None:
             continue
@@ -500,9 +540,7 @@ def main():
     if "--check" in sys.argv[1:]:
         return check_only()
 
-    original = SRC.read_bytes()
-    text = original.decode("utf-8")
-    newline = _newline_of(original)
+    originals = {path: path.read_bytes() for path in (SRC, HOLDS)}
     errors, caught, survived = [], [], []
 
     real_names = collect_names()
@@ -531,13 +569,17 @@ def main():
     print("baseline green")
 
     for mut in MUTATIONS:
-        mutated, error = _build_mutant(text, newline, mut)
+        target = _src_of(mut)
+        original = originals[target]
+        mutated, error = _build_mutant(
+            original.decode("utf-8"), _newline_of(original), mut
+        )
         if error is not None:
             errors.append(error)
             print("ERROR", error)
             continue
         _clear_bytecode()
-        SRC.write_bytes(mutated.encode("utf-8"))
+        target.write_bytes(mutated.encode("utf-8"))
         try:
             result = _pytest(TEST_FILE, *PYTEST_ARGS)
         except subprocess.TimeoutExpired:
@@ -545,7 +587,7 @@ def main():
             print("ERROR", errors[-1])
             continue
         finally:
-            SRC.write_bytes(original)
+            target.write_bytes(original)
             _clear_bytecode()
         defect = run_defect(result)
         if defect is not None:

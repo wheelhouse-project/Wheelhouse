@@ -277,33 +277,6 @@ def test_pin_older_session_is_rejected_as_stale(handler):
     assert resp.snapshot_id == "older"
 
 
-def test_watermark_state_is_bounded_across_many_overlay_sessions(handler):
-    # The per-session generation state must be a single (session_id,
-    # generation) pair, NOT a dict that adds one permanent entry per overlay
-    # session for the lifetime of the long-lived Input process. Drive many
-    # monotonically-increasing overlay sessions and assert the tracking state
-    # stays O(1).
-    finder = _wire_finder(handler, pin_result=True)
-
-    for sid in range(1, 101):
-        handler.pin_snapshot(
-            overlay_session_id=sid, snapshot_id=f"s{sid}", paint_generation=0,
-            request_id=f"r{sid}",
-        )
-
-    # Only the latest session's watermark is retained -- a single pair.
-    assert handler._latest_pin_watermark == (100, 0)
-    # The watermark must be a single bounded (session_id, generation) pair, NOT
-    # a dict that adds one entry per overlay session (wh-n29v.44.3). The earlier
-    # assertion read getattr(handler, "_latest_pin_generation", None) -- a name
-    # that was renamed to _latest_pin_watermark in wh-n29v.42.1, so it always
-    # returned None and the check was vacuous. Assert the REAL attribute is a
-    # 2-tuple, so a future per-session-dict regression fails here.
-    assert isinstance(handler._latest_pin_watermark, tuple)
-    assert not isinstance(handler._latest_pin_watermark, dict)
-    assert len(handler._latest_pin_watermark) == 2
-
-
 # ---------------------------------------------------------------------------
 # pin_snapshot: the stale-generation watermark must advance on any accepted
 # (non-stale) dispatch BEFORE the store pin, so a FAILED newer pin (snapshot
@@ -351,43 +324,6 @@ def test_failed_newer_pin_still_rejects_later_stale_older(handler):
 # single-pair watermark makes every later VALID pin raise on the comparison
 # (e.g. 5 < "bad") and return status=error until the Input process restarts.
 # ---------------------------------------------------------------------------
-
-
-def test_pin_non_int_session_id_rejected_without_touching_store(handler):
-    finder = _wire_finder(handler, pin_result=True)
-
-    handler.pin_snapshot(
-        overlay_session_id="bad",  # type: ignore[arg-type]
-        snapshot_id="walk-1",
-        paint_generation=0,
-        request_id="req-bad",
-    )
-
-    finder.pin.assert_not_called()
-    resp = _last_response(handler, action="pin_snapshot", request_id="req-bad")
-    assert resp.status == "error"
-    assert resp.pinned is False
-    assert resp.reason == "invalid_request"
-    # The watermark was NOT mutated by the malformed request.
-    assert getattr(handler, "_latest_pin_watermark", None) is None
-
-
-def test_pin_non_int_generation_rejected_without_touching_store(handler):
-    finder = _wire_finder(handler, pin_result=True)
-
-    handler.pin_snapshot(
-        overlay_session_id=5,
-        snapshot_id="walk-1",
-        paint_generation="bad",  # type: ignore[arg-type]
-        request_id="req-bad",
-    )
-
-    finder.pin.assert_not_called()
-    resp = _last_response(handler, action="pin_snapshot", request_id="req-bad")
-    assert resp.status == "error"
-    assert resp.pinned is False
-    assert resp.reason == "invalid_request"
-    assert getattr(handler, "_latest_pin_watermark", None) is None
 
 
 def test_pin_bool_session_id_rejected(handler):

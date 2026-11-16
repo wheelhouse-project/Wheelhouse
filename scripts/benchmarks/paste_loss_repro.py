@@ -1048,8 +1048,8 @@ def run_once(args, sentences: list[list[str]], label: str, index: int) -> dict:
                         shm.name, command_ready_event, input_ready_event,
                         response_queue, SHARED_MEM_SIZE,
                     )
-                    app._start_demuxer()
-                    app._start_sender()
+                    app.start_demuxer()
+                    app.start_sender()
                     try:
                         async def send_word(step):
                             await app.send_request(

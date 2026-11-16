@@ -63,11 +63,18 @@ puts a different snapshot on screen.
                                 satisfies every refusal test on its own; this
                                 is what makes the pair discriminate.
 
-All twelve must be caught. Pattern-not-found, an ambiguous pattern, a mutation
+Nine must be caught. Three are declared expected survivors with the key
+"survives" and a reason (wh-full-refactor.3.1): keeps-only-the-newest-prior,
+restore-disarms and closed-reset-keeps-entry-pin. The old tests that caught
+them need an order inside the 3 s grace window that no boundary test
+produces, and the stage deleted them. An expected
+survivor passes only when its whole selection stays green; any failed test
+prints "CAUGHT EXPECTED SURVIVOR" and the gate exits 1. Pattern-not-found, an ambiguous pattern, a mutation
 that does not compile, a per-mutation timeout, a suite-timeout abort, a
 skipped catcher and a missing expected test name are reported as errors,
 never as a verdict. ``--check`` verifies every pattern matches exactly once
-in the current source and that every mutant compiles, without running a test.
+in the current source and that every mutant compiles, without running a test,
+and refuses an expected survivor whose reason is blank.
 """
 
 import os
@@ -79,7 +86,7 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 
 SERVICE = Path(__file__).resolve().parent.parent
-SRC = SERVICE / "main.py"
+SRC = SERVICE / "numbered_overlay" / "controller.py"
 
 INTEGRATION = "tests/test_logic_overlay_integration.py"
 JOURNEYS = "tests/test_overlay_journeys.py"
@@ -88,6 +95,12 @@ JOURNEYS = "tests/test_overlay_journeys.py"
 # file is part of the collected-name set as well as a selection.
 ROUTING = "tests/test_voice_overlay_routing.py"
 ALL_FILES = [INTEGRATION, JOURNEYS, ROUTING]
+# wh-full-refactor.2: phase B of the overlay pilot (wh-overlay-refactor-pilot.2)
+# replaced the old re-said "show numbers" test with a boundary test in this
+# file. It is collected and run in the baseline beside ALL_FILES, and only
+# the mutation that names it selects it.
+CLICK = "tests/test_overlay_requirements_click.py"
+COLLECTED = ALL_FILES + [CLICK]
 
 # -v prints one line per test, which is what names a SKIPPED catcher; -rf
 # keeps the FAILED summary lines failed_names() reads.
@@ -137,27 +150,18 @@ _SAFE_CALL = (
 )
 
 # --- catcher names -------------------------------------------------------
-SETTLE_ARMS = "test_settle_repaint_on_a_non_browser_app_arms_the_renumber_guard"
-FOCUS_ARMS = "test_focus_triggered_refresh_arms_the_renumber_guard"
-SETTLE_RESTORE = "test_settle_repaint_of_the_same_snapshot_arms_nothing"
-FOCUS_RESTORE = "test_failed_focus_refresh_restore_arms_nothing"
-CLOSE_STRANDED = "test_a_session_close_drops_a_stranded_repaint_entry_pin"
-PROACTIVE_ARMS = "test_successful_proactive_refresh_resets_backoff_and_records_swap"
-PROACTIVE_RESTORE = "test_failed_proactive_refresh_records_no_swap_guard"
-KEEPS_ARMED = "test_a_failed_refresh_after_a_swap_keeps_the_armed_renumber_guard"
 JOURNEY_REFUSES = "test_journey_2_a_repaint_mid_sentence_refuses_the_spoken_number"
 JOURNEY_UNCHANGED = (
     "test_journey_2_an_unchanged_badge_stays_clickable_across_that_repaint"
 )
-SHOW_ARMS = "test_a_re_said_show_numbers_swap_arms_the_renumber_guard"
-GRACE_KEEPS_BOTH = (
-    "test_a_second_swap_inside_the_grace_window_keeps_both_priors"
-)
-MIDDLE_LIST_BLOCKS = (
-    "test_click_n_blocked_when_an_intermediate_list_renumbered_badge_n"
-)
-LATER_SWAP_WINDOW = (
-    "test_a_later_swap_keeps_its_own_grace_window_after_the_first_expires"
+SHOW_ARMS = "test_ck_34_click_n_after_a_renumbering_repaint_is_refused"
+# wh-full-refactor.3.1: the boundary tests that replace the deleted catchers.
+# CK-57 is the same code change as checks-only-the-first-prior and
+# expiry-uses-the-oldest-swap; CK-59 is the same code change as
+# refresh-entry-site-dropped, settle-entry-site-dropped and arm-on-restore.
+CHAIN_REFUSED = "test_ck_57_renumbering_anywhere_in_a_repaint_chain_is_refused"
+FOCUS_OR_SETTLE_CHECKED = (
+    "test_ck_59_click_n_after_a_focus_or_settle_repaint_is_checked"
 )
 
 MUTATIONS = [
@@ -168,25 +172,22 @@ MUTATIONS = [
         # block leaves an empty body, and a mutant that cannot compile reads
         # as caught while proving nothing.
         "new": "                pass\n",
-        "selection": ALL_FILES,
-        "expect": [
-            SETTLE_ARMS, FOCUS_ARMS, PROACTIVE_ARMS, KEEPS_ARMED,
-            JOURNEY_REFUSES,
-        ],
+        "selection": ALL_FILES + [CLICK],
+        "expect": [JOURNEY_REFUSES, FOCUS_OR_SETTLE_CHECKED],
     },
     {
         "name": "refresh-entry-site-dropped",
         "old": _ENTRY_PIN_STATES,
         "new": "            in (OverlayState.POST_CLICK_SETTLING,)\n",
-        "selection": ALL_FILES,
-        "expect": [FOCUS_ARMS, PROACTIVE_ARMS, KEEPS_ARMED, JOURNEY_REFUSES],
+        "selection": ALL_FILES + [CLICK],
+        "expect": [JOURNEY_REFUSES, FOCUS_OR_SETTLE_CHECKED],
     },
     {
         "name": "settle-entry-site-dropped",
         "old": _ENTRY_PIN_STATES,
         "new": "            in (OverlayState.REFRESH_IN_FLIGHT,)\n",
-        "selection": [INTEGRATION],
-        "expect": [SETTLE_ARMS],
+        "selection": [INTEGRATION, CLICK],
+        "expect": [FOCUS_OR_SETTLE_CHECKED],
     },
     {
         # wh-overlay-slow-uia-stale-badges.4.1.1. The other apply path.
@@ -198,7 +199,7 @@ MUTATIONS = [
         # Deleting the call is safe here: it is one statement among many in
         # this function, not the only statement in a block.
         "new": "        # the session still clears it.\n",
-        "selection": [INTEGRATION],
+        "selection": [INTEGRATION, CLICK],
         "expect": [SHOW_ARMS],
     },
     {
@@ -212,8 +213,11 @@ MUTATIONS = [
             "                self._overlay_repaint_swaps = "
             "[(entry_pin, now)]\n"
         ),
-        "selection": [INTEGRATION, ROUTING],
-        "expect": [GRACE_KEEPS_BOTH],
+        "selection": [INTEGRATION, ROUTING, CLICK],
+        "expect": [],
+        "survives": (
+            "Needs two repaint swaps and a click N inside one 3 s grace window"
+        ),
     },
     {
         # wh-overlay-slow-uia-stale-badges.4.2.1. Keep the whole chain but
@@ -222,8 +226,8 @@ MUTATIONS = [
         "name": "checks-only-the-first-prior",
         "old": _CHECK_LOOP,
         "new": "        for prior_id, _swap_t in live[:1]:\n",
-        "selection": [ROUTING],
-        "expect": [MIDDLE_LIST_BLOCKS],
+        "selection": [ROUTING, CLICK],
+        "expect": [CHAIN_REFUSED],
     },
     {
         # wh-overlay-slow-uia-stale-badges.4.2.1. Expire every entry on the
@@ -236,8 +240,8 @@ MUTATIONS = [
             "            if now - swaps[0][1] <= "
             "_OVERLAY_RENUMBER_GRACE_SECONDS\n"
         ),
-        "selection": [ROUTING],
-        "expect": [LATER_SWAP_WINDOW],
+        "selection": [ROUTING, CLICK],
+        "expect": [CHAIN_REFUSED],
     },
     {
         "name": "arm-on-restore",
@@ -246,13 +250,10 @@ MUTATIONS = [
             "            if entry_pin is not None and "
             "machine.pinned_snapshot_id == entry_pin:\n"
         ),
-        "selection": ALL_FILES,
+        "selection": ALL_FILES + [CLICK],
         # Both sides of the same-snapshot exclusion: the restores now arm,
         # and the swaps stop arming.
-        "expect": [
-            SETTLE_RESTORE, FOCUS_RESTORE, PROACTIVE_RESTORE,
-            SETTLE_ARMS, FOCUS_ARMS, JOURNEY_REFUSES,
-        ],
+        "expect": [JOURNEY_REFUSES, FOCUS_OR_SETTLE_CHECKED],
     },
     {
         "name": "proactive-gate-restored",
@@ -267,11 +268,11 @@ MUTATIONS = [
             "                )\n"
             "            ):\n"
         ),
-        "selection": ALL_FILES,
+        "selection": ALL_FILES + [CLICK],
         # The proactive tests stay green under this mutant on purpose: it IS
         # the old behaviour, and the whole bead is that the old behaviour
         # protected browser windows and nothing else.
-        "expect": [SETTLE_ARMS, FOCUS_ARMS, JOURNEY_REFUSES],
+        "expect": [JOURNEY_REFUSES, FOCUS_OR_SETTLE_CHECKED],
     },
     {
         "name": "restore-disarms",
@@ -280,15 +281,24 @@ MUTATIONS = [
             "            else:\n"
             "                self._overlay_repaint_swaps = []\n"
         ),
-        "selection": [INTEGRATION],
-        "expect": [KEEPS_ARMED],
+        "selection": [INTEGRATION, CLICK],
+        "expect": [],
+        "survives": (
+            "Needs a repaint swap, then a failed refresh, then click N, all "
+            "inside the 3 s grace window"
+        ),
     },
     {
         "name": "closed-reset-keeps-entry-pin",
         "old": _CLOSED_RESET,
         "new": "            self._overlay_repaint_swaps = []\n",
-        "selection": [INTEGRATION],
-        "expect": [CLOSE_STRANDED],
+        "selection": [INTEGRATION, CLICK],
+        "expect": [],
+        "survives": (
+            "Needs hide numbers while a refresh walk is outstanding, then "
+            "show numbers and a click N inside 3 s of the new session's "
+            "first paint"
+        ),
     },
     {
         "name": "renumber-refuses-everything",
@@ -317,7 +327,7 @@ def _pytest(*extra):
 
 def collect_names():
     """Real test names, so a renamed test cannot read as a survivor."""
-    out = _pytest(*ALL_FILES, "--collect-only", "-q", "-p", "no:randomly")
+    out = _pytest(*COLLECTED, "--collect-only", "-q", "-p", "no:randomly")
     names = set()
     for line in out.stdout.splitlines():
         if "::" in line:
@@ -361,11 +371,36 @@ def _build_mutant(text: str, newline: str, mut: dict):
     return mutated, None
 
 
+def _declaration_problems(mutations):
+    """Name each mutation whose expected-survivor declaration has no reason.
+
+    The same rule as the shared runner (stt_providers/shared/tests/
+    mutation_gate_runner.py): a declaration without a reason hides a
+    survivor and says nothing about why, so it is refused before any file
+    is mutated.
+    """
+    problems = []
+    for mut in mutations:
+        if "survives" not in mut:
+            continue
+        reason = mut["survives"]
+        if not isinstance(reason, str) or not reason.strip():
+            problems.append(f"{mut['name']}: an expected survivor needs a reason")
+    return problems
+
+
+def _declared(mutations):
+    return sum(1 for mut in mutations if "survives" in mut)
+
+
 def check_only():
     raw = SRC.read_bytes()
     text = raw.decode("utf-8")
     newline = _newline_of(raw)
     stale, non_compiling = [], []
+    invalid = _declaration_problems(MUTATIONS)
+    for problem in invalid:
+        print("ERROR", problem)
     for mut in MUTATIONS:
         mutant, error = _build_mutant(text, newline, mut)
         if error is None:
@@ -375,11 +410,15 @@ def check_only():
         else:
             stale.append(error)
         print("ERROR", error)
-    print(
+    line = (
         f"checked {len(MUTATIONS)} patterns, {len(stale)} stale, "
         f"{len(non_compiling)} that do not compile"
     )
-    return 1 if stale or non_compiling else 0
+    # The line keeps its old form when no mutation declares a survivor.
+    if _declared(MUTATIONS):
+        line += f", {_declared(MUTATIONS)} expected survivors"
+    print(line)
+    return 1 if stale or non_compiling or invalid else 0
 
 
 def _restore(original: bytes):
@@ -436,14 +475,20 @@ def main():
     mutations = _selected(sys.argv[1:])
     if mutations is None:
         return 1
+    invalid = _declaration_problems(mutations)
+    if invalid:
+        for problem in invalid:
+            print("ERROR", problem)
+        return 1
 
     original = SRC.read_bytes()
     text = original.decode("utf-8")
     newline = _newline_of(original)
     errors, caught, survived = [], [], []
+    expected, expected_caught = [], []
 
     real_names = collect_names()
-    print(f"collected {len(real_names)} test names in {ALL_FILES}")
+    print(f"collected {len(real_names)} test names in {COLLECTED}")
     for mut in mutations:
         for name in mut["expect"]:
             if name not in real_names:
@@ -456,7 +501,7 @@ def main():
         return 1
 
     _clear_bytecode()
-    baseline = _pytest(*ALL_FILES, *PYTEST_ARGS)
+    baseline = _pytest(*COLLECTED, *PYTEST_ARGS)
     if baseline.returncode != 0:
         print("ERROR baseline is not green; refusing to start")
         print(baseline.stdout[-3000:])
@@ -499,6 +544,24 @@ def main():
             print("ERROR", errors[-1])
             continue
         missing = [n for n in mut["expect"] if n not in got]
+        if "survives" in mut:
+            # An expected survivor must leave its whole selection green. A
+            # failed test, named or not, catches the mutation, so the
+            # reason is no longer true and the declaration must go.
+            if result.returncode == 0:
+                expected.append(mut["name"])
+                print(f"expected survivor {mut['name']}: {mut['survives']}")
+            elif got:
+                expected_caught.append(mut["name"])
+                print(
+                    f"CAUGHT EXPECTED SURVIVOR {mut['name']} by {sorted(got)}"
+                )
+            else:
+                errors.append(
+                    f"{mut['name']}: exit {result.returncode} with no FAILED line"
+                )
+                print("ERROR", errors[-1])
+            continue
         if result.returncode == 0 or missing:
             survived.append(mut["name"])
             print(
@@ -512,8 +575,16 @@ def main():
     print()
     names = ", ".join(mut["name"] for mut in mutations)
     print(f"scope: {len(mutations)} mutations, none skipped: {names}")
-    print(f"caught {len(caught)}, survived {len(survived)}, errors {len(errors)}")
-    return 1 if survived or errors else 0
+    line = f"caught {len(caught)}, survived {len(survived)}, errors {len(errors)}"
+    # The line keeps its old form when no selected mutation declares a
+    # survivor, so a run of an older table prints what it always printed.
+    if _declared(mutations):
+        line += (
+            f", {len(expected)} expected survivors, "
+            f"{len(expected_caught)} expected survivors caught"
+        )
+    print(line)
+    return 1 if survived or errors or expected_caught else 0
 
 
 if __name__ == "__main__":

@@ -109,8 +109,8 @@ class ShowNumberedOverlayResponseSchemaError(ValueError):
 # Closed-set membership for the Schema A transport status used when PARSING.
 # The REAL handler emits ONLY ``"ok"`` / ``"error"``; ``"not_implemented"`` is
 # retained here as a defensive parse literal for the surviving Phase 1.5 stub
-# (UIActionHandler.show_numbered_overlay), which still emits it until the real
-# walk lookup ships (wh-cy670k). See the module docstring.
+# (OverlaySnapshotActions.show_numbered_overlay), which still emits it until
+# the real walk lookup ships (wh-cy670k). See the module docstring.
 _ALLOWED_STATUS = frozenset({"ok", "error", "not_implemented"})
 
 # Closed-set membership for the authoritative feature outcome. This set

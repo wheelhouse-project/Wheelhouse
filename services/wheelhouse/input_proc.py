@@ -2650,6 +2650,20 @@ def input_process_main(shm_name: str, command_ready_event: multiprocessing.Event
                 awaited_window_s,
             )
 
+            # wh-focus-read-once-utterance: tell the handler which command
+            # runs next, before the special-case chain, so every dispatched
+            # command passes here. A dictated word may then use the focus
+            # read stored for its utterance, and any other command discards
+            # it. A failure here must not end the Input process, so it is
+            # logged and the command still runs.
+            try:
+                ui_handler.note_input_command(action)
+            except Exception as e:
+                logger.warning(
+                    "note_input_command failed for %s: %s",
+                    action, _safe_error_text(e),
+                )
+
             # --- Special Case: Window Activation ---
             # activate_window is handled directly here because it only requires win32gui
             # operations and doesn't need the UIActionHandler's UI automation framework.

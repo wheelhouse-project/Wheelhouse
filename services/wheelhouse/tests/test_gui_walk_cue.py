@@ -129,8 +129,8 @@ class TestQueueDispatch:
         payload = {"action": "overlay_walk_cue", "active": True}
         manager.state_from_logic_queue.get_nowait.side_effect = [payload, Empty()]
 
-        with patch.object(manager, "_handle_paint_overlay") as mock_paint, \
-             patch.object(manager, "_handle_clear_overlay") as mock_clear:
+        with patch.object(manager.overlay_messages, "handle_paint_overlay") as mock_paint, \
+             patch.object(manager.overlay_messages, "handle_clear_overlay") as mock_clear:
             manager._check_queues_and_events()
 
         mock_paint.assert_not_called()

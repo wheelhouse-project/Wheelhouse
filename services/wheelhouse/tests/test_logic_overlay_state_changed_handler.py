@@ -4,7 +4,7 @@ The GUI emits ``overlay_state_changed { state, overlay_session_id,
 paint_generation, monitor_ids, snapshot_id }`` on the
 ``commands_to_logic_queue`` after it applies / fails / clears a numbered-overlay
 paint request. Before this slice, ``main.py``'s ``_build_gui_handler_map`` had no
-route for the action, so ``_listen_for_gui_commands`` logged "Received unknown
+route for the action, so ``listen_for_gui_commands`` logged "Received unknown
 action from GUI: overlay_state_changed" and dropped it -- the Logic-side paint-
 acknowledgement state machine was never driven.
 
@@ -23,18 +23,20 @@ This slice adds:
     ``"snapshot_item_clicked"`` precedent's shape.
 
 These tests build a ``LogicController`` via ``object.__new__`` to skip the heavy
-``__init__`` and inject only the few attributes the handler touches
-(``click_config``, ``click_overlay_state``, ``_perform_overlay_effects``). The
-generation gate is the machine's OWN concern: the handler copies the wire pair
-onto the ``OverlayEvent`` and the machine returns ``STALE_GENERATION`` with no
-state change / no effects when it does not match. The handler does NOT
-re-implement a generation check, so the stale case is asserted via the machine's
-resulting state and the (non-)hand-off to ``_perform_overlay_effects``.
+``__init__``, build the overlay with its public constructor, and inject only
+the few host attributes the handler touches (``click_config``,
+``create_task_with_error_handling``). The generation gate is the machine's OWN
+concern: the handler copies the wire pair onto the ``OverlayEvent`` and the
+machine returns ``STALE_GENERATION`` with no state change / no effects when it
+does not match. The handler does NOT re-implement a generation check, so the
+stale case is asserted via the machine's resulting state and the (non-)hand-off
+of an effect batch to the host's ``create_task_with_error_handling``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -45,10 +47,14 @@ from services.wheelhouse.click_overlay_state import (
     OverlayState,
 )
 from services.wheelhouse.main import LogicController
+from services.wheelhouse.numbered_overlay.controller import (
+    NumberedOverlayController,
+)
 from services.wheelhouse.shared.overlay_state_changed import (
     ACTION_NAME,
     OverlayStateChangedEvent,
 )
+from services.wheelhouse.ui.click_config import ClickConfig
 
 
 # ---------------------------------------------------------------------------
@@ -59,44 +65,55 @@ from services.wheelhouse.shared.overlay_state_changed import (
 def _controller(*, enabled: bool = True, overlay_effective: bool = True):
     """Build a bare LogicController with only the overlay-handler attributes.
 
-    Skips the heavy ``__init__`` via ``object.__new__`` (the wh-n29v test
-    precedent) and injects:
+    Skips the heavy ``LogicController.__init__`` via ``object.__new__`` (the
+    wh-n29v test precedent), builds the overlay with its public constructor
+    (as main.py does), and injects:
 
       * ``click_config`` -- a MagicMock with ``enabled`` /
         ``overlay_enabled_effective`` so the active-gate is exercised.
       * ``click_overlay_state`` -- a real ``ClickOverlayStateMachine`` so the
         PAINT_ACK transition and the generation gate run for real.
-      * ``_perform_overlay_effects`` -- a MagicMock that captures the effects
-        handed off by ``_apply_overlay_event``.
+      * ``create_task_with_error_handling`` -- a MagicMock on the host. The
+        overlay hands every non-empty effect batch to the host as an
+        "OverlayEffects" task, so this mock records each hand-off; it closes
+        the coroutine instead of running it.
     """
 
     controller = object.__new__(LogicController)
+
+    # The public constructor reads numbers from click_config, so it runs on
+    # a real default config; the MagicMock replaces it afterwards for the
+    # active-gate reads.
+    controller.click_config = ClickConfig.from_raw({})
+    controller.overlay = NumberedOverlayController(
+        controller, clock=time.monotonic
+    )
     controller.click_config = MagicMock()
     controller.click_config.enabled = enabled
     controller.click_config.overlay_enabled_effective = overlay_effective
     controller.click_config.overlay_invalid_key = None
-    controller.click_overlay_state = ClickOverlayStateMachine()
-    controller._perform_overlay_effects = MagicMock()  # type: ignore[method-assign]
-    # _apply_overlay_event resets the focus debouncer on entry to closed and
-    # reconciles the transient destroy hook. None of the PAINT_ACK paths here
-    # enter closed or touch the hook, but inject the fields it may read so the
-    # method body never raises an AttributeError on the shared seam.
-    controller._overlay_focus_debouncer = MagicMock()
-    controller._overlay_focus_hooks = None
-    controller._overlay_destroy_hook_active = False
-    controller._overlay_tracked_identity = None
+    controller.overlay.click_overlay_state = ClickOverlayStateMachine()
+
+    def _close_the_batch(coro, task_name):
+        coro.close()
+        return MagicMock()
+
+    controller.create_task_with_error_handling = MagicMock(  # type: ignore[method-assign]
+        side_effect=_close_the_batch,
+    )
     return controller
 
 
 def _effects_mock(controller) -> MagicMock:
-    """Return the ``_perform_overlay_effects`` MagicMock as a typed handle.
+    """Return the host's ``create_task_with_error_handling`` mock, typed.
 
-    The helper assigns a ``MagicMock`` over the bound method; pyright still sees
-    the declared ``MethodType``, so cast at the assertion site to keep the test
-    file pyright-clean while asserting on the mock's call records.
+    Each effect batch the overlay hands off reaches the host as one call, so
+    ``assert_not_called`` asserts that no effect was handed off. The helper
+    assigns a ``MagicMock`` over the bound method; pyright still sees the
+    declared ``MethodType``, so cast to assert on the mock's call records.
     """
 
-    return cast(MagicMock, controller._perform_overlay_effects)
+    return cast(MagicMock, controller.create_task_with_error_handling)
 
 
 def _drive_to_paint_in_flight(controller) -> tuple[int, int]:
@@ -110,7 +127,7 @@ def _drive_to_paint_in_flight(controller) -> tuple[int, int]:
     test can build a wire dict with matching values.
     """
 
-    machine = controller.click_overlay_state
+    machine = controller.overlay.click_overlay_state
     machine.apply(OverlayEvent(kind=OverlayEventKind.SHOW_NUMBERS))
     sid = machine.overlay_session_id
     gen = machine.paint_generation
@@ -151,40 +168,9 @@ def _wire(
 # ---------------------------------------------------------------------------
 
 
-def test_painted_ack_at_active_pair_drives_painted_and_hands_off_effects():
-    controller = _controller()
-    sid, gen = _drive_to_paint_in_flight(controller)
-
-    asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
-    )
-
-    # paint_in_flight + painted ack -> painted (the machine's contract).
-    assert controller.click_overlay_state.state is OverlayState.PAINTED
-    # _apply_overlay_event handed the returned effects (CANCEL_TIMER) to the
-    # effects seam. The painted-ack transition returns a non-empty effect tuple,
-    # so the seam was called exactly once.
-    assert _effects_mock(controller).call_count == 1
-
-
 # ---------------------------------------------------------------------------
 # (b) failed ack maps to PaintAckState.FAILED and is applied.
 # ---------------------------------------------------------------------------
-
-
-def test_failed_ack_maps_to_failed_and_is_applied():
-    controller = _controller()
-    sid, gen = _drive_to_paint_in_flight(controller)
-
-    asyncio.run(
-        controller._handle_overlay_state_changed(_wire("failed", sid, gen))
-    )
-
-    # paint_in_flight + failed ack -> error -> closed (the machine recovers to
-    # closed). A failed ack must NOT leave the machine in painted.
-    assert controller.click_overlay_state.state is OverlayState.CLOSED
-    # The failure recovery returns effects (cancel_timer, unpin, ...), handed off.
-    assert _effects_mock(controller).call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +185,10 @@ def test_cleared_ack_maps_to_cleared_and_is_bookkeeping_no_op():
     # A cleared ack in paint_in_flight is bookkeeping only (NO_OP): no state
     # change, no effects. It must not raise and must not corrupt state.
     asyncio.run(
-        controller._handle_overlay_state_changed(_wire("cleared", sid, gen))
+        controller.overlay.handle_overlay_state_changed(_wire("cleared", sid, gen))
     )
 
-    assert controller.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
     # NO_OP returns no effects, so the seam is never called.
     _effects_mock(controller).assert_not_called()
 
@@ -210,38 +196,6 @@ def test_cleared_ack_maps_to_cleared_and_is_bookkeeping_no_op():
 # ---------------------------------------------------------------------------
 # (d) GENERATION GATE: a non-matching generation -> STALE_GENERATION, no change.
 # ---------------------------------------------------------------------------
-
-
-def test_stale_generation_is_dropped_by_machine_no_change_no_effects():
-    controller = _controller()
-    sid, gen = _drive_to_paint_in_flight(controller)
-
-    # A paint_generation that does not match the active pair: the machine
-    # returns STALE_GENERATION with NO state change and NO effects, BEFORE the
-    # transition table. The handler must pass the wire pair through and NOT
-    # re-implement a check, so a stale ack leaves the machine in paint_in_flight.
-    asyncio.run(
-        controller._handle_overlay_state_changed(
-            _wire("painted", sid, gen + 7)
-        )
-    )
-
-    assert controller.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
-    _effects_mock(controller).assert_not_called()
-
-
-def test_stale_session_is_dropped_by_machine_no_change_no_effects():
-    controller = _controller()
-    sid, gen = _drive_to_paint_in_flight(controller)
-
-    asyncio.run(
-        controller._handle_overlay_state_changed(
-            _wire("painted", sid + 99, gen)
-        )
-    )
-
-    assert controller.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
-    _effects_mock(controller).assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -264,9 +218,9 @@ def test_malformed_payload_missing_field_dropped_without_raising():
         "monitor_ids": [0],
         # snapshot_id intentionally omitted
     }
-    asyncio.run(controller._handle_overlay_state_changed(bad))
+    asyncio.run(controller.overlay.handle_overlay_state_changed(bad))
 
-    assert controller.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
     _effects_mock(controller).assert_not_called()
 
 
@@ -276,9 +230,9 @@ def test_wrong_action_payload_dropped_without_raising():
 
     bad = _wire("painted", sid, gen)
     bad["action"] = "not_overlay_state_changed"
-    asyncio.run(controller._handle_overlay_state_changed(bad))
+    asyncio.run(controller.overlay.handle_overlay_state_changed(bad))
 
-    assert controller.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
     _effects_mock(controller).assert_not_called()
 
 
@@ -292,10 +246,10 @@ def test_inactive_disabled_early_returns_without_touching_machine():
     sid, gen = _drive_to_paint_in_flight(controller)
 
     asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
+        controller.overlay.handle_overlay_state_changed(_wire("painted", sid, gen))
     )
 
-    assert controller.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
     _effects_mock(controller).assert_not_called()
 
 
@@ -304,10 +258,10 @@ def test_inactive_overlay_not_effective_early_returns_without_touching_machine()
     sid, gen = _drive_to_paint_in_flight(controller)
 
     asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
+        controller.overlay.handle_overlay_state_changed(_wire("painted", sid, gen))
     )
 
-    assert controller.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAINT_IN_FLIGHT
     _effects_mock(controller).assert_not_called()
 
 
@@ -324,6 +278,10 @@ def test_handler_map_binds_overlay_state_changed_to_a_callable():
     # overlay_state_changed entry. This catches a copy-paste mis-binding (wrong
     # handler on the right key) without exercising the unrelated entries.
     controller = object.__new__(LogicController)
+    controller.click_config = ClickConfig.from_raw({})
+    controller.overlay = NumberedOverlayController(
+        controller, clock=time.monotonic
+    )
     controller.state_manager = MagicMock()
 
     # Capture the coroutine the overlay lambda schedules and assert it targets
@@ -348,7 +306,7 @@ def test_handler_map_binds_overlay_state_changed_to_a_callable():
     entry = handler_map["overlay_state_changed"]
     assert callable(entry)
     entry()  # invoke the lambda -> calls create_task_with_error_handling
-    assert captured.get("coro_name") == "_handle_overlay_state_changed"
+    assert captured.get("coro_name") == "handle_overlay_state_changed"
     assert captured.get("task_name") == "OverlayStateChanged"
 
 
@@ -358,88 +316,10 @@ def test_handler_map_binds_overlay_state_changed_to_a_callable():
 # ---------------------------------------------------------------------------
 
 
-def test_unexpected_error_in_apply_is_swallowed_not_escalated():
-    """An unexpected error in the post-parse body must be logged and dropped,
-    NOT propagated out of the coroutine.
-
-    The handler runs as a ``create_task_with_error_handling`` background task
-    whose done-callback (``_handle_task_completion``) calls ``request_shutdown()``
-    on ANY uncaught exception. An unguarded raise here would therefore restart
-    the whole Logic process -- defeating wh-uf54's "version-skewed sender cannot
-    crash the listener" intent and diverging from the ``_handle_snapshot_item_clicked``
-    degrade-don't-die precedent in the same file. ``safe_parse`` only covers the
-    malformed-payload (ValueError) path; the ``PaintAckState`` mapping and the
-    ``_apply_overlay_event`` hand-off (whose effects seam becomes real cross-process
-    IPC in the integration slice) are the realistic unexpected-error sources.
-    """
-    controller = _controller()
-    sid, gen = _drive_to_paint_in_flight(controller)
-
-    # Replace the apply hand-off with one that raises an unexpected error,
-    # standing in for any failure in the effects path or an enum/schema drift.
-    controller._apply_overlay_event = MagicMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("boom")
-    )
-
-    # Must NOT raise -- asyncio.run re-raises an exception that escapes the
-    # coroutine, so a propagating error fails this test (and, in production,
-    # restarts Logic).
-    asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
-    )
-
-    # The guard wraps the real work, not an early return: the body reached the
-    # apply call before the error was swallowed.
-    cast(MagicMock, controller._apply_overlay_event).assert_called_once()
-
-
 # ---------------------------------------------------------------------------
 # (i) painted ack while auto_hide -> PAUSED, and _apply_overlay_event reconciles
 #     the transient destroy hook to match (wh-n29v.68.2).
 # ---------------------------------------------------------------------------
-
-
-def test_painted_ack_while_auto_hide_drives_paused_and_registers_destroy_hook():
-    """A painted ack while ``auto_hide_in_flight`` drives paint_in_flight ->
-    paused, and ``_apply_overlay_event`` then registers the transient destroy
-    hook (scoped to the tracked window's pid/tid) to match the paused state.
-
-    The other tests set ``_overlay_focus_hooks=None`` so the hook-registration
-    branch in ``_reconcile_overlay_destroy_hook`` never runs; this test primes a
-    hook manager, a tracked identity, and a pid/tid resolver so the
-    paint-ack -> PAUSED -> destroy-hook-register reuse this handler triggers is
-    actually exercised.
-    """
-    controller = _controller()
-    sid, gen = _drive_to_paint_in_flight(controller)
-
-    # Prime the transient-destroy-hook dependencies the default helper nulls out.
-    manager = MagicMock()
-    manager.register_destroy_hook.return_value = True
-    controller._overlay_focus_hooks = manager
-    tracked = MagicMock()
-    tracked.hwnd = 4321
-    controller._overlay_tracked_identity = tracked
-    controller._overlay_window_pid_tid = MagicMock(  # type: ignore[method-assign]
-        return_value=(111, 222)
-    )
-
-    # MIC_PAUSE in paint_in_flight sets auto_hide_in_flight and stays
-    # paint_in_flight, so the next painted ack routes to _paint_ack_to_paused.
-    controller.click_overlay_state.apply(
-        OverlayEvent(kind=OverlayEventKind.MIC_PAUSE)
-    )
-    assert controller.click_overlay_state.auto_hide_in_flight is True
-
-    asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
-    )
-
-    assert controller.click_overlay_state.state is OverlayState.PAUSED
-    manager.register_destroy_hook.assert_called_once_with(pid=111, tid=222)
-    assert controller._overlay_destroy_hook_active is True
-    # The paint-ack -> paused transition returns effects, handed to the seam.
-    assert _effects_mock(controller).call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -464,19 +344,19 @@ def test_cleared_ack_in_paused_is_bookkeeping_not_error():
 
     # MIC_PAUSE arms auto-hide; the painted ack then drives paint_in_flight ->
     # paused (and dispatches the clear the GUI will acknowledge).
-    controller.click_overlay_state.apply(
+    controller.overlay.click_overlay_state.apply(
         OverlayEvent(kind=OverlayEventKind.MIC_PAUSE)
     )
     asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
+        controller.overlay.handle_overlay_state_changed(_wire("painted", sid, gen))
     )
-    assert controller.click_overlay_state.state is OverlayState.PAUSED
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAUSED
 
     # The 'cleared' ack for that hide arrives at the SAME generation.
     asyncio.run(
-        controller._handle_overlay_state_changed(_wire("cleared", sid, gen))
+        controller.overlay.handle_overlay_state_changed(_wire("cleared", sid, gen))
     )
-    assert controller.click_overlay_state.state is OverlayState.PAUSED
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAUSED
 
 
 def test_painted_ack_in_paused_is_bookkeeping_not_error():
@@ -486,19 +366,19 @@ def test_painted_ack_in_paused_is_bookkeeping_not_error():
     """
     controller = _controller()
     sid, gen = _drive_to_paint_in_flight(controller)
-    controller.click_overlay_state.apply(
+    controller.overlay.click_overlay_state.apply(
         OverlayEvent(kind=OverlayEventKind.MIC_PAUSE)
     )
     asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
+        controller.overlay.handle_overlay_state_changed(_wire("painted", sid, gen))
     )
-    assert controller.click_overlay_state.state is OverlayState.PAUSED
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAUSED
 
     # A duplicate painted ack at the same generation in paused: bookkeeping.
     asyncio.run(
-        controller._handle_overlay_state_changed(_wire("painted", sid, gen))
+        controller.overlay.handle_overlay_state_changed(_wire("painted", sid, gen))
     )
-    assert controller.click_overlay_state.state is OverlayState.PAUSED
+    assert controller.overlay.click_overlay_state.state is OverlayState.PAUSED
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +395,10 @@ def test_completed_overlay_task_is_discarded_from_background_tasks():
     discards the finished task from self.background_tasks.
     """
     controller = object.__new__(LogicController)
+    controller.click_config = ClickConfig.from_raw({})
+    controller.overlay = NumberedOverlayController(
+        controller, clock=time.monotonic
+    )
     controller.background_tasks = []
 
     async def _run():

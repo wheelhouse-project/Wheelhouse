@@ -3548,16 +3548,16 @@ class TestSenderLoop:
 
 
 # ---------------------------------------------------------------------------
-# _start_demuxer / _start_sender
+# start_demuxer / start_sender
 # ---------------------------------------------------------------------------
 
 class TestStartHelpers:
-    """Test _start_demuxer and _start_sender helper methods."""
+    """Test start_demuxer and start_sender helper methods."""
 
     @pytest.mark.asyncio
     async def test_start_demuxer_creates_task(self, app):
-        """_start_demuxer creates a new demuxer_task."""
-        app._start_demuxer()
+        """start_demuxer creates a new demuxer_task."""
+        app.start_demuxer()
         assert app.demuxer_task is not None
         assert not app.demuxer_task.done()
         app.demuxer_task.cancel()
@@ -3568,11 +3568,11 @@ class TestStartHelpers:
 
     @pytest.mark.asyncio
     async def test_start_demuxer_noop_if_running(self, app):
-        """_start_demuxer does nothing if task is still running."""
-        app._start_demuxer()
+        """start_demuxer does nothing if task is still running."""
+        app.start_demuxer()
         first_task = app.demuxer_task
 
-        app._start_demuxer()
+        app.start_demuxer()
         assert app.demuxer_task is first_task
 
         first_task.cancel()
@@ -3583,8 +3583,8 @@ class TestStartHelpers:
 
     @pytest.mark.asyncio
     async def test_start_sender_creates_task(self, app):
-        """_start_sender creates a new sender task."""
-        app._start_sender()
+        """start_sender creates a new sender task."""
+        app.start_sender()
         assert app._sender_task is not None
         assert not app._sender_task.done()
         app._sender_task.cancel()
@@ -3595,11 +3595,11 @@ class TestStartHelpers:
 
     @pytest.mark.asyncio
     async def test_start_sender_noop_if_running(self, app):
-        """_start_sender does nothing if task is still running."""
-        app._start_sender()
+        """start_sender does nothing if task is still running."""
+        app.start_sender()
         first_task = app._sender_task
 
-        app._start_sender()
+        app.start_sender()
         assert app._sender_task is first_task
 
         first_task.cancel()

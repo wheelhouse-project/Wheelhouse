@@ -9,6 +9,7 @@ Tests mouse input routing including:
 """
 
 import asyncio
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from unittest.mock import Mock, AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -107,6 +108,190 @@ class TestOnMove:
         mouse_handler.on_move(300, 200)
         mouse_handler.on_move(0, 200)
         assert mouse_handler.mouse_x == 0
+
+
+# ===========================================================================
+# on_click / on_scroll: the numbered overlay's mouse refresh
+# (wh-overlay-refresh-after-mouse)
+# ===========================================================================
+
+
+@asynccontextmanager
+async def _overlay_entry(tmp_path, *, numbers_show=True):
+    """A real Logic overlay, with its numbers painted or never shown.
+
+    The Logic process of tests/overlay_boundary_harness.py: "show numbers",
+    the walk answered and the paint acknowledged when ``numbers_show``.
+    Yields ``(boundary, paint)``: ``paint`` is the paint_overlay message,
+    or None. The overlay's hook entry is
+    ``boundary.controller.overlay.note_pointer_input``.
+    """
+    from tests.overlay_boundary_harness import overlay_boundary
+
+    async with overlay_boundary(tmp_path) as boundary:
+        paint = None
+        if numbers_show:
+            paint = await boundary.show_numbers_painted("snap-1")
+        yield boundary, paint
+
+
+@contextmanager
+def _posting_to(boundary, loop):
+    """The overlay posts to ``loop`` (a stand-in) instead of the Logic loop.
+
+    ``note_pointer_input`` runs on the pynput hook thread, reads one bool
+    and posts at most one call to ``LogicController.loop``. The stand-in is
+    in place only while the hook callbacks run, so the boundary's own awaits
+    still use the real loop.
+    """
+    real = boundary.controller.loop
+    boundary.controller.loop = loop
+    try:
+        yield
+    finally:
+        boundary.controller.loop = real
+
+
+class TestPointerInputForOverlay:
+    """Clicks and wheel steps reach the overlay without delaying the input.
+
+    pynput runs these callbacks inside the WH_MOUSE_LL hook procedure, so
+    every click and wheel step waits for them, and an exception that leaves
+    a callback stops the listener (acceptance item 5).
+    """
+
+    def test_click_and_wheel_reach_the_listener_with_the_injected_flag(
+        self, mouse_handler,
+    ):
+        listener = Mock()
+        mouse_handler.set_pointer_input_listener(listener)
+        mouse_handler.on_click(5, 6, "left", True, True)
+        mouse_handler.on_click(5, 6, "left", False, False)
+        mouse_handler.on_scroll(5, 6, 0, -1, True)
+        mouse_handler.on_scroll(5, 6, 0, 1, False)
+        assert listener.call_args_list == [
+            call(True, True), call(True, False),
+            call(False, True), call(False, False),
+        ]
+
+    def test_installed_pynput_passes_the_injected_flag(self, mouse_handler):
+        """The installed pynput calls on_click and on_scroll with ``injected``.
+
+        pynput 1.8 wraps a callback by its parameter count
+        (pynput/_util/__init__.py ``_wrap``); a callback with fewer than five
+        parameters never sees the flag.
+        """
+        from pynput.mouse import Button, Listener
+
+        listener = Mock()
+        mouse_handler.set_pointer_input_listener(listener)
+        hook = Listener(
+            on_move=mouse_handler.on_move,
+            on_click=mouse_handler.on_click,
+            on_scroll=mouse_handler.on_scroll,
+        )
+        hook.on_click(1, 2, Button.left, True, True)
+        hook.on_scroll(1, 2, 0, -1, True)
+        assert listener.call_args_list == [call(True, True), call(False, True)]
+
+    def test_no_listener_is_a_no_op(self, mouse_handler):
+        assert mouse_handler.on_click(1, 2, "left", True, False) is None
+        assert mouse_handler.on_scroll(1, 2, 0, 1, False) is None
+
+    async def test_overlay_entry_posts_one_call_per_event_and_writes_no_log(
+        self, mouse_handler, caplog, tmp_path,
+    ):
+        import logging
+
+        from tests.overlay_boundary_harness import settle
+
+        loop = Mock()
+        async with _overlay_entry(tmp_path, numbers_show=True) as (b, paint):
+            overlay = b.controller.overlay
+            mouse_handler.set_pointer_input_listener(overlay.note_pointer_input)
+            caplog.clear()
+            with _posting_to(b, loop), caplog.at_level(logging.DEBUG):
+                mouse_handler.on_click(5, 6, "left", True, False)
+                assert loop.call_soon_threadsafe.call_count == 1
+                mouse_handler.on_scroll(5, 6, 0, -1, True)
+                assert loop.call_soon_threadsafe.call_count == 2
+                records = list(caplog.records)
+            assert [name for name, _a, _k in loop.method_calls] == [
+                "call_soon_threadsafe", "call_soon_threadsafe",
+            ]
+            posted = [c.args for c in loop.call_soon_threadsafe.call_args_list]
+            assert [args[1:] for args in posted] == [(True, False), (False, True)]
+            assert records == []
+            # The posted calls are the overlay's: run on the Logic loop, they
+            # give one refresh once the quiet time has passed.
+            mark = b.mark()
+            for args in posted:
+                b.loop.call_soon(*args)
+            await settle()
+            await b.advance(0.6)
+            frames, _gui = await b.quiet(mark, 0.05)
+            walks = [f for f in frames if f.action == "start_overlay_walk"]
+            assert [
+                (w.params["overlay_session_id"], w.params["paint_generation"])
+                for w in walks
+            ] == [(paint["overlay_session_id"], paint["paint_generation"] + 1)]
+
+    async def test_overlay_entry_posts_nothing_while_no_numbers_can_show(
+        self, mouse_handler, caplog, tmp_path,
+    ):
+        import logging
+
+        loop = Mock()
+        async with _overlay_entry(tmp_path, numbers_show=False) as (b, _paint):
+            mouse_handler.set_pointer_input_listener(
+                b.controller.overlay.note_pointer_input
+            )
+            caplog.clear()
+            with _posting_to(b, loop), caplog.at_level(logging.DEBUG):
+                mouse_handler.on_click(5, 6, "left", True, False)
+                mouse_handler.on_scroll(5, 6, 0, -1, False)
+                records = list(caplog.records)
+        assert loop.method_calls == []
+        assert records == []
+
+    @pytest.mark.parametrize("where", ["listener", "closed_loop"])
+    async def test_an_exception_does_not_leave_the_callback(
+        self, mouse_handler, caplog, tmp_path, where,
+    ):
+        import logging
+
+        async with AsyncExitStack() as stack:
+            loop = Mock()
+            if where == "listener":
+                listener = Mock(side_effect=RuntimeError("listener failed"))
+            else:
+                loop.call_soon_threadsafe.side_effect = RuntimeError(
+                    "Event loop is closed"
+                )
+                b, _paint = await stack.enter_async_context(
+                    _overlay_entry(tmp_path, numbers_show=True)
+                )
+                stack.enter_context(_posting_to(b, loop))
+                listener = b.controller.overlay.note_pointer_input
+            mouse_handler.set_pointer_input_listener(listener)
+            escaped = []
+            caplog.clear()
+            with caplog.at_level(logging.DEBUG):
+                for callback, args in (
+                    (mouse_handler.on_click, (5, 6, "left", True, False)),
+                    (mouse_handler.on_scroll, (5, 6, 0, -1, False)),
+                ):
+                    try:
+                        callback(*args)
+                    except Exception as exc:  # noqa: BLE001 -- the assertion below
+                        escaped.append(exc)
+                records = list(caplog.records)
+            if where == "closed_loop":
+                # The overlay's numbers show, so each event reached the
+                # closed loop.
+                assert loop.call_soon_threadsafe.call_count == 2
+        assert escaped == []
+        assert records == []
 
 
 # ===========================================================================

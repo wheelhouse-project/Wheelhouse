@@ -9,6 +9,13 @@ sites and their sequence counter, the GUI forwarder's Full guard, and the
 Logic handler's validation, config gate, ordering and handler-map entry --
 and requires the named tests to fail for each.
 
+EXPECTED SURVIVORS (wh-full-refactor.3.1). Seven mutations carry the key
+"survives" with a reason: the old tests that caught them are deleted by the
+overlay refactor, and the requirement rows that cover the behaviour are
+NOT_REQUIRED, or the mutant changes nothing a boundary test can observe. An
+expected survivor passes only when its whole selection stays
+green; a failed test prints "CAUGHT EXPECTED SURVIVOR" and the gate exits 1.
+
 Run from services/wheelhouse, with the interpreter the whole worktree uses
 (``sys.executable`` becomes the pytest launcher, see LAUNCH below). In a
 worktree that is the main checkout's interpreter, so <main> below is the
@@ -96,12 +103,19 @@ PURE = (HOOKS,)                 # decide_tree_change and its Logic callback
 UI = (DIALOG, SCHEMA)           # the dialog's emits and the GUI forwarder
 LOGIC = (HANDLER, HOOKS)        # the Logic handler and the callback's ordering
 EXPAND = (EXPANDS,)             # expand / collapse of a category
+# wh-full-refactor.2: phase B of the overlay pilot (wh-overlay-refactor-pilot.2)
+# deleted the old decide_tree_change, callback and handler-map tests; their
+# boundary tests live here, so the selections that name them add this file.
+REWALK = "tests/test_overlay_requirements_rewalk.py"
+PURE_RW = PURE + (REWALK,)
+LOGIC_RW = LOGIC + (REWALK,)
 
 # --- expected catchers, by the name pytest reports -------------------------
 
 # decide_tree_change (tests/test_overlay_focus_hooks.py)
-ACCEPT_PAINTED = "test_decide_tree_change_accepts_when_painted_and_handles_match"
-ACCEPT_REFRESH = "test_decide_tree_change_accepts_when_refresh_in_flight"
+# The boundary test that replaced the two old "accepts" tests (painted with
+# matching handles, and refresh in flight); tests/test_overlay_requirements_rewalk.py.
+RW_ACCEPT = "test_rw_19_tree_change_for_the_pinned_window_refreshes"
 # One parametrized test names the expected decision for all EIGHT OverlayState
 # members (contract C2 as amended). The runner strips the parameter list, so
 # this one name catches a wrong decision for any state.
@@ -115,16 +129,16 @@ DROP_OTHER_WINDOW = (
     "test_decide_tree_change_drops_other_window_on_a_different_handle"
 )
 DROP_ZERO_HANDLE = "test_decide_tree_change_drops_other_window_on_a_zero_handle"
-DROP_STALE = "test_decide_tree_change_drops_a_sequence_at_or_below_the_last"
-ACCEPT_NEXT = "test_decide_tree_change_accepts_the_next_sequence"
-RESTART = "test_decide_tree_change_a_different_handle_restarts_the_sequence"
+# The boundary test that replaced the old drop-stale, accept-next and
+# handle-restart tests; tests/test_overlay_requirements_rewalk.py.
+RW_SEQUENCE = "test_rw_23_old_sequence_dropped_and_new_handle_restarts_it"
 ORDER_STATE_FIRST = "test_decide_tree_change_checks_state_before_the_window"
 ORDER_WINDOW_FIRST = "test_decide_tree_change_checks_the_window_before_the_sequence"
 
 # the Logic callback (same file)
-CB_BURST = "test_tree_change_burst_inside_one_debounce_window_walks_once"
-CB_CLOSED = "test_tree_change_dropped_when_overlay_closed_leaves_machine_untouched"
-CB_CONFIG = "test_tree_change_gated_on_disabled_config"
+# The boundary test that replaced the old burst test;
+# tests/test_overlay_requirements_rewalk.py.
+CB_BURST = "test_rw_24_typing_burst_inside_debounce_yields_one_walk"
 
 # the dialog (tests/test_pattern_manager_dialog.py)
 UI_FILTER_ONE = "test_filter_change_emits_one_tree_changed_event"
@@ -152,21 +166,30 @@ H_MALFORMED = (
 )
 H_WRONG_ACTION = "test_wrong_action_payload_dropped_without_raising"
 H_ZERO_HWND = "test_zero_hwnd_payload_dropped_without_raising"
-H_MAP = "test_handler_map_binds_the_action_to_a_callable"
+# The boundary test that replaced the old handler-map test;
+# tests/test_overlay_requirements_rewalk.py.
+H_MAP = "test_rw_19_tree_change_for_the_pinned_window_refreshes"
 
 MUTATIONS = []
 
 
-def add(name, file, tests, old, new, *expect):
-    MUTATIONS.append(dict(name=name, service=SERVICE, test_file=tests,
-                          file=SERVICE / file, old=old, new=new,
-                          expect=list(expect)))
+def add(name, file, tests, old, new, *expect, survives=None):
+    mutation = dict(name=name, service=SERVICE, test_file=tests,
+                    file=SERVICE / file, old=old, new=new,
+                    expect=list(expect))
+    # The key is added only when given, as in
+    # tests/mutation_gate_overlay_requirements.py: the shared runner treats
+    # the presence of "survives" as the declaration.
+    if survives is not None:
+        mutation["survives"] = survives
+    MUTATIONS.append(mutation)
 
 
 HOOKS_SRC = "overlay_focus_hooks.py"
 DIALOG_SRC = "pattern_manager_dialog.py"
 GUI_SRC = "gui.py"
 MAIN_SRC = "main.py"
+CONTROLLER_SRC = "numbered_overlay/controller.py"
 
 STATE_CHECK = "    if state not in TREE_CHANGE_ACCEPTED_STATES:\n"
 # The whole state branch, for the order mutation below.
@@ -254,10 +277,10 @@ add("window-check-drops-both-zero-guards", HOOKS_SRC, PURE,
     WINDOW_CHECK,
     "    if tracked_hwnd != event_hwnd:\n",
     DROP_ZERO_HANDLE)
-add("window-check-inverted", HOOKS_SRC, PURE,
+add("window-check-inverted", HOOKS_SRC, PURE_RW,
     WINDOW_CHECK,
     "    if tracked_hwnd == 0 or event_hwnd == 0 or tracked_hwnd == event_hwnd:\n",
-    ACCEPT_PAINTED, ACCEPT_REFRESH)
+    RW_ACCEPT)
 add("window-check-removed", HOOKS_SRC, PURE,
     WINDOW_CHECK,
     "    if False:\n",
@@ -265,32 +288,36 @@ add("window-check-removed", HOOKS_SRC, PURE,
 
 # --- the stale-sequence check ----------------------------------------------
 
-add("stale-check-lets-a-repeat-through", HOOKS_SRC, PURE,
+add("stale-check-lets-a-repeat-through", HOOKS_SRC, PURE_RW,
     STALE_CHECK,
     "    if event_hwnd == last_hwnd and event_sequence < last_sequence:\n",
-    DROP_STALE)
+    RW_SEQUENCE)
 # The sequence-restart behaviour: without the handle conjunct a reopened
 # dialog's first event is judged against the OLD window's counter.
-add("stale-check-ignores-the-handle", HOOKS_SRC, PURE,
+add("stale-check-ignores-the-handle", HOOKS_SRC, PURE_RW,
     STALE_CHECK,
     "    if event_sequence <= last_sequence:\n",
-    RESTART)
-add("stale-check-removed", HOOKS_SRC, PURE,
+    RW_SEQUENCE)
+add("stale-check-removed", HOOKS_SRC, PURE_RW,
     STALE_CHECK,
     "    if False:\n",
-    DROP_STALE)
+    RW_SEQUENCE)
 
 # --- what an accepted decision carries -------------------------------------
 
+# wh-full-refactor.2: the three old catchers were deleted in phase B. The
+# boundary tests RW_ACCEPT and RW_SEQUENCE stay green under this mutation
+# (sweep 2026-11-10); the parametrized EVERY_STATE test fails on its
+# ``accepted_sequence == 1`` assertion for each accepting state.
 add("accepted-sequence-is-the-old-one", HOOKS_SRC, PURE,
     ACCEPT,
     ACCEPT.replace("        event_sequence,\n", "        last_sequence,\n"),
-    ACCEPT_PAINTED, ACCEPT_NEXT, RESTART)
-add("accepted-event-is-the-wrong-kind", HOOKS_SRC, PURE,
+    EVERY_STATE)
+add("accepted-event-is-the-wrong-kind", HOOKS_SRC, PURE_RW,
     ACCEPT,
     ACCEPT.replace("OverlayEventKind.FOCUS_CHANGE",
                    "OverlayEventKind.FOCUSED_HWND_DESTROYED"),
-    ACCEPT_PAINTED)
+    RW_ACCEPT)
 
 # --- the order the three reasons are tested in ------------------------------
 # Only the order test can catch this one: with the handles equal (every other
@@ -424,7 +451,7 @@ DECIDE_CALL = (
     "\n"
 )
 DEBOUNCE = (
-    "        now_ms = time.monotonic() * 1000.0\n"
+    "        now_ms = self._clock() * 1000.0\n"
     "        if not self._overlay_focus_debouncer.should_fire(now_ms=now_ms):\n"
     "            _overlay_focus_logger.debug(\n"
     '                "overlay: pattern manager tree change hwnd=%s seq=%s "\n'
@@ -442,7 +469,7 @@ DEBOUNCE = (
     "        self._cancel_overlay_settle_refire()\n"
 )
 
-add("accepted-sequence-recorded-after-the-debounce", MAIN_SRC, LOGIC,
+add("accepted-sequence-recorded-after-the-debounce", CONTROLLER_SRC, LOGIC_RW,
     "        self._pm_tree_change_last_hwnd = hwnd\n"
     "        self._pm_tree_change_last_sequence = sequence\n"
     "\n"
@@ -453,40 +480,47 @@ add("accepted-sequence-recorded-after-the-debounce", MAIN_SRC, LOGIC,
         "        self._pm_tree_change_last_sequence = sequence\n"
         "        self._cancel_overlay_settle_refire()\n"),
     CB_BURST)
-add("debounce-runs-before-the-decision", MAIN_SRC, LOGIC,
+add("debounce-runs-before-the-decision", CONTROLLER_SRC,
+    LOGIC_RW,
     DECIDE_CALL
-    + "        now_ms = time.monotonic() * 1000.0\n"
+    + "        now_ms = self._clock() * 1000.0\n"
     + "        if not self._overlay_focus_debouncer.should_fire(now_ms=now_ms):\n",
-    "        now_ms = time.monotonic() * 1000.0\n"
+    "        now_ms = self._clock() * 1000.0\n"
     "        fired = self._overlay_focus_debouncer.should_fire(now_ms=now_ms)\n"
     + DECIDE_CALL
     + "        if not fired:\n",
-    CB_CLOSED)
+    survives=(
+        "Result 4 timing detail, case 4(a) RW-11 (NOT_REQUIRED). The mutant "
+        "only lets a dropped closed-state tree change move the debounce clock. "
+        "Needs a tree change while closed, then within "
+        "overlay_focus_debounce_ms show numbers, a paint and a focus event"
+    ))
 add("malformed-payload-guard-removed", MAIN_SRC, LOGIC,
     "        if ev is None:\n"
     "            return  # already logged\n"
     "\n"
-    "        self._on_pattern_manager_tree_change(ev.hwnd, ev.sequence)\n",
-    "        self._on_pattern_manager_tree_change(\n"
+    "        self.overlay.on_pattern_manager_tree_change(ev.hwnd, ev.sequence)\n",
+    "        self.overlay.on_pattern_manager_tree_change(\n"
     '            getattr(ev, "hwnd", 0), getattr(ev, "sequence", 0)\n'
     "        )\n",
     H_MALFORMED, H_WRONG_ACTION, H_ZERO_HWND)
-add("config-gate-removed", MAIN_SRC, LOGIC,
+add("config-gate-removed", CONTROLLER_SRC,
+    LOGIC_RW,
     "        if not (\n"
-    "            self.click_config.enabled\n"
-    "            and self.click_config.overlay_enabled_effective\n"
+    "            self._host.click_config.enabled\n"
+    "            and self._host.click_config.overlay_enabled_effective\n"
     "        ):\n"
     "            return\n"
-    "        import time\n"
-    "\n"
     "        from services.wheelhouse.overlay_focus_hooks import decide_tree_change\n",
     "        if False:\n"
     "            return\n"
-    "        import time\n"
-    "\n"
     "        from services.wheelhouse.overlay_focus_hooks import decide_tree_change\n",
-    CB_CONFIG)
-add("handler-map-entry-removed", MAIN_SRC, LOGIC,
+    survives=(
+        "Item 4 exception 1: with the overlay disabled the machine stays "
+        "closed, so decide_tree_change drops the same event before the "
+        "debounce; the mutant changes only a debug log line"
+    ))
+add("handler-map-entry-removed", MAIN_SRC, LOGIC_RW,
     '            "pattern_manager_tree_changed": lambda: (\n'
     "                self._handle_pattern_manager_tree_changed(command)\n"
     "            ),\n",
@@ -540,41 +574,47 @@ add("expand-all-suppression-never-set", DIALOG_SRC, EXPAND + (DIALOG,),
 INTEGRATION = "tests/test_logic_overlay_integration.py"
 BUILD = (INTEGRATION, HOOKS)    # the dispatch/pin lifecycle and the callback
 
-I_DISPATCH = "test_build_dispatch_records_the_window_the_build_is_for"
-I_AUTO_OPEN = "test_auto_open_build_dispatch_records_the_window_too"
-I_PIN_CONSUMES = "test_pin_consumes_the_pending_build_target"
-I_CLOSED_CLEARS = "test_entry_to_closed_clears_the_pending_build_target"
-CB_FIRST_WALK = "test_tree_change_accepted_during_a_first_session_walk"
+# Case 4(a) of the stage inventory: the rows RW-20 and RW-22 that cover the
+# window an in-flight build is for are NOT_REQUIRED (lead ruling).
+_PENDING_WINDOW_ROWS = "Case 4(a): rows RW-20 and RW-22 are NOT_REQUIRED"
+
 CB_FIRST_AUTO = "test_tree_change_accepted_during_a_first_session_auto_open"
 CB_CROSS_WINDOW = "test_tree_change_in_a_cross_window_refresh_follows_the_build"
-CB_OLD_WINDOW = (
-    "test_tree_change_from_the_old_window_dropped_during_that_refresh"
-)
-CB_PAINTED_PIN = (
-    "test_tree_change_when_painted_reads_the_pinned_window_not_the_pending"
-)
 
-add("dispatch-does-not-record-the-build-window", MAIN_SRC, BUILD,
+add("dispatch-does-not-record-the-build-window", CONTROLLER_SRC,
+    BUILD + (REWALK,),
     "        self._overlay_pending_build_identity = (\n"
     "            self._capture_overlay_foreground_identity()\n"
     "        )\n",
     "",
-    I_DISPATCH, I_AUTO_OPEN)
-add("pin-does-not-consume-the-build-window", MAIN_SRC, BUILD,
+    survives=(
+        f"{_PENDING_WINDOW_ROWS}: the build dispatch records the pending "
+        "build window, on a walk and on auto-open. Needs a Pattern Manager "
+        "list change while a build is in flight"
+    ))
+add("pin-does-not-consume-the-build-window", CONTROLLER_SRC,
+    BUILD + (REWALK,),
     "            # the tree-change callback prefer it over the pin.\n"
     "            self._overlay_pending_build_identity = None\n",
     "            # the tree-change callback prefer it over the pin.\n",
-    I_PIN_CONSUMES)
-add("closed-does-not-clear-the-build-window", MAIN_SRC, BUILD,
+    survives=(
+        f"{_PENDING_WINDOW_ROWS}: the pin consumes the pending build window"
+    ))
+add("closed-does-not-clear-the-build-window", CONTROLLER_SRC,
+    BUILD + (REWALK,),
     "            # And the window a build in flight was being made for: the session\n"
     "            # it belonged to is over (wh-overlay-rewalk-after-filter.1.3).\n"
     "            self._overlay_pending_build_identity = None\n",
     "            # And the window a build in flight was being made for: the session\n"
     "            # it belonged to is over (wh-overlay-rewalk-after-filter.1.3).\n",
-    I_CLOSED_CLEARS)
+    survives=(
+        f"{_PENDING_WINDOW_ROWS}: entry to closed clears the pending build "
+        "window"
+    ))
 # The read falls back to the pre-fix source: the pinned identity, whatever the
 # machine is doing. This is the defect itself, restored.
-add("tree-change-ignores-the-pending-build-window", MAIN_SRC, PURE,
+add("tree-change-ignores-the-pending-build-window", CONTROLLER_SRC,
+    PURE_RW,
     "        from services.wheelhouse.click_overlay_state import OverlayState\n"
     "\n"
     "        state = self.click_overlay_state.state\n"
@@ -589,19 +629,23 @@ add("tree-change-ignores-the-pending-build-window", MAIN_SRC, PURE,
     "            tracked = self._overlay_tracked_identity\n",
     "        state = self.click_overlay_state.state\n"
     "        tracked = self._overlay_tracked_identity\n",
-    CB_FIRST_WALK, CB_FIRST_AUTO, CB_CROSS_WINDOW, CB_OLD_WINDOW)
+    CB_FIRST_AUTO, CB_CROSS_WINDOW)
 # And the opposite error: the pending target read in every accepted state. A
 # refresh that falls back to its prior pin returns to painted with no new pin,
 # so the pending target then names a window whose badges never reached the
 # screen.
-add("tree-change-prefers-the-build-window-in-every-state", MAIN_SRC, PURE,
+add("tree-change-prefers-the-build-window-in-every-state", CONTROLLER_SRC,
+    PURE_RW,
     "        if pending is not None and state in (\n"
     "            OverlayState.WALK_IN_FLIGHT,\n"
     "            OverlayState.PAINT_IN_FLIGHT,\n"
     "            OverlayState.REFRESH_IN_FLIGHT,\n"
     "        ):\n",
     "        if pending is not None:\n",
-    CB_PAINTED_PIN)
+    survives=(
+        "Case 4(a) RW-20/RW-22 (NOT_REQUIRED; lead ruling). Needs a tree "
+        "change while painted with a build window pending"
+    ))
 
 
 # wh-overlay-rewalk-after-filter.1.4: the build's window is also sampled when a
@@ -615,7 +659,7 @@ HANDOFF_SAMPLE = (
     "                self._capture_overlay_foreground_identity()\n"
     "            )\n"
 )
-add("handoff-does-not-record-the-build-window", MAIN_SRC, BUILD,
+add("handoff-does-not-record-the-build-window", CONTROLLER_SRC, BUILD,
     HANDOFF_SAMPLE,
     "",
     Q_AHEAD)
@@ -623,14 +667,14 @@ add("handoff-does-not-record-the-build-window", MAIN_SRC, BUILD,
 # already ready on the Logic loop -- exactly the ordering the finding replayed.
 # (Moving it after create_task_with_error_handling instead is an equivalent
 # mutant: the default task factory runs nothing until this function returns.)
-add("handoff-sample-deferred-one-loop-turn", MAIN_SRC, BUILD,
+add("handoff-sample-deferred-one-loop-turn", CONTROLLER_SRC, BUILD,
     HANDOFF_SAMPLE,
     "        if any(e.kind is EffectKind.DISPATCH_BUILD for e in effects):\n"
     "            def _late_sample():\n"
     "                self._overlay_pending_build_identity = (\n"
     "                    self._capture_overlay_foreground_identity()\n"
     "                )\n"
-    "            self.loop.call_soon(_late_sample)\n",
+    "            self._host.loop.call_soon(_late_sample)\n",
     Q_AHEAD)
 
 

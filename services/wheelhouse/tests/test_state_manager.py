@@ -127,6 +127,12 @@ class TestSettingsAcknowledgement:
     async def test_settings_ack_handler_keeps_request_id(self, sm, mock_config, mock_gui_queue):
         from main import LogicController
         controller = MagicMock(spec=LogicController)
+        # wh-overlay-refactor-pilot.2: the save wrapper now reaches the
+        # overlay through controller.overlay.
+        from services.wheelhouse.numbered_overlay.controller import (
+            NumberedOverlayController,
+        )
+        controller.overlay = MagicMock(spec=NumberedOverlayController)
         controller.state_manager = sm
         # wh-numbers-stay-setting: the handler routes through the controller's own
         # save-and-apply wrapper, which a spec'd mock replaces; bind the real one.

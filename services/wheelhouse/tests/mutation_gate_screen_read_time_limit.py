@@ -40,7 +40,7 @@ ui/click_config.py:
   read-deadline-floor-dropped
                           A 100 ms key yields a -150 ms Input bound.
 
-ui/ui_action_handler.py:
+ui/overlay_snapshot_actions.py:
   read-deadline-uses-click-walk-bound
                           start_overlay_walk anchors the by-name click's
                           walk_deadline_ms (2500) again instead of the
@@ -131,10 +131,12 @@ sys.stdout.reconfigure(line_buffering=True)
 
 SERVICE = Path(__file__).resolve().parent.parent
 CFG = SERVICE / "ui" / "click_config.py"
-UAH = SERVICE / "ui" / "ui_action_handler.py"
+OSA = SERVICE / "ui" / "overlay_snapshot_actions.py"
 MAIN = SERVICE / "main.py"
+CONTROLLER = SERVICE / "numbered_overlay" / "controller.py"
+HELPERS = SERVICE / "numbered_overlay" / "helpers.py"
 SP = SERVICE / "speech" / "speech_processor.py"
-TARGETS = (CFG, UAH, MAIN, SP)
+TARGETS = (CFG, OSA, MAIN, CONTROLLER, HELPERS, SP)
 
 JOURNEY_7 = (
     "tests/test_overlay_journeys.py::"
@@ -147,6 +149,19 @@ S_CFG_H = S_CFG + S_HANDLER
 S_INT = ["tests/test_logic_overlay_integration.py"]
 S_INT_J = S_INT + [JOURNEY_7]
 S_GATE = ["tests/test_screen_read_dictation_gate.py"]
+# wh-full-refactor.3.1: the boundary test files whose tests replace the old
+# catchers in test_logic_overlay_integration.py that the stage deletes.
+S_LC = ["tests/test_overlay_requirements_lifecycle.py"]
+S_AO = ["tests/test_overlay_requirements_autoopen.py"]
+LC_42 = "test_lc_42_walk_cue_carries_the_whole_walk_bound"
+LC_43 = "test_lc_43_a_walk_waits_for_the_screen_read_limit"
+# LC-43 stays green under machine-walk-deadline-not-derived (gate run,
+# wh-full-refactor.3.1). LC-50 fails under it: with the class default
+# deadline in place of the derived one, the paint for the new list is sent
+# after the short refresh deadline has passed.
+LC_50 = "test_lc_50_refresh_paint_held_past_the_refresh_deadline_is_not_sent"
+AO_33 = "test_ao_33_auto_open_walk_cue_carries_two_reply_limits"
+AO_34 = "test_ao_34_auto_open_waits_only_the_click_reply_limit"
 
 PYTEST_ARGS = ["-p", "no:randomly", "-q", "-rfE", "--tb=line"]
 PER_RUN_TIMEOUT_S = 300
@@ -234,19 +249,17 @@ MUTATIONS = [
         "selection": S_CFG,
         "expect": ["test_screen_read_walk_deadline_floors_at_100"],
     },
-    # ---- ui/ui_action_handler.py --------------------------------------
+    # ---- ui/overlay_snapshot_actions.py --------------------------------------
     {
         "name": "read-deadline-uses-click-walk-bound",
-        "src": UAH,
+        "src": OSA,
         "old": (
-            '                "screen_read_walk_deadline_ms",\n'
-            "                None,\n"
-            "            )\n"
+            "                click_cfg.screen_read_walk_deadline_ms\n"
+            "                if click_cfg is not None\n"
         ),
         "new": (
-            '                "walk_deadline_ms",\n'
-            "                None,\n"
-            "            )\n"
+            "                click_cfg.walk_deadline_ms\n"
+            "                if click_cfg is not None\n"
         ),
         "selection": S_HANDLER,
         "expect": [
@@ -259,58 +272,55 @@ MUTATIONS = [
     {
         # Acceptance 3: a read finishing after the reply limit is used.
         "name": "build-awaits-reply-limit-for-reads",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": (
             "        else:\n"
-            "            timeout_ms = self.click_config.screen_read_timeout_ms\n"
+            "            timeout_ms = self._host.click_config.screen_read_timeout_ms\n"
         ),
         "new": (
             "        else:\n"
-            "            timeout_ms = self.click_config.response_timeout_ms\n"
+            "            timeout_ms = self._host.click_config.response_timeout_ms\n"
         ),
-        "selection": S_INT_J,
+        "selection": S_INT_J + S_LC,
         "expect": [
-            "test_screen_read_build_awaits_its_own_key_and_auto_open_awaits_the_reply_limit",
-            "test_a_read_that_answers_after_the_reply_limit_but_inside_the_read_limit_is_applied",
+            LC_42,
+            LC_43,
             "test_journey_7_a_slow_read_types_nothing_into_the_window_that_took_over",
         ],
     },
     {
         "name": "auto-open-awaits-read-limit",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": (
             "        if effect.build_reason is BuildReason.AUTO_OPEN:\n"
-            "            timeout_ms = self.click_config.response_timeout_ms\n"
+            "            timeout_ms = self._host.click_config.response_timeout_ms\n"
         ),
         "new": (
             "        if effect.build_reason is BuildReason.AUTO_OPEN:\n"
-            "            timeout_ms = self.click_config.screen_read_timeout_ms\n"
+            "            timeout_ms = self._host.click_config.screen_read_timeout_ms\n"
         ),
-        "selection": S_INT,
-        "expect": [
-            "test_screen_read_build_awaits_its_own_key_and_auto_open_awaits_the_reply_limit",
-        ],
+        "selection": S_INT + S_AO,
+        "expect": [AO_33, AO_34],
     },
     {
         "name": "cue-bound-walk-only",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": (
             "        cue_bound_ms = timeout_ms "
-            "+ self.click_config.response_timeout_ms\n"
+            "+ self._host.click_config.response_timeout_ms\n"
         ),
         "new": "        cue_bound_ms = timeout_ms\n",
-        "selection": S_INT,
-        "expect": [
-            "test_overlay_walk_cue_emitted_active_true_at_walk_start",
-            "test_overlay_walk_cue_walk_timeout_covers_walk_plus_pin",
-        ],
+        "selection": S_INT + S_LC + S_AO,
+        "expect": [LC_42, AO_33],
     },
     {
         # wh-overlay-slow-uia-stale-badges.3.1.1. The AUTO_OPEN arm is
         # untouched, so test_overlay_walk_cue_auto_open_bound_carries_no_
         # sentence_wait stays green here as the control.
+        # wh-full-refactor.3.1: the same code change as the overlay gate's
+        # lc-42-walk-cue-bound-drops-the-sentence-wait.
         "name": "cue-bound-omits-sentence-wait",
-        "src": MAIN,
+        "src": CONTROLLER,
         "old": (
             "        if effect.build_reason is not BuildReason.AUTO_OPEN:\n"
             "            cue_bound_ms += "
@@ -320,15 +330,12 @@ MUTATIONS = [
             "        if effect.build_reason is not BuildReason.AUTO_OPEN:\n"
             "            cue_bound_ms += 0\n"
         ),
-        "selection": S_INT,
-        "expect": [
-            "test_overlay_walk_cue_emitted_active_true_at_walk_start",
-            "test_overlay_walk_cue_walk_timeout_covers_walk_plus_pin",
-        ],
+        "selection": S_INT + S_LC,
+        "expect": [LC_42],
     },
     {
         "name": "machine-settle-deadline-not-derived",
-        "src": MAIN,
+        "src": HELPERS,
         "old": (
             "        settle_deadline_ms=max(\n"
             "            ClickOverlayStateMachine.settle_deadline_ms,\n"
@@ -346,7 +353,7 @@ MUTATIONS = [
         # margin but loses the sentence-end wait the settle build spends
         # before its send.
         "name": "machine-settle-deadline-omits-sentence-wait",
-        "src": MAIN,
+        "src": HELPERS,
         "old": (
             "        settle_deadline_ms=max(\n"
             "            ClickOverlayStateMachine.settle_deadline_ms,\n"
@@ -364,18 +371,18 @@ MUTATIONS = [
     },
     {
         "name": "machine-walk-deadline-not-derived",
-        "src": MAIN,
+        "src": HELPERS,
         "old": "        walk_deadline_ms=read_bound_ms,\n",
         "new": "        walk_deadline_ms=ClickOverlayStateMachine.walk_deadline_ms,\n",
-        "selection": S_INT,
+        "selection": S_INT + S_LC,
         "expect": [
             "test_overlay_machine_deadlines_follow_the_screen_read_key",
-            "test_a_read_that_answers_after_the_reply_limit_but_inside_the_read_limit_is_applied",
+            LC_50,
         ],
     },
     {
         "name": "machine-deadlines-no-margin",
-        "src": MAIN,
+        "src": HELPERS,
         "old": (
             "    read_bound_ms = click_config.screen_read_timeout_ms "
             "+ PRE_WALK_MARGIN_MS\n"

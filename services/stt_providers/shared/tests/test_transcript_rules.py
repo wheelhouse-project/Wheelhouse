@@ -713,7 +713,9 @@ SURROUNDING_TEXT_CASES = [
     ("it was fifty nine, then", "it was 59, then"),
     # Punctuation inside a phrase splits it; punctuation before the unit
     # anchor detaches the anchor.
-    ("fifty, nine", "fifty, nine"),
+    # Since wh-itn-lone-number-ten the lone "fifty" converts and "nine"
+    # stays a word; the comma still splits the phrase in two.
+    ("fifty, nine", "50, nine"),
     ("fifty nine, dollars", "59, dollars"),
     ("fifty nine\nnext line", "59\nnext line"),
 ]
@@ -769,7 +771,15 @@ HOUSE_NUMBER_CASES = [
     # The lone number word the pair guard alone refuses: 50 passes both
     # chunk bounds, so nothing but "this run is not a pair" keeps
     # "fifty main street" from reading as 5050.
-    ("fifty main street", "fifty main street"),
+    # Since wh-itn-lone-number-ten the lone word converts by itself, so
+    # the result is "50 main street" (the address number is written bare).
+    ("fifty main street", "50 main street"),
+    # The two lone words that still reach the pair guard: a word below
+    # ten, and a word from ten up in an utterance that says "literal".
+    # Both are refused as cardinals, so nothing but "this run is not a
+    # pair" keeps them from reading as 5 and 5050.
+    ("five main street", "five main street"),
+    ("literal fifty main street", "literal fifty main street"),
     # The word between the pair and the suffix has to be an ordinary
     # word. A number-ish word there belongs to a spoken number this
     # module could not read, and an "and" there is the connector shape.
@@ -1343,7 +1353,9 @@ PERCENT_CASES = [
     # "percent" said alone reaches no number run, so this module leaves
     # it for the punct-percent replacement pattern to write.
     ("percent", "percent"),
-    ("fifty", "fifty"),
+    # Since wh-itn-lone-number-ten a lone "fifty" types as digits even
+    # with no anchor behind it.
+    ("fifty", "50"),
     # A bare scale word is the one single word that can reach the
     # grouping threshold, and it converts here exactly as it does behind
     # a dollar anchor. Measured on base 6d907456: "hundred dollars" is
@@ -1637,3 +1649,239 @@ class TestAgreementPrefixLen:
 
     def test_current_shorter_than_prev(self):
         assert agreement_prefix_len(["delete", "two"], ["delete"]) == 1
+
+
+# --------------------------------------------------------------------
+# A lone number word from ten to ninety types as digits
+# (wh-itn-lone-number-ten, David's decision 2026-11-12). The threshold
+# is ten: one to nine stay words. Boss ruling 1 limits the change to the
+# words in _ITN_TEENS and _ITN_TENS; a lone scale word stays a word.
+# Boss ruling 2 keeps the lone-word rule off an utterance that carries
+# the WheelHouse command word "literal".
+# --------------------------------------------------------------------
+
+LONE_TEN_AND_UP_WORDS = [
+    ("ten", "10"), ("eleven", "11"), ("twelve", "12"),
+    ("thirteen", "13"), ("fourteen", "14"), ("fifteen", "15"),
+    ("sixteen", "16"), ("seventeen", "17"), ("eighteen", "18"),
+    ("nineteen", "19"), ("twenty", "20"), ("thirty", "30"),
+    ("forty", "40"), ("fifty", "50"), ("sixty", "60"),
+    ("seventy", "70"), ("eighty", "80"), ("ninety", "90"),
+]
+
+
+class TestLoneNumberWordFromTen:
+    @pytest.mark.parametrize(
+        "spoken,written",
+        LONE_TEN_AND_UP_WORDS,
+        ids=[spoken for spoken, _ in LONE_TEN_AND_UP_WORDS],
+    )
+    def test_a_lone_word_from_ten_up_types_as_digits(self, spoken, written):
+        assert apply_itn(spoken) == written
+
+    def test_a_lone_ten_inside_a_sentence_types_as_digits(self):
+        assert apply_itn("I have ten apples") == "I have 10 apples"
+
+    def test_a_lone_fifteen_inside_a_sentence_types_as_digits(self):
+        assert apply_itn("I have fifteen apples") == "I have 15 apples"
+
+    @pytest.mark.parametrize(
+        "spoken",
+        [
+            "zero", "one", "two", "three", "four", "five", "six",
+            "seven", "eight", "nine",
+        ],
+    )
+    def test_a_lone_word_below_ten_stays_a_word(self, spoken):
+        assert apply_itn(spoken) == spoken
+
+    def test_a_lone_seven_inside_a_sentence_stays_a_word(self):
+        assert apply_itn("I have seven apples") == "I have seven apples"
+
+    @pytest.mark.parametrize(
+        "spoken",
+        ["hundred", "thousand", "million", "billion", "a hundred apples"],
+        ids=["hundred", "thousand", "million", "billion", "a-hundred"],
+    )
+    def test_a_lone_scale_word_stays_a_word(self, spoken):
+        assert apply_itn(spoken) == spoken
+
+    @pytest.mark.parametrize(
+        "spoken",
+        ["the tenth", "the twelfth", "the twentieth"],
+    )
+    def test_an_ordinal_stays_a_word(self, spoken):
+        assert apply_itn(spoken) == spoken
+
+    @pytest.mark.parametrize(
+        "spoken",
+        ["no one", "the one I like", "one more time"],
+        ids=["no-one", "the-one", "one-more-time"],
+    )
+    def test_the_word_one_stays_a_word(self, spoken):
+        assert apply_itn(spoken) == spoken
+
+    @pytest.mark.parametrize(
+        "spoken,written",
+        [
+            ("literal ten", "literal ten"),
+            ("LITERAL ten", "LITERAL ten"),
+            ("Literal twelve", "Literal twelve"),
+            ("I have ten apples literal", "I have ten apples literal"),
+        ],
+        ids=["lower", "upper", "capital", "word-last"],
+    )
+    def test_an_utterance_with_literal_keeps_a_lone_word(
+        self, spoken, written
+    ):
+        assert apply_itn(spoken) == written
+
+    def test_literal_still_converts_a_multi_word_number(self):
+        assert apply_itn("literal twenty one") == "literal 21"
+
+    def test_a_word_that_only_contains_literal_does_not_stop_conversion(self):
+        assert apply_itn("literally ten") == "literally 10"
+
+    @pytest.mark.parametrize(
+        "spoken,written",
+        [
+            ("I have twenty one apples", "I have 21 apples"),
+            ("one hundred", "100"),
+            ("ten thirty", "ten thirty"),
+            ("ten eleven", "ten eleven"),
+            ("ten dollars", "$10"),
+            ("ten pm", "10 PM"),
+            ("ten fifteen pm", "10:15 PM"),
+            ("twelve thirty four main street", "1234 main street"),
+            ("fifteen thousand", "15,000"),
+            ("three point five", "3.5"),
+            ("fifty percent", "50 percent"),
+            ("january third", "january 3rd"),
+            ("nine oh two one oh", "90210"),
+        ],
+        ids=[
+            "two-word", "one-hundred", "ten-thirty-ambiguous",
+            "ten-eleven-ambiguous", "money", "pm", "clock",
+            "house-number", "thousands", "decimal", "percent",
+            "date", "digit-sequence",
+        ],
+    )
+    def test_an_expression_converted_before_keeps_its_result(
+        self, spoken, written
+    ):
+        assert apply_itn(spoken) == written
+
+
+class TestLoneNumberWordFromTenShapesThatStayWords:
+    @pytest.mark.parametrize(
+        "spoken",
+        [
+            "the twenty first century",
+            "march thirty second",
+            "point twenty",
+            "point fifteen percent",
+        ],
+        ids=["compound-ordinal", "invalid-date", "point-tail", "point-percent"],
+    )
+    def test_a_fraction_tail_or_compound_ordinal_front_stays_a_word(
+        self, spoken
+    ):
+        assert apply_itn(spoken) == spoken
+
+    @pytest.mark.parametrize(
+        "spoken",
+        [
+            "twenty oh five",
+            "twenty oh one",
+            "twenty oh eight",
+            "twenty o five",
+            "thirty oh five",
+            "twenty oh",
+            "I have twenty oh five apples",
+            "ten oh five",
+        ],
+        ids=[
+            "twenty-oh-five", "twenty-oh-one", "twenty-oh-eight",
+            "twenty-o-five", "thirty-oh-five", "twenty-oh-at-end",
+            "twenty-oh-five-in-a-sentence", "ten-oh-five",
+        ],
+    )
+    def test_a_tens_word_before_a_spoken_zero_stays_a_word(self, spoken):
+        # "twenty oh five" was all words before wh-itn-lone-number-ten,
+        # because "oh" joins a run only after a digit or a teen.
+        assert apply_itn(spoken) == spoken
+
+    def test_a_tens_word_before_a_plural_unit_still_converts(self):
+        assert apply_itn("thirty seconds") == "30 seconds"
+
+
+# --------------------------------------------------------------------
+# Interim text (wh-itn-lone-number-ten.1.1). Parakeet runs apply_itn on
+# every interim decode, and WheelHouse reads the agreed interim words as
+# stable words. A tens word that is the last word of interim text can
+# still grow ("twenty" -> "twenty three"), and WheelHouse waits for a
+# count only while that word is a word. So with interim=True a trailing
+# tens word stays a word; every other result is the final result.
+# --------------------------------------------------------------------
+
+INTERIM_TRAILING_TENS_WORDS = [
+    "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty",
+    "ninety",
+]
+
+
+class TestInterimKeepsATrailingTensWord:
+    @pytest.mark.parametrize("spoken", INTERIM_TRAILING_TENS_WORDS)
+    def test_a_trailing_tens_word_stays_a_word(self, spoken):
+        assert apply_itn(spoken, interim=True) == spoken
+        assert apply_itn(f"backspace {spoken}", interim=True) == (
+            f"backspace {spoken}"
+        )
+
+    @pytest.mark.parametrize(
+        "spoken",
+        ["backspace twenty.", "backspace twenty ", "backspace twenty, "],
+        ids=["period", "space", "comma-space"],
+    )
+    def test_trailing_punctuation_or_space_still_counts_as_last(
+        self, spoken
+    ):
+        assert apply_itn(spoken, interim=True) == spoken
+
+    @pytest.mark.parametrize(
+        "spoken,written",
+        [
+            ("I have twenty apples", "I have 20 apples"),
+            ("backspace fifteen", "backspace 15"),
+            ("ten", "10"),
+            ("backspace twenty three", "backspace 23"),
+            ("literal twenty", "literal twenty"),
+            ("fifty percent", "50 percent"),
+            ("fifty dollars", "$50"),
+        ],
+        ids=[
+            "inside-a-sentence", "trailing-teen", "lone-ten",
+            "two-word-count", "literal", "percent", "money",
+        ],
+    )
+    def test_every_other_interim_result_is_the_final_result(
+        self, spoken, written
+    ):
+        assert apply_itn(spoken, interim=True) == written
+        assert apply_itn(spoken) == written
+
+    def test_the_final_text_still_converts_a_trailing_tens_word(self):
+        assert apply_itn("backspace twenty") == "backspace 20"
+        assert apply_itn("backspace twenty", interim=False) == (
+            "backspace 20"
+        )
+
+    @pytest.mark.parametrize(
+        "spoken",
+        [
+            "fifty", "backspace twenty", "I have twenty apples",
+            "ten pm", "nine oh two one oh", "literal ten",
+        ],
+    )
+    def test_interim_false_is_the_default(self, spoken):
+        assert apply_itn(spoken, interim=False) == apply_itn(spoken)

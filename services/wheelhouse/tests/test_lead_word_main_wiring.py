@@ -460,5 +460,5 @@ async def test_the_gui_listener_routes_an_lw_action_through_the_map():
     fake._build_gui_handler_map = MagicMock(return_value={"lw_open": handler})
     q = queue.Queue()
     q.put({"action": "lw_open"})
-    await LogicController._listen_for_gui_commands(fake, q)
+    await LogicController.listen_for_gui_commands(fake, q)
     assert seen == ["handled"]

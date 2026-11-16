@@ -597,8 +597,9 @@ ACTION_CATALOG = (
             },
         ],
         "example": (
-            'Trigger "^numeric (\\d+)$" with params ["g1"]: saying '
-            '"numeric twenty three" inserts "23".'
+            'Trigger "^(?:numeric|numeral) (\\d+)$" with params ["g1"]: '
+            'saying "numeric twenty three" inserts "23", and the synonym '
+            '"numeral seven" inserts "7".'
         ),
         "audience": "advanced",
         "group": "Text",
@@ -1301,13 +1302,19 @@ ACTION_CATALOG = (
         "name": "add_hint_to_stt",
         "label": "Teach word to speech engine",
         "summary": (
-            "Sends the clipboard text to the speech-recognition server "
-            "as a vocabulary hint so it is transcribed correctly."
+            "Sends the clipboard text to the speech engine as a recognition "
+            "hint, so that the engine writes the word correctly. Only an "
+            "engine that applies hints accepts this action. Google always "
+            "applies hints. Parakeet, the default engine, applies hints only "
+            "when hint biasing is on. Under another engine, Wheelhouse types "
+            "the spoken words as dictation."
         ),
         "params": [],
         "example": (
-            'Trigger "^boost$": select a word, say "boost" by itself, '
-            "and the word is copied and sent to the speech engine as a hint."
+            'Trigger "^boost$": select a word, and say "boost" by itself. '
+            "When the engine applies hints, Wheelhouse copies the word and "
+            "sends it to the engine as a hint. Otherwise, Wheelhouse types "
+            '"boost".'
         ),
         "audience": "internal",
         "group": "Wheelhouse",
@@ -1340,8 +1347,10 @@ ACTION_CATALOG = (
         "summary": (
             "Switches listening off, as clicking the floating button or the "
             "tray icon does while it listens. In toggle mode, say the wake "
-            "word to switch it back on; in push-to-talk mode the wake word "
-            "ends only the idle pause, so hold the floating button again."
+            "word to switch it back on; while sound that this computer plays "
+            "keeps listening paused, click the floating button or the tray "
+            "icon instead. In push-to-talk mode the wake word ends only the "
+            "idle pause, so hold the floating button again."
         ),
         "params": [],
         "example": (

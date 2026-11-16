@@ -79,7 +79,7 @@ class TestEventDispatchWithRequestId:
 
             # Run the real demux loop briefly so we exercise the actual
             # dispatch logic, then cancel it.
-            app._start_demuxer()
+            app.start_demuxer()
             try:
                 # Give the demuxer a few sleep ticks to drain the queue.
                 for _ in range(20):
@@ -118,7 +118,7 @@ class TestEventDispatchWithRequestId:
             # Put a Schema A success response (no 'type', has request_id).
             q.put({"request_id": "abc-123", "status": "ok", "action": "noop"})
 
-            app._start_demuxer()
+            app.start_demuxer()
             try:
                 result = await asyncio.wait_for(future, timeout=1.0)
             finally:

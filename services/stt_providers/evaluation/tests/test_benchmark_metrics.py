@@ -6,10 +6,19 @@ JSON must carry all three.
 """
 
 import sys
+import wave
 
 import pytest
 
-from run_benchmark import UtteranceResult, compute_metrics, create_adapter, process_stats
+from adapters.base import TranscriptionResult
+from run_benchmark import (
+    UtteranceResult,
+    compute_metrics,
+    create_adapter,
+    process_stats,
+    run_benchmark,
+    wav_duration_seconds,
+)
 
 
 def _result(elapsed_ms: float) -> UtteranceResult:
@@ -40,6 +49,75 @@ class TestLatencySpread:
         overall = metrics["overall"]
         assert overall["median_inference_ms"] == 50.0
         assert overall["p95_inference_ms"] == 297.5
+
+
+def _timed(category: str, elapsed_ms: float, audio_seconds: float) -> UtteranceResult:
+    result = _result(elapsed_ms)
+    result.category = category
+    result.audio_seconds = audio_seconds
+    return result
+
+
+class TestRealTimeFactor:
+    """RTF = total inference seconds / total audio seconds, not a mean of ratios."""
+
+    def test_overall_and_per_category_rtf(self):
+        # a: 1.0 s inference over 4.0 s audio. b: 3.0 s inference over 4.0 s audio.
+        # A mean of per-utterance ratios would differ: (0.5+0.1+1.5+... ) is not 0.5.
+        results = [
+            _timed("a", 500.0, 1.0),
+            _timed("a", 500.0, 3.0),
+            _timed("b", 3000.0, 4.0),
+        ]
+        metrics = compute_metrics(results)
+        assert metrics["overall"]["total_audio_seconds"] == 8.0
+        assert metrics["overall"]["rtf"] == 0.5
+        assert metrics["by_category"]["a"]["total_audio_seconds"] == 4.0
+        assert metrics["by_category"]["a"]["rtf"] == 0.25
+        assert metrics["by_category"]["b"]["total_audio_seconds"] == 4.0
+        assert metrics["by_category"]["b"]["rtf"] == 0.75
+
+    def test_rtf_is_none_without_audio(self):
+        metrics = compute_metrics([_timed("a", 100.0, 0.0)])
+        assert metrics["overall"]["rtf"] is None
+
+    def test_existing_keys_are_unchanged(self):
+        metrics = compute_metrics([_timed("a", 100.0, 1.0)])
+        assert metrics["overall"]["avg_inference_ms"] == 100.0
+        assert metrics["by_category"]["a"]["avg_inference_ms"] == 100.0
+        assert metrics["overall"]["count"] == 1
+
+    def test_wav_duration_seconds_reads_the_file(self, tmp_path):
+        path = tmp_path / "a.wav"
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00\x00" * 24000)
+        assert wav_duration_seconds(path) == 1.5
+
+    def test_run_benchmark_records_audio_seconds(self, tmp_path):
+        path = tmp_path / "a.wav"
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00\x00" * 8000)
+        manifest = {"utterances": [
+            {"id": "u1", "category": "c", "file": "a.wav", "text": "go"},
+        ]}
+
+        class FakeAdapter:
+            name = "fake"
+
+            def reset(self):
+                pass
+
+            def transcribe(self, samples, sample_rate):
+                return TranscriptionResult(text="go", elapsed_ms=10.0, interim_results=[])
+
+        results = run_benchmark(FakeAdapter(), manifest, tmp_path)
+        assert results[0].audio_seconds == 0.5
 
 
 class TestProcessStats:

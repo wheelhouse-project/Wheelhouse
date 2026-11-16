@@ -56,6 +56,7 @@ from .utterance_clipboard_manager import UtteranceClipboardManager
 from .shadow_buffer import ShadowBufferManager
 from .terminal_editor_proxy import TerminalEditorProxy
 from .response_handler import ResponseHandler
+from .mouse_pointer_actions import MousePointerActions
 from .continuous_scroll import (
     NOTICE_TITLE,
     ContinuousScroller,
@@ -72,6 +73,9 @@ from .hwnd_utils import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover -- typing only, no runtime import cost
+    from ui.click_config import ClickConfig
+    from ui.click_executor import ClickExecutor
+    from ui.element_finder import ElementFinder
     from ui.element_types import ClickGesture
 
 # New Router/Strategy Components
@@ -85,6 +89,7 @@ from .uia_phrase_select import (
 from .elevation_check import target_elevation_state
 from .router import InsertionRouter
 from .strategies.base import InsertionMode, InsertionOptions
+from .target_identity import TargetIdentity, current_foreground_root
 from .strategies.specific import (
     _context_hwnd,
     ClipboardOnlyStrategy,
@@ -101,6 +106,18 @@ from .text_target import build_predicate_from_config
 from speech.text_transforms import auto_compress_spelled_letters
 
 logger = logging.getLogger(__name__)
+
+# wh-focus-read-once-utterance: the Input commands whose words may use the
+# focus read stored for the current utterance. intelligent_insert_text is a
+# dictated word; end_utterance carries the final letter-buffer flush, which
+# is the last word of the utterance. Every other command discards the stored
+# read (discard event D6 of the bead's design), a deny-by-default list: a
+# command type missing from a list of commands that can move the focus
+# would change what the user sees, while an extra discard costs one read.
+_FOCUS_READ_REUSE_COMMANDS = frozenset({
+    "intelligent_insert_text",
+    "end_utterance",
+})
 
 # Transient stale-window UIA/COM error classes (wh-overlay-walk-theme-error).
 # Same guarded pair as ui/uia_walker.py and ui/element_finder.py duplicate
@@ -366,8 +383,9 @@ def _win32_scroll_wheel(direction, clicks) -> tuple[bool, str | None]:
         # right. An earlier version of this comment said their callers
         # never report to the user; that was false, and correcting it is
         # wh-wheel-refusal-notice.1.4. Their handlers answer with a
-        # MouseActionResponse, and main.py::_send_mouse_action turns
-        # every non-ok response into _forward_click_notice, so a refused
+        # MouseActionResponse, and
+        # mouse_grid/controller.py::MouseGridController._send_mouse_action turns
+        # every non-ok response into forward_click_notice, so a refused
         # grid click, move or drag ALREADY shows an action-specific
         # notice -- and the ERROR record adds the generic box beside it.
         # That is the same duplicate this bead removes for the wheel.
@@ -777,44 +795,35 @@ class UIActionHandler:
         # response on the demuxer queue (wh-lla5d).
         self.response = ResponseHandler(response_queue)
 
-        # wh-n29v.41 / wh-n29v.42.1: Input-side defence-in-depth watermark for
-        # pin_snapshot stale-generation rejection. A SINGLE bounded
-        # (overlay_session_id, latest_accepted_paint_generation) pair -- NOT a
-        # per-session dict, which would add one permanent entry per overlay
-        # session for the lifetime of this long-lived process. overlay_session_id
-        # is monotonic and the overlay state machine is single, so only the
-        # latest session can receive a legitimate pin; an older session id (or a
-        # strictly-older generation within the latest session) is stale.
-        self._latest_pin_watermark: Optional[tuple[int, int]] = None
+        # wh-full-refactor.4.3: the overlay walk, the snapshots and click N
+        # (area U4) live in OverlaySnapshotActions, with their two state
+        # fields. It reads the members it needs back through this handler
+        # (ui/overlay_snapshot_host.py). The import is here, not at the top,
+        # because ui/overlay_snapshot_actions.py reads module globals of
+        # this module.
+        # crewcut: an import inside __init__ to break the import cycle. A
+        # shared module for the three globals that OverlaySnapshotActions
+        # reads lets it move to the top of the file (wh-full-refactor.5).
+        from .overlay_snapshot_actions import OverlaySnapshotActions
+        self.overlay_snapshots = OverlaySnapshotActions(
+            self, clock=time.monotonic
+        )
 
-        # wh-overlay-slow-uia-stale-badges.8 part 4: one EXECUTED click per
-        # (overlay_session_id, paint_generation). The pair of the last click
-        # that returned ok; a later click carrying a pair that is not STRICTLY
-        # newer is refused (stale_overlay_generation) -- that list was
-        # consumed by the click that changed the screen. A single bounded
-        # pair, not a per-session dict, for the same reason as
-        # _latest_pin_watermark above (wh-n29v.42.1): overlay_session_id is
-        # monotonic and the overlay machine is single. Ordering alone cannot
-        # give Input a "current" generation (the command loop is FIFO, so an
-        # arriving pair is always >= any watermark it could keep from paints),
-        # which is why the guard keys on EXECUTION, the one event that
-        # invalidates a painted list.
-        self._last_executed_click_pair: Optional[tuple[int, int]] = None
-
-        # wh-input-mouse-primitives: the SendInput seams for the mouse-grid
-        # pointer actions (click_point / move_pointer / perform_drag). Set as
-        # attributes rather than called directly so the test suite can inject
-        # a fake and never synthesise real input; production keeps the
-        # module-level Win32-backed wrappers above.
-        self._mouse_click_seam = _win32_click_point
-        self._mouse_move_seam = _win32_move_pointer
-        self._mouse_drag_seam = _win32_drag_pointer
-        # wh-voice-access-parity.2.5: the pointer read for click_at_pointer.
-        # A seam for the same reason as the three above: tests inject a
-        # fixed position and never depend on the real pointer.
-        self._pointer_position_seam = _win32_pointer_position
+        # wh-full-refactor.6.2: click_point, click_at_pointer, move_pointer
+        # and perform_drag (area U7) live in MousePointerActions. It holds
+        # the SendInput seams of the four actions (wh-input-mouse-primitives,
+        # wh-voice-access-parity.2.5) as attributes, so a test can inject a
+        # fake and never send real input; production passes the module-level
+        # Win32-backed wrappers above.
+        self.mouse_pointer = MousePointerActions(
+            self,
+            mouse_click_seam=_win32_click_point,
+            mouse_move_seam=_win32_move_pointer,
+            mouse_drag_seam=_win32_drag_pointer,
+            pointer_position_seam=_win32_pointer_position,
+        )
         # wh-voice-access-parity.2.3: the SendInput seam for the spoken scroll
-        # commands. Same injection reason as the three pointer seams above,
+        # commands. Same injection reason as the pointer seams above,
         # though the wheel is not a grid action and is not gated by the
         # voice-clicking config (see ``scroll_wheel``).
         self._mouse_scroll_seam = _win32_scroll_wheel
@@ -1055,6 +1064,24 @@ class UIActionHandler:
         # leaves the set looking split.
         self._credited_target_hwnds: set[int] = set()
 
+        # wh-focus-read-once-utterance: the focus read (the UIContext that
+        # capture_context returned) of an earlier word of this utterance,
+        # or None. _execute_insert_with_ack uses it in place of a new read
+        # while the same window holds the foreground. invalidate_buffer
+        # sets it to None from the pynput listener threads, so the insert
+        # path reads it ONE time into a local and uses only that local
+        # (condition C1 of the boss ruling).
+        self._utterance_focus_read: Optional[Any] = None
+        # True only while the command being handled is one of
+        # _FOCUS_READ_REUSE_COMMANDS. note_input_command sets it for each
+        # command. False by default, so a direct call of an insert method
+        # (a test, or a caller that is not the command loop) keeps one new
+        # read for each word.
+        self._command_reuses_focus_read: bool = False
+        # The cause of the last discard, written to the FOCUS_READ log line
+        # of the next new read (condition C3 of the boss ruling).
+        self._focus_read_discard_cause: str = "first_word"
+
         logger.debug("UIActionHandler initialized with all specialist components.")
 
     # ========================================================================
@@ -1212,6 +1239,147 @@ class UIActionHandler:
         """
         self.buffer_manager.invalidate()
         self._user_interacted_during_utterance = True
+        # wh-focus-read-once-utterance, discard event D7: a physical click
+        # or key press can move the focus to another field, so the next
+        # word reads again. The listeners call this only while
+        # is_internal_action is clear, so the keys WheelHouse sends itself
+        # do not reach this line.
+        self._discard_focus_read("user_input")
+
+    # ========================================================================
+    # PUBLIC API - Focus read for each utterance (wh-focus-read-once-utterance)
+    # ========================================================================
+
+    def note_input_command(self, action: str) -> None:
+        """Record which Input command the command loop is about to run.
+
+        input_process_main calls this once for every dispatched command,
+        before the command runs. A dictated word (intelligent_insert_text)
+        and end_utterance may use the focus read stored for the current
+        utterance. Every other command makes the next word read again
+        (discard event D6), because a command such as "press tab" or a
+        voice click can move the focus inside the same window.
+        """
+        if action in _FOCUS_READ_REUSE_COMMANDS:
+            self._command_reuses_focus_read = True
+            return
+        self._command_reuses_focus_read = False
+        self._discard_focus_read("command")
+
+    def _discard_focus_read(self, cause: str) -> None:
+        """Forget the stored focus read; the next word reads again.
+
+        The cause is written first, so the insert path that finds no
+        stored read also finds the cause of its absence. Each statement
+        is one attribute assignment, so a call from a listener thread is
+        safe beside the insert on the command-loop thread.
+        """
+        self._focus_read_discard_cause = cause
+        self._utterance_focus_read = None
+
+    @staticmethod
+    def _focus_read_is_storable(context) -> bool:
+        """Whether a new read may serve the later words of the utterance.
+
+        A failed read, an empty identity, or no focused control is never
+        stored (discard event D5), so the next word reads again. A Flutter
+        read is not stored either: the router skips the text check for
+        Flutter, so the check that finds a dead stored control (condition
+        C4) could not run, and Flutter apps keep one read for each word.
+        """
+        identity = getattr(context, "target_identity", None)
+        return bool(
+            not context.focus_read_failed
+            and identity is not None
+            and identity != TargetIdentity()
+            and context.focused_control
+            and not context.is_flutter
+        )
+
+    def _keep_focus_read(self, context) -> None:
+        """Store a new read for the later words, or discard the old one.
+
+        Only a dictation command inside an utterance stores. A read that
+        cannot be stored also discards the record it would have replaced,
+        which is what the retry pass needs (discard event D4).
+        """
+        if not self._command_reuses_focus_read:
+            return
+        if not self.utterance_manager.is_in_utterance():
+            return
+        if self._focus_read_is_storable(context):
+            self._utterance_focus_read = context
+        elif context.is_flutter:
+            self._discard_focus_read("flutter")
+        else:
+            self._discard_focus_read("failed_read")
+
+    @staticmethod
+    def _stored_read_is_current(stored) -> bool:
+        """The Win32 check (no UI Automation) that the stored window is in front.
+
+        current_foreground_root and TargetIdentity.is_current use only
+        GetForegroundWindow, GetAncestor, GetProp and
+        GetWindowThreadProcessId. Any doubt answers False, and the word
+        then reads again (discard event D3).
+        """
+        identity = stored.target_identity
+        try:
+            return bool(
+                current_foreground_root() == identity.foreground_root
+                and identity.is_current()
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _take_focus_read():
+        """One new focus read, and its duration in whole milliseconds."""
+        started = time.perf_counter()
+        context = capture_context()
+        duration_ms = int(round((time.perf_counter() - started) * 1000))
+        return context, duration_ms
+
+    def _choose_focus_read(self):
+        """The focus read for the first pass of one word.
+
+        Returns (context, cause, duration_ms). cause is None when the
+        context is the stored read; otherwise it names why a new read was
+        made, for the FOCUS_READ log line.
+
+        ACCEPTED BEHAVIOR CHANGE (acceptance item 9, David 2026-11-14,
+        Option 1): the check below compares windows, not controls. When the
+        focus moves to another control of the SAME window in the middle of
+        an utterance and no discard event saw it, the later words use the
+        stored control, and the strategy sets the focus back on it.
+        """
+        # C1: one read of the shared attribute; only the local is used.
+        stored = self._utterance_focus_read
+        if not self._command_reuses_focus_read:
+            cause = "not_dictation"
+        elif not self.utterance_manager.is_in_utterance():
+            cause = "no_utterance"
+        elif stored is None:
+            cause = self._focus_read_discard_cause
+        elif self._stored_read_is_current(stored):
+            return stored, None, 0
+        else:
+            self._discard_focus_read("window_changed")
+            cause = "window_changed"
+        context, duration_ms = self._take_focus_read()
+        self._keep_focus_read(context)
+        return context, cause, duration_ms
+
+    @staticmethod
+    def _log_focus_read(cause: Optional[str], duration_ms: int) -> None:
+        """One line for each insert pass. No text, no title, no program."""
+        if cause is None:
+            logger.info("FOCUS_READ source=stored")
+        else:
+            logger.info(
+                "FOCUS_READ source=new cause=%s duration_ms=%d",
+                cause, duration_ms,
+            )
 
     # ========================================================================
     # PUBLIC API - Utterance Lifecycle
@@ -1223,6 +1391,17 @@ class UIActionHandler:
         Args:
             utterance_id: The ID of the utterance starting
         """
+        # wh-focus-read-once-utterance, discard event D1: the first word
+        # after any start_utterance call reads again. The words carry no
+        # utterance id and the message between the processes does not
+        # change (condition C2 of the boss ruling), so the discard acts on
+        # each CALL. Two cases follow, by design: a word of utterance N that
+        # this process handles after start_utterance of N+1 counts as a word
+        # after that call, and so does a word held across the end of N.
+        # SpeechProcessor's lifecycle reset sends end_utterance and
+        # start_utterance with the SAME id; both calls discard here.
+        self._discard_focus_read("first_word")
+
         # Reset retraction tracking for new utterance
         self._user_interacted_during_utterance = False
         self._used_simple_paste = False
@@ -1278,6 +1457,13 @@ class UIActionHandler:
                     "end_utterance: final letter-buffer flush failed; the "
                     "buffered letters were not delivered."
                 )
+
+        # wh-focus-read-once-utterance, discard event D2: after the final
+        # flush above, so the flush still uses the stored read. The two
+        # cross-call cases of condition C2 (a word of utterance N handled
+        # after start_utterance of N+1, and a word held across the end of
+        # N) count as words after the call; see start_utterance.
+        self._discard_focus_read("first_word")
 
         # Skip clipboard restore when a submit is still pasting.
         # Clipboard operations (win32clipboard) on the main thread race with
@@ -1969,8 +2155,43 @@ class UIActionHandler:
             # word wait about 7 s.
             with self.clipboard.copy_retry_budget():
                 while True:
-                    # Capture Context
-                    context = capture_context()
+                    # wh-focus-read-once-utterance: the first pass of a
+                    # later word of an utterance uses the stored focus read
+                    # while the Win32 check shows the same window. The
+                    # retry pass always reads again, as before, and its
+                    # read replaces the stored one (discard event D4).
+                    routed = None
+                    if attempt == 0:
+                        context, read_cause, read_ms = (
+                            self._choose_focus_read()
+                        )
+                    else:
+                        context, read_ms = self._take_focus_read()
+                        read_cause = "retry"
+                        self._keep_focus_read(context)
+                    if read_cause is None:
+                        # Condition C4: a dead stored control. In
+                        # production the router's text check answers
+                        # stale_com for it, and a stored identity is never
+                        # the empty record, so the router returns
+                        # ClipboardOnlyStrategy. That answer, and only that
+                        # one, earns one new read and a second evaluation;
+                        # the word is never sent by a strategy chosen from
+                        # the stored control. A live control that is really
+                        # rejected costs the one read of the base sha. No
+                        # second evaluation on RejectedInsertionStrategy:
+                        # the elevated refusal parks a pending answer there
+                        # that a later insert would consume.
+                        routed = self.router.get_strategy(
+                            context, insertion_string,
+                        )
+                        if routed is self.router.clipboard_only:
+                            self._discard_focus_read("stored_control_rejected")
+                            context, read_ms = self._take_focus_read()
+                            read_cause = "stored_control_rejected"
+                            self._keep_focus_read(context)
+                            routed = None
+                    self._log_focus_read(read_cause, read_ms)
                     # wh-paste-target-window-vanished, boss ruling option
                     # 2: the word must not land in a different program from
                     # the one the user spoke it into. The capture recorded
@@ -2047,8 +2268,14 @@ class UIActionHandler:
                                 self._retry_rebound_target = True
 
                     # Get Strategy from Router. The text length feeds the
-                    # Unicode-vs-Standard branch (wh-606yk).
-                    strategy = self.router.get_strategy(context, insertion_string)
+                    # Unicode-vs-Standard branch (wh-606yk). It runs for
+                    # every word; a stored read was already routed above.
+                    if routed is not None:
+                        strategy = routed
+                    else:
+                        strategy = self.router.get_strategy(
+                            context, insertion_string,
+                        )
 
                     # wh-fz7j.4: clear the per-instance write-seq buffer so a stale
                     # value from a previous insert that did NOT call _safe_copy this
@@ -3168,174 +3395,12 @@ class UIActionHandler:
         """
         self.terminal_editor.cancelled_by_gui(request_id)
 
-    def _settle_overlay_walk(
-        self,
-        finder,
-        foreground,
-        *,
-        walk_deadline: Optional[float],
-        compare_snapshot_id: str,
-        trace_id: str,
-    ):
-        """Read the window until it settles, then compare it with the held list.
-
-        Returns ``(walk, held_summary)``. ``held_summary`` is the stored
-        summary of ``compare_snapshot_id`` when the settled read matches it --
-        the caller reads "unchanged" from that being non-None -- and ``None``
-        every other time, including every failure.
-
-        The read callable performs a full ``overlay_walk`` each time rather
-        than a bare tree walk, because the comparison has to be made against
-        the SAME processed list the badges are drawn from: the browser DOM
-        fold, the owned-popup fold, the taskbar walk and the contiguous
-        renumber all run inside ``overlay_walk``, and a raw walk would differ
-        from the held snapshot on every read.
-
-        crewcut: two limits are accepted here, both removable later.
-        (1) Every read this makes is bounded by the ONE dequeue-anchored
-        screen-read deadline this request was given -- ``[click]
-        screen_read_timeout_ms`` minus the 250 ms pre-walk margin, 9750 ms at
-        the shipped default -- because all reads share that single deadline
-        rather than each getting its own. On a slow accessibility provider a
-        read can still exceed the bound and produce no list, which ends the
-        settle early: the answer is then the last read that DID complete,
-        unconfirmed by a matching pair. Removing this means giving each read
-        its own budget, which needs a second configured number and a rule for
-        how many reads the settle may spend.
-        (2) Each read stores its own snapshot, so a settle leaves two or three
-        extra UNPINNED entries in the finder's store (capacity 4, TTL 30 s).
-        They cannot displace the held snapshot, which is pinned and so immune
-        to LRU eviction, and the last insert protects itself. Removing this
-        means splitting ``overlay_walk`` into a walk half and a store half,
-        which is about 300 lines of shipped fold and renumber logic that three
-        other paths share; not worth it for entries the store already reclaims.
-        """
-
-        class _SettleWalkFailed(Exception):
-            """A read could not produce a list; abort the detector."""
-
-            def __init__(self, walk):
-                super().__init__("settle read failed")
-                self.walk = walk
-
-        last: list = []
-
-        def _read():
-            result = finder.overlay_walk(foreground, deadline=walk_deadline)
-            if result.snapshot is None:
-                # execution_failed: no list at all. The detector only catches
-                # stale-window errors, so anything else propagates -- which is
-                # exactly the abort this needs.
-                raise _SettleWalkFailed(result)
-            last.append(result)
-            return result.snapshot.matches
-
-        listener = settle_detector.StructureEventListener(
-            foreground.foreground_window
-        )
-        available = False
-        try:
-            available = listener.start()
-        except Exception:  # noqa: BLE001 - the listener is best-effort
-            logger.warning(
-                "start_overlay_walk: settle listener failed to start; "
-                "degrading to plain two matching reads (trace_id=%s)",
-                trace_id, exc_info=True,
-            )
-        settled = None
-        try:
-            settled = settle_detector.wait_for_settled_window(
-                _read,
-                events_between=(
-                    listener.any_event_between if available else None
-                ),
-            )
-        except _SettleWalkFailed as failed:
-            if not last:
-                # Nothing completed, so there is no list to paint and nothing
-                # to compare. Hand the failed result back and let the
-                # handler's existing execution_failed branch answer.
-                return failed.walk, None
-            # A later read produced no list, but an earlier one did. Answer
-            # with that one rather than with nothing: it is a post-click read,
-            # so it is no worse than the single walk this path replaced, and
-            # the comparison below still runs -- when it matches the held
-            # snapshot the answer is the numbers already on screen, which is
-            # the safest outcome available.
-            logger.info(
-                "start_overlay_walk: a settle read failed (%s) after %d "
-                "completed reads; answering with the last completed read "
-                "(trace_id=%s)",
-                failed.walk.reason, len(last), trace_id,
-            )
-        finally:
-            # stop() unconditionally, not only when start() reported
-            # success: a start that registered some handlers and then raised
-            # leaves live COM registrations, and stop() is a no-op when there
-            # is nothing to release.
-            try:
-                listener.stop()
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "start_overlay_walk: settle listener failed to stop "
-                    "(trace_id=%s)", trace_id, exc_info=True,
-                )
-
-        walk = last[-1]
-        if settled is not None:
-            logger.info(
-                "start_overlay_walk: settled=%s after %d reads "
-                "(%d voided pairs, %.0f ms, trace_id=%s)",
-                settled.settled, settled.read_count, settled.voided_pairs,
-                settled.elapsed_ms, trace_id,
-            )
-        if not compare_snapshot_id or walk.snapshot is None:
-            return walk, None
-        # wh-overlay-slow-uia-stale-badges.2.2.2: ask for the held list AS THE
-        # WINDOW THIS READ RAN AGAINST. ``signature_of`` compares control type
-        # id, accessible name and bounding rectangle and carries no window
-        # identity, so two windows with the same layout compare as "unchanged"
-        # -- a dialog closed and reopened is the ordinary way there. Answering
-        # with the held id would then paint the old window's badges over the
-        # new one, and the machine's unchanged branch repaints WITHOUT
-        # re-pinning, so nothing would rebind the list to the window on screen.
-        # ``get_snapshot`` drops the entry and returns None on an identity
-        # mismatch, which falls into the held-is-gone path just below and
-        # answers with the fresh read; Logic then unpins, pins the new list and
-        # paints it. The two other production consumers, show_numbered_overlay
-        # and click_snapshot_item, already pass these four fields.
-        held = finder.get_snapshot(
-            compare_snapshot_id,
-            current_foreground_window=foreground.foreground_window,
-            current_foreground_pid=foreground.foreground_pid,
-            current_foreground_process_name=(
-                foreground.foreground_process_name
-            ),
-            current_foreground_window_creation_time=(
-                foreground.foreground_window_creation_time
-            ),
-        )
-        if held is None:
-            # The held snapshot expired (TTL) or was unpinned and evicted
-            # while the window settled. There is nothing to compare against,
-            # so the fresh read is the answer.
-            logger.info(
-                "start_overlay_walk: the held snapshot %s is gone; "
-                "answering with the fresh read (trace_id=%s)",
-                compare_snapshot_id, trace_id,
-            )
-            return walk, None
-        if settle_detector.signature_of(
-            held.matches
-        ) != settle_detector.signature_of(walk.snapshot.matches):
-            return walk, None
-        held_summary = finder.get_summary(compare_snapshot_id)
-        if held_summary is None:
-            # The lists match but the summary is gone, so the id cannot be
-            # answered with. Fall back to the fresh read rather than send an
-            # id with no list behind it.
-            return walk, None
-        return walk, held_summary
+    # ========================================================================
+    # NUMBERED OVERLAY WALK, SNAPSHOTS AND CLICK N: moved to
+    # ui/overlay_snapshot_actions.py, class OverlaySnapshotActions
+    # (wh-full-refactor.4.3). The six actions stay as delegators, because
+    # input_proc.py calls them by name with getattr(ui_handler, action).
+    # ========================================================================
 
     def start_overlay_walk(
         self,
@@ -3349,720 +3414,18 @@ class UIActionHandler:
         compare_snapshot_id: str = "",
         **kwargs,
     ) -> None:
-        """Walk the focused window from scratch for the numbered overlay (wh-n29v.37).
-
-        ``start_overlay_walk`` is the standalone "show numbers" build request:
-        Logic dispatches it when the overlay state machine needs a FRESH walk
-        of the focused window (no prior ``click_element`` request to reuse).
-        The Input process owns the walk:
-
-          1. Gate on the validated overlay config: short-circuit (no walk) when
-             ``overlay_enabled_effective`` is False -- the same two-sided gate
-             the by-name click path uses (Logic also gates, but the Input side
-             defends against a stale/racing request). Defence-in-depth.
-          2. Snapshot the foreground identity + cursor.
-          3. ``ElementFinder.overlay_walk(foreground)`` walks the focused window
-             and numbers EVERY interactive control 1..K (no clear-winner rule).
-          4. Map the walk outcome to the schema outcome (ok / no_targets /
-             execution_failed) and emit exactly one ``StartOverlayWalkResponse``
-             on the response queue, echoing ``overlay_session_id`` +
-             ``paint_generation`` + ``trace_id`` so Logic can drop a superseded
-             walk's response by generation.
-
-        ``settle=True`` (wh-overlay-slow-uia-stale-badges.2) changes step 3
-        only: instead of one walk, the window is read through
-        ``ui.settle_detector.wait_for_settled_window`` until two consecutive
-        reads agree, and the settled read is then compared against
-        ``compare_snapshot_id`` -- the snapshot Logic pinned before the click.
-        When the two comparison lists are equal the response carries THAT id
-        and THAT summary, which is how Logic learns to restore the numbers it
-        already had; when they differ the fresh snapshot is the answer, exactly
-        as for a plain walk. Ids are never reused (``walk-<uuid4 hex>-<n>``
-        with a per-run salt and a monotonic counter), so the held id in a
-        response can only mean "unchanged".
-
-        The handler is in ``_HANDLES_OWN_RESPONSE`` so the generic emitter does
-        not clobber the walk outcome. It NEVER raises: any unexpected error is
-        mapped to a ``status="error"`` / ``outcome="error"`` response so the
-        one-response-per-request_id contract holds and the Logic awaiter does
-        not fall through to its timeout path. The status/outcome split follows
-        the documented r2.10 mapping: a feature failure (no_targets /
-        execution_failed) rides transport ``status="ok"``; ``status="error"``
-        is reserved for a handler-level crash where the outcome is unreliable.
-        """
-        from services.wheelhouse.shared.start_overlay_walk import (
-            StartOverlayWalkResponse,
+        """Delegate to OverlaySnapshotActions.start_overlay_walk (input_proc.py calls this name)."""
+        self.overlay_snapshots.start_overlay_walk(
+            scope=scope,
+            overlay_session_id=overlay_session_id,
+            paint_generation=paint_generation,
+            trace_id=trace_id,
+            request_id=request_id,
+            command_dequeue_monotonic=command_dequeue_monotonic,
+            settle=settle,
+            compare_snapshot_id=compare_snapshot_id,
+            **kwargs,
         )
-
-        action_name = "start_overlay_walk"
-
-        # wh-overlay-slow-uia-stale-badges.2.2.1: the reply names the window
-        # this handler ACTUALLY READ, so Logic can refuse to paint a list over
-        # a window it does not describe. Filled in from the ONE
-        # ``ForegroundContext`` captured below -- the same context every settle
-        # read walks against -- so it is the read's window, not whatever is in
-        # front when the reply is parsed. It starts at the same per-field
-        # sentinels ``_capture_click_foreground`` degrades to, which is what a
-        # short-circuit emitted BEFORE the capture (automation unavailable,
-        # overlay disabled) sends; a sentinel identity matches no real
-        # foreground, so Logic fails closed on it.
-        read_identity: dict = {
-            "foreground_window": 0,
-            "foreground_pid": 0,
-            "foreground_process_name": "",
-            "foreground_window_creation_time": 0,
-        }
-
-        def _emit(response: "StartOverlayWalkResponse") -> None:
-            payload = response.to_dict()
-            if request_id is not None:
-                payload["request_id"] = request_id
-            payload["action"] = action_name
-            try:
-                self.response_queue.put(payload)
-            except Exception as exc:  # noqa: BLE001
-                # Last-resort: log and drop. Without a response the Logic-side
-                # Future times out, which Logic already handles gracefully.
-                logger.error(
-                    "start_overlay_walk: failed to enqueue response "
-                    "(trace_id=%s): %s",
-                    trace_id, exc,
-                )
-
-        def _failed(outcome: str, reason: Optional[str], status: str = "ok",
-                    snapshot_id: Optional[str] = None,
-                    snapshot_summary=None) -> "StartOverlayWalkResponse":
-            return StartOverlayWalkResponse(
-                status=status,
-                outcome=outcome,
-                reason=reason,
-                snapshot_id=snapshot_id,
-                snapshot_summary=snapshot_summary,
-                trace_id=trace_id,
-                overlay_session_id=overlay_session_id,
-                paint_generation=paint_generation,
-                **read_identity,
-            )
-
-        try:
-            finder = self._get_overlay_walk_finder()
-            if finder is None:
-                # finder is None either because the COM root could not be built
-                # on this host (the _AUTOMATION_UNAVAILABLE sentinel, set by the
-                # shared _get_click_element_finder) or because the overlay is
-                # genuinely disabled in config (operator opt-out, an overlay-key
-                # validation failure, or the whole feature off). Emit the
-                # matching tag so the notice is accurate (wh-n29v.74.1, deepseek
-                # reviewer_2): clicking IS enabled in config on the
-                # COM-unavailable path, so "disabled_by_config" would wrongly
-                # point the user at config.toml. Logic also short-circuits
-                # before sending; this defends the Input side against a stale or
-                # racing request.
-                if (
-                    getattr(self, "_click_automation_root", None)
-                    is _AUTOMATION_UNAVAILABLE
-                ):
-                    logger.info(
-                        "start_overlay_walk: IUIAutomation root unavailable on "
-                        "this host; short-circuiting (trace_id=%s)", trace_id,
-                    )
-                    _emit(_failed("execution_failed", "automation_unavailable"))
-                    return
-                logger.info(
-                    "start_overlay_walk: overlay disabled by config; "
-                    "short-circuiting (trace_id=%s)", trace_id,
-                )
-                _emit(_failed("execution_failed", "disabled_by_config"))
-                return
-
-            # reviewer_0 finding 38.2: anchor the ONE per-request walk deadline
-            # at the dequeue instant the input_proc command reader captured
-            # (threaded in as command_dequeue_monotonic), exactly as
-            # click_element does (wh-9f3t.73.1). Charging from that earliest
-            # reader instant -- not this handler's entry -- folds the ~1s
-            # pre-handler reader stall into the budget so the walk gives up
-            # before the Logic walk_in_flight timeout rather than after it.
-            # The fallback (a direct call with no anchor, e.g. a unit test) uses
-            # this handler's entry instant. The bound is the SCREEN READ's own
-            # one, ClickConfig.screen_read_walk_deadline_ms -- [click]
-            # screen_read_timeout_ms minus the pre-walk margin, 9750 ms at the
-            # shipped default -- NOT walk_deadline_ms, which bounds the by-name
-            # click walk and is still validated strictly below the click reply
-            # limit (wh-overlay-slow-uia-stale-badges.3). Reading it here is
-            # what lets a read that answers correctly after 2500 ms be used
-            # instead of discarded. It comes from the validated _click_config
-            # (set as a side effect of the finder build); None when no bound is
-            # configured (defensive -- finder is non-None here). overlay_walk
-            # already accepts deadline= and threads it into walk_window
-            # unchanged.
-            dequeue_monotonic = (
-                command_dequeue_monotonic
-                if command_dequeue_monotonic is not None
-                else time.monotonic()
-            )
-            walk_deadline_ms = getattr(
-                getattr(self, "_click_config", None),
-                "screen_read_walk_deadline_ms",
-                None,
-            )
-            walk_deadline: Optional[float] = (
-                dequeue_monotonic + (walk_deadline_ms / 1000.0)
-                if walk_deadline_ms is not None
-                else None
-            )
-
-            foreground = _capture_click_foreground()
-            # Record the window every read below runs against, so the reply
-            # carries it (wh-overlay-slow-uia-stale-badges.2.2.1). This is the
-            # ONE capture the settle loop reuses for every read, so it names
-            # the window the answer describes even when the foreground moves
-            # while the window settles.
-            read_identity.update(
-                foreground_window=foreground.foreground_window,
-                foreground_pid=foreground.foreground_pid,
-                foreground_process_name=foreground.foreground_process_name,
-                foreground_window_creation_time=(
-                    foreground.foreground_window_creation_time
-                ),
-            )
-            logger.info(
-                "start_overlay_walk: %s focused window in process=%s "
-                "(session=%s gen=%s settle=%s trace_id=%s)",
-                "settling" if settle else "walking",
-                foreground.foreground_process_name,
-                overlay_session_id, paint_generation, settle, trace_id,
-            )
-            unchanged = False
-            held_summary = None
-            if settle:
-                walk, held_summary = self._settle_overlay_walk(
-                    finder,
-                    foreground,
-                    walk_deadline=walk_deadline,
-                    compare_snapshot_id=compare_snapshot_id,
-                    trace_id=trace_id,
-                )
-                unchanged = held_summary is not None
-            else:
-                walk = finder.overlay_walk(foreground, deadline=walk_deadline)
-
-            if walk.outcome == "execution_failed":
-                logger.info(
-                    "start_overlay_walk: execution_failed reason=%s "
-                    "(trace_id=%s)", walk.reason, trace_id,
-                )
-                _emit(_failed(
-                    "execution_failed",
-                    walk.reason or "walk_failed",
-                ))
-                return
-
-            snapshot_id = (
-                walk.snapshot.snapshot_id if walk.snapshot is not None else None
-            )
-            summary = walk.summary
-            if unchanged:
-                # Nothing changed since the click. Answer with the HELD
-                # snapshot and its OWN summary: a summary names the snapshot
-                # it was projected from, and StartOverlayWalkResponse REFUSES
-                # a response whose snapshot_summary.snapshot_id differs from
-                # its top-level snapshot_id (shared/start_overlay_walk.py:266)
-                # because Logic keys the retained summary by the top-level id.
-                # The fresh walk's summary names the fresh snapshot, so that
-                # pairing would be rejected at the process boundary and the
-                # whole response lost. _settle_overlay_walk only reports
-                # unchanged when it has the held summary in hand.
-                snapshot_id = compare_snapshot_id
-                summary = held_summary
-            if walk.outcome == "no_targets":
-                logger.info(
-                    "start_overlay_walk: no_targets (trace_id=%s)", trace_id,
-                )
-                _emit(StartOverlayWalkResponse(
-                    status="ok",
-                    outcome="no_targets",
-                    reason=None,
-                    snapshot_id=snapshot_id,
-                    snapshot_summary=summary,
-                    trace_id=trace_id,
-                    overlay_session_id=overlay_session_id,
-                    paint_generation=paint_generation,
-                    **read_identity,
-                ))
-                return
-
-            # outcome == "ok".
-            item_count = len(summary.items) if summary is not None else 0
-            logger.info(
-                "start_overlay_walk: ok with %d items (snapshot=%s "
-                "unchanged=%s trace_id=%s)",
-                item_count, snapshot_id, unchanged, trace_id,
-            )
-            _emit(StartOverlayWalkResponse(
-                status="ok",
-                outcome="ok",
-                reason=None,
-                snapshot_id=snapshot_id,
-                snapshot_summary=summary,
-                trace_id=trace_id,
-                overlay_session_id=overlay_session_id,
-                paint_generation=paint_generation,
-                **read_identity,
-            ))
-        except _TRANSIENT_WALK_ERRORS as exc:
-            # Known transient class (rebuilding window, e.g. a theme switch):
-            # a feature failure on the normal execution_failed path, logged at
-            # WARNING so no error notification pops for a self-healing blip.
-            logger.warning(
-                "start_overlay_walk: transient UIA/COM walk error, likely a "
-                "rebuilding window; mapping to execution_failed "
-                "(trace_id=%s): %r",
-                trace_id, exc,
-            )
-            _emit(_failed("execution_failed", "transient_com_error"))
-        except Exception as exc:  # noqa: BLE001 -- contract: never raise
-            logger.error(
-                "start_overlay_walk: unexpected error (trace_id=%s): %s",
-                trace_id, exc, exc_info=True,
-            )
-            _emit(_failed("error", "unexpected_error", status="error"))
-
-    def _get_overlay_walk_finder(self):
-        """Return the ElementFinder for the numbered overlay, or None if off.
-
-        The overlay gates on ``ClickConfig.overlay_enabled_effective`` (NOT just
-        ``enabled``): a bad overlay key disables ONLY the overlay while by-name
-        click stays operative, and a valid ``overlay_enabled=false`` is an
-        operator opt-out. Reuses ``_get_click_element_finder`` to build (and
-        memoise) the same finder + validated ``_click_config`` -- the overlay
-        and by-name click share one ElementFinder over one ``[click]`` block --
-        and then applies the overlay-specific gate on top.
-
-        Returns the cached finder when the overlay is effectively enabled, else
-        ``None`` so the handler short-circuits before any walk.
-        """
-        finder = self._get_click_element_finder()
-        # _get_click_element_finder set self._click_config as a side effect
-        # (even on its None return path, via the lazy-config guard).
-        click_cfg = getattr(self, "_click_config", None)
-        if click_cfg is None or not click_cfg.overlay_enabled_effective:
-            return None
-        # When by-name click is disabled but the overlay somehow validated,
-        # _get_click_element_finder returns None; overlay_enabled_effective is
-        # False in that case too (the disabled path sets overlay_enabled=False),
-        # so the guard above already returned None. finder is non-None here.
-        return finder
-
-    def pin_snapshot(
-        self,
-        overlay_session_id: int = 0,
-        snapshot_id: str = "",
-        paint_generation: int = 0,
-        request_id: Optional[str] = None,
-        **kwargs,
-    ) -> None:
-        """Pin a stored snapshot so LRU eviction skips it (wh-n29v.41).
-
-        Logic owns the active-overlay pin and dispatches ``pin_snapshot`` when
-        it dispatches the ``paint_overlay`` that displays a snapshot. The Input
-        process drives the multi-snapshot store's :meth:`ElementFinder.pin`
-        (skips LRU eviction; the pin is still TTL-bounded). Logic does NOT block
-        the paint on this ack, but the handler still emits exactly one
-        ``PinSnapshotResponse`` so the Logic-side awaiting Future resolves.
-
-        Stale rejection (the design point, r1c.2 / r1c.1). The store keys
-        snapshots by ``snapshot_id`` ONLY and tracks no generation; Logic owns
-        the authoritative generation comparison and drops a superseded WALK
-        response before it would ever dispatch a pin. As Input-side
-        defence-in-depth, this handler keeps a SINGLE bounded watermark
-        ``(latest_session_id, latest_accepted_paint_generation)`` (not a
-        per-session dict, which would grow one permanent entry per overlay
-        session over the process lifetime -- wh-n29v.42.1). ``overlay_session_id``
-        is monotonic (allocated when the overlay state machine leaves
-        ``closed``) and the state machine is single, so a pin is rejected
-        WITHOUT touching the store when EITHER its ``overlay_session_id`` is
-        OLDER than the latest seen (a superseded session Logic has torn down)
-        OR, within the latest session, its ``paint_generation`` is STRICTLY
-        OLDER than the latest accepted one (a racing or duplicated out-of-order
-        dispatch). Binding a stale pin could pin the wrong snapshot against a
-        session/generation Logic has already advanced. Equal-or-newer
-        generations within the latest session and any newer session are
-        accepted (an equal generation is the legitimate re-dispatch of the same
-        paint; r2.5 / line 366 of the v4 design).
-
-        The watermark advances on ANY accepted (non-stale) dispatch BEFORE the
-        store pin, NOT only on a successful pin (wh-n29v.42.2). A failed pin --
-        the snapshot was already TTL-evicted -- does not make its generation
-        stale, so it must still advance "latest seen"; otherwise a later,
-        strictly-older generation for the same session would slip through the
-        guard.
-
-        The handler is in ``_HANDLES_OWN_RESPONSE`` so the generic emitter does
-        not clobber the ack. It NEVER raises: any unexpected error is mapped to
-        a ``status="error"`` response so the one-response-per-request_id
-        contract holds and the Logic awaiter does not fall through to its
-        timeout path.
-        """
-        from services.wheelhouse.shared.pin_snapshot import PinSnapshotResponse
-
-        action_name = "pin_snapshot"
-
-        def _emit(
-            *, status: str, reason: Optional[str], pinned: bool,
-        ) -> None:
-            # Coerce the echoed identity to schema-safe primitives so the
-            # response always parses on the Logic side, even when this handler
-            # is rejecting malformed input (wh-n29v.43.1). PinSnapshotResponse
-            # .from_dict requires overlay_session_id to be a non-bool int and
-            # snapshot_id to be a str; a malformed echo would otherwise raise
-            # PinSnapshotResponseSchemaError on Logic instead of resolving the
-            # awaiting Future cleanly.
-            safe_session = (
-                overlay_session_id
-                if isinstance(overlay_session_id, int)
-                and not isinstance(overlay_session_id, bool)
-                else 0
-            )
-            safe_snapshot = snapshot_id if isinstance(snapshot_id, str) else ""
-            payload = PinSnapshotResponse(
-                status=status,
-                reason=reason,
-                overlay_session_id=safe_session,
-                snapshot_id=safe_snapshot,
-                pinned=pinned,
-            ).to_dict()
-            if request_id is not None:
-                payload["request_id"] = request_id
-            payload["action"] = action_name
-            try:
-                self.response_queue.put(payload)
-            except Exception as exc:  # noqa: BLE001
-                # Last-resort: log and drop. Without a response the Logic-side
-                # Future times out, which Logic already handles gracefully.
-                logger.error(
-                    "pin_snapshot: failed to enqueue response "
-                    "(session=%s snapshot=%s): %s",
-                    overlay_session_id, snapshot_id, exc,
-                )
-
-        try:
-            # Validate IPC fields before touching the store or the watermark
-            # (wh-n29v.43.1). Logic constructs these, but a malformed message
-            # (wrong types from a Logic bug or corruption) must NOT reach the
-            # single-pair watermark: a non-int written there makes every later
-            # valid pin raise on the comparison (e.g. 5 < "bad") and return
-            # status=error until the Input process restarts. overlay_session_id
-            # and paint_generation must be non-bool ints (bool is an int
-            # subclass; an overlay session / generation is a real count) and
-            # snapshot_id must be a str. Reject without store or watermark
-            # mutation, emitting exactly one response.
-            if (
-                not isinstance(overlay_session_id, int)
-                or isinstance(overlay_session_id, bool)
-                or not isinstance(paint_generation, int)
-                or isinstance(paint_generation, bool)
-                or not isinstance(snapshot_id, str)
-            ):
-                logger.error(
-                    "pin_snapshot: invalid request fields; rejecting without "
-                    "touching store or watermark "
-                    "(session=%r snapshot=%r gen=%r)",
-                    overlay_session_id, snapshot_id, paint_generation,
-                )
-                _emit(status="error", reason="invalid_request", pinned=False)
-                return
-
-            finder = self._get_overlay_walk_finder()
-            if finder is None:
-                # Overlay disabled by config (operator opt-out, an overlay-key
-                # validation failure, or the whole feature disabled). Logic
-                # gates before sending; defend the Input side too.
-                logger.info(
-                    "pin_snapshot: overlay disabled by config; "
-                    "short-circuiting (session=%s snapshot=%s)",
-                    overlay_session_id, snapshot_id,
-                )
-                _emit(status="ok", reason="disabled_by_config", pinned=False)
-                return
-
-            # Single-pair stale watermark (wh-n29v.42.1 / wh-n29v.42.2). Track
-            # ONE (latest_session_id, latest_accepted_generation) pair, not a
-            # per-session dict. overlay_session_id is monotonic and the overlay
-            # state machine is single, so two staleness cases are rejected:
-            #   * an OLDER overlay_session_id is from a superseded session that
-            #     Logic has already torn down; and
-            #   * within the latest session, a STRICTLY-OLDER paint_generation
-            #     is a racing or duplicated out-of-order dispatch.
-            # Equal-or-newer (same session) and any newer session are accepted.
-            watermark = getattr(self, "_latest_pin_watermark", None)
-            if watermark is not None:
-                latest_session, latest_gen = watermark
-                if overlay_session_id < latest_session:
-                    logger.info(
-                        "pin_snapshot: stale session rejected "
-                        "(session=%s snapshot=%s < latest_session=%s)",
-                        overlay_session_id, snapshot_id, latest_session,
-                    )
-                    _emit(status="ok", reason="stale_session", pinned=False)
-                    return
-                if (overlay_session_id == latest_session
-                        and paint_generation < latest_gen):
-                    logger.info(
-                        "pin_snapshot: stale generation rejected "
-                        "(session=%s snapshot=%s gen=%s < accepted=%s)",
-                        overlay_session_id, snapshot_id, paint_generation,
-                        latest_gen,
-                    )
-                    _emit(status="ok", reason="stale_generation", pinned=False)
-                    return
-
-            # Accepted (non-stale): advance the watermark BEFORE the store pin
-            # so a FAILED pin (snapshot already TTL-evicted) still advances
-            # "latest seen". The snapshot being absent does not make the
-            # generation stale -- a later strictly-older generation must still
-            # be rejected (wh-n29v.42.2). A newer session resets the generation
-            # watermark to this dispatch's generation.
-            if (watermark is not None
-                    and overlay_session_id == watermark[0]):
-                new_gen = max(watermark[1], paint_generation)
-            else:
-                new_gen = paint_generation
-            self._latest_pin_watermark = (overlay_session_id, new_gen)
-
-            pinned = finder.pin(snapshot_id)
-            if pinned:
-                logger.info(
-                    "pin_snapshot: pinned (session=%s snapshot=%s gen=%s)",
-                    overlay_session_id, snapshot_id, paint_generation,
-                )
-                _emit(status="ok", reason=None, pinned=True)
-            else:
-                logger.info(
-                    "pin_snapshot: unknown snapshot (session=%s snapshot=%s)",
-                    overlay_session_id, snapshot_id,
-                )
-                _emit(status="ok", reason="unknown_snapshot", pinned=False)
-        except Exception as exc:  # noqa: BLE001 -- contract: never raise
-            logger.error(
-                "pin_snapshot: unexpected error (session=%s snapshot=%s): %s",
-                overlay_session_id, snapshot_id, exc, exc_info=True,
-            )
-            _emit(status="error", reason="unexpected_error", pinned=False)
-
-    def unpin_snapshot(
-        self,
-        overlay_session_id: int = 0,
-        snapshot_id: str = "",
-        request_id: Optional[str] = None,
-        **kwargs,
-    ) -> None:
-        """Clear a stored snapshot's pin (wh-n29v.41).
-
-        ``unpin_snapshot`` is clear-by-identity: it carries
-        ``(overlay_session_id, snapshot_id)`` only and needs NO generation
-        check. Clearing a pin only relaxes LRU immunity, so it is always safe
-        to apply regardless of generation -- unlike ``pin_snapshot``, which
-        could bind the wrong snapshot against a session Logic has advanced.
-        The handler drives the multi-snapshot store's
-        :meth:`ElementFinder.unpin` and emits exactly one ``PinSnapshotResponse``
-        with ``pinned=False`` so the Logic-side awaiting Future resolves.
-
-        The handler validates its IPC field types up front and is in
-        ``_HANDLES_OWN_RESPONSE``. It is never-raise: a malformed message is
-        rejected with ``status="error" reason="invalid_request"`` and any
-        unexpected error maps to a ``status="error"`` response. Exactly one
-        response is emitted per ``request_id`` (the single exception is a dead
-        response queue, where the enqueue itself fails -- see the module
-        docstring of ``shared/pin_snapshot.py``).
-        """
-        from services.wheelhouse.shared.pin_snapshot import PinSnapshotResponse
-
-        action_name = "unpin_snapshot"
-
-        def _emit(*, status: str, reason: Optional[str]) -> None:
-            # Coerce the echoed identity to schema-safe primitives so the
-            # response always parses on the Logic side, even when this handler
-            # is rejecting malformed input (wh-n29v.44.1, mirroring
-            # pin_snapshot). PinSnapshotResponse.from_dict requires
-            # overlay_session_id to be a non-bool int and snapshot_id to be a
-            # str; a malformed echo would otherwise raise
-            # PinSnapshotResponseSchemaError on Logic instead of resolving the
-            # awaiting Future cleanly.
-            safe_session = (
-                overlay_session_id
-                if isinstance(overlay_session_id, int)
-                and not isinstance(overlay_session_id, bool)
-                else 0
-            )
-            safe_snapshot = snapshot_id if isinstance(snapshot_id, str) else ""
-            payload = PinSnapshotResponse(
-                status=status,
-                reason=reason,
-                overlay_session_id=safe_session,
-                snapshot_id=safe_snapshot,
-                # An unpin's resulting pin state is always "not pinned".
-                pinned=False,
-            ).to_dict()
-            if request_id is not None:
-                payload["request_id"] = request_id
-            payload["action"] = action_name
-            try:
-                self.response_queue.put(payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "unpin_snapshot: failed to enqueue response "
-                    "(session=%s snapshot=%s): %s",
-                    overlay_session_id, snapshot_id, exc,
-                )
-
-        try:
-            # Validate IPC fields before touching the store (wh-n29v.44.1).
-            # unpin has no watermark to poison (unlike pin_snapshot), but a
-            # malformed (overlay_session_id, snapshot_id) echo would make the
-            # Logic-side from_dict raise instead of resolving the awaiting
-            # Future. Mirror pin_snapshot: reject malformed input without
-            # touching the store, emitting exactly one response.
-            # overlay_session_id must be a non-bool int (bool is an int
-            # subclass; an overlay session is a real count) and snapshot_id a
-            # str. unpin carries no paint_generation, so only two fields.
-            if (
-                not isinstance(overlay_session_id, int)
-                or isinstance(overlay_session_id, bool)
-                or not isinstance(snapshot_id, str)
-            ):
-                logger.error(
-                    "unpin_snapshot: invalid request fields; rejecting without "
-                    "touching store (session=%r snapshot=%r)",
-                    overlay_session_id, snapshot_id,
-                )
-                _emit(status="error", reason="invalid_request")
-                return
-
-            finder = self._get_overlay_walk_finder()
-            if finder is None:
-                logger.info(
-                    "unpin_snapshot: overlay disabled by config; "
-                    "short-circuiting (session=%s snapshot=%s)",
-                    overlay_session_id, snapshot_id,
-                )
-                _emit(status="ok", reason="disabled_by_config")
-                return
-
-            present = finder.unpin(snapshot_id)
-            logger.info(
-                "unpin_snapshot: %s (session=%s snapshot=%s)",
-                "cleared" if present else "unknown",
-                overlay_session_id, snapshot_id,
-            )
-            _emit(
-                status="ok",
-                reason=None if present else "unknown_snapshot",
-            )
-        except Exception as exc:  # noqa: BLE001 -- contract: never raise
-            logger.error(
-                "unpin_snapshot: unexpected error (session=%s snapshot=%s): %s",
-                overlay_session_id, snapshot_id, exc, exc_info=True,
-            )
-            _emit(status="error", reason="unexpected_error")
-
-    def refresh_overlay_snapshot(
-        self,
-        overlay_session_id: int = 0,
-        snapshot_id: str = "",
-        request_id: Optional[str] = None,
-        **kwargs,
-    ) -> None:
-        """Slide the Input store's TTL for the still-RETAINED pinned snapshot.
-
-        The Input side of the Logic-side 15-second overlay keepalive
-        (wh-overlay-snapshot-keepalive). Logic sends this every keepalive tick
-        for the snapshot it still holds pinned; the handler slides that
-        snapshot's TTL anchor via
-        :meth:`ElementFinder.refresh_snapshot_ttl` so a numbered overlay left on
-        screen past the TTL stays clickable. Without it the Logic resolver cache
-        and the Input store expire independently and "click N" fails with
-        ``snapshot_expired`` on a still-visible overlay.
-
-        The badges are not always on screen when this arrives. Logic also sends
-        it while its overlay is PAUSED or POST_CLICK_SETTLING, which clear the
-        badges but keep the pin -- for a repaint on resume, or for the
-        post-click comparison. See ``_overlay_keepalive_states`` in main.py
-        (wh-overlay-slow-uia-stale-badges.13.6).
-
-        Logic does NOT block on the ack, but the handler emits exactly one
-        ``PinSnapshotResponse`` (reused as the small Schema-A ack) so the
-        Logic-side awaiting Future resolves. The ``pinned`` field echoes whether
-        the store found and refreshed the snapshot.
-
-        Unlike ``pin_snapshot`` there is NO stale-generation watermark: a refresh
-        carries no generation, and refreshing a superseded snapshot's TTL briefly
-        is harmless (it is unpinned and aged out normally). The handler is in
-        ``_HANDLES_OWN_RESPONSE`` so the generic emitter does not clobber the
-        ack. It NEVER raises: any unexpected error maps to ``status="error"``.
-        """
-        from services.wheelhouse.shared.pin_snapshot import PinSnapshotResponse
-
-        action_name = "refresh_overlay_snapshot"
-
-        def _emit(*, status: str, reason: Optional[str], pinned: bool) -> None:
-            # Coerce the echoed identity to schema-safe primitives so the
-            # response always parses on the Logic side (mirrors pin_snapshot).
-            safe_session = (
-                overlay_session_id
-                if isinstance(overlay_session_id, int)
-                and not isinstance(overlay_session_id, bool)
-                else 0
-            )
-            safe_snapshot = snapshot_id if isinstance(snapshot_id, str) else ""
-            payload = PinSnapshotResponse(
-                status=status,
-                reason=reason,
-                overlay_session_id=safe_session,
-                snapshot_id=safe_snapshot,
-                pinned=pinned,
-            ).to_dict()
-            if request_id is not None:
-                payload["request_id"] = request_id
-            payload["action"] = action_name
-            try:
-                self.response_queue.put(payload)
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "refresh_overlay_snapshot: failed to enqueue response "
-                    "(snapshot=%s): %s",
-                    snapshot_id, exc,
-                )
-
-        try:
-            if not isinstance(snapshot_id, str):
-                logger.error(
-                    "refresh_overlay_snapshot: invalid snapshot_id; rejecting "
-                    "without touching the store (snapshot=%r)", snapshot_id,
-                )
-                _emit(status="error", reason="invalid_request", pinned=False)
-                return
-
-            finder = self._get_overlay_walk_finder()
-            if finder is None:
-                logger.info(
-                    "refresh_overlay_snapshot: overlay disabled by config; "
-                    "short-circuiting (snapshot=%s)", snapshot_id,
-                )
-                _emit(status="ok", reason="disabled_by_config", pinned=False)
-                return
-
-            refreshed = finder.refresh_snapshot_ttl(snapshot_id)
-            _emit(
-                status="ok",
-                reason=None if refreshed else "unknown_snapshot",
-                pinned=refreshed,
-            )
-        except Exception as exc:  # noqa: BLE001 -- contract: never raise
-            logger.error(
-                "refresh_overlay_snapshot: unexpected error (snapshot=%s): %s",
-                snapshot_id, exc, exc_info=True,
-            )
-            _emit(status="error", reason="unexpected_error", pinned=False)
 
     def show_numbered_overlay(
         self,
@@ -4075,291 +3438,64 @@ class UIActionHandler:
         command_dequeue_monotonic: Optional[float] = None,
         **kwargs,
     ) -> None:
-        """Re-paint an EXISTING walk snapshot for the numbered overlay (wh-n29v.83).
-
-        Unlike the sibling ``start_overlay_walk`` (which walks the focused
-        window FROM SCRATCH), ``show_numbered_overlay`` LOOKS UP a snapshot the
-        multi-snapshot store already holds and re-paints it. Logic dispatches
-        it to re-display a snapshot it retained -- e.g. an auto-open after an
-        ambiguous by-name click, restricting the painted set to the ambiguous
-        finalists via ``item_id_filter``. The Input process owns the lookup:
-
-          1. Gate on the validated overlay config exactly as
-             ``start_overlay_walk`` does, via ``_get_overlay_walk_finder()``:
-             short-circuit (no lookup) to ``outcome="execution_failed"`` with
-             reason ``automation_unavailable`` when the COM root is the
-             ``_AUTOMATION_UNAVAILABLE`` sentinel, or ``disabled_by_config``
-             when the overlay is genuinely off. Defence-in-depth -- Logic gates
-             too, but the Input side defends against a stale/racing request.
-          2. Snapshot the foreground identity + cursor.
-          3. ``ElementFinder.get_snapshot(snapshot_id, ...)`` resolves the id
-             with the captured foreground identity. A ``None`` return -- stale
-             id, TTL-swept, LRU-evicted, or foreground-identity mismatch -- is
-             the ``snapshot_expired`` signal.
-          4. On a hit, ``ElementFinder._build_summary`` projects the snapshot to
-             a display summary, then ``filter_and_renumber_summary`` keeps only
-             ``item_id_filter`` items (when supplied) and renumbers the kept set
-             1..K in reading order so the badges are contiguous from 1.
-          5. An empty post-filter item set is ``no_targets`` (carrying an
-             empty-items summary, never a populated one). A non-empty set is
-             ``outcome="ok"`` with the rebuilt summary and the snapshot id; the
-             summary names the SAME snapshot id (cross-field rule (c)).
-
-        Every response echoes ``overlay_session_id`` + ``paint_generation`` +
-        ``trace_id`` verbatim so Logic can drop a superseded paint by
-        generation. The handler is in ``_HANDLES_OWN_RESPONSE`` so the generic
-        emitter does not clobber the outcome. It NEVER raises: any unexpected
-        error is mapped to ``status="error"`` / ``outcome="error"`` so the
-        one-response-per-request_id contract holds and the Logic awaiter does
-        not fall through to its timeout path. The status/outcome split follows
-        the documented r2.10 mapping: a feature failure (snapshot_expired /
-        no_targets / execution_failed) rides transport ``status="ok"``;
-        ``status="error"`` is reserved for a handler-level crash where the
-        outcome is unreliable. The real handler NEVER emits
-        ``status="not_implemented"`` (the stub-only parse literal).
-
-        Emits exactly one ShowNumberedOverlayResponse Schema A response on the
-        response queue, augmented with ``request_id`` and ``action`` so the
-        demuxer in ``app.py`` can resolve the awaiting Future.
-        """
-        from services.wheelhouse.shared.show_numbered_overlay import (
-            ShowNumberedOverlayResponse,
-        )
-        from ui.element_finder import (
-            ElementFinder,
-            collapse_near_identical_containers,
+        """Delegate to OverlaySnapshotActions.show_numbered_overlay (input_proc.py calls this name)."""
+        self.overlay_snapshots.show_numbered_overlay(
+            snapshot_id=snapshot_id,
+            item_id_filter=item_id_filter,
+            overlay_session_id=overlay_session_id,
+            paint_generation=paint_generation,
+            trace_id=trace_id,
+            request_id=request_id,
+            command_dequeue_monotonic=command_dequeue_monotonic,
+            **kwargs,
         )
 
-        action_name = "show_numbered_overlay"
+    def pin_snapshot(
+        self,
+        overlay_session_id: int = 0,
+        snapshot_id: str = "",
+        paint_generation: int = 0,
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Delegate to OverlaySnapshotActions.pin_snapshot (input_proc.py calls this name)."""
+        self.overlay_snapshots.pin_snapshot(
+            overlay_session_id=overlay_session_id,
+            snapshot_id=snapshot_id,
+            paint_generation=paint_generation,
+            request_id=request_id,
+            **kwargs,
+        )
 
-        def _emit(response: "ShowNumberedOverlayResponse") -> None:
-            payload = response.to_dict()
-            if request_id is not None:
-                payload["request_id"] = request_id
-            payload["action"] = action_name
-            try:
-                self.response_queue.put(payload)
-            except Exception as exc:  # noqa: BLE001
-                # Last-resort: log and drop. Without a response the Logic-side
-                # Future times out, which Logic already handles gracefully.
-                logger.error(
-                    "show_numbered_overlay: failed to enqueue response "
-                    "(trace_id=%s snapshot=%s): %s",
-                    trace_id, snapshot_id, exc,
-                )
+    def unpin_snapshot(
+        self,
+        overlay_session_id: int = 0,
+        snapshot_id: str = "",
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Delegate to OverlaySnapshotActions.unpin_snapshot (input_proc.py calls this name)."""
+        self.overlay_snapshots.unpin_snapshot(
+            overlay_session_id=overlay_session_id,
+            snapshot_id=snapshot_id,
+            request_id=request_id,
+            **kwargs,
+        )
 
-        def _build(
-            outcome: str,
-            reason: Optional[str],
-            *,
-            status: str = "ok",
-            snapshot_id_out: Optional[str] = None,
-            snapshot_summary=None,
-        ) -> "ShowNumberedOverlayResponse":
-            # Coerce the echoed scalars to schema-safe primitives so EVERY
-            # response this handler builds passes the Logic-side
-            # ShowNumberedOverlayResponse.from_dict, even when the inbound Logic
-            # message carried malformed echo fields (a Logic bug or corruption).
-            # from_dict requires trace_id to be a str and overlay_session_id /
-            # paint_generation to be non-bool ints; a response that fails it is
-            # log-dropped, which would break the handler-owned one-response
-            # contract (the awaiting Future never resolves with a usable
-            # result). For a well-formed message these are no-ops. The early
-            # invalid_request reject below stops a malformed request before any
-            # lookup; this coercion is the belt-and-suspenders guarantee that
-            # the error response itself -- and the never-raise error path -- are
-            # always serialisable.
-            safe_trace = trace_id if isinstance(trace_id, str) else ""
-            safe_session = (
-                overlay_session_id
-                if isinstance(overlay_session_id, int)
-                and not isinstance(overlay_session_id, bool)
-                else 0
-            )
-            safe_generation = (
-                paint_generation
-                if isinstance(paint_generation, int)
-                and not isinstance(paint_generation, bool)
-                else 0
-            )
-            return ShowNumberedOverlayResponse(
-                status=status,
-                outcome=outcome,
-                reason=reason,
-                snapshot_id=snapshot_id_out,
-                snapshot_summary=snapshot_summary,
-                trace_id=safe_trace,
-                overlay_session_id=safe_session,
-                paint_generation=safe_generation,
-            )
-
-        try:
-            # Reject a malformed Logic message before any lookup, mirroring the
-            # pin_snapshot / unpin_snapshot IPC-field guard (wh-n29v.43.1).
-            # trace_id must be a str, overlay_session_id / paint_generation
-            # non-bool ints, snapshot_id a str, and item_id_filter None or a
-            # list of str (a non-list filter would also break
-            # filter_and_renumber_summary's set() membership build). _build
-            # coerces the echoed scalars, so this invalid_request response still
-            # passes from_dict; rejecting here means we never run a snapshot
-            # lookup against a malformed snapshot_id / filter. status="error"
-            # pairs with outcome="error" (cross-field rule (a)); the snapshot
-            # fields stay None (rule (d)).
-            if not (
-                isinstance(trace_id, str)
-                and isinstance(overlay_session_id, int)
-                and not isinstance(overlay_session_id, bool)
-                and isinstance(paint_generation, int)
-                and not isinstance(paint_generation, bool)
-                and isinstance(snapshot_id, str)
-                and (
-                    item_id_filter is None
-                    or (
-                        isinstance(item_id_filter, list)
-                        and all(isinstance(x, str) for x in item_id_filter)
-                    )
-                )
-            ):
-                logger.error(
-                    "show_numbered_overlay: invalid request fields; rejecting "
-                    "without lookup (trace=%r session=%r gen=%r snapshot=%r "
-                    "filter_type=%s)",
-                    trace_id, overlay_session_id, paint_generation, snapshot_id,
-                    type(item_id_filter).__name__,
-                )
-                _emit(_build("error", "invalid_request", status="error"))
-                return
-
-            finder = self._get_overlay_walk_finder()
-            if finder is None:
-                # finder is None either because the COM root could not be built
-                # on this host (the _AUTOMATION_UNAVAILABLE sentinel set by the
-                # shared _get_click_element_finder) or because the overlay is
-                # genuinely disabled in config. Emit the matching reason tag so
-                # the notice is accurate (mirrors start_overlay_walk): clicking
-                # IS enabled in config on the COM-unavailable path, so
-                # "disabled_by_config" would wrongly point the user at
-                # config.toml. Logic also short-circuits before sending; this
-                # defends the Input side against a stale or racing request. Both
-                # are execution_failed (in _NO_SNAPSHOT_OUTCOMES) so the snapshot
-                # fields stay None per cross-field rule (d).
-                if (
-                    getattr(self, "_click_automation_root", None)
-                    is _AUTOMATION_UNAVAILABLE
-                ):
-                    logger.info(
-                        "show_numbered_overlay: IUIAutomation root unavailable "
-                        "on this host; short-circuiting (trace_id=%s)", trace_id,
-                    )
-                    _emit(_build("execution_failed", "automation_unavailable"))
-                    return
-                logger.info(
-                    "show_numbered_overlay: overlay disabled by config; "
-                    "short-circuiting (trace_id=%s)", trace_id,
-                )
-                _emit(_build("execution_failed", "disabled_by_config"))
-                return
-
-            foreground = _capture_click_foreground()
-            logger.info(
-                "show_numbered_overlay: looking up snapshot=%s in process=%s "
-                "(session=%s gen=%s filter=%s trace_id=%s)",
-                snapshot_id, foreground.foreground_process_name,
-                overlay_session_id, paint_generation,
-                None if item_id_filter is None else len(item_id_filter),
-                trace_id,
-            )
-
-            snapshot = finder.get_snapshot(
-                snapshot_id,
-                current_foreground_window=foreground.foreground_window,
-                current_foreground_pid=foreground.foreground_pid,
-                current_foreground_process_name=(
-                    foreground.foreground_process_name
-                ),
-                current_foreground_window_creation_time=(
-                    foreground.foreground_window_creation_time
-                ),
-            )
-            if snapshot is None:
-                # Stale id, TTL-swept, LRU-evicted, or foreground-identity
-                # mismatch -- nothing to paint. snapshot_expired is in
-                # _NO_SNAPSHOT_OUTCOMES so snapshot_id/summary MUST be None
-                # (cross-field rule (d)).
-                logger.info(
-                    "show_numbered_overlay: snapshot_expired for snapshot=%s "
-                    "(trace_id=%s)", snapshot_id, trace_id,
-                )
-                _emit(_build("snapshot_expired", "stale_snapshot_id"))
-                return
-
-            # Build the display summary, then filter to item_id_filter (when
-            # supplied) and renumber the kept items 1..K in reading order so the
-            # painted badges are contiguous from 1.
-            #
-            # wh-overlay-nested-dupes.1.2: this path re-paints a by-name find()
-            # snapshot, which is stored UNCOLLAPSED (a spoken name may match a
-            # container, so find() keeps both). The Brave wrapper+link pair --
-            # identical name, identical rectangle -- is exactly the shape that
-            # makes find() ambiguous, so without a collapse the auto-open would
-            # paint badge 1 and badge 2 on the same pixels at the very moment
-            # the user must read a number. Collapse the DISPLAY set (the
-            # filter-selected matches, in the snapshot's pre-order) the same
-            # way overlay_walk collapses its walk; the stored snapshot is
-            # untouched and every surviving item_id still resolves for
-            # click_snapshot_item.
-            keep = set(item_id_filter) if item_id_filter is not None else None
-            selected = [
-                m for m in snapshot.matches
-                if keep is None or m.item_id in keep
-            ]
-            survivors = collapse_near_identical_containers(selected)
-            summary = ElementFinder._build_summary(snapshot)
-            summary = ElementFinder.filter_and_renumber_summary(
-                summary, [m.item_id for m in survivors]
-            )
-
-            if not summary.items:
-                # Zero interactive controls, or the filter excluded everything.
-                # no_targets is the successful-but-empty outcome; it carries the
-                # empty-items summary (never a populated one).
-                logger.info(
-                    "show_numbered_overlay: no_targets for snapshot=%s "
-                    "(filter=%s trace_id=%s)",
-                    snapshot_id,
-                    None if item_id_filter is None else len(item_id_filter),
-                    trace_id,
-                )
-                _emit(_build(
-                    "no_targets",
-                    None,
-                    snapshot_id_out=snapshot.snapshot_id,
-                    snapshot_summary=summary,
-                ))
-                return
-
-            # outcome == "ok": a non-empty painted set. The summary already
-            # carries snapshot.snapshot_id (filter_and_renumber preserves it),
-            # so summary.snapshot_id == the top-level snapshot_id we echo
-            # (cross-field rule (c)).
-            logger.info(
-                "show_numbered_overlay: ok with %d items "
-                "(snapshot=%s trace_id=%s)",
-                len(summary.items), snapshot.snapshot_id, trace_id,
-            )
-            _emit(_build(
-                "ok",
-                None,
-                snapshot_id_out=snapshot.snapshot_id,
-                snapshot_summary=summary,
-            ))
-        except Exception as exc:  # noqa: BLE001 -- contract: never raise
-            logger.error(
-                "show_numbered_overlay: unexpected error "
-                "(trace_id=%s snapshot=%s): %s",
-                trace_id, snapshot_id, exc, exc_info=True,
-            )
-            _emit(_build("error", "unexpected_error", status="error"))
+    def refresh_overlay_snapshot(
+        self,
+        overlay_session_id: int = 0,
+        snapshot_id: str = "",
+        request_id: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        """Delegate to OverlaySnapshotActions.refresh_overlay_snapshot (input_proc.py calls this name)."""
+        self.overlay_snapshots.refresh_overlay_snapshot(
+            overlay_session_id=overlay_session_id,
+            snapshot_id=snapshot_id,
+            request_id=request_id,
+            **kwargs,
+        )
 
     def click_snapshot_item(
         self,
@@ -4372,348 +3508,53 @@ class UIActionHandler:
         paint_generation: Any = None,
         **kwargs,
     ) -> None:
-        """Click a numbered-overlay item by item_id (wh-tab7j / wh-jfavj).
-
-        Phase 1.5 of the voice-element-clicking feature (epic wh-l4h.1). When
-        the user clicks a numbered overlay badge, Logic resolves the display
-        number to an ``item_id`` from its retained ``WalkSnapshotSummary`` and
-        forwards this request carrying ``snapshot_id`` + ``item_id``
-        (+ ``trace_id`` + ``request_id``, and since wh-click-gesture-param an
-        optional ``gesture`` for "right click N" / "double click N"; absent or
-        unrecognised means today's Invoke behaviour). The Input process owns
-        the click:
-
-          1. Validate the request fields (both ``snapshot_id`` and ``item_id``
-             must be non-empty strings) before any lookup.
-          2. Get the finder that holds the pinned snapshot store via
-             ``_get_overlay_walk_finder`` -- the SAME accessor
-             ``show_numbered_overlay`` uses, so it hits the populated store and
-             applies the overlay-enabled / automation-unavailable gates.
-          3. Capture the current foreground identity.
-          4. Look up the pinned snapshot via ``finder.get_snapshot`` with the
-             foreground-identity check; ``None`` means stale / TTL-swept /
-             LRU-evicted / foreground mismatch -> ``snapshot_expired``.
-          5. Find the ``ElementMatch`` in ``snapshot.matches`` whose
-             ``item_id`` matches; absence -> ``item_not_found``.
-          6. Run ``ClickExecutor.click`` -- the full pre-click verification
-             block (foreground identity, IsEnabled, BoundingRectangle, the
-             bounds-tolerance check, the popup-still-visible probe) and
-             InvokePattern with the DoDefaultAction press fallback. The handler
-             does NOT re-implement verification and adds no second COM read.
-          7. Emit EXACTLY ONE ``ClickElementResponse`` with the same
-             status/outcome pairing and reason tags as ``click_element``:
-             ``status="ok"`` only for ``outcome="ok"``, ``status="error"`` for
-             ``execution_failed``.
-
-        The handler is in ``_HANDLES_OWN_RESPONSE`` so the generic emitter does
-        not clobber the executor's outcome. It NEVER raises: any unexpected
-        error is mapped to an ``execution_failed`` response so the
-        one-response-per-request_id contract holds and the Logic awaiter does
-        not fall through to its timeout path. ``snapshot_summary`` is always
-        ``None`` here -- this handler clicks a pinned snapshot, it does not
-        re-walk or repaint.
-
-        wh-overlay-slow-uia-stale-badges.8 part 4: the request MAY carry
-        ``overlay_session_id`` + ``paint_generation``, the pair of the visible
-        list the spoken number was resolved against. Between the field
-        validation and the snapshot lookup the handler refuses the click
-        (``stale_overlay_generation``) when that pair is not STRICTLY newer
-        than ``_last_executed_click_pair`` -- an earlier click already
-        executed against that list and changed the screen, so the number now
-        names the wrong control. Only an ok click records the watermark (a
-        refusal leaves the screen unchanged, so a retry must work). An absent
-        pair (pre-slice payload shape) or a malformed pair skips the check --
-        the primary guard is Logic's in-flight refusal; this one is
-        defence-in-depth, so it degrades OPEN like the pin watermark.
-        """
-        from services.wheelhouse.shared.click_element import (
-            ClickElementResponse,
+        """Delegate to OverlaySnapshotActions.click_snapshot_item (input_proc.py calls this name)."""
+        self.overlay_snapshots.click_snapshot_item(
+            snapshot_id=snapshot_id,
+            item_id=item_id,
+            request_id=request_id,
+            trace_id=trace_id,
+            gesture=gesture,
+            overlay_session_id=overlay_session_id,
+            paint_generation=paint_generation,
+            **kwargs,
         )
-        from ui.element_types import ElementQuery
 
-        action_name = "click_snapshot_item"
+    # ------------------------------------------------------------------
+    # Members for OverlaySnapshotActions (the OverlaySnapshotHost Protocol
+    # in ui/overlay_snapshot_host.py). The private members stay, because
+    # click_element and the tests outside the overlay area use them.
+    # ------------------------------------------------------------------
 
-        # Coerce trace_id to a str so EVERY response this handler builds passes
-        # the Logic-side ClickElementResponse.from_dict (trace_id must be a str)
-        # even when the inbound Logic message carried a malformed echo field.
-        safe_trace = trace_id if isinstance(trace_id, str) else ""
+    @property
+    def click_config(self) -> "Optional[ClickConfig]":
+        """The validated [click] config, or None before the first build.
 
-        def _emit(response: "ClickElementResponse") -> None:
-            payload = response.to_dict()
-            if request_id is not None:
-                payload["request_id"] = request_id
-            payload["action"] = action_name
-            try:
-                self.response_queue.put(payload)
-            except Exception as exc:  # noqa: BLE001
-                # Last-resort: log and drop. Without a response the Logic-side
-                # Future times out, which Logic already handles gracefully.
-                logger.error(
-                    "click_snapshot_item: failed to enqueue response "
-                    "(trace_id=%s snapshot=%s item=%s): %s",
-                    safe_trace, snapshot_id, item_id, exc,
-                )
+        _get_click_element_finder and _get_click_executor set it as a side
+        effect, so it is None until one of them runs.
+        """
+        return getattr(self, "_click_config", None)
 
-        def _failed(reason: str, matched_name: Optional[str] = None,
-                    snapshot_id_out: Optional[str] = None) -> "ClickElementResponse":
-            return ClickElementResponse(
-                status="error",
-                outcome="execution_failed",
-                reason=reason,
-                matched_names=(matched_name,) if matched_name else (),
-                snapshot_id=snapshot_id_out,
-                snapshot_summary=None,
-                matched_name=matched_name,
-                trace_id=safe_trace,
-            )
+    def click_automation_unavailable(self) -> bool:
+        """True when the UI Automation root failed to build on this host.
 
-        try:
-            # Reject a malformed Logic message before any lookup, mirroring the
-            # show_numbered_overlay IPC-field guard. Both ids must be non-empty
-            # strings; the snapshot_id echoed on the invalid_request response
-            # stays None so we never echo a non-str id.
-            if not (
-                isinstance(snapshot_id, str) and snapshot_id
-                and isinstance(item_id, str) and item_id
-            ):
-                logger.error(
-                    "click_snapshot_item: invalid request fields; rejecting "
-                    "without lookup (snapshot_type=%s item_type=%s "
-                    "trace_id=%s)",
-                    type(snapshot_id).__name__, type(item_id).__name__,
-                    safe_trace,
-                )
-                _emit(_failed("invalid_request"))
-                return
+        _get_click_element_finder stores the _AUTOMATION_UNAVAILABLE
+        sentinel as the root when create_automation() raises.
+        """
+        return (
+            getattr(self, "_click_automation_root", None)
+            is _AUTOMATION_UNAVAILABLE
+        )
 
-            # wh-overlay-slow-uia-stale-badges.8 part 4: one executed click
-            # per (overlay_session_id, paint_generation). Parse the optional
-            # pair; a malformed pair degrades OPEN (log, skip the check, and
-            # do NOT record it) because the primary guard lives on the Logic
-            # side and a type glitch must not refuse a click the user
-            # legitimately asked for. bool is excluded explicitly -- it is an
-            # int subclass, not a session id or generation.
-            resolved_pair: Optional[tuple[int, int]] = None
-            if (
-                isinstance(overlay_session_id, int)
-                and not isinstance(overlay_session_id, bool)
-                and isinstance(paint_generation, int)
-                and not isinstance(paint_generation, bool)
-            ):
-                resolved_pair = (overlay_session_id, paint_generation)
-            elif overlay_session_id is not None or paint_generation is not None:
-                logger.warning(
-                    "click_snapshot_item: malformed overlay pair "
-                    "(session=%r generation=%r); skipping the stale check "
-                    "(trace_id=%s)",
-                    overlay_session_id, paint_generation, safe_trace,
-                )
-            last = getattr(self, "_last_executed_click_pair", None)
-            if resolved_pair is not None and last is not None and (
-                resolved_pair[0] < last[0]
-                or (
-                    resolved_pair[0] == last[0]
-                    and resolved_pair[1] <= last[1]
-                )
-            ):
-                # The list this number came from was consumed by an earlier
-                # executed click (same pair) or belongs to an even older
-                # paint. Refuse WITHOUT touching the snapshot or executor:
-                # the screen has already changed under the badge.
-                logger.info(
-                    "click_snapshot_item: stale_overlay_generation -- "
-                    "resolved pair %s is not newer than the last executed "
-                    "click's pair %s (snapshot=%s item=%s trace_id=%s)",
-                    resolved_pair, last, snapshot_id, item_id, safe_trace,
-                )
-                _emit(_failed(
-                    "stale_overlay_generation", snapshot_id_out=snapshot_id,
-                ))
-                return
+    def get_click_element_finder(self) -> "Optional[ElementFinder]":
+        """Call ``_get_click_element_finder``, so a patch of that name applies."""
+        return self._get_click_element_finder()
 
-            finder = self._get_overlay_walk_finder()
-            if finder is None:
-                # finder is None either because the COM root could not be built
-                # on this host (the _AUTOMATION_UNAVAILABLE sentinel set by the
-                # shared _get_click_element_finder) or because the feature is
-                # genuinely disabled in config. Emit the matching reason tag so
-                # the notice is accurate (mirrors click_element /
-                # show_numbered_overlay).
-                if (
-                    getattr(self, "_click_automation_root", None)
-                    is _AUTOMATION_UNAVAILABLE
-                ):
-                    logger.info(
-                        "click_snapshot_item: IUIAutomation root unavailable "
-                        "on this host; short-circuiting (trace_id=%s)",
-                        safe_trace,
-                    )
-                    _emit(_failed("automation_unavailable"))
-                    return
-                logger.info(
-                    "click_snapshot_item: feature disabled by config; "
-                    "short-circuiting (trace_id=%s)", safe_trace,
-                )
-                _emit(_failed("disabled_by_config"))
-                return
+    def get_click_executor(self) -> "ClickExecutor":
+        """Call ``_get_click_executor``, so a patch of that name applies."""
+        return self._get_click_executor()
 
-            foreground = _capture_click_foreground()
-            # Name the exact miss cause BEFORE get_snapshot is called
-            # (wh-overlay-snapshot-keepalive Fix 3). The bare snapshot_expired
-            # conflated a TTL expiry (trigger A), a never-stored/evicted id, and
-            # a foreground change (trigger B), so a live report could not tell
-            # the two triggers apart. describe_snapshot_miss is the non-mutating
-            # query that names which one fired -- but get_snapshot MUTATES on a
-            # miss (it sweeps a TTL-expired entry and drops a foreground-mismatch
-            # entry before returning None), so describe MUST run first or it
-            # always sees an already-gone entry and reports not_found for the two
-            # real triggers (wh-overlay-snapshot-keepalive.1.1). describe returns
-            # None on the hit path, so this is a cheap non-mutating lookup on
-            # every numbered-badge click. Best-effort: never let cause-naming
-            # break the click path. The emitted Schema-A reason tag stays
-            # snapshot_expired (routing/notice behaviour is unchanged); only the
-            # log gains the cause.
-            miss_cause = None
-            describe = getattr(finder, "describe_snapshot_miss", None)
-            if callable(describe):
-                try:
-                    miss_cause = describe(
-                        snapshot_id,
-                        current_foreground_window=(
-                            foreground.foreground_window
-                        ),
-                        current_foreground_pid=foreground.foreground_pid,
-                        current_foreground_process_name=(
-                            foreground.foreground_process_name
-                        ),
-                        current_foreground_window_creation_time=(
-                            foreground.foreground_window_creation_time
-                        ),
-                    )
-                except Exception as exc:  # noqa: BLE001 -- log only
-                    logger.debug(
-                        "click_snapshot_item: describe_snapshot_miss failed "
-                        "for snapshot=%s: %s", snapshot_id, exc,
-                    )
-            snapshot = finder.get_snapshot(
-                snapshot_id,
-                current_foreground_window=foreground.foreground_window,
-                current_foreground_pid=foreground.foreground_pid,
-                current_foreground_process_name=(
-                    foreground.foreground_process_name
-                ),
-                current_foreground_window_creation_time=(
-                    foreground.foreground_window_creation_time
-                ),
-            )
-            if snapshot is None:
-                # Stale id, TTL-swept, LRU-evicted, or foreground-identity
-                # mismatch -- nothing to click. miss_cause (computed above,
-                # before get_snapshot dropped the entry) names which.
-                logger.info(
-                    "click_snapshot_item: snapshot_expired (cause=%s) for "
-                    "snapshot=%s (trace_id=%s)",
-                    miss_cause or "unknown", snapshot_id, safe_trace,
-                )
-                _emit(_failed("snapshot_expired", snapshot_id_out=snapshot_id))
-                return
-
-            # Find the requested item by its stable item_id in the pinned
-            # snapshot's matches (a simple linear scan -- the snapshot holds at
-            # most a few dozen interactive controls).
-            match = next(
-                (m for m in snapshot.matches if m.item_id == item_id), None
-            )
-            if match is None:
-                logger.info(
-                    "click_snapshot_item: item_not_found item=%s in "
-                    "snapshot=%s (trace_id=%s)",
-                    item_id, snapshot_id, safe_trace,
-                )
-                _emit(_failed("item_not_found", snapshot_id_out=snapshot_id))
-                return
-
-            from ui.click_executor import SnapshotForeground
-
-            # The overlay-click path has no spoken query; build a minimal
-            # ElementQuery from the match. It is consumed ONLY by the executor's
-            # coordinate-eligibility check (_coord_eligible) and, since
-            # wh-click-gesture-param, by the gesture branch: "right click 5" /
-            # "double click 5" arrive as a gesture field on the request, and
-            # this is where that value becomes something the executor reads.
-            # An absent or unrecognised value degrades to the default Invoke
-            # gesture rather than guessing a physical click.
-            query = ElementQuery(
-                name=match.name,
-                role=match.role,
-                ordinal=None,
-                spatial=None,
-                raw_utterance="",
-                gesture=_parse_gesture(gesture),
-            )
-            snap_fg = SnapshotForeground(
-                window=foreground.foreground_window,
-                pid=foreground.foreground_pid,
-                process_name=foreground.foreground_process_name,
-                window_creation_time=foreground.foreground_window_creation_time,
-            )
-            executor = self._get_click_executor()
-            # wh-review-pattern-fixes.8: a badge click can move focus, the
-            # caret, or the selection; invalidate before the dispatch (see
-            # the hotkey_action block comment for the full rationale).
-            self.buffer_manager.invalidate()
-            # badge_pick=True: a numbered-badge pick prefers the guarded
-            # coordinate click over DoDefaultAction when InvokePattern is
-            # structurally unavailable (wh-electron-dda-noop).
-            click_result = executor.click(match, snap_fg, query, badge_pick=True)
-            if click_result.outcome == "ok":
-                if resolved_pair is not None:
-                    # wh-overlay-slow-uia-stale-badges.8 part 4: only an
-                    # EXECUTED click consumes its pair -- a refusal leaves
-                    # the screen unchanged, so a retry from the same list
-                    # must stay allowed.
-                    self._last_executed_click_pair = resolved_pair
-                logger.info(
-                    "click_snapshot_item: clicked %r via %s "
-                    "(item=%s snapshot=%s trace_id=%s)",
-                    click_result.matched_name, click_result.clicked_via,
-                    item_id, snapshot_id, safe_trace,
-                )
-                _emit(ClickElementResponse(
-                    status="ok",
-                    outcome="ok",
-                    reason=None,
-                    matched_names=(
-                        (click_result.matched_name,)
-                        if click_result.matched_name else ()
-                    ),
-                    snapshot_id=snapshot_id,
-                    snapshot_summary=None,
-                    matched_name=click_result.matched_name,
-                    trace_id=safe_trace,
-                ))
-                return
-
-            logger.info(
-                "click_snapshot_item: execution_failed reason=%s matched=%r "
-                "(item=%s snapshot=%s trace_id=%s)",
-                click_result.reason, click_result.matched_name,
-                item_id, snapshot_id, safe_trace,
-            )
-            _emit(_failed(
-                click_result.reason or "invoke_com_error",
-                matched_name=click_result.matched_name,
-                snapshot_id_out=snapshot_id,
-            ))
-        except Exception as exc:  # noqa: BLE001 -- contract: never raise
-            logger.error(
-                "click_snapshot_item: unexpected error "
-                "(trace_id=%s snapshot=%s item=%s): %s",
-                safe_trace, snapshot_id, item_id, exc, exc_info=True,
-            )
-            _emit(_failed("invoke_com_error"))
-
-    def _get_click_element_finder(self):
+    def _get_click_element_finder(self) -> "Optional[ElementFinder]":
         """Lazily build (and memoise) the ElementFinder for voice clicking.
 
         wh-tab7j wires the deferred ClickConfig-to-ElementFinder
@@ -4873,7 +3714,7 @@ class UIActionHandler:
         self._click_element_finder = finder
         return finder
 
-    def _get_click_executor(self):
+    def _get_click_executor(self) -> "ClickExecutor":
         """Lazily build (and memoise) the ClickExecutor for voice clicking."""
         existing = getattr(self, "_click_executor", None)
         if existing is not None:
@@ -6835,25 +5676,14 @@ class UIActionHandler:
     # -----------------------------------------------------------------
     # Mouse-grid pointer actions (wh-input-mouse-primitives).
     #
-    # The Input process is the only place that touches the mouse. Logic's
-    # grid state machine owns every decision (which monitor, which cell,
-    # where the mark is) and sends one of these three commands with a
-    # resolved physical-pixel point; the Input process synthesises the
-    # input and reports back.
-    #
-    # All three are in ``_HANDLES_OWN_RESPONSE``, all three are
-    # never-raise, and all three emit exactly one ``MouseActionResponse``
-    # per request_id -- the same contract the click handlers keep, for the
-    # same reason (wh-lla5d: a dropped or doubled response leaves the
-    # Logic awaiter to time out or the demuxer to warn).
-    #
-    # None of them runs UI Automation verification or the occlusion
-    # hit-test the by-name click path uses: the user picked the point
-    # visually off a painted grid, so there is no invisible control to
-    # protect against (the design doc's "Verification difference").
+    # The four pointer actions live in MousePointerActions
+    # (ui/mouse_pointer_actions.py). This section holds the members of this
+    # handler that they use, the channel_probe command that Logic sends
+    # after a pointer request times out, and the four delegators that
+    # input_proc.py calls by name.
     # -----------------------------------------------------------------
 
-    def _get_validated_click_config(self):
+    def get_validated_click_config(self) -> "ClickConfig":
         """Return the validated ``[click]`` config, building it once.
 
         ``ClickConfig.from_raw`` never raises and degrades to a disabled
@@ -6875,54 +5705,6 @@ class UIActionHandler:
             self._click_config = cfg
         return cfg
 
-    def _emit_mouse_action_response(
-        self,
-        *,
-        action_name: str,
-        request_id: Optional[str],
-        trace_id: str,
-        succeeded: bool,
-        reason: Optional[str],
-    ) -> None:
-        """Put exactly one ``MouseActionResponse`` on the response queue.
-
-        A dead response queue is the ONE case that yields zero responses:
-        there is no second channel to deliver on, and the orphaned Logic
-        Future is already covered by Logic's own timeout.
-        """
-        from services.wheelhouse.shared.mouse_action import MouseActionResponse
-
-        payload = MouseActionResponse(
-            status="ok" if succeeded else "error",
-            outcome="ok" if succeeded else "execution_failed",
-            reason=None if succeeded else (reason or "unexpected_error"),
-            trace_id=trace_id if isinstance(trace_id, str) else "",
-        ).to_dict()
-        # Record the result BEFORE the enqueue attempt (wh-mouse-grid.1.24):
-        # when the reply reaches Logic after its timeout, the app demuxer
-        # discards it, so channel_probe's reply carries this record and Logic
-        # correlates it by trace_id to recover a release_failed warning. A
-        # failed enqueue is exactly the case where recovery matters, so the
-        # record must not depend on the put succeeding. This command loop is
-        # single-threaded, so the read in channel_probe cannot race this
-        # write.
-        self._last_mouse_action_result = {
-            "action": action_name,
-            "succeeded": bool(succeeded),
-            "reason": payload["reason"],
-            "trace_id": payload["trace_id"],
-        }
-        if request_id is not None:
-            payload["request_id"] = request_id
-        payload["action"] = action_name
-        try:
-            self.response_queue.put(payload)
-        except Exception as exc:  # noqa: BLE001 -- log and drop
-            logger.error(
-                "%s: failed to enqueue response (trace_id=%s): %s",
-                action_name, trace_id, exc,
-            )
-
     def channel_probe(
         self,
         trace_id: str = "",
@@ -6938,7 +5720,8 @@ class UIActionHandler:
         fire later.
 
         The reply also carries ``last_mouse_action`` -- the recorded result
-        of the most recent pointer action (or ``None``) -- because the
+        of the most recent pointer action (or ``None``), which
+        ``MousePointerActions`` keeps in ``last_mouse_action_result`` -- because the
         timed-out action's own reply was discarded by the app demuxer after
         Logic's timeout. Logic correlates the record by trace_id to recover
         the release_failed stuck-button warning (wh-mouse-grid.1.24). The
@@ -6950,9 +5733,7 @@ class UIActionHandler:
         payload: dict = {
             "status": "ok",
             "trace_id": trace_id if isinstance(trace_id, str) else "",
-            "last_mouse_action": getattr(
-                self, "_last_mouse_action_result", None
-            ),
+            "last_mouse_action": self.mouse_pointer.last_mouse_action_result,
             "action": "channel_probe",
         }
         if request_id is not None:
@@ -6965,6 +5746,11 @@ class UIActionHandler:
                 trace_id, exc,
             )
 
+    # wh-full-refactor.6.2: the four pointer actions live in
+    # MousePointerActions (ui/mouse_pointer_actions.py), built in __init__ as
+    # self.mouse_pointer. These four methods stay because input_proc.py calls
+    # them by name (getattr(ui_handler, action)).
+
     def click_point(
         self,
         x=None,
@@ -6975,61 +5761,11 @@ class UIActionHandler:
         request_id: Optional[str] = None,
         **kwargs,
     ) -> None:
-        """Click at a physical-pixel screen point (mouse-grid gesture).
-
-        Args:
-            x, y: physical screen pixels. Negative values are normal on a
-                multi-monitor desktop whose secondary monitor sits left of or
-                above the primary.
-            button: ``"left"`` or ``"right"``.
-            click_count: 1, 2 (a double click) or 3 (a triple click).
-            trace_id: Logic-generated correlation id, echoed in the response.
-
-        Emits one ``MouseActionResponse``. The argument validation lives in
-        the SendInput primitive, which reports ``invalid_point`` /
-        ``invalid_button`` / ``invalid_click_count`` rather than raising, so a
-        malformed IPC message produces a normal ``execution_failed`` response.
-        """
-        action_name = "click_point"
-        try:
-            if not self._get_validated_click_config().grid_enabled_effective:
-                logger.info(
-                    "click_point: voice clicking disabled by config; "
-                    "short-circuiting (trace_id=%s)", trace_id,
-                )
-                self._emit_mouse_action_response(
-                    action_name=action_name, request_id=request_id,
-                    trace_id=trace_id, succeeded=False,
-                    reason="disabled_by_config",
-                )
-                return
-
-            # wh-review-pattern-fixes.8: a grid click can move focus, the
-            # caret, or the selection; invalidate before the dispatch (see
-            # the hotkey_action block comment for the full rationale).
-            self.buffer_manager.invalidate()
-            succeeded, reason = self._mouse_click_seam(
-                x, y, button, click_count,
-            )
-            logger.info(
-                "click_point: point=(%r,%r) button=%s count=%r ok=%s "
-                "reason=%s (trace_id=%s)",
-                x, y, button, click_count, succeeded, reason, trace_id,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
-            )
-        except Exception as exc:  # noqa: BLE001 -- never-raise handler
-            logger.error(
-                "click_point: unexpected error (trace_id=%s): %s",
-                trace_id, exc, exc_info=True,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=False,
-                reason="unexpected_error",
-            )
+        """Click at a screen point; calls ``MousePointerActions.click_point``."""
+        self.mouse_pointer.click_point(
+            x=x, y=y, button=button, click_count=click_count,
+            trace_id=trace_id, request_id=request_id, **kwargs,
+        )
 
     def click_at_pointer(
         self,
@@ -7039,75 +5775,11 @@ class UIActionHandler:
         request_id: Optional[str] = None,
         **kwargs,
     ) -> None:
-        """Click wherever the pointer is now (wh-voice-access-parity.2.5).
-
-        The bare "click", "right click", "double click" and "triple click"
-        words send this when no mouse grid is open. The pointer position is
-        read HERE, in the Input process, through ``_pointer_position_seam``
-        (``GetCursorPos``), and the click goes through the same
-        ``_mouse_click_seam`` as ``click_point``, so the button and count
-        validation and the stuck-button handling are the primitive's.
-
-        Gate: the ``[click] enabled`` master switch only. Unlike the grid
-        handlers this does not read ``grid_enabled_effective``: a bad grid
-        key refuses the grid's geometry, and this action uses none.
-
-        Emits one ``MouseActionResponse``. An unreadable pointer fails
-        closed with ``pointer_unavailable``, sending no input.
-        """
-        action_name = "click_at_pointer"
-        try:
-            if not self._get_validated_click_config().enabled:
-                logger.info(
-                    "click_at_pointer: voice clicking disabled by config; "
-                    "short-circuiting (trace_id=%s)", trace_id,
-                )
-                self._emit_mouse_action_response(
-                    action_name=action_name, request_id=request_id,
-                    trace_id=trace_id, succeeded=False,
-                    reason="disabled_by_config",
-                )
-                return
-
-            position = self._pointer_position_seam()
-            if position is None:
-                logger.warning(
-                    "click_at_pointer: the pointer position could not be "
-                    "read; sending no input (trace_id=%s)", trace_id,
-                )
-                self._emit_mouse_action_response(
-                    action_name=action_name, request_id=request_id,
-                    trace_id=trace_id, succeeded=False,
-                    reason="pointer_unavailable",
-                )
-                return
-            x, y = position
-
-            # Same invalidation as click_point: a click can move focus, the
-            # caret, or the selection (wh-review-pattern-fixes.8).
-            self.buffer_manager.invalidate()
-            succeeded, reason = self._mouse_click_seam(
-                x, y, button, click_count,
-            )
-            logger.info(
-                "click_at_pointer: point=(%r,%r) button=%s count=%r ok=%s "
-                "reason=%s (trace_id=%s)",
-                x, y, button, click_count, succeeded, reason, trace_id,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
-            )
-        except Exception as exc:  # noqa: BLE001 -- never-raise handler
-            logger.error(
-                "click_at_pointer: unexpected error (trace_id=%s): %s",
-                trace_id, exc, exc_info=True,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=False,
-                reason="unexpected_error",
-            )
+        """Click at the pointer; calls ``MousePointerActions.click_at_pointer``."""
+        self.mouse_pointer.click_at_pointer(
+            button=button, click_count=click_count,
+            trace_id=trace_id, request_id=request_id, **kwargs,
+        )
 
     def move_pointer(
         self,
@@ -7117,48 +5789,10 @@ class UIActionHandler:
         request_id: Optional[str] = None,
         **kwargs,
     ) -> None:
-        """Park the pointer at a physical-pixel point, pressing nothing.
-
-        The grid's "move here" gesture. Hover-revealed menus are common in
-        exactly the applications with poor accessibility trees that motivate
-        the grid, so parking the pointer is a first-class action rather than a
-        side effect of clicking.
-
-        Emits one ``MouseActionResponse``.
-        """
-        action_name = "move_pointer"
-        try:
-            if not self._get_validated_click_config().grid_enabled_effective:
-                logger.info(
-                    "move_pointer: voice clicking disabled by config; "
-                    "short-circuiting (trace_id=%s)", trace_id,
-                )
-                self._emit_mouse_action_response(
-                    action_name=action_name, request_id=request_id,
-                    trace_id=trace_id, succeeded=False,
-                    reason="disabled_by_config",
-                )
-                return
-
-            succeeded, reason = self._mouse_move_seam(x, y)
-            logger.info(
-                "move_pointer: point=(%r,%r) ok=%s reason=%s (trace_id=%s)",
-                x, y, succeeded, reason, trace_id,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
-            )
-        except Exception as exc:  # noqa: BLE001 -- never-raise handler
-            logger.error(
-                "move_pointer: unexpected error (trace_id=%s): %s",
-                trace_id, exc, exc_info=True,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=False,
-                reason="unexpected_error",
-            )
+        """Move the pointer; calls ``MousePointerActions.move_pointer``."""
+        self.mouse_pointer.move_pointer(
+            x=x, y=y, trace_id=trace_id, request_id=request_id, **kwargs,
+        )
 
     def perform_drag(
         self,
@@ -7171,64 +5805,12 @@ class UIActionHandler:
         request_id: Optional[str] = None,
         **kwargs,
     ) -> None:
-        """Drag from one physical-pixel point to another as ONE operation.
-
-        The whole gesture -- button down at the start, interpolated movement
-        across ``duration_ms``, button up at the end -- runs inside the
-        SendInput primitive, so no IPC boundary sits between the press and the
-        release and no message loss can strand the button pressed. The
-        primitive guarantees the release with a try/finally even when the
-        movement fails partway.
-
-        The movement is gradual because many applications ignore a drag whose
-        pointer teleports: they never see the intermediate movement that makes
-        them begin the drag operation.
-
-        Emits one ``MouseActionResponse``. The ``release_failed`` reason is
-        the one outcome meaning a mouse button may still be held; it reaches
-        Logic verbatim so the notice can say so.
-        """
-        action_name = "perform_drag"
-        try:
-            if not self._get_validated_click_config().grid_enabled_effective:
-                logger.info(
-                    "perform_drag: voice clicking disabled by config; "
-                    "short-circuiting (trace_id=%s)", trace_id,
-                )
-                self._emit_mouse_action_response(
-                    action_name=action_name, request_id=request_id,
-                    trace_id=trace_id, succeeded=False,
-                    reason="disabled_by_config",
-                )
-                return
-
-            # wh-review-pattern-fixes.8: a drag can move focus, the caret,
-            # or the selection; invalidate before the dispatch (see the
-            # hotkey_action block comment for the full rationale).
-            self.buffer_manager.invalidate()
-            succeeded, reason = self._mouse_drag_seam(
-                start_x, start_y, end_x, end_y, duration_ms,
-            )
-            logger.info(
-                "perform_drag: (%r,%r)->(%r,%r) duration_ms=%r ok=%s "
-                "reason=%s (trace_id=%s)",
-                start_x, start_y, end_x, end_y, duration_ms, succeeded,
-                reason, trace_id,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=bool(succeeded), reason=reason,
-            )
-        except Exception as exc:  # noqa: BLE001 -- never-raise handler
-            logger.error(
-                "perform_drag: unexpected error (trace_id=%s): %s",
-                trace_id, exc, exc_info=True,
-            )
-            self._emit_mouse_action_response(
-                action_name=action_name, request_id=request_id,
-                trace_id=trace_id, succeeded=False,
-                reason="unexpected_error",
-            )
+        """Drag between two points; calls ``MousePointerActions.perform_drag``."""
+        self.mouse_pointer.perform_drag(
+            start_x=start_x, start_y=start_y, end_x=end_x, end_y=end_y,
+            duration_ms=duration_ms, trace_id=trace_id,
+            request_id=request_id, **kwargs,
+        )
 
     def _poll_clipboard(self, sentinel: str) -> str | None:
         """Poll clipboard until content differs from sentinel, or timeout.

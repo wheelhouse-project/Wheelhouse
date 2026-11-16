@@ -154,6 +154,161 @@ class TestReadContextViaTextPattern:
         assert read_context_via_text_pattern() is None
 
 
+class TestReadContextCaretInNewEmptyParagraph:
+    """wh-line-start-space-capital: the legacy reader in a new empty paragraph."""
+
+    @staticmethod
+    def _setup(mock_auto, before, enclosing_class, enclosing_text=None,
+               selection_text=""):
+        focused, text_pattern = _setup_text_pattern_mock(
+            mock_auto, text_before_caret=before, selection_text=selection_text
+        )
+        sel_range = text_pattern.GetSelection.return_value[0]
+        sel_range.GetEnclosingControl.return_value = MagicMock(
+            ClassName=enclosing_class
+        )
+        mock_auto.ControlsAreSame.return_value = False  # a child element
+        if enclosing_text is not None:
+            text_pattern.pattern.RangeFromChild.return_value.GetText.return_value = enclosing_text
+        return focused
+
+    @patch(f"{_MOD}.auto")
+    def test_period_line(self, mock_auto):
+        focused = self._setup(mock_auto, "Hello world.", "is-empty")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == ".\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_line_without_period(self, mock_auto):
+        focused = self._setup(mock_auto, "It should not be there", "is-empty")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "e\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_placeholder_text_is_stripped(self, mock_auto):
+        focused = self._setup(
+            mock_auto, "Hello world.\nType / for commands", "is-empty",
+            enclosing_text="Type / for commands\n",
+        )
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == ".\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_claude_box_empty_paragraph_without_class(self, mock_auto):
+        focused = self._setup(mock_auto, "Hello world", "", enclosing_text="\n")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "d\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_argument_error_without_class_keeps_today_read(self, mock_auto):
+        import ctypes
+
+        focused = self._setup(mock_auto, "Hello world.", "")
+        focused.GetPattern.return_value.pattern.RangeFromChild.side_effect = (
+            ctypes.ArgumentError("argument 1")
+        )
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result is not None
+        assert result["preceding_chars"] == "d."
+
+    @patch(f"{_MOD}.auto")
+    def test_raw_range_is_read_for_the_enclosing_element(self, mock_auto):
+        """The raw RangeFromChild receives enclosing.Element (not the control)."""
+        focused = self._setup(mock_auto, "Hello world", "", enclosing_text="\n")
+        text_pattern = focused.GetPattern.return_value
+        enclosing = text_pattern.GetSelection.return_value[0].GetEnclosingControl.return_value
+        _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        text_pattern.pattern.RangeFromChild.assert_called_once_with(enclosing.Element)
+
+    @patch(f"{_MOD}.auto")
+    def test_empty_text_before_caret_is_read_without_error(self, mock_auto):
+        focused = self._setup(mock_auto, "", "", enclosing_text="\n")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result is not None
+        assert result["preceding_chars"] == ""
+
+    @patch(f"{_MOD}.auto")
+    def test_caret_at_end_of_line_with_text_node_keeps_today_read(self, mock_auto):
+        """Measured in the Claude box: enclosing text node, class '', own text 'Hello world'."""
+        focused = self._setup(mock_auto, "Hello world", "", enclosing_text="Hello world")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result is not None
+        assert result["preceding_chars"] == "ld"
+
+    @patch(f"{_MOD}.auto")
+    def test_mid_line_keeps_today_read(self, mock_auto):
+        focused = self._setup(mock_auto, "Hello world.", "tiptap ProseMirror",
+                              enclosing_text="Hello world.")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "d."
+
+    @patch(f"{_MOD}.auto")
+    def test_text_already_after_line_break_is_unchanged(self, mock_auto):
+        focused = self._setup(mock_auto, "ab\n", "is-empty")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "b\n"
+
+    @patch(f"{_MOD}.auto")
+    def test_selection_keeps_today_read(self, mock_auto):
+        focused = self._setup(mock_auto, "Hello world.", "is-empty",
+                              selection_text="ld")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "d."
+        assert result["has_selection"] is True
+
+
+class TestReadContextSingleElementEditor:
+    """wh-line-start-space-capital.1.1: enclosing element IS the focused control."""
+
+    @patch(f"{_MOD}.auto")
+    def test_legacy_single_element_editor_keeps_today_read(self, mock_auto):
+        focused = TestReadContextCaretInNewEmptyParagraph._setup(
+            mock_auto, "Hello world.", "is-empty", enclosing_text="\n"
+        )
+        mock_auto.ControlsAreSame.return_value = True
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "d."
+        enclosing = focused.GetPattern.return_value.GetSelection.return_value[0].GetEnclosingControl.return_value
+        mock_auto.ControlsAreSame.assert_called_once_with(enclosing, focused)
+
+    @patch(f"{_MOD}.auto")
+    def test_compare_error_keeps_the_line_start_rule(self, mock_auto):
+        focused = TestReadContextCaretInNewEmptyParagraph._setup(
+            mock_auto, "Hello world.", "is-empty"
+        )
+        mock_auto.ControlsAreSame.side_effect = _ctypes.COMError(-1, "x", (None,) * 5)
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == ".\n"
+
+
+class TestReadContextEmptyInputControl:
+    """wh-google-messages-first-word: the focused control's own class marks an empty box."""
+
+    @staticmethod
+    def _setup(mock_auto, before, control_class):
+        focused, _tp = _setup_text_pattern_mock(mock_auto, text_before_caret=before)
+        focused.ClassName = control_class
+        return focused
+
+    @patch(f"{_MOD}.auto")
+    def test_empty_box_returns_empty_context(self, mock_auto):
+        focused = self._setup(mock_auto, "Text message", "input is-empty")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result == {"preceding_chars": "", "has_selection": False}
+
+    @patch(f"{_MOD}.auto")
+    def test_box_with_text_keeps_today_read(self, mock_auto):
+        focused = self._setup(mock_auto, "Hello there", "input")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "re"
+
+    @patch(f"{_MOD}.auto")
+    def test_other_token_keeps_today_read(self, mock_auto):
+        focused = self._setup(mock_auto, "Hello there", "input is-empty-ish")
+        result = _reader_mod.read_context_via_text_pattern(focused_control=focused)
+        assert result["preceding_chars"] == "re"
+
+
 class TestReadValuePatternText:
     """read_value_pattern_text() reads full text via ValuePattern."""
 
@@ -312,6 +467,56 @@ class _FakeControlTP2:
         if pattern_id == _reader_mod.auto.PatternId.TextPattern:
             return self._text_pattern
         return None
+
+
+class TestReadViaTextPattern2NewEmptyParagraph:
+    """wh-line-start-space-capital: the TextPattern2 path applies the rule too."""
+
+    def _build(self, enclosing_class, own_text="\n"):
+        calls = []
+        sel_range = MagicMock()
+        sel_range.GetText.return_value = ""
+        sel_range.GetEnclosingControl.return_value = MagicMock(
+            ClassName=enclosing_class
+        )
+        text_pattern = _FakeTextPattern("Hello world.", calls)
+        text_pattern.GetSelection = lambda: [sel_range]
+        text_pattern.pattern = MagicMock()
+        text_pattern.pattern.RangeFromChild.return_value.GetText.return_value = own_text
+        raw_tp2 = _FakeRawTP2(
+            caret_range=_FakeRawRange("", calls, "caret"), calls=calls
+        )
+        return _FakeControlTP2(_FakeWrapperTP2(raw_tp2), text_pattern)
+
+    def test_empty_paragraph_puts_caret_after_line_break(self):
+        ctrl = self._build("is-empty")
+        result = _reader_mod._read_via_text_pattern2(ctrl, max_chars=2)
+        assert result["preceding_chars"] == ".\n"
+
+    def test_tp2_claude_box_empty_paragraph_without_class(self):
+        ctrl = self._build("", "\n")
+        result = _reader_mod._read_via_text_pattern2(ctrl, max_chars=2)
+        assert result["preceding_chars"] == ".\n"
+
+    def test_text_node_own_text_without_class_keeps_today_read(self):
+        ctrl = self._build("", "Hello world.")
+        result = _reader_mod._read_via_text_pattern2(ctrl, max_chars=2)
+        assert result["preceding_chars"] == "d."
+
+    def test_other_class_keeps_today_read(self):
+        ctrl = self._build("tiptap ProseMirror", "Hello world.")
+        result = _reader_mod._read_via_text_pattern2(ctrl, max_chars=2)
+        assert result["preceding_chars"] == "d."
+
+    def test_tp2_single_element_editor_keeps_today_read(self):
+        """wh-line-start-space-capital.1.1: enclosing element is the focused control."""
+        ctrl = self._build("is-empty")
+        with patch.object(_reader_mod.auto, "ControlsAreSame",
+                          return_value=True) as same:
+            result = _reader_mod._read_via_text_pattern2(ctrl, max_chars=2)
+        assert result["preceding_chars"] == "d."
+        assert same.called
+        assert same.call_args.args[1] is ctrl
 
 
 class TestReadViaTextPattern2FastPath:

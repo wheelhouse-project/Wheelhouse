@@ -175,6 +175,30 @@ class TestItnApplied:
         bare.finalize()
         assert bare.get_result() == "two"
 
+    def test_periodic_inference_keeps_a_trailing_tens_word(
+        self, engine_factory
+    ):
+        """wh-itn-lone-number-ten.1.1: the interim call passes
+        interim=True. WheelHouse reads agreed interim words as stable
+        words, and "backspace twenty" can still grow into "backspace
+        twenty three"; the router waits for a count only while the
+        trailing tens word is a word."""
+        engine = engine_factory(recognizer_text="backspace twenty")
+        engine.process_audio(_chunk())
+        engine._run_inference()
+        engine._run_inference()
+        assert engine.get_result() == "backspace twenty"
+
+    def test_final_inference_converts_a_trailing_tens_word(
+        self, engine_factory
+    ):
+        """The final call keeps the default: the utterance is over, so
+        the trailing "twenty" can no longer grow."""
+        engine = engine_factory(recognizer_text="backspace twenty")
+        engine.process_audio(_chunk())
+        engine.finalize()
+        assert engine.get_result() == "backspace 20"
+
 
 class TestItnDoesNotDoubleConvert:
     """Parakeet emits digits natively, unlike word-emitting streaming

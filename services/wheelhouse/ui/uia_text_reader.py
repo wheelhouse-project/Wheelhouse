@@ -51,6 +51,110 @@ import uiautomation as auto
 logger = logging.getLogger(__name__)
 
 
+_LINE_BREAKS = "\n\r\u2028\u2029"
+
+
+def is_empty_input_control(focused_control) -> bool:
+    """True when the focused control's own class marks an empty text box.
+
+    The Google Messages web text box (Brave) reports its empty state as the
+    class "input is-empty" on the focused EditControl itself, and shows a
+    placeholder as the document text (wh-google-messages-first-word). Only
+    the whole-word token "is-empty" on the focused control counts. Any
+    failure to read the class returns False, which keeps today's read.
+    """
+    try:
+        class_name = getattr(focused_control, "ClassName", "")
+    except (_ctypes.COMError, AttributeError, ValueError, TypeError):
+        return False
+    return isinstance(class_name, str) and "is-empty" in class_name.split()
+
+
+def read_empty_line_placeholder(sel_range, text_pattern,
+                                focused_control=None) -> str | None:
+    """Detect a caret that UIA reports before a new empty paragraph.
+
+    In a tiptap/ProseMirror editor in Chromium, a caret in a new empty
+    paragraph is reported at the END of the previous paragraph, before the
+    paragraph line break (wh-line-start-space-capital). The caret's
+    enclosing element then carries the class token "is-empty".
+
+    Two shapes are recognised (measured in the Claude desktop app box and
+    on a tiptap page in Edge, 2026-11-10):
+
+    * the element carries the class token "is-empty" (an empty paragraph
+      or one that shows placeholder text): the element's own text, minus
+      its trailing line break, is the placeholder; when that text cannot
+      be read the placeholder is "".
+    * the element has no such class but its own text is only a line break
+      (the Claude box): the placeholder is "".
+
+    Returns None when there is no information or the element is neither
+    (the caller keeps its normal read). It also returns None when the
+    enclosing element is the focused control itself (a single-element
+    editor): that element's own text or class says nothing about a new
+    paragraph (wh-line-start-space-capital.1.1). When the comparison
+    raises, the read goes on as if the elements differ, so a failed
+    compare never changes today's behaviour.
+
+    The element's own text is read through the RAW COM pointer:
+    uiautomation's TextPattern.RangeFromChild wrapper passes the
+    ``Control.Element`` property instead of ``child.Element`` and always
+    raises ctypes.ArgumentError.
+    """
+    try:
+        enclosing = sel_range.GetEnclosingControl()
+        class_name = getattr(enclosing, "ClassName", "") if enclosing else ""
+    except (_ctypes.COMError, AttributeError, ValueError, TypeError):
+        return None
+    if enclosing is not None and focused_control is not None:
+        try:
+            if auto.ControlsAreSame(enclosing, focused_control):
+                return None
+        except Exception as e:  # a failed compare keeps the read going
+            logger.debug("UIA caret element identity compare failed: %s", e)
+    has_token = isinstance(class_name, str) and "is-empty" in class_name.split()
+    element_text = None
+    try:
+        raw_range = text_pattern.pattern.RangeFromChild(enclosing.Element)
+        text = raw_range.GetText(-1)
+        if isinstance(text, str):
+            element_text = text
+    except Exception as e:  # ctypes.ArgumentError is not a COMError
+        logger.debug("UIA caret element text read failed: %s", e)
+    core = element_text.rstrip(_LINE_BREAKS) if element_text is not None else None
+    if has_token:
+        return core if core is not None else ""
+    if core == "":
+        return ""
+    return None
+
+
+def apply_line_start_rule(before: str, placeholder: str) -> tuple[str, bool]:
+    """Strip the placeholder from the text before the caret.
+
+    Returns (stripped_before, needs_break). needs_break is True when the
+    text before the caret is non-empty and does not end with a line break,
+    so the caret really sits after a line break UIA did not report.
+    """
+    if placeholder and before.endswith(placeholder):
+        before = before[: len(before) - len(placeholder)]
+    needs_break = bool(before) and before[-1] not in _LINE_BREAKS
+    return before, needs_break
+
+
+def _adjust_pre_text_for_line_start(sel_range, text_pattern, pre_text: str,
+                                    focused_control=None) -> str:
+    """pre_text with the empty-line rule applied (no selection only)."""
+    placeholder = read_empty_line_placeholder(
+        sel_range, text_pattern, focused_control
+    )
+    if placeholder is None:
+        return pre_text
+    stripped, needs_break = apply_line_start_rule(pre_text, placeholder)
+    return stripped + "\n" if needs_break else stripped
+
+
 def _has_text_pattern2(focused_control) -> bool:
     """True when the control exposes TextPattern2 (and ValuePattern2 hook).
 
@@ -205,10 +309,12 @@ def _read_via_text_pattern2(focused_control, max_chars: int) -> dict | None:
         # selection.
         text_pattern = focused_control.GetPattern(auto.PatternId.TextPattern)
         has_selection = False
+        caret_sel_range = None
         if text_pattern is not None:
             try:
                 sel_ranges = text_pattern.GetSelection()
                 if sel_ranges:
+                    caret_sel_range = sel_ranges[0]
                     sel_text = sel_ranges[0].GetText(-1)
                     has_selection = len(sel_text) > 0
             except _ctypes.COMError:
@@ -230,6 +336,10 @@ def _read_via_text_pattern2(focused_control, max_chars: int) -> dict | None:
             auto.TextPatternRangeEndpoint.Start,
         )
         pre_text = pre_range.GetText(-1)
+        if not has_selection and caret_sel_range is not None:
+            pre_text = _adjust_pre_text_for_line_start(
+                caret_sel_range, text_pattern, pre_text, focused_control
+            )
         preceding_chars = pre_text[-max_chars:] if pre_text else ""
 
         return {
@@ -283,6 +393,11 @@ def read_context_via_text_pattern(focused_control=None, max_chars: int = 2) -> d
                 )
                 return None
 
+            # wh-google-messages-first-word: an empty text box shows its
+            # placeholder as text; read it as empty.
+            if is_empty_input_control(focused_control):
+                return {"preceding_chars": "", "has_selection": False}
+
             # Prefer TextPattern2 caret source on capable controls.
             if _has_text_pattern2(focused_control):
                 tp2_result = _read_via_text_pattern2(focused_control, max_chars)
@@ -311,6 +426,10 @@ def read_context_via_text_pattern(focused_control=None, max_chars: int = 2) -> d
                 auto.TextPatternRangeEndpoint.Start,
             )
             pre_text = pre_range.GetText(-1)
+            if not has_selection:
+                pre_text = _adjust_pre_text_for_line_start(
+                    sel_range, text_pattern, pre_text, focused_control
+                )
             preceding_chars = pre_text[-max_chars:] if pre_text else ""
 
             return {

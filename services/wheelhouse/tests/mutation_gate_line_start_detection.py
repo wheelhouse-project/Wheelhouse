@@ -9,6 +9,11 @@ with the caret at 0 and synchronize returns early, so the placeholder text
 keeps the normal read. Any failure of the enclosing-element read keeps the
 normal read too.
 
+The wh-line-start-space-capital rule (caret in a new empty paragraph,
+class token "is-empty") lives in ui/uia_text_reader.py and is applied by
+ShadowBufferManager.synchronize and by read_context_via_text_pattern; its
+mutations are the entries from rule-never-fires onward.
+
 WHAT IT COVERS:
 
   editor-empty-check-always-false          the detection never fires
@@ -63,7 +68,19 @@ TESTS = (
     "tests/test_ui/test_verified_unicode_strategy.py::TestVerifiedUnicodeStrategyEmptyTiptapPrompt",
     # Sanity: the normal synchronize path must stay green under every mutant.
     "tests/test_ui/test_shadow_buffer.py::TestSynchronize",
+    # wh-line-start-space-capital: a caret in a new empty paragraph.
+    "tests/test_ui/test_shadow_buffer.py::TestCaretInNewEmptyParagraph",
+    "tests/test_ui/test_uia_text_reader.py::TestReadContextCaretInNewEmptyParagraph",
+    "tests/test_ui/test_uia_text_reader.py::TestReadViaTextPattern2NewEmptyParagraph",
+    "tests/test_ui/test_verified_unicode_strategy.py::TestVerifiedUnicodeStrategyNewEmptyParagraph",
+    # wh-line-start-space-capital.1.1: enclosing element is the focused control.
+    "tests/test_ui/test_shadow_buffer.py::TestSingleElementEditorLineStart",
+    "tests/test_ui/test_uia_text_reader.py::TestReadContextSingleElementEditor",
+    # wh-google-messages-first-word: the focused control's own class "is-empty".
+    "tests/test_ui/test_shadow_buffer.py::TestEmptyInputControlClass",
+    "tests/test_ui/test_uia_text_reader.py::TestReadContextEmptyInputControl",
 )
+READER = SERVICE / "ui/uia_text_reader.py"
 
 os.environ["UV_LOCKED"] = "1"
 
@@ -142,8 +159,8 @@ runner._failed_names = lambda output: {line[7:] for line in output.splitlines()
                                        if line.startswith("FAILED ")}
 
 
-def mutation(name, old, new, expect):
-    return dict(name=name, service=SERVICE, test_file=TESTS, file=TARGET,
+def mutation(name, old, new, expect, file=TARGET):
+    return dict(name=name, service=SERVICE, test_file=TESTS, file=file,
                 old=old, new=new, expect=expect)
 
 
@@ -162,13 +179,13 @@ MUTATIONS = [
              '        return isinstance(class_name, str) and "is-empty" in class_name\n',
              ["test_empty_paragraph_in_non_empty_editor_keeps_text"]),
     mutation("early-return-removed",
-             "                if self._is_editor_empty(sel_range):\n"
+             "                        or is_empty_input_control(focused_control)):\n"
              "                    with self._lock:\n"
              '                        self._buffer = ""\n'
              "                        self._cursor_pos = 0\n"
              "                        self._selection_len = 0\n"
              "                    return True\n",
-             "                if self._is_editor_empty(sel_range):\n"
+             "                        or is_empty_input_control(focused_control)):\n"
              "                    with self._lock:\n"
              '                        self._buffer = ""\n'
              "                        self._cursor_pos = 0\n"
@@ -182,6 +199,175 @@ MUTATIONS = [
              "        except (_ctypes.COMError, AttributeError, ValueError, TypeError):\n"
              "            raise\n",
              ["test_enclosing_control_error_keeps_today_path"]),
+    mutation("rule-never-fires",
+             '    if has_token:\n'
+             '        return core if core is not None else ""\n'
+             '    if core == "":\n'
+             '        return ""\n'
+             '    return None\n',
+             "    return None\n",
+             ["test_period_line_puts_caret_after_line_break",
+              "test_line_without_period_puts_caret_after_line_break",
+              "test_placeholder_text_is_removed_from_buffer",
+              "test_missing_line_break_is_inserted",
+              "test_claude_box_empty_paragraph_without_class",
+              "test_period_line",
+              "test_line_without_period",
+              "test_placeholder_text_is_stripped",
+              "test_first_word_after_new_line_has_no_space_and_capital",
+              "test_claude_box_shape_has_no_space_and_capital",
+              "test_tp2_claude_box_empty_paragraph_without_class"],
+             file=READER),
+    mutation("is-empty-token-loosened-to-substring",
+             '    has_token = isinstance(class_name, str) and "is-empty" in class_name.split()\n',
+             '    has_token = isinstance(class_name, str) and "is-empty" in class_name\n',
+             ["test_is_empty_token_must_match_exactly"],
+             file=READER),
+    mutation("empty-paragraph-without-class-ignored",
+             '    if core == "":\n'
+             '        return ""\n'
+             '    return None\n',
+             "    return None\n",
+             ["test_claude_box_empty_paragraph_without_class",
+              "test_claude_box_shape_has_no_space_and_capital",
+              "test_tp2_claude_box_empty_paragraph_without_class"],
+             file=READER),
+    mutation("own-text-of-any-kind-treated-as-empty-line",
+             '    if core == "":\n',
+             "    if core is not None:\n",
+             ["test_caret_at_end_of_line_with_text_node_keeps_today_read",
+              "test_text_node_own_text_without_class_keeps_today_read",
+              "test_mid_line_own_text_keeps_today_read"],
+             file=READER),
+    mutation("raw-range-read-for-control-not-element",
+             "        raw_range = text_pattern.pattern.RangeFromChild(enclosing.Element)\n",
+             "        raw_range = text_pattern.pattern.RangeFromChild(enclosing)\n",
+             ["test_raw_range_is_read_for_the_enclosing_element"],
+             file=READER),
+    mutation("trailing-line-break-not-stripped-from-own-text",
+             "    core = element_text.rstrip(_LINE_BREAKS) if element_text is not None else None\n",
+             "    core = element_text\n",
+             ["test_claude_box_empty_paragraph_without_class",
+              "test_placeholder_text_is_removed_from_buffer",
+              "test_placeholder_text_is_stripped"],
+             file=READER),
+    mutation("raw-read-catches-only-com-errors",
+             "    except Exception as e:  # ctypes.ArgumentError is not a COMError\n",
+             "    except _ctypes.COMError as e:\n",
+             ["test_argument_error_without_class_keeps_today_read",
+              "test_argument_error_with_class_still_applies_rule"],
+             file=READER),
+    mutation("class-token-read-failure-returns-no-information",
+             '        return core if core is not None else ""\n',
+             "        return core\n",
+             ["test_element_text_error_keeps_line_break_rule_without_stripping",
+              "test_argument_error_with_class_still_applies_rule"],
+             file=READER),
+    mutation("tp2-rule-removed",
+             "        if not has_selection and caret_sel_range is not None:\n",
+             "        if False:\n",
+             ["test_empty_paragraph_puts_caret_after_line_break"],
+             file=READER),
+    mutation("placeholder-strip-removed",
+             "    if placeholder and before.endswith(placeholder):\n",
+             "    if False:\n",
+             ["test_placeholder_text_is_removed_from_buffer",
+              "test_placeholder_text_is_stripped"],
+             file=READER),
+    mutation("newline-need-removed",
+             "    needs_break = bool(before) and before[-1] not in _LINE_BREAKS\n",
+             "    needs_break = False\n",
+             ["test_period_line_puts_caret_after_line_break",
+              "test_line_without_period_puts_caret_after_line_break",
+              "test_missing_line_break_is_inserted",
+              "test_period_line",
+              "test_line_without_period",
+              "test_first_word_after_new_line_has_no_space_and_capital"],
+             file=READER),
+    mutation("reader-legacy-rule-removed",
+             "            if not has_selection:\n"
+             "                pre_text = _adjust_pre_text_for_line_start(\n",
+             "            if False:\n"
+             "                pre_text = _adjust_pre_text_for_line_start(\n",
+             ["test_period_line", "test_line_without_period",
+              "test_placeholder_text_is_stripped"],
+             file=READER),
+    mutation("reader-applies-rule-with-selection",
+             "            if not has_selection:\n"
+             "                pre_text = _adjust_pre_text_for_line_start(\n",
+             "            if True:\n"
+             "                pre_text = _adjust_pre_text_for_line_start(\n",
+             ["test_selection_keeps_today_read"],
+             file=READER),
+    mutation("buffer-rule-never-fires",
+             "                    if placeholder is not None:\n"
+             "                        full_text, cursor_pos = self._place_caret_after_line_break(\n",
+             "                    if False:\n"
+             "                        full_text, cursor_pos = self._place_caret_after_line_break(\n",
+             ["test_period_line_puts_caret_after_line_break",
+              "test_line_without_period_puts_caret_after_line_break",
+              "test_placeholder_text_is_removed_from_buffer",
+              "test_missing_line_break_is_inserted",
+              "test_first_word_after_new_line_has_no_space_and_capital"]),
+    mutation("buffer-applies-rule-with-selection",
+             "                if sel_len == 0:\n"
+             "                    placeholder = read_empty_line_placeholder(\n",
+             "                if True:\n"
+             "                    placeholder = read_empty_line_placeholder(\n",
+             ["test_selection_keeps_today_read"]),
+    mutation("line-start-rule-empty-before-guard-removed",
+             "    needs_break = bool(before) and before[-1] not in _LINE_BREAKS\n",
+             "    needs_break = before[-1] not in _LINE_BREAKS\n",
+             ["test_empty_text_before_caret_is_read_without_error"],
+             file=READER),
+    mutation("buffer-caret-not-moved-past-existing-break",
+             "                return before + after, cursor + 1\n"
+             "            return before + \"\\n\" + after, cursor + 1\n",
+             "                return before + after, cursor\n"
+             "            return before + \"\\n\" + after, cursor + 1\n",
+             ["test_period_line_puts_caret_after_line_break"]),
+    mutation("same-control-check-removed",
+             "            if auto.ControlsAreSame(enclosing, focused_control):\n",
+             "            if False:\n",
+             ["test_legacy_single_element_editor_keeps_today_read",
+              "test_tp2_single_element_editor_keeps_today_read",
+              "test_single_element_editor_keeps_today_read"],
+             file=READER),
+    mutation("buffer-caller-omits-focused-control",
+             "                        sel_range, text_pattern, focused_control\n"
+             "                    )\n",
+             "                        sel_range, text_pattern\n"
+             "                    )\n",
+             ["test_single_element_editor_keeps_today_read"]),
+    mutation("reader-legacy-caller-omits-focused-control",
+             "                    sel_range, text_pattern, pre_text, focused_control\n",
+             "                    sel_range, text_pattern, pre_text\n",
+             ["test_legacy_single_element_editor_keeps_today_read"],
+             file=READER),
+    mutation("reader-tp2-caller-omits-focused-control",
+             "                caret_sel_range, text_pattern, pre_text, focused_control\n",
+             "                caret_sel_range, text_pattern, pre_text\n",
+             ["test_tp2_single_element_editor_keeps_today_read"],
+             file=READER),
+    mutation("buffer-break-not-inserted-when-missing",
+             "            return before + \"\\n\" + after, cursor + 1\n",
+             "            return before + after, cursor\n",
+             ["test_missing_line_break_is_inserted"]),
+    # wh-google-messages-first-word: the empty Google Messages web text box.
+    mutation("buffer-input-control-check-removed",
+             "                        or is_empty_input_control(focused_control)):\n",
+             "                        or False):\n",
+             ["test_empty_google_messages_box_reads_as_empty"]),
+    mutation("reader-input-control-check-removed",
+             "            if is_empty_input_control(focused_control):\n",
+             "            if False:\n",
+             ["test_empty_box_returns_empty_context"],
+             file=READER),
+    mutation("input-control-token-loosened-to-substring",
+             '    return isinstance(class_name, str) and "is-empty" in class_name.split()\n',
+             '    return isinstance(class_name, str) and "is-empty" in class_name\n',
+             ["test_other_token_keeps_today_read"],
+             file=READER),
 ]
 
 if __name__ == "__main__":

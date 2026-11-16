@@ -101,7 +101,7 @@ ruling the hold rests on):
   the-whole-utterance-half-of-the-hold-gate-is-dropped
         C5's "committed-text guard". The end_of_utterance arm of
         ``_should_hold_replacement_prefix`` keeps only the name test and
-        loses ``_payload_is_the_whole_utterance``, so the TAIL of an
+        loses ``payload_is_the_whole_utterance``, so the TAIL of an
         ordinary sentence -- "I said back space" -- is held as if the
         user had begun a name.
   the-expiry-drops-the-held-words-instead-of-typing-them
@@ -562,7 +562,7 @@ _NAME_CANNOT_MATCH = (
 # The end_of_utterance arm of _should_hold_replacement_prefix.
 _WHOLE_UTTERANCE_GATE = (
     "            return (\n"
-    '                self._payload_is_the_whole_utterance(" ".join(words))\n'
+    '                self.bare_number_holds.payload_is_the_whole_utterance(" ".join(words))\n'
     "                and self.router.is_incomplete_replacement_name(words)\n"
     "            )\n"
 )
@@ -713,8 +713,14 @@ _LIFECYCLE_PREFIX_DRAIN = (
     "                        drain_replacement_prefix=True,\n"
     "                    )\n"
 )
-# The completion rule in _resolve_pending_replacement_prefix.
-_COMPLETION_NEEDS_THE_END = "        if not word_event.end_of_utterance:\n"
+# The completion rule in _resolve_pending_replacement_prefix. The bare
+# ``if`` line also sits, four spaces deeper, twice in the cancel
+# recognizer (added by 68431b45), so the line it holds back is part of
+# the pattern; that pair appears nowhere else.
+_COMPLETION_NEEDS_THE_END = (
+    "        if not word_event.end_of_utterance:\n"
+    "            self._pending_replacement_prefix = combined\n"
+)
 
 # The new-utterance guard, which this branch rewrote. The shipped line
 # was ``if not word_event.word or word_event.start_of_utterance:``; the
@@ -1011,7 +1017,10 @@ MUTATIONS = [
         "file": PROCESSOR,
         "selection": SEL_HOLD,
         "old": _COMPLETION_NEEDS_THE_END,
-        "new": "        if False:\n",
+        "new": (
+            "        if False:\n"
+            "            self._pending_replacement_prefix = combined\n"
+        ),
         # Measured 2026-09-05 against SEL_HOLD: 1 failed, 19 passed. The
         # catcher is the assertion taken BEFORE the deadline --
         # `assert early == []` with the message "the mark fired on

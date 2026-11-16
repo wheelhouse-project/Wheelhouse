@@ -36,7 +36,12 @@ them, as Windows Voice Access does. True keeps the old refresh behaviour.
   settings_window_dialog.py  the check box, its default, its place in the tab
                            order, its label, its lack of a restart note
 
-Every mutation names the tests that must fail for it to count as caught.
+Every mutation names the tests that must fail for it to count as caught,
+or carries the key "survives" with a reason (wh-full-refactor.3.1): the old
+test that caught it is deleted by the overlay refactor, and no boundary test
+can produce the order it needs, or the mutant changes nothing a boundary test
+can observe. An expected survivor passes only when its whole selection stays
+green; a failed test prints "CAUGHT EXPECTED SURVIVOR" and the gate exits 1.
 Pattern-not-found, an ambiguous pattern, a mutant that does not compile, a
 timeout, a suite-timeout abort and a missing expected test name are reported
 as errors, never as a verdict; a restore that cannot be proved stops the
@@ -62,6 +67,8 @@ CONFIG = SERVICE / "ui" / "click_config.py"
 STATE = SERVICE / "click_overlay_state.py"
 HOOKS = SERVICE / "overlay_focus_hooks.py"
 MAIN = SERVICE / "main.py"
+CONTROLLER = SERVICE / "numbered_overlay" / "controller.py"
+HELPERS = SERVICE / "numbered_overlay" / "helpers.py"
 DIALOG = SERVICE / "settings_window_dialog.py"
 
 CONFIG_TESTS = "tests/test_click_config.py"
@@ -70,18 +77,33 @@ LOGIC_TESTS = "tests/test_logic_overlay_integration.py"
 HOOK_TESTS = "tests/test_overlay_focus_hooks.py"
 DIALOG_TESTS = "tests/test_settings_window_dialog.py"
 HELP_TESTS = "tests/test_settings_help_dialog.py"
+# wh-full-refactor.2: the boundary tests that replaced the old tests
+# deleted in phase B of the overlay pilot (wh-overlay-refactor-pilot.2).
+REWALK_TESTS = "tests/test_overlay_requirements_rewalk.py"
+CLICK_TESTS = "tests/test_overlay_requirements_click.py"
 
 CFG_SEL = [CONFIG_TESTS]
 STATE_SEL = [STATE_TESTS]
 LOGIC_SEL = [LOGIC_TESTS]
-JOURNEY_TESTS = "tests/test_overlay_journeys.py::test_journey_rig_starts_with_no_window_change_pending_and_numbers_removed_by_default"
 HOOK_SEL = [LOGIC_TESTS, HOOK_TESTS]
 DIALOG_SEL = [DIALOG_TESTS, HELP_TESTS]
 
+# The selection of every mutation that named a catcher the overlay refactor
+# deleted (wh-full-refactor.3.1): the logic file and the two boundary files
+# that replace those catchers. An expected survivor must leave all of it
+# green.
+REPLACED_SEL = LOGIC_SEL + [REWALK_TESTS, CLICK_TESTS]
 
-def M(name, target, old, new, selection, expect):
-    return dict(name=name, service=SERVICE, test_file=tuple(selection),
-                file=target, old=old, new=new, expect=expect)
+
+def M(name, target, old, new, selection, expect, survives=None):
+    mutation = dict(name=name, service=SERVICE, test_file=tuple(selection),
+                    file=target, old=old, new=new, expect=expect)
+    # The key is added only when given, as in
+    # tests/mutation_gate_overlay_requirements.py: the shared runner treats
+    # the presence of "survives" as the declaration.
+    if survives is not None:
+        mutation["survives"] = survives
+    return mutation
 
 
 # --- click_config.py --------------------------------------------------------
@@ -229,10 +251,8 @@ MUTATIONS += [
       "        kind=OverlayEventKind.FOCUS_CHANGE, "
       "dismisses_numbers=dismisses_numbers,\n",
       "        kind=OverlayEventKind.FOCUS_CHANGE, dismisses_numbers=False,\n",
-      HOOK_SEL, [
-        "test_foreground_change_to_another_application_removes_numbers",
-        "test_foreground_change_to_a_dialog_the_numbered_window_owns_removes_numbers",
-        "test_foreground_change_with_overlay_keep_numbers_written_false_removes_numbers",
+      HOOK_SEL + [REWALK_TESTS], [
+        "test_rw_5_change_of_window_with_keep_off_clears_and_unpins",
       ]),
     M("map-foreground-default-true", HOOKS,
       "    *, hwnd: int, dismisses_numbers: bool = False\n",
@@ -266,76 +286,78 @@ _PRUNE_LOOP = (
 )
 
 MUTATIONS += [
-    M("factory-passes-true", MAIN,
+    M("factory-passes-true", HELPERS,
       "        keep_numbers=click_config.overlay_keep_numbers,\n",
       "        keep_numbers=True,\n",
-      LOGIC_SEL, [
+      LOGIC_SEL + [CLICK_TESTS], [
         "test_overlay_keep_numbers_key_absent_removes_numbers_after_a_click",
-        "test_overlay_keep_numbers_false_removes_numbers_after_a_click",
+        "test_ck_17_ok_click_with_keep_numbers_off_clears_and_unpins",
         "test_overlay_keep_numbers_false_late_success_removes_numbers",
       ]),
-    M("early-hide-ignores-click-success", MAIN,
+    M("early-hide-ignores-click-success", CONTROLLER,
       "            click_succeeded\n            and not click_keep_numbers\n",
       "            True\n            and not click_keep_numbers\n",
-      LOGIC_SEL, [
-        "test_overlay_keep_numbers_false_stale_refusal_shows_new_numbers",
+      LOGIC_SEL + [CLICK_TESTS], [
+        "test_ck_21_ck_22_stale_position_refusal_rewalks_and_repaints",
         "test_overlay_keep_numbers_false_late_stale_refusal_shows_new_numbers",
         "test_overlay_keep_numbers_false_deferred_refusal_replay_shows_new_numbers",
       ]),
-    M("early-hide-reads-the-key-backwards", MAIN,
+    M("early-hide-reads-the-key-backwards", CONTROLLER,
       "            and not click_keep_numbers\n"
       "            and overlay_dispatch_pair[0] == current_pair[0]\n",
       "            and click_keep_numbers\n"
       "            and overlay_dispatch_pair[0] == current_pair[0]\n",
-      LOGIC_SEL, [
-        "test_send_snapshot_item_click_late_ok_superseded_pair_feed_noops",
-        "test_ok_click_feeds_click_complete_and_painted_refreshes",
-        "test_ok_click_for_superseded_generation_does_not_refresh",
+      REPLACED_SEL, [
+        "test_ck_18_ok_click_with_keep_numbers_on_refreshes_in_place",
       ]),
-    M("early-hide-session-compare-inverted", MAIN,
+    M("early-hide-session-compare-inverted", CONTROLLER,
       "            and overlay_dispatch_pair[0] == current_pair[0]\n"
       "            and not shown_again\n",
       "            and overlay_dispatch_pair[0] != current_pair[0]\n"
       "            and not shown_again\n",
-      LOGIC_SEL, [
+      LOGIC_SEL + [CLICK_TESTS], [
         "test_overlay_keep_numbers_key_absent_removes_numbers_after_a_click",
-        "test_overlay_keep_numbers_false_removes_numbers_after_a_click",
+        "test_ck_17_ok_click_with_keep_numbers_off_clears_and_unpins",
         "test_overlay_keep_numbers_false_late_success_removes_numbers",
       ]),
-    M("early-hide-ignores-a-later-show-numbers", MAIN,
+    M("early-hide-ignores-a-later-show-numbers", CONTROLLER,
       "            and not shown_again\n        ):\n",
       "            and True\n        ):\n",
       LOGIC_SEL, [
         "test_a_late_success_after_a_re_said_show_numbers_keeps_the_numbers",
         "test_an_on_time_success_after_a_re_said_show_numbers_keeps_the_numbers",
       ]),
-    M("early-hide-applies-show-numbers", MAIN,
+    M("early-hide-applies-show-numbers", CONTROLLER,
       "                OverlayEvent(kind=OverlayEventKind.HIDE_NUMBERS),\n"
       '                source=f"click_complete ({trigger}) gen={current_pair}",\n',
       "                OverlayEvent(kind=OverlayEventKind.SHOW_NUMBERS),\n"
       '                source=f"click_complete ({trigger}) gen={current_pair}",\n',
-      LOGIC_SEL, [
+      LOGIC_SEL + [CLICK_TESTS], [
         "test_overlay_keep_numbers_key_absent_removes_numbers_after_a_click",
-        "test_overlay_keep_numbers_false_removes_numbers_after_a_click",
+        "test_ck_17_ok_click_with_keep_numbers_off_clears_and_unpins",
         "test_overlay_keep_numbers_false_late_success_removes_numbers",
       ]),
-    M("shown-again-inverted", MAIN,
+    M("shown-again-inverted", CONTROLLER,
       "            and click_show_count\n"
       '            != getattr(self, "_overlay_show_numbers_applied", 0)\n',
       "            and click_show_count\n"
       '            == getattr(self, "_overlay_show_numbers_applied", 0)\n',
-      LOGIC_SEL, [
+      LOGIC_SEL + [CLICK_TESTS], [
         "test_overlay_keep_numbers_key_absent_removes_numbers_after_a_click",
-        "test_overlay_keep_numbers_false_removes_numbers_after_a_click",
+        "test_ck_17_ok_click_with_keep_numbers_off_clears_and_unpins",
         "test_overlay_keep_numbers_false_late_success_removes_numbers",
       ]),
-    M("shown-again-without-a-recorded-count", MAIN,
+    M("shown-again-without-a-recorded-count", CONTROLLER,
       "            click_show_count is not None\n            and click_show_count\n",
       "            True\n            and click_show_count\n",
-      LOGIC_SEL, [
-        "test_success_reply_with_no_recorded_show_count_still_removes_the_numbers",
-      ]),
-    M("show-numbers-counter-never-advances", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          "Result 4(c): Needs a click's reply to arrive after 32 newer "
+          'badge-click dispatches pruned its record (the prune loop in '
+          'numbered_overlay/controller.py, _OVERLAY_CLICK_SHOW_COUNT_KEEP = '
+          '32)'
+      )),
+    M("show-numbers-counter-never-advances", CONTROLLER,
       "            self._overlay_show_numbers_applied = (\n"
       '                getattr(self, "_overlay_show_numbers_applied", 0) + 1\n'
       "            )\n",
@@ -346,7 +368,7 @@ MUTATIONS += [
         "test_a_late_success_after_a_re_said_show_numbers_keeps_the_numbers",
         "test_an_on_time_success_after_a_re_said_show_numbers_keeps_the_numbers",
       ]),
-    M("show-numbers-counter-counts-hide", MAIN,
+    M("show-numbers-counter-counts-hide", CONTROLLER,
       '        if command == "show":\n'
       "            # wh-numbers-stay-setting (decision D5): see\n",
       '        if command == "hide":\n'
@@ -355,42 +377,50 @@ MUTATIONS += [
         "test_a_late_success_after_a_re_said_show_numbers_keeps_the_numbers",
         "test_an_on_time_success_after_a_re_said_show_numbers_keeps_the_numbers",
       ]),
-    M("click-stamps-no-show-count", MAIN,
+    M("click-stamps-no-show-count", CONTROLLER,
       _SHOW_COUNT_STAMP,
       "        show_counts[self._overlay_click_dispatch_ordinal] = 0\n",
-      LOGIC_SEL, [
-        "test_a_show_numbers_before_the_click_does_not_cancel_the_success_close",
+      REPLACED_SEL, [
+        "test_ck_17_ok_click_with_keep_numbers_off_clears_and_unpins",
       ]),
-    M("show-counts-never-pruned", MAIN,
+    M("show-counts-never-pruned", CONTROLLER,
       _PRUNE_LOOP,
       _PRUNE_LOOP.replace("                del record[stale]\n",
                           "                pass\n"),
-      LOGIC_SEL, [
-        "test_click_show_counts_keep_exactly_the_newest_32_dispatches",
-      ]),
-    M("show-counts-keep-one", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(c): memory use; an output change needs a reply for a '
+          'click 32 or more dispatches old'
+      )),
+    M("show-counts-keep-one", HELPERS,
       "_OVERLAY_CLICK_SHOW_COUNT_KEEP = 32\n",
       "_OVERLAY_CLICK_SHOW_COUNT_KEEP = 1\n",
-      LOGIC_SEL, [
-        "test_click_show_counts_keep_exactly_the_newest_32_dispatches",
-      ]),
-    M("show-counts-prune-off-by-one", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(c): Needs a timed-out click, a re-said show numbers, a '
+          'newer click, then the late reply'
+      )),
+    M("show-counts-prune-off-by-one", CONTROLLER,
       "                if key <= self._overlay_click_dispatch_ordinal\n"
       "                - _OVERLAY_CLICK_SHOW_COUNT_KEEP\n",
       "                if key < self._overlay_click_dispatch_ordinal\n"
       "                - _OVERLAY_CLICK_SHOW_COUNT_KEEP\n",
-      LOGIC_SEL, [
-        "test_click_show_counts_keep_exactly_the_newest_32_dispatches",
-      ]),
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(c): memory use; an output change needs a reply for a '
+          'click 32 or more dispatches old'
+      )),
     # wh-numbers-stay-setting.1.1: the keep_numbers value each click was sent
     # under, so a save made by that click does not change it.
-    M("keep-record-never-pruned", MAIN,
+    M("keep-record-never-pruned", CONTROLLER,
       "        for record in (show_counts, click_keeps):\n",
       "        for record in (show_counts,):\n",
-      LOGIC_SEL, [
-        "test_click_show_counts_keep_exactly_the_newest_32_dispatches",
-      ]),
-    M("keep-record-never-written", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(c): memory use; an output change needs a reply for a '
+          'click 32 or more dispatches old'
+      )),
+    M("keep-record-never-written", CONTROLLER,
       "        if machine is not None:\n"
       "            click_keeps[self._overlay_click_dispatch_ordinal] = (\n",
       "        if machine is None:\n"
@@ -401,7 +431,7 @@ MUTATIONS += [
         "test_a_save_made_by_the_click_does_not_change_that_late_click_off_to_on",
         "test_a_save_made_by_the_click_does_not_change_that_late_click_on_to_off",
       ]),
-    M("reply-reads-the-current-keep-value", MAIN,
+    M("reply-reads-the-current-keep-value", CONTROLLER,
       "        ).get(overlay_dispatch_ordinal, machine.keep_numbers)\n",
       "        ).get(-1, machine.keep_numbers)\n",
       LOGIC_SEL, [
@@ -410,47 +440,44 @@ MUTATIONS += [
         "test_a_save_made_by_the_click_does_not_change_that_late_click_off_to_on",
         "test_a_save_made_by_the_click_does_not_change_that_late_click_on_to_off",
       ]),
-    M("inner-success-reported-as-refusal", MAIN,
+    M("inner-success-reported-as-refusal", CONTROLLER,
       "                click_succeeded=True,\n"
       "                preclick_snapshot_id=snapshot_id,\n",
       "                click_succeeded=False,\n"
       "                preclick_snapshot_id=snapshot_id,\n",
-      LOGIC_SEL, [
+      LOGIC_SEL + [CLICK_TESTS], [
         "test_overlay_keep_numbers_key_absent_removes_numbers_after_a_click",
-        "test_overlay_keep_numbers_false_removes_numbers_after_a_click",
+        "test_ck_17_ok_click_with_keep_numbers_off_clears_and_unpins",
         "test_overlay_keep_numbers_false_success_during_a_refresh_closes_at_the_reply_not_after_it_settles",
       ]),
-    M("inner-refusal-reported-as-success", MAIN,
+    M("inner-refusal-reported-as-success", CONTROLLER,
       "                click_succeeded=False,\n"
       '                trigger=f"click refused ({response.reason})",\n'
       "                preclick_snapshot_id=snapshot_id,\n",
       "                click_succeeded=True,\n"
       '                trigger=f"click refused ({response.reason})",\n'
       "                preclick_snapshot_id=snapshot_id,\n",
-      LOGIC_SEL, [
-        "test_overlay_keep_numbers_false_stale_refusal_shows_new_numbers",
+      LOGIC_SEL + [CLICK_TESTS], [
+        "test_ck_21_ck_22_stale_position_refusal_rewalks_and_repaints",
         "test_overlay_keep_numbers_false_deferred_refusal_replay_shows_new_numbers",
         "test_refresh_before_a_stale_position_refusal_keeps_new_numbers",
       ]),
-    M("late-success-reported-as-refusal", MAIN,
+    M("late-success-reported-as-refusal", HELPERS,
       "                click_succeeded=True,\n"
       "                preclick_snapshot_id=fallback_snapshot_id,\n",
       "                click_succeeded=False,\n"
       "                preclick_snapshot_id=fallback_snapshot_id,\n",
-      LOGIC_SEL, [
-        "test_send_snapshot_item_click_late_ok_with_pair_runs_success_bookkeeping",
+      REPLACED_SEL, [
         "test_overlay_keep_numbers_false_late_success_removes_numbers",
       ]),
-    M("late-refusal-reported-as-success", MAIN,
+    M("late-refusal-reported-as-success", HELPERS,
       "            click_succeeded=False,\n"
       '            trigger=f"click refused ({response.reason})",\n'
       "            preclick_snapshot_id=fallback_snapshot_id,\n",
       "            click_succeeded=True,\n"
       '            trigger=f"click refused ({response.reason})",\n'
       "            preclick_snapshot_id=fallback_snapshot_id,\n",
-      LOGIC_SEL, [
-        "test_send_snapshot_item_click_late_rewalk_reason_feeds_refresh",
-        "test_send_snapshot_item_click_late_suppressed_notice_still_feeds_refresh",
+      REPLACED_SEL, [
         "test_overlay_keep_numbers_false_late_stale_refusal_shows_new_numbers",
       ]),
 ]
@@ -483,212 +510,233 @@ _FILTER_STATE_CHECK = (
 )
 
 MUTATIONS += [
-    M("can-be-dismissed-ignores-the-key", MAIN,
+    M("can-be-dismissed-ignores-the-key", CONTROLLER,
       '        if machine is None or getattr(machine, "keep_numbers", True):\n'
       "            return False\n",
       "        if machine is None:\n            return False\n",
-      LOGIC_SEL, [
-        "test_window_change_filter_reads_nothing_when_keep_numbers_is_true",
-      ]),
-    M("can-be-dismissed-painted-only", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Item 4 exception 1: changes only a Win32 read and the event '
+          'field dismisses_numbers, which the machine reads only in the '
+          'painted and refresh_in_flight states and ignores when '
+          'keep_numbers is on (_event_dismisses_numbers in '
+          'click_overlay_state.py)'
+      )),
+    M("can-be-dismissed-painted-only", CONTROLLER,
       _CAN_BE_DISMISSED_STATES,
       "        return machine.state in (OverlayState.PAINTED,)\n",
-      LOGIC_SEL, [
-        "test_window_change_filter_answers_for_a_refresh_in_flight_machine",
+      REPLACED_SEL, [
+        "test_rw_5_change_of_window_with_keep_off_clears_and_unpins",
       ]),
-    M("can-be-dismissed-refresh-in-flight-only", MAIN,
+    M("can-be-dismissed-refresh-in-flight-only", CONTROLLER,
       _CAN_BE_DISMISSED_STATES,
       "        return machine.state in (OverlayState.REFRESH_IN_FLIGHT,)\n",
-      LOGIC_SEL, [
-        "test_foreground_change_to_another_application_removes_numbers",
-        "test_foreground_change_to_a_dialog_the_numbered_window_owns_removes_numbers",
-        "test_foreground_change_with_overlay_keep_numbers_written_false_removes_numbers",
+      LOGIC_SEL + [REWALK_TESTS], [
+        "test_rw_5_change_of_window_with_keep_off_clears_and_unpins",
       ]),
-    M("can-be-dismissed-during-the-first-walk", MAIN,
+    M("can-be-dismissed-during-the-first-walk", CONTROLLER,
       _CAN_BE_DISMISSED_STATES,
       "        return machine.state in (\n"
       "            OverlayState.PAINTED, OverlayState.REFRESH_IN_FLIGHT,\n"
       "            OverlayState.WALK_IN_FLIGHT,\n"
       "        )\n",
-      LOGIC_SEL, [
-        "test_foreground_change_during_the_first_walk_restarts_the_walk",
-        "test_settle_refire_reads_no_window_while_the_first_walk_runs",
-        "test_a_foreground_event_coalesced_during_the_first_walk_is_not_judged_after_the_paint",
-      ]),
-    M("filter-answers-during-the-first-walk", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(b) N11: Needs the first walk and paint to finish inside '
+          'the 250 ms debounce window after a coalesced foreground event; '
+          'otherwise the mutant changes only a Win32 read and the event '
+          'field dismisses_numbers, which the machine ignores during the '
+          'first walk'
+      )),
+    M("filter-answers-during-the-first-walk", CONTROLLER,
       _FILTER_STATE_CHECK,
       "        try:\n            facts = _overlay_window_facts(hwnd)\n",
-      LOGIC_SEL, [
-        "test_foreground_change_during_the_first_walk_restarts_the_walk",
-      ]),
-    M("filter-dismisses-an-unreadable-window", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Item 4 exception 1: changes only a Win32 read and the event '
+          'field dismisses_numbers, which the machine reads only in the '
+          'painted and refresh_in_flight states and ignores when '
+          'keep_numbers is on (_event_dismisses_numbers in '
+          'click_overlay_state.py)'
+      )),
+    M("filter-dismisses-an-unreadable-window", CONTROLLER,
       "            if facts is None:\n                return False\n"
       "            if facts.class_name.lower() in",
       "            if facts is None:\n                return True\n"
       "            if facts.class_name.lower() in",
-      LOGIC_SEL, [
-        "test_foreground_change_with_unreadable_window_facts_refreshes",
+      LOGIC_SEL + [REWALK_TESTS], [
+        "test_rw_6_non_window_change_with_keep_off_refreshes",
       ]),
-    M("filter-tooltip-class-removed", MAIN,
+    M("filter-tooltip-class-removed", HELPERS,
       '_OVERLAY_NON_WINDOW_CHANGE_CLASSES = frozenset({"tooltips_class32"})\n',
       "_OVERLAY_NON_WINDOW_CHANGE_CLASSES = frozenset()\n",
-      LOGIC_SEL, [
-        "test_foreground_change_to_a_tooltip_refreshes",
-        "test_settle_refire_does_not_dismiss_for_a_coalesced_tooltip",
+      REPLACED_SEL, [
+        "test_rw_6_non_window_change_with_keep_off_refreshes",
       ]),
-    M("filter-class-compare-case-sensitive", MAIN,
+    M("filter-class-compare-case-sensitive", CONTROLLER,
       "            if facts.class_name.lower() in _OVERLAY_NON_WINDOW_CHANGE_CLASSES:\n",
       "            if facts.class_name in _OVERLAY_NON_WINDOW_CHANGE_CLASSES:\n",
-      LOGIC_SEL, [
-        "test_window_change_filter_ignores_the_case_of_the_tooltip_class_name",
-      ]),
-    M("filter-numbered-window-check-dropped", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(b) N10: Needs a tooltip whose class name reads in '
+          'another case'
+      )),
+    M("filter-numbered-window-check-dropped", CONTROLLER,
       '            tracked = getattr(self, "_overlay_tracked_identity", None)\n'
       "            if tracked is not None:\n",
       '            tracked = getattr(self, "_overlay_tracked_identity", None)\n'
       "            if False:\n",
-      LOGIC_SEL, [
-        "test_foreground_change_back_to_the_numbered_window_refreshes",
-        "test_foreground_change_to_a_control_inside_the_numbered_window_refreshes",
-        "test_foreground_change_back_to_the_numbered_window_makes_no_process_scan",
+      REPLACED_SEL, [
+        "test_rw_6_non_window_change_with_keep_off_refreshes",
       ]),
-    M("filter-root-compare-inverted", MAIN,
+    M("filter-root-compare-inverted", CONTROLLER,
       "                if facts.root == numbered_root:\n",
       "                if facts.root != numbered_root:\n",
-      LOGIC_SEL, [
-        "test_foreground_change_to_another_application_removes_numbers",
-        "test_foreground_change_to_a_control_inside_the_numbered_window_refreshes",
-        "test_foreground_change_to_a_dialog_the_numbered_window_owns_removes_numbers",
+      LOGIC_SEL + [REWALK_TESTS], [
+        "test_rw_5_change_of_window_with_keep_off_clears_and_unpins",
+        "test_rw_6_non_window_change_with_keep_off_refreshes",
       ]),
-    M("filter-numbered-root-fallback-zero", MAIN,
+    M("filter-numbered-root-fallback-zero", CONTROLLER,
       "                    else int(tracked.hwnd)\n",
       "                    else 0\n",
-      LOGIC_SEL, [
-        "test_window_change_filter_matches_a_control_of_an_unreadable_numbered_window",
-      ]),
-    M("filter-wheelhouse-processes-not-excluded", MAIN,
-      "            if facts.pid in self._wheelhouse_process_ids():\n",
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(b) N10: Needs the numbered window unreadable while a '
+          "window inside it is in front; rw_6's child case reads the "
+          'numbered window facts, so the fallback never runs'
+      )),
+    M("filter-wheelhouse-processes-not-excluded", CONTROLLER,
+      "            if facts.pid in self._host.wheelhouse_process_ids():\n",
       "            if False:\n",
-      LOGIC_SEL, [
-        "test_foreground_change_to_a_wheelhouse_window_refreshes",
-        "test_foreground_change_back_to_the_numbered_window_makes_no_process_scan",
+      REPLACED_SEL, [
+        "test_rw_6_non_window_change_with_keep_off_refreshes",
       ]),
-    M("filter-never-dismisses", MAIN,
+    M("filter-never-dismisses", CONTROLLER,
       "                return False\n            return True\n"
       "        except Exception as exc:  # noqa: BLE001 -- never break focus following\n",
       "                return False\n            return False\n"
       "        except Exception as exc:  # noqa: BLE001 -- never break focus following\n",
-      LOGIC_SEL, [
-        "test_foreground_change_to_another_application_removes_numbers",
-        "test_foreground_change_to_a_dialog_the_numbered_window_owns_removes_numbers",
-        "test_foreground_change_with_overlay_keep_numbers_written_false_removes_numbers",
+      LOGIC_SEL + [REWALK_TESTS], [
+        "test_rw_5_change_of_window_with_keep_off_clears_and_unpins",
       ]),
-    M("filter-error-dismisses", MAIN,
+    M("filter-error-dismisses", CONTROLLER,
       '                "keeping the refresh.", hwnd, exc,\n'
       "            )\n            return False\n",
       '                "keeping the refresh.", hwnd, exc,\n'
       "            )\n            return True\n",
-      LOGIC_SEL, [
-        "test_window_change_filter_keeps_the_refresh_when_the_process_list_fails",
-      ]),
-    M("foreground-handler-sends-no-decision", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(c): Needs the process-id read or the window-facts read '
+          'to raise; both catch their own exceptions '
+          '(_wheelhouse_process_ids in main.py, _overlay_window_facts in '
+          'numbered_overlay/helpers.py)'
+      )),
+    M("foreground-handler-sends-no-decision", CONTROLLER,
       "                dismisses_numbers=self._foreground_change_dismisses_numbers(\n"
       "                    hwnd\n"
       "                ),\n",
       "                dismisses_numbers=False,\n",
-      LOGIC_SEL, [
-        "test_foreground_change_to_another_application_removes_numbers",
-        "test_foreground_change_to_a_dialog_the_numbered_window_owns_removes_numbers",
-        "test_foreground_change_with_overlay_keep_numbers_written_false_removes_numbers",
+      LOGIC_SEL + [REWALK_TESTS], [
+        "test_rw_5_change_of_window_with_keep_off_clears_and_unpins",
       ]),
 ]
 
 # --- main.py: the settle-refire flag ---------------------------------------
 MUTATIONS += [
-    M("refire-flag-set-while-nothing-is-showing", MAIN,
+    M("refire-flag-set-while-nothing-is-showing", CONTROLLER,
       _FLAG_SET,
       "            if True:\n"
       "                self._overlay_settle_refire_foreground = True\n",
-      LOGIC_SEL, [
-        "test_a_foreground_event_coalesced_during_the_first_walk_is_not_judged_after_the_paint",
-        "test_a_foreground_event_coalesced_while_closed_does_not_leak_into_a_later_session",
-      ]),
-    M("refire-flag-never-set", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(b) N11 and case 4(a) RW-11 (NOT_REQUIRED): Needs a '
+          'foreground event coalesced while closed or during the first walk '
+          'with the paint finishing inside the debounce window'
+      )),
+    M("refire-flag-never-set", CONTROLLER,
       _FLAG_SET,
       "            if self._overlay_numbers_can_be_dismissed():\n"
       "                self._overlay_settle_refire_foreground = False\n",
-      LOGIC_SEL, [
-        "test_settle_refire_dismisses_when_the_burst_ended_on_another_application",
-        "test_settle_refire_dismisses_when_a_menu_event_came_before_the_window_change",
-        "test_settle_refire_dismisses_when_the_last_coalesced_event_named_the_numbered_window_but_another_is_in_front",
+      REPLACED_SEL, [
+        "test_rw_12_burst_ending_on_another_app_clears_instead_of_walking",
       ]),
-    M("refire-flag-starts-set", MAIN,
+    M("refire-flag-starts-set", CONTROLLER,
       "        self._overlay_settle_refire_foreground: bool = False\n",
       "        self._overlay_settle_refire_foreground: bool = True\n",
-      [JOURNEY_TESTS], [
-        "test_journey_rig_starts_with_no_window_change_pending_and_numbers_removed_by_default",
-      ]),
-    M("consume-ignores-the-flag", MAIN,
+      REPLACED_SEL + ["tests/test_overlay_journeys.py"], [],
+      survives=(
+          'Case 4(a) RW-18 (NOT_REQUIRED). Needs a menu or tree change as '
+          'the first focus event while painted with another application in '
+          'front'
+      )),
+    M("consume-ignores-the-flag", CONTROLLER,
       _CONSUME_HEAD,
       "        self._overlay_settle_refire_foreground = False\n",
-      LOGIC_SEL, [
-        "test_settle_refire_does_not_dismiss_for_a_coalesced_menu_event_alone",
-        "test_settle_refire_clears_the_window_change_flag_after_it_runs",
-        "test_cancelling_the_settle_refire_clears_the_window_change_flag",
-      ]),
-    M("consume-never-clears-the-flag", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 1 rw_15 (lead decision 15): Needs another application in '
+          'front at the refire with no foreground event since the last '
+          'decision'
+      )),
+    M("consume-never-clears-the-flag", CONTROLLER,
       _CONSUME_HEAD,
       '        if not getattr(self, "_overlay_settle_refire_foreground", False):\n'
       "            return False\n",
-      LOGIC_SEL, [
-        "test_settle_refire_reads_no_window_while_the_first_walk_runs",
-        "test_settle_refire_clears_the_window_change_flag_after_it_runs",
-      ]),
-    M("consume-reads-the-window-while-nothing-is-showing", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(b) N11 and N2d: Needs a later refire or immediate menu '
+          'or tree decision with another application in front and no '
+          'foreground event since the flag was consumed'
+      )),
+    M("consume-reads-the-window-while-nothing-is-showing", CONTROLLER,
       _CONSUME_STATE_CHECK,
       "        hwnd = _overlay_current_foreground_hwnd()\n",
-      LOGIC_SEL, [
-        "test_settle_refire_reads_no_window_while_the_first_walk_runs",
-      ]),
-    M("consume-accepts-an-unreadable-foreground", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Item 4 exception 1: only an extra GetForegroundWindow read; '
+          '_foreground_change_dismisses_numbers starts with the same '
+          'can-be-dismissed check and returns False'
+      )),
+    M("consume-accepts-an-unreadable-foreground", CONTROLLER,
       "        if not hwnd:\n            return False\n"
       "        return self._foreground_change_dismisses_numbers(hwnd)\n",
       "        return self._foreground_change_dismisses_numbers(hwnd)\n",
-      LOGIC_SEL, [
-        "test_settle_refire_refreshes_when_the_foreground_window_reads_as_zero_but_has_facts",
-      ]),
-    M("consume-skips-the-exclusions", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Item 4 exception 1: no output change; _overlay_window_facts(0) '
+          'returns None, so _foreground_change_dismisses_numbers(0) returns '
+          'False'
+      )),
+    M("consume-skips-the-exclusions", CONTROLLER,
       "        if not hwnd:\n            return False\n"
       "        return self._foreground_change_dismisses_numbers(hwnd)\n",
       "        if not hwnd:\n            return False\n        return True\n",
-      LOGIC_SEL, [
-        "test_settle_refire_refreshes_when_the_burst_ended_back_on_the_numbered_window",
-        "test_settle_refire_does_not_dismiss_for_a_coalesced_tooltip",
+      REPLACED_SEL, [
+        "test_rw_13_burst_ending_on_numbered_window_refreshes",
       ]),
-    M("cancel-keeps-the-flag", MAIN,
+    M("cancel-keeps-the-flag", CONTROLLER,
       "        self._overlay_settle_refire_foreground = False\n"
       "        handle = self._overlay_settle_handle\n",
       "        handle = self._overlay_settle_handle\n",
-      LOGIC_SEL, [
-        "test_cancelling_the_settle_refire_clears_the_window_change_flag",
-      ]),
-    M("refire-never-asks-the-flag", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Result 4(b) N2d: Needs another application in front at the '
+          'refire with no foreground event since the last decision after '
+          'the refire was cancelled'
+      )),
+    M("refire-never-asks-the-flag", CONTROLLER,
       "        dismisses = self._consume_pending_foreground_dismissal()\n",
       "        dismisses = False\n",
-      LOGIC_SEL, [
-        "test_settle_refire_reads_no_window_while_the_first_walk_runs",
-        "test_settle_refire_dismisses_when_the_burst_ended_on_another_application",
-        "test_settle_refire_dismisses_when_a_menu_event_came_before_the_window_change",
+      REPLACED_SEL, [
+        "test_rw_12_burst_ending_on_another_app_clears_instead_of_walking",
       ]),
-    M("refire-sends-no-decision", MAIN,
+    M("refire-sends-no-decision", CONTROLLER,
       "                dismisses_numbers=dismisses,\n",
       "                dismisses_numbers=False,\n",
-      LOGIC_SEL, [
-        "test_settle_refire_dismisses_when_the_burst_ended_on_another_application",
-        "test_settle_refire_dismisses_when_a_menu_event_came_before_the_window_change",
-        "test_settle_refire_dismisses_when_the_last_coalesced_event_named_the_numbered_window_but_another_is_in_front",
+      REPLACED_SEL, [
+        "test_rw_12_burst_ending_on_another_app_clears_instead_of_walking",
       ]),
-    M("menu-event-drops-the-pending-change", MAIN,
+    M("menu-event-drops-the-pending-change", CONTROLLER,
       "        if self._consume_pending_foreground_dismissal():\n"
       "            event = dataclasses.replace(event, dismisses_numbers=True)\n"
       "        self._cancel_overlay_settle_refire()\n"
@@ -697,10 +745,12 @@ MUTATIONS += [
       "            event = dataclasses.replace(event, dismisses_numbers=True)\n"
       "        self._cancel_overlay_settle_refire()\n"
       '        self._apply_overlay_event(event, source=f"menu popup {verb}")\n',
-      LOGIC_SEL, [
-        "test_a_menu_event_that_fires_at_once_keeps_a_pending_window_change",
-      ]),
-    M("pattern-manager-event-drops-the-pending-change", MAIN,
+      REPLACED_SEL, [],
+      survives=(
+          'Case 4(a): a menu event after a coalesced foreground event, row '
+          'RW-18 NOT_REQUIRED'
+      )),
+    M("pattern-manager-event-drops-the-pending-change", CONTROLLER,
       "        event = decision.event\n"
       "        # As in ``_on_overlay_menu_popup_change``: settle a coalesced\n"
       "        # foreground event into this event before the cancel drops it.\n"
@@ -709,23 +759,25 @@ MUTATIONS += [
       "        # As in ``_on_overlay_menu_popup_change``: settle a coalesced\n"
       "        # foreground event into this event before the cancel drops it.\n"
       "        if False:\n",
-      LOGIC_SEL, [
-        "test_a_pattern_manager_event_that_fires_at_once_keeps_a_pending_window_change",
-      ]),
+      REPLACED_SEL, [],
+      survives=(
+          'Case 4(a): a Pattern Manager tree event after a coalesced '
+          'foreground event, row RW-18 NOT_REQUIRED'
+      )),
 ]
 
 # --- main.py: a saved value reaches the running machine --------------------
 _SAVE_ONE = (
-    "        self._apply_saved_overlay_keep_numbers([key], saved)\n"
+    "        self.overlay.apply_saved_overlay_keep_numbers([key], saved)\n"
     "        return saved\n"
 )
 _SAVE_GROUP = (
-    "        self._apply_saved_overlay_keep_numbers(list(values or {}), saved)\n"
+    "        self.overlay.apply_saved_overlay_keep_numbers(list(values or {}), saved)\n"
     "        return saved\n"
 )
 
 MUTATIONS += [
-    M("apply-saved-ignores-a-failed-save", MAIN,
+    M("apply-saved-ignores-a-failed-save", CONTROLLER,
       '        if not saved or "click.overlay_keep_numbers" not in keys:\n'
       "            return\n",
       '        if "click.overlay_keep_numbers" not in keys:\n'
@@ -733,52 +785,52 @@ MUTATIONS += [
       LOGIC_SEL, [
         "test_failed_save_leaves_the_machine_unchanged_and_returns_false",
       ]),
-    M("apply-saved-ignores-the-key-name", MAIN,
+    M("apply-saved-ignores-the-key-name", CONTROLLER,
       '        if not saved or "click.overlay_keep_numbers" not in keys:\n'
       "            return\n",
       "        if not saved:\n            return\n",
       LOGIC_SEL, [
         "test_saving_an_unrelated_key_does_not_touch_the_machine",
       ]),
-    M("apply-saved-inverts-the-value", MAIN,
+    M("apply-saved-inverts-the-value", CONTROLLER,
       "            machine.keep_numbers = ClickConfig.from_raw(\n"
-      '                self.config_service.get("click", {})\n'
+      '                self._host.config_service.get("click", {})\n'
       "            ).overlay_keep_numbers\n",
       "            machine.keep_numbers = not ClickConfig.from_raw(\n"
-      '                self.config_service.get("click", {})\n'
+      '                self._host.config_service.get("click", {})\n'
       "            ).overlay_keep_numbers\n",
-      LOGIC_SEL, [
+      REPLACED_SEL, [
         "test_saved_keep_numbers_value_reaches_the_machine_without_a_restart",
         "test_saved_keep_numbers_value_in_a_group_save_reaches_the_machine",
-        "test_next_click_after_a_save_follows_the_new_value",
+        "test_ck_62_saved_keep_numbers_applies_at_the_next_click",
       ]),
-    M("apply-saved-reads-an-empty-section", MAIN,
-      '                self.config_service.get("click", {})\n'
+    M("apply-saved-reads-an-empty-section", CONTROLLER,
+      '                self._host.config_service.get("click", {})\n'
       "            ).overlay_keep_numbers\n",
       "                {}\n            ).overlay_keep_numbers\n",
-      LOGIC_SEL, [
+      REPLACED_SEL, [
         "test_saved_keep_numbers_value_reaches_the_machine_without_a_restart",
         "test_saved_keep_numbers_value_in_a_group_save_reaches_the_machine",
-        "test_next_click_after_a_save_follows_the_new_value",
+        "test_ck_62_saved_keep_numbers_applies_at_the_next_click",
       ]),
     M("save-one-never-applies", MAIN,
       _SAVE_ONE,
       "        pass\n        return saved\n",
-      LOGIC_SEL, [
+      REPLACED_SEL, [
         "test_saved_keep_numbers_value_reaches_the_machine_without_a_restart",
-        "test_next_click_after_a_save_follows_the_new_value",
+        "test_ck_62_saved_keep_numbers_applies_at_the_next_click",
       ]),
     M("save-one-passes-no-keys", MAIN,
       _SAVE_ONE,
-      "        self._apply_saved_overlay_keep_numbers([], saved)\n"
+      "        self.overlay.apply_saved_overlay_keep_numbers([], saved)\n"
       "        return saved\n",
-      LOGIC_SEL, [
+      REPLACED_SEL, [
         "test_saved_keep_numbers_value_reaches_the_machine_without_a_restart",
-        "test_next_click_after_a_save_follows_the_new_value",
+        "test_ck_62_saved_keep_numbers_applies_at_the_next_click",
       ]),
     M("save-one-reports-success-always", MAIN,
       _SAVE_ONE,
-      "        self._apply_saved_overlay_keep_numbers([key], saved)\n"
+      "        self.overlay.apply_saved_overlay_keep_numbers([key], saved)\n"
       "        return True\n",
       LOGIC_SEL, [
         "test_failed_save_leaves_the_machine_unchanged_and_returns_false",
@@ -791,14 +843,14 @@ MUTATIONS += [
       ]),
     M("save-group-passes-no-keys", MAIN,
       _SAVE_GROUP,
-      "        self._apply_saved_overlay_keep_numbers([], saved)\n"
+      "        self.overlay.apply_saved_overlay_keep_numbers([], saved)\n"
       "        return saved\n",
       LOGIC_SEL, [
         "test_saved_keep_numbers_value_in_a_group_save_reaches_the_machine",
       ]),
     M("save-group-reports-success-always", MAIN,
       _SAVE_GROUP,
-      "        self._apply_saved_overlay_keep_numbers(list(values or {}), saved)\n"
+      "        self.overlay.apply_saved_overlay_keep_numbers(list(values or {}), saved)\n"
       "        return True\n",
       LOGIC_SEL, [
         "test_failed_group_save_returns_false_and_leaves_the_machine_unchanged",

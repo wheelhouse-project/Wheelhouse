@@ -47,6 +47,12 @@ def make_state(manager, tmp_path):
             manager.state_from_logic_queue, None,
         )
         controller = MagicMock(spec=LogicController)
+        # wh-overlay-refactor-pilot.2: the save wrapper now reaches the
+        # overlay through controller.overlay.
+        from services.wheelhouse.numbered_overlay.controller import (
+            NumberedOverlayController,
+        )
+        controller.overlay = MagicMock(spec=NumberedOverlayController)
         controller.state_manager = state
         # wh-numbers-stay-setting: the handler routes through the controller's own
         # save-and-apply wrapper, which a spec'd mock replaces; bind the real one.

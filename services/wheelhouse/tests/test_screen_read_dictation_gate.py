@@ -50,6 +50,9 @@ from services.wheelhouse.click_overlay_state import (
     PaintAckState,
 )
 from services.wheelhouse.main import LogicController
+from services.wheelhouse.numbered_overlay.controller import (
+    NumberedOverlayController,
+)
 from services.wheelhouse.ui.click_config import ClickConfig
 from services.wheelhouse.shared.start_overlay_walk import (
     StartOverlayWalkResponse,
@@ -68,6 +71,18 @@ from speech.speech_processor import SpeechProcessor
 # ============================================================================
 # PROCESSOR-SIDE RIG (shape follows tests/test_speech_processor_bare_number.py)
 # ============================================================================
+
+def _bind_overlay(c):
+    """Build the real NumberedOverlayController as ``c.overlay``.
+
+    wh-overlay-refactor-pilot.2 moved the numbered overlay out of
+    LogicController. The overlay is built through its public constructor
+    with ``c`` as its host; the constructor reads ``c.click_config``, so the
+    caller sets that first.
+    """
+    c.overlay = NumberedOverlayController(c, clock=time.monotonic)
+    return c.overlay
+
 
 class MockApp:
     """Mock app recording IPC calls."""
@@ -650,25 +665,37 @@ def _walk_response(snapshot_id, sid, gen, *display_numbers) -> dict:
 
 
 def _controller(machine: Optional[ClickOverlayStateMachine] = None):
-    """Bare LogicController with only the build-dispatch attributes."""
+    """Bare LogicController with only the build-dispatch attributes.
+
+    The overlay is built through its public constructor. The constructor
+    reads the [click] config, so a real default config is in place while it
+    runs; the MagicMock config replaces it afterwards. The build reply feeds
+    the real machine, so a successful walk is followed by the machine's own
+    pin_snapshot send; the tests that record every send pick out the walk.
+    """
     controller = object.__new__(LogicController)
+    controller.grid_overlay_state = None
+    controller.click_config = ClickConfig.from_raw({})
+    controller.overlay = NumberedOverlayController(
+        controller, clock=time.monotonic,
+    )
     controller.click_config = MagicMock()
     controller.click_config.enabled = True
     controller.click_config.overlay_enabled_effective = True
     controller.click_config.overlay_invalid_key = None
     controller.click_config.response_timeout_ms = 3000
     controller.click_config.screen_read_timeout_ms = 10000
-    controller.click_overlay_state = (
+    controller.overlay.click_overlay_state = (
         machine if machine is not None else ClickOverlayStateMachine()
     )
-    controller._overlay_effect_lock = asyncio.Lock()
-    controller._overlay_settle_read_identity = None
-    controller._overlay_auto_open_filter = None
+    controller.background_tasks = []
     controller.state_manager = MagicMock()
     controller.state_manager.state_to_gui_queue = _FakeQueue()
-    # Stop the build-response feed cascade: these tests assert send TIMING,
-    # not machine advancement.
-    controller._apply_overlay_event = MagicMock()
+    # wh-full-refactor.6.2: the grid methods live in MouseGridController,
+    # which reaches this controller through its host back-reference.
+    from services.wheelhouse.mouse_grid.controller import MouseGridController
+
+    controller.mouse_grid = MouseGridController(controller)
     return controller
 
 
@@ -708,6 +735,91 @@ def _refresh_machine() -> ClickOverlayStateMachine:
     return machine
 
 
+def _painted_machine() -> ClickOverlayStateMachine:
+    """A machine with badges painted; "show numbers" over it is a REFRESH."""
+    machine = ClickOverlayStateMachine()
+    machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+    sid, gen = machine.overlay_session_id, machine.paint_generation
+    machine.apply(
+        OverlayEvent(
+            OverlayEventKind.BUILD_RESPONSE, overlay_session_id=sid,
+            paint_generation=gen, snapshot_id="snap-a",
+        )
+    )
+    machine.apply(
+        OverlayEvent(
+            OverlayEventKind.PAINT_ACK, overlay_session_id=sid,
+            paint_generation=gen, paint_state=PaintAckState.PAINTED,
+        )
+    )
+    assert machine.state is OverlayState.PAINTED
+    return machine
+
+
+async def _show_numbers(controller) -> asyncio.Task:
+    """Say "show numbers" over painted badges through the public entry.
+
+    Returns the scheduled refresh build batch; it has not started yet.
+    """
+    task = await controller.overlay.handle_overlay_command("show", "tr")
+    assert task is not None
+    assert (
+        controller.overlay.click_overlay_state.state
+        is OverlayState.REFRESH_IN_FLIGHT
+    )
+    return task
+
+
+def _walk_reply_for(machine):
+    """A responder answering every send with a walk for the current pair."""
+    return lambda a, p: _walk_response(
+        "snap-b", machine.overlay_session_id, machine.paint_generation, 1,
+    )
+
+
+def _auto_open_controller():
+    """The bare rig with the ambiguous auto-open turned on.
+
+    The AUTO_OPEN event that ``forward_click_element`` applies reaches the
+    real machine, so the auto-open build is the production one.
+    """
+    controller = _controller(ClickOverlayStateMachine())
+    controller.click_config.overlay_auto_open_on_ambiguous = True
+    return controller
+
+
+def _ambiguous_reply(action, params) -> dict:
+    """click_element answers ambiguous with two finalists; others answer ok."""
+    from services.wheelhouse.shared.click_element import ClickElementResponse
+
+    if action != "click_element":
+        return {"status": "ok"}
+    return ClickElementResponse(
+        status="ok", outcome="ambiguous", reason=None,
+        matched_names=("control 1", "control 2"), snapshot_id="snap-c",
+        snapshot_summary=_summary("snap-c", 1, 2), matched_name=None,
+        trace_id=params.get("trace_id", "tr"),
+        ambiguous_item_ids=("snap-c-item-1", "snap-c-item-2"),
+    ).to_dict()
+
+
+async def _ambiguous_click(controller) -> None:
+    """Say "click control" and let the auto-open repaint it starts finish."""
+    from services.wheelhouse.ui.element_types import ElementQuery
+
+    before = set(controller.background_tasks)
+    await controller.forward_click_element(
+        ElementQuery("control", None, None, None, "click control"), "tr",
+    )
+    assert (
+        controller.overlay.click_overlay_state.state
+        is OverlayState.WALK_IN_FLIGHT
+    ), "test rig: the ambiguous click did not auto-open the overlay"
+    started = [t for t in controller.background_tasks if t not in before]
+    assert started, "test rig: the auto-open scheduled no build"
+    await asyncio.gather(*started)
+
+
 def _build_effect(machine, reason=BuildReason.REFRESH) -> Effect:
     return Effect(
         kind=EffectKind.DISPATCH_BUILD,
@@ -737,22 +849,14 @@ class TestReadWaitsForTheSentenceEnd:
 
     def test_read_requested_mid_sentence_waits_for_the_sentence_end(self):
         async def _run():
-            machine = _refresh_machine()
-            sid, gen = machine.overlay_session_id, machine.paint_generation
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
             sentence_closed = asyncio.Event()  # cleared = sentence open
             _wire_sentence(controller, sentence_closed)
-            _wire_app(
-                controller,
-                lambda a, p: _walk_response("snap-b", sid, gen, 1),
-            )
+            _wire_app(controller, _walk_reply_for(machine))
 
-            task = asyncio.get_running_loop().create_task(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine),), trace_id="tr",
-                )
-            )
+            task = await _show_numbers(controller)
             for _ in range(10):
                 await asyncio.sleep(0)
             walks_before = [a for a, _ in controller._sent
@@ -773,24 +877,20 @@ class TestReadWaitsForTheSentenceEnd:
         )
 
     def test_the_sentence_wait_gives_up_at_its_bound(self):
+        # The shipped bound is 5 s (_OVERLAY_READ_SENTENCE_WAIT_MAX_S in
+        # numbered_overlay/helpers.py). No public setting shortens it, and
+        # the wait runs on the event loop's own timer, not the overlay
+        # clock, so the test waits it out in real time.
         async def _run():
-            machine = _refresh_machine()
-            sid, gen = machine.overlay_session_id, machine.paint_generation
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
-            controller._overlay_read_sentence_wait_max_s = 0.05
             sentence_closed = asyncio.Event()  # never set
             _wire_sentence(controller, sentence_closed)
-            _wire_app(
-                controller,
-                lambda a, p: _walk_response("snap-b", sid, gen, 1),
-            )
+            _wire_app(controller, _walk_reply_for(machine))
 
             await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine),), trace_id="tr",
-                ),
-                timeout=2.0,
+                await _show_numbers(controller), timeout=8.0,
             )
             return [a for a, _ in controller._sent
                     if a == "start_overlay_walk"]
@@ -802,25 +902,21 @@ class TestReadWaitsForTheSentenceEnd:
 
     def test_a_hide_during_the_sentence_wait_wakes_the_build(self):
         async def _run():
-            machine = _refresh_machine()
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
             sentence_closed = asyncio.Event()  # sentence stays open
             _wire_sentence(controller, sentence_closed)
             _wire_app(controller, lambda a, p: {"status": "ok"})
 
-            task = asyncio.get_running_loop().create_task(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine),), trace_id="tr",
-                )
-            )
+            task = await _show_numbers(controller)
             for _ in range(10):
                 await asyncio.sleep(0)
 
             # The user says "hide numbers": the machine closes and the
             # committer wakes any parked build.
-            machine.apply(OverlayEvent(OverlayEventKind.HIDE_NUMBERS))
-            controller._abort_inflight_overlay_build()
+            await controller.overlay.handle_overlay_command("hide", "tr")
+            assert machine.state is OverlayState.CLOSED
             await asyncio.wait_for(task, timeout=1.0)
             return [a for a, _ in controller._sent
                     if a == "start_overlay_walk"]
@@ -840,27 +936,24 @@ class TestReadWaitsForTheSentenceEnd:
         once, not sleep out its 5 s bound holding the lock while the
         hide's clear batch queues behind it."""
         async def _run():
-            machine = _refresh_machine()
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
             sentence_closed = asyncio.Event()  # sentence stays open
             _wire_sentence(controller, sentence_closed)
             _wire_app(controller, lambda a, p: {"status": "ok"})
-            effect = _build_effect(machine)
+            # "show numbers" schedules the build batch; nothing has yielded
+            # to the loop since, so it is still queued.
+            task = await _show_numbers(controller)
 
             # The hide commits BEFORE the build batch runs; its abort
             # call finds nothing parked (the lost wake).
-            machine.apply(OverlayEvent(OverlayEventKind.HIDE_NUMBERS))
-            controller._abort_inflight_overlay_build()
+            await controller.overlay.handle_overlay_command("hide", "tr")
+            assert machine.state is OverlayState.CLOSED
 
             # Far below the default 5 s wait bound: a lost wake that
             # sleeps out the bound trips this timeout.
-            await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (effect,), trace_id="tr",
-                ),
-                timeout=0.8,
-            )
+            await asyncio.wait_for(task, timeout=0.8)
             return [a for a, _ in controller._sent
                     if a == "start_overlay_walk"]
 
@@ -871,29 +964,25 @@ class TestReadWaitsForTheSentenceEnd:
         machine moved on to a NEW session while the old build batch was
         still queued."""
         async def _run():
-            machine = _refresh_machine()
-            sid, gen = machine.overlay_session_id, machine.paint_generation
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
             sentence_closed = asyncio.Event()  # sentence stays open
             _wire_sentence(controller, sentence_closed)
             _wire_app(controller, lambda a, p: {"status": "ok"})
-            effect = _build_effect(machine)
+            task = await _show_numbers(controller)
+            sid, gen = machine.overlay_session_id, machine.paint_generation
 
-            machine.apply(OverlayEvent(OverlayEventKind.HIDE_NUMBERS))
-            machine.apply(OverlayEvent(OverlayEventKind.SHOW_NUMBERS))
+            # "hide numbers" then "show numbers" while that batch is still
+            # queued: the machine moves on to a new session.
+            await controller.overlay.handle_overlay_command("hide", "tr")
+            await controller.overlay.handle_overlay_command("show", "tr")
             assert (
                 machine.overlay_session_id, machine.paint_generation,
             ) != (sid, gen), "test rig: the machine must have moved on"
             assert machine.state is not OverlayState.CLOSED
-            controller._abort_inflight_overlay_build()
 
-            await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (effect,), trace_id="tr",
-                ),
-                timeout=0.8,
-            )
+            await asyncio.wait_for(task, timeout=0.8)
             return [a for a, _ in controller._sent
                     if a == "start_overlay_walk"]
 
@@ -908,30 +997,29 @@ class TestReadMarkerLifecycle:
 
     def test_marker_set_during_the_round_trip_and_cleared_after(self):
         async def _run():
-            machine = _refresh_machine()
-            sid, gen = machine.overlay_session_id, machine.paint_generation
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
-            seen: list = []
+            sends: list = []
 
             async def _send_request(action, params=None, timeout_s=None,
                                     on_late_response=None):
-                seen.append(controller.screen_read_in_flight_since)
-                return _walk_response("snap-b", sid, gen, 1)
+                sends.append((action, controller.screen_read_in_flight_since))
+                return _walk_reply_for(machine)(action, params)
 
             controller.app = MagicMock()
             controller.app.send_request = _send_request
             controller._sent = []
 
             await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine),), trace_id="tr",
-                ),
-                timeout=2.0,
+                await _show_numbers(controller), timeout=2.0,
             )
-            return seen, controller.screen_read_in_flight_since
+            return sends, controller.screen_read_in_flight_since
 
-        seen, after = asyncio.run(_run())
+        sends, after = asyncio.run(_run())
+        # The machine's own pin_snapshot follows the walk; it is not a read.
+        seen = [marker for action, marker in sends
+                if action == "start_overlay_walk"]
         assert len(seen) == 1
         assert isinstance(seen[0], float), (
             "the marker must be a monotonic stamp while Input runs the read"
@@ -940,7 +1028,7 @@ class TestReadMarkerLifecycle:
 
     def test_marker_cleared_when_the_send_times_out(self):
         async def _run():
-            machine = _refresh_machine()
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
 
@@ -953,10 +1041,7 @@ class TestReadMarkerLifecycle:
             controller._sent = []
 
             await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine),), trace_id="tr",
-                ),
-                timeout=2.0,
+                await _show_numbers(controller), timeout=2.0,
             )
             return controller.screen_read_in_flight_since
 
@@ -976,20 +1061,21 @@ def _click_controller(*, send_result=None, send_exc=None):
     controller.forward_click_element = (
         LogicController.forward_click_element.__get__(controller)
     )
-    controller._forward_click_notice = (
-        LogicController._forward_click_notice.__get__(controller)
-    )
     controller.click_config = ClickConfig.from_raw(
         {"enabled": True, "response_timeout_ms": 3000}
     )
+    _bind_overlay(controller)
     controller._click_disabled_notice_shown = False
+    controller.grid_overlay_state = None
     controller.state_manager = MagicMock()
     controller.state_manager.state_to_gui_queue = MagicMock()
     controller.screen_read_in_flight_since = None
     # Bind the real marker helpers when they exist: the spec'd mock
     # would otherwise swallow the site's helper calls. The getattr
     # keeps the rig importable while the helpers are red.
-    for _name in ("_mark_screen_read_started", "_mark_screen_read_finished"):
+    for _name in ("_mark_screen_read_started", "_mark_screen_read_finished",
+                  "mark_screen_read_started", "mark_screen_read_finished",
+                  "take_click_disabled_notice"):
         _real = getattr(LogicController, _name, None)
         if _real is not None:
             setattr(controller, _name, _real.__get__(controller))
@@ -1062,35 +1148,35 @@ class TestOverlappingReadsKeepTheMarker:
     def test_the_build_walk_counts_its_round_trip(self):
         """The SITE must use the shared count, not a raw stamp write."""
         async def _run():
-            machine = _refresh_machine()
-            sid, gen = machine.overlay_session_id, machine.paint_generation
+            machine = _painted_machine()
             controller = _controller(machine)
             controller.loop = asyncio.get_running_loop()
-            counts: list = []
+            sends: list = []
 
             async def _send_request(action, params=None, timeout_s=None,
                                     on_late_response=None):
                 # getattr, not direct access: a mutant that skips the
                 # helper must fail the counts assert below, not crash
                 # here on the missing attribute.
-                counts.append(
-                    getattr(controller, "_screen_reads_in_flight", 0)
-                )
-                return _walk_response("snap-b", sid, gen, 1)
+                sends.append((
+                    action,
+                    getattr(controller, "_screen_reads_in_flight", 0),
+                ))
+                return _walk_reply_for(machine)(action, params)
 
             controller.app = MagicMock()
             controller.app.send_request = _send_request
             controller._sent = []
 
             await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine),), trace_id="tr",
-                ),
-                timeout=2.0,
+                await _show_numbers(controller), timeout=2.0,
             )
-            return counts, controller._screen_reads_in_flight
+            return sends, controller._screen_reads_in_flight
 
-        counts, after = asyncio.run(_run())
+        sends, after = asyncio.run(_run())
+        # The machine's own pin_snapshot follows the walk; it is not a read.
+        counts = [count for action, count in sends
+                  if action == "start_overlay_walk"]
         assert counts == [1]
         assert after == 0
 
@@ -1509,8 +1595,7 @@ class TestAutoOpenRepaintIsNotGated:
 
     def test_an_auto_open_repaint_does_not_set_the_marker(self):
         async def _run():
-            machine = _refresh_machine()
-            controller = _controller(machine)
+            controller = _auto_open_controller()
             controller.loop = asyncio.get_running_loop()
             controller.screen_read_in_flight_since = None
             seen: list = []
@@ -1520,23 +1605,19 @@ class TestAutoOpenRepaintIsNotGated:
                 seen.append(
                     (action, controller.screen_read_in_flight_since)
                 )
-                return {"status": "ok"}
+                return _ambiguous_reply(action, params or {})
 
             controller.app = MagicMock()
             controller.app.send_request = _send_request
             controller._sent = []
 
-            await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine, reason=BuildReason.AUTO_OPEN),),
-                    trace_id="tr",
-                ),
-                timeout=2.0,
-            )
+            await asyncio.wait_for(_ambiguous_click(controller), timeout=2.0)
             return seen, controller.screen_read_in_flight_since
 
         seen, after = asyncio.run(_run())
-        assert seen == [("show_numbered_overlay", None)], (
+        # The by-name click that found the two finalists comes first.
+        assert [action for action, _ in seen[:1]] == ["click_element"]
+        assert seen[1:] == [("show_numbered_overlay", None)], (
             "a snapshot repaint runs no UIA walk; it must not set the "
             "marker that refuses dictation"
         )
@@ -1544,25 +1625,20 @@ class TestAutoOpenRepaintIsNotGated:
 
     def test_an_auto_open_repaint_skips_the_sentence_wait(self):
         async def _run():
-            machine = _refresh_machine()
-            controller = _controller(machine)
+            controller = _auto_open_controller()
             controller.loop = asyncio.get_running_loop()
             sentence_closed = asyncio.Event()  # sentence stays open
             _wire_sentence(controller, sentence_closed)
-            _wire_app(controller, lambda a, p: {"status": "ok"})
+            _wire_app(controller, _ambiguous_reply)
 
             # Far below the 5 s sentence bound: a repaint parked on the
             # sentence wait trips this timeout.
-            await asyncio.wait_for(
-                controller._dispatch_overlay_effects(
-                    (_build_effect(machine, reason=BuildReason.AUTO_OPEN),),
-                    trace_id="tr",
-                ),
-                timeout=0.8,
-            )
+            await asyncio.wait_for(_ambiguous_click(controller), timeout=0.8)
             return [a for a, _ in controller._sent]
 
-        assert asyncio.run(_run()) == ["show_numbered_overlay"], (
+        assert asyncio.run(_run()) == [
+            "click_element", "show_numbered_overlay",
+        ], (
             "the snapshot repaint must not wait for the open sentence"
         )
 

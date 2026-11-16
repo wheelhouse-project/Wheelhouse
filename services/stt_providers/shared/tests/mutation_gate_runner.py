@@ -528,6 +528,28 @@ def _line_start_problem(data, old):
     return None
 
 
+def _declaration_problems(selected):
+    """Name each mutation whose expected-survivor declaration has no reason.
+
+    A gate declares a mutation that no test can catch with the key
+    "survives", whose value is the reason. A declaration without a reason
+    hides a survivor and says nothing about why, so it is refused before
+    any file is mutated.
+    """
+    problems = []
+    for m in selected:
+        if "survives" not in m:
+            continue
+        reason = m["survives"]
+        if not isinstance(reason, str) or not reason.strip():
+            problems.append(f"{m['name']}: an expected survivor needs a reason")
+    return problems
+
+
+def _declared(mutations):
+    return sum(1 for m in mutations if "survives" in m)
+
+
 def _check(selected, total, skipped) -> int:
     """Answer, without running a test, whether each mutation still applies.
 
@@ -549,6 +571,9 @@ def _check(selected, total, skipped) -> int:
     every document mutation as broken.
     """
     stale, broken = [], []
+    invalid = _declaration_problems(selected)
+    for problem in invalid:
+        print(f"ERROR {problem}")
     for m in selected:
         path = m["file"]
         data = path.read_bytes()
@@ -572,10 +597,15 @@ def _check(selected, total, skipped) -> int:
             print(f"ERROR {m['name']}: {problem}")
             continue
         print(f"ok {m['name']}")
-    print(f"checked {len(selected)} patterns of {total}, "
-          f"skipped {skipped} by name filter, {len(stale)} stale, "
-          f"{len(broken)} that do not compile")
-    return 1 if (stale or broken) else 0
+    line = (f"checked {len(selected)} patterns of {total}, "
+            f"skipped {skipped} by name filter, {len(stale)} stale, "
+            f"{len(broken)} that do not compile")
+    # The line keeps its old form for a gate that declares no expected
+    # survivor, so a reader of an older gate's output sees no change.
+    if _declared(selected):
+        line += f", {_declared(selected)} expected survivors"
+    print(line)
+    return 1 if (stale or broken or invalid) else 0
 
 
 def run(mutations, argv=None) -> int:
@@ -599,6 +629,12 @@ def run(mutations, argv=None) -> int:
     if check_only:
         return _check(selected, len(mutations), skipped)
 
+    invalid = _declaration_problems(selected)
+    if invalid:
+        for problem in invalid:
+            print(f"ERROR {problem}")
+        return 1
+
     try:
         _admit_execution()
     except OSError as exc:
@@ -606,6 +642,7 @@ def run(mutations, argv=None) -> int:
         return 1
 
     errors, survivors = [], []
+    expected, expected_caught = [], []
     suites = {(m["service"], m["test_file"]) for m in selected}
 
     # Validate every expected name against real collection first: a renamed
@@ -758,14 +795,30 @@ def run(mutations, argv=None) -> int:
         # makes the short summary worth reading.
         failed = set() if proc.returncode == 0 else _failed_names(out)
         missing = [t for t in m["expect"] if t not in failed]
-        if missing:
+        if "survives" in m:
+            # An expected survivor must leave its whole selection green. A
+            # failure of any test, named in the expect list or not, shows a
+            # test that catches the mutation, so the reason is no longer
+            # true and the declaration must be removed.
+            if proc.returncode == 0:
+                expected.append(m["name"])
+                print(f"expected survivor {m['name']}: {m['survives']}")
+            else:
+                expected_caught.append(m["name"])
+                print(f"CAUGHT EXPECTED SURVIVOR {m['name']} by "
+                      f"{sorted(failed)}")
+        elif missing:
             survivors.append(f"{m['name']}: expected {missing}")
             print(f"SURVIVED {m['name']}: expected {missing} to fail; "
                   f"failed={sorted(failed)}")
         else:
             print(f"caught {m['name']} by {sorted(failed & set(m['expect']))}")
 
-    print(f"scope: ran {len(selected)} of {len(mutations)} mutations, "
-          f"skipped {skipped} by name filter, "
-          f"{len(survivors)} survivors, {len(errors)} errors")
-    return 1 if (survivors or errors) else 0
+    line = (f"scope: ran {len(selected)} of {len(mutations)} mutations, "
+            f"skipped {skipped} by name filter, "
+            f"{len(survivors)} survivors, {len(errors)} errors")
+    if _declared(selected):
+        line += (f", {len(expected)} expected survivors, "
+                 f"{len(expected_caught)} expected survivors caught")
+    print(line)
+    return 1 if (survivors or errors or expected_caught) else 0

@@ -66,6 +66,8 @@ SERVICE = Path(__file__).resolve().parent.parent
 INPUT_PROC = SERVICE / "input_proc.py"
 APP = SERVICE / "app.py"
 MAIN = SERVICE / "main.py"
+CONTROLLER = SERVICE / "numbered_overlay" / "controller.py"
+HELPERS = SERVICE / "numbered_overlay" / "helpers.py"
 ENGINE = SERVICE / "speech" / "command_engine.py"
 PROCESSOR = SERVICE / "speech" / "speech_processor.py"
 ACTIONS = SERVICE / "speech" / "actions.py"
@@ -642,10 +644,8 @@ MUTATIONS = [
     mut(
         "actions-disabled-notice-flag-never-set",
         ACTIONS,
-        "                lc._click_disabled_notice_shown = True\n"
-        "            lc._forward_click_notice(**kwargs)\n",
-        "                pass\n"
-        "            lc._forward_click_notice(**kwargs)\n",
+        "                if not lc.take_click_disabled_notice():\n",
+        "                if lc._click_disabled_notice_shown:\n",
         [F_CLICK],
         ['test_with_the_safety_word_a_notice_is_shown_and_nothing_typed', 'test_click_turned_off_shows_its_notice_once_per_session'],
     ),
@@ -654,7 +654,7 @@ MUTATIONS = [
     mut(
         "actions-disabled-notice-shown-every-time",
         ACTIONS,
-        "                if lc._click_disabled_notice_shown:\n",
+        "                if not lc.take_click_disabled_notice():\n",
         "                if False:\n",
         [F_CLICK],
         ['test_click_turned_off_shows_its_notice_once_per_session'],
@@ -705,7 +705,7 @@ MUTATIONS = [
     # =====================================================================
     mut(
         "main-deferral-never-happens",
-        MAIN,
+        CONTROLLER,
         "        if defer_failure_notice and (\n",
         "        if False and (\n",
         [F_CLICK],
@@ -714,7 +714,7 @@ MUTATIONS = [
     ),
     mut(
         "main-every-outcome-is-deferred",
-        MAIN,
+        CONTROLLER,
         '            response.outcome == "not_found"\n'
         "            or (\n",
         "            True\n"
@@ -725,7 +725,7 @@ MUTATIONS = [
     ),
     mut(
         "main-a-walk-deadline-is-shown-at-once",
-        MAIN,
+        CONTROLLER,
         '                and response.reason == "walk_deadline_exceeded"\n',
         "                and False\n",
         [F_CLICK],
@@ -734,7 +734,7 @@ MUTATIONS = [
     ),
     mut(
         "main-disabled-click-shows-at-once",
-        MAIN,
+        CONTROLLER,
         "            if defer_failure_notice:\n"
         "                # The caller decides whether the notice is shown (the\n",
         "            if False:\n"
@@ -745,7 +745,7 @@ MUTATIONS = [
     ),
     mut(
         "main-notice-snapshot-id-ignores-the-response",
-        MAIN,
+        HELPERS,
         "        snapshot_id=response.snapshot_id or fallback_snapshot_id,\n",
         "        snapshot_id=fallback_snapshot_id,\n",
         [F_CLICK],
@@ -753,7 +753,7 @@ MUTATIONS = [
     ),
     mut(
         "main-notice-trace-id-ignores-the-response",
-        MAIN,
+        HELPERS,
         "        trace_id=response.trace_id or trace_id,\n"
         "        late_correction=late_correction,\n",
         "        trace_id=trace_id,\n"

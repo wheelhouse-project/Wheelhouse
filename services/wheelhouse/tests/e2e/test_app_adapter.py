@@ -787,8 +787,9 @@ class TestMouseAndNotificationBoundaryIsolation:
     ``UIActionHandler.show_notification`` has the same shape with
     ``plyer.notification``.
 
-    The handler stores the three pointer wrappers in ``_mouse_click_seam``,
-    ``_mouse_move_seam`` and ``_mouse_drag_seam``, and the ClickExecutor
+    The handler gives the three pointer wrappers to ``MousePointerActions``,
+    which stores them in ``mouse_click_seam``, ``mouse_move_seam`` and
+    ``mouse_drag_seam``, and the ClickExecutor
     holds the coordinate, gesture and hit-test wrappers. AppAdapter's empty
     config reaches ``ClickConfig``'s ``enabled=True`` default, so none of
     these dispatches short-circuits.

@@ -282,9 +282,8 @@ def renumber_click_is_safe(
     user reading badge N and their "click N" transcript arriving. N then
     resolves against the NEW snapshot with fresh bounds, so the executor's
     stale-position refusal never fires and the click silently lands on the
-    wrong control. The caller
-    (``LogicController._overlay_renumber_click_safe``) arms this check for
-    every repaint that replaces the pinned list -- a focus- or menu-triggered
+    wrong control. The caller (``NumberedOverlayController``) arms this
+    check for every repaint that replaces the pinned list -- a focus- or menu-triggered
     refresh, the post-click settle re-read, a re-said "show numbers", and the
     browser timer's proactive tick -- on every application
     (wh-overlay-slow-uia-stale-badges.4; the proactive refresh was the only

@@ -158,7 +158,7 @@ def _loose_normalize(text: str) -> str:
        clock times, decimals, and spoken digit sequences.
     2. _normalize_small_numbers(), the harness's own zero-through-ten
        table, which predates the module and covers the lone number words
-       apply_itn deliberately refuses.
+       apply_itn leaves as words (zero to nine, and the scale words).
 
     The order is load-bearing. apply_itn() reads number WORDS, so
     "eight thousand" must reach it before _normalize_small_numbers()
@@ -167,8 +167,9 @@ def _loose_normalize(text: str) -> str:
     The identical treatment runs on the manifest's canonical text and on
     the model output (loose_match, and the WER pass), so no model is
     scored down for choosing one written form over the other. Phrases
-    apply_itn() refuses on command-safety grounds -- a lone number word,
-    "twenty three fifty", "four ten" -- stay refused on both sides, so
+    apply_itn() refuses on command-safety grounds -- a lone number word
+    below ten, "twenty three fifty", "four ten" -- stay refused on both
+    sides (a lone word from ten to ninety converts), so
     they still compare equal to themselves. The harness does not relax a
     module rule to suit itself.
 
@@ -194,8 +195,10 @@ def loose_match(expected: str, actual: str) -> bool:
       - Cardinal words zero through ten are then replaced with their
         digit equivalents on each side, mirroring WheelHouse's
         word-or-digit acceptance for command parameters in that range.
-        apply_itn() refuses a lone number word on command-safety
-        grounds; this table is what still converts it.
+        apply_itn() leaves a lone number word below ten as a word on
+        command-safety grounds (a lone word from ten to ninety converts
+        in apply_itn); this table is what still converts the words
+        below ten.
       - If the (normalized) expected contains a proper-noun-shaped word,
         the comparison is strict: mid-string casing must match. So
         "Bill Smith" and "Boston" need their capitals.
@@ -265,6 +268,8 @@ class UtteranceResult:
     interim_results: list[str] = field(default_factory=list)
     interim_final_match: bool = False
     punctuation_added: bool = False
+    # Length of the decoded wav in seconds; the real-time factor divides by it.
+    audio_seconds: float = 0.0
 
 
 @dataclass
@@ -275,6 +280,14 @@ class CategoryMetrics:
     exact_matches: int = 0
     total_wer: float = 0.0
     total_ms: float = 0.0
+    total_audio_seconds: float = 0.0
+
+    @property
+    def rtf(self) -> float | None:
+        """Total inference seconds over total audio seconds."""
+        if self.total_audio_seconds <= 0:
+            return None
+        return (self.total_ms / 1000.0) / self.total_audio_seconds
 
     @property
     def exact_match_accuracy(self) -> float:
@@ -304,6 +317,12 @@ def read_wav(path: Path) -> tuple[np.ndarray, int]:
     return samples, sample_rate
 
 
+def wav_duration_seconds(path: Path) -> float:
+    """Length of a WAV file in seconds, from its header."""
+    with wave.open(str(path), "rb") as wf:
+        return wf.getnframes() / wf.getframerate()
+
+
 # ── Adapter Factory ─────────────────────────────────────────────────
 
 
@@ -326,6 +345,7 @@ def create_adapter(
     initial_prompt: str = "",
     language: str = "",
     num_threads: int = 0,
+    shipped_text: bool = False,
 ) -> ModelAdapter:
     """Create a model adapter by name."""
     if model_type not in ADAPTER_REGISTRY:
@@ -339,6 +359,10 @@ def create_adapter(
     if num_threads and not model_type.startswith("sherpa-"):
         raise ValueError(
             f"--num-threads is supported only by the sherpa adapters, not '{model_type}'"
+        )
+    if shipped_text and not model_type.startswith("sherpa-"):
+        raise ValueError(
+            f"--shipped-text is supported only by the sherpa adapters, not '{model_type}'"
         )
 
     if model_type == "google":
@@ -387,6 +411,7 @@ def create_adapter(
     return SherpaAdapter(
         model_path=model_path, provider=provider, language=language or None,
         num_threads=num_threads or None,
+        shipped_text=shipped_text,
     )
 
 
@@ -479,6 +504,7 @@ def run_benchmark(
             interim_results=interim_list,
             interim_final_match=interim_final_match,
             punctuation_added=has_punctuation(raw_text),
+            audio_seconds=wav_duration_seconds(wav_path),
         )
         results.append(result)
 
@@ -497,6 +523,10 @@ def run_benchmark(
 # ── Metrics Computation ─────────────────────────────────────────────
 
 
+def _round_rtf(rtf: float | None) -> float | None:
+    return None if rtf is None else round(rtf, 4)
+
+
 def compute_metrics(results: list[UtteranceResult]) -> dict:
     """Compute aggregate metrics from benchmark results."""
     if not results:
@@ -512,6 +542,7 @@ def compute_metrics(results: list[UtteranceResult]) -> dict:
         cat.exact_matches += int(r.exact_match)
         cat.total_wer += r.wer
         cat.total_ms += r.elapsed_ms
+        cat.total_audio_seconds += r.audio_seconds
 
     # Overall
     overall = CategoryMetrics()
@@ -520,6 +551,7 @@ def compute_metrics(results: list[UtteranceResult]) -> dict:
         overall.exact_matches += int(r.exact_match)
         overall.total_wer += r.wer
         overall.total_ms += r.elapsed_ms
+        overall.total_audio_seconds += r.audio_seconds
 
     # Litmus counts. Reported as data only -- the harness does not derive
     # a litmus_pass boolean or any other automatic disposition from these.
@@ -552,6 +584,8 @@ def compute_metrics(results: list[UtteranceResult]) -> dict:
             "avg_inference_ms": round(overall.avg_ms, 1),
             "median_inference_ms": round(float(median_ms), 1),
             "p95_inference_ms": round(float(p95_ms), 1),
+            "total_audio_seconds": round(overall.total_audio_seconds, 3),
+            "rtf": _round_rtf(overall.rtf),
             "interim_stability": round(
                 interim_stable / interim_total, 4
             ) if interim_total else None,
@@ -569,6 +603,8 @@ def compute_metrics(results: list[UtteranceResult]) -> dict:
                 "exact_match_accuracy": round(m.exact_match_accuracy, 4),
                 "wer": round(m.avg_wer, 4),
                 "avg_inference_ms": round(m.avg_ms, 1),
+                "total_audio_seconds": round(m.total_audio_seconds, 3),
+                "rtf": _round_rtf(m.rtf),
             }
             for cat, m in sorted(categories.items())
         },
@@ -677,6 +713,11 @@ def print_report(model_name: str, results: list[UtteranceResult], metrics: dict)
         f"Inference ms: median {o['median_inference_ms']:.1f}, "
         f"p95 {o['p95_inference_ms']:.1f}"
     )
+    if o.get("rtf") is not None:
+        print(
+            f"Real-time factor: {o['rtf']:.4f} "
+            f"({o['total_audio_seconds']:.1f} s of audio)"
+        )
     peak = metrics.get("process", {}).get("peak_working_set_bytes")
     if peak is not None:
         print(f"Peak working set: {peak / 2**20:.0f} MiB")
@@ -865,6 +906,12 @@ def parse_args() -> argparse.Namespace:
              "for a streaming model and 1 for an offline model; the shipped "
              "Parakeet provider uses 4.",
     )
+    parser.add_argument(
+        "--shipped-text", action="store_true",
+        help="Score the transcript the shipped Parakeet server produces: "
+             "result.tokens joined, then normalize_transcript and apply_itn "
+             "(sherpa adapters, offline models only).",
+    )
     return parser.parse_args()
 
 
@@ -897,6 +944,7 @@ def main() -> int:
         initial_prompt=args.initial_prompt,
         language=args.language,
         num_threads=args.num_threads,
+        shipped_text=args.shipped_text,
     )
     # wh-as9: park the adapter on a module global so it survives main()
     # returning. After a full-corpus CUDA run, the ctranslate2 model

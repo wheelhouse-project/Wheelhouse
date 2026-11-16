@@ -880,7 +880,9 @@ async def test_fifty_then_percent_leaves_digits_and_no_leftover_word(
     typed after it.
     """
     apply_itn = _load_apply_itn()
-    stable_text = apply_itn("fifty")
+    # The stable text is interim text: Parakeet passes interim=True there
+    # (wh-itn-lone-number-ten.1.1).
+    stable_text = apply_itn("fifty", interim=True)
     final_text = apply_itn("fifty percent")
 
     watcher = _RetractWatcher(harness).install()
@@ -926,7 +928,9 @@ async def test_fifty_then_dollars_leaves_the_dollar_amount(
     altering the existing currency behavior.
     """
     apply_itn = _load_apply_itn()
-    stable_text = apply_itn("fifty")
+    # The stable text is interim text: Parakeet passes interim=True there
+    # (wh-itn-lone-number-ten.1.1).
+    stable_text = apply_itn("fifty", interim=True)
     final_text = apply_itn("fifty dollars")
 
     watcher = _RetractWatcher(harness).install()

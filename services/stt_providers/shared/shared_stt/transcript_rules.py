@@ -190,10 +190,22 @@ def normalize_transcript(text: str) -> str:
 #
 # Command safety (David's direction, 2026-08-25): a phrase converts only
 # when it carries two or more number words that read as ONE number, or a
-# number word beside a unit anchor (dollar/cent, AM/PM, "point"). A lone
-# number word stays a word, because Wheelhouse matches spoken commands
-# against word forms -- "backspace one" must never become "backspace 1".
-# The accepted cost is that a dictated lone "seven" types "seven".
+# number word beside a unit anchor (dollar/cent, AM/PM, "point"), or one
+# lone number word from ten to ninety. A lone number word below ten
+# stays a word, because Wheelhouse matches spoken commands against word
+# forms -- "backspace one" must never become "backspace 1". The accepted
+# cost is that a dictated lone "seven" types "seven".
+#
+# Lone number words from ten up (David, 2026-11-12, wh-itn-lone-number-ten):
+# one single word from ten to ninety converts, so "I have ten apples"
+# types "I have 10 apples". Command matching is unaffected: a (\d+)
+# capture in a WheelHouse pattern accepts digits as well as words
+# (speech/pattern_transform.py _transform_numeric_captures, and
+# words_to_int in speech/actions.py takes int() of digits). A check of all
+# 336 shipped patterns on 2026-11-12 found that the word form and the digit
+# form matched the same pattern with the same action. Single scale words
+# ("hundred", "thousand") stay words. An utterance that carries the word
+# "literal" skips only this lone-word conversion (see _LITERAL_WORD).
 #
 # Refusal policy (David's ruling, 2026-08-25): once ANY rule refuses a
 # span, the refusal absorbs every adjacent word of the number-ish
@@ -791,7 +803,7 @@ def _try_percent(
     """The digits of a run that stands directly in front of "percent".
 
     The anchor licenses a LONE number word, which is the whole reason
-    this rule exists: _try_cardinal refuses a one-word run by the
+    this rule exists: _try_cardinal refused a one-word run by the
     command-safety rule above, so "fifty percent" kept its words and the
     screen read "fifty%" (wh-itn-percent-digits, David's UTT-31 of
     2026-10-06). A dollar anchor already licenses the same lone word in
@@ -1121,8 +1133,77 @@ def _try_digit_sequence(run: list[str]) -> str | None:
     return "".join(str(_ITN_DIGITS[word]) for word in run)
 
 
+# crewcut: this copies the WheelHouse command word "literal", which the
+# literal-bypass pattern in services/wheelhouse/speech/config/patterns.toml
+# ('literal (.+)$', no leading ^) matches anywhere in an utterance. The
+# provider cannot read that pattern, so the word is written here a second
+# time. Remove the copy by having the provider receive a flag from
+# WheelHouse, or by running this conversion in WheelHouse after it reads
+# "literal".
+_LITERAL_WORD = re.compile(r"\bliteral\b", re.IGNORECASE)
+
+# The words that one lone number word may convert from: ten to ninety.
+# A single condition on purpose (boss ruling 1, 2026-11-12): units stay
+# words below ten, and a lone scale word stays a word.
+_LONE_CONVERTIBLE = {**_ITN_TEENS, **_ITN_TENS}
+
+
+def _lone_word_converts(
+    records: list[_Token], word: str, end: int, *, interim: bool = False
+) -> bool:
+    """True when the one number word that ends at `end` converts alone.
+
+    The word has to be from ten to ninety, and three shapes of it are not
+    a quantity. The first is the tail of a leading "point": "point
+    twenty percent" would type "point 20 percent" and the screen "point
+    20%", which is the fault wh-itn-percent-digits.1.2 closed for the
+    percent anchor. The second is the front half of a compound ordinal
+    -- "march thirty second", "the twenty first century" -- where "30"
+    would strand the ordinal word behind it. The third is a tens word
+    in front of a spoken zero -- "twenty oh five" -- where "20" would
+    strand the "oh" and the digit word behind it.
+
+    In `interim` text a tens word that is the last word stays a word
+    too: the next decode can add a unit ("twenty" -> "twenty three"),
+    and WheelHouse waits for a spoken count only while its last word is
+    a number word (wh-itn-lone-number-ten.1.1). Punctuation and white
+    space after the word do not count as a later word.
+    """
+    if word not in _LONE_CONVERTIBLE:
+        return False
+    if (
+        interim
+        and word in _ITN_TENS
+        and not any(record.core for record in records[end:])
+    ):
+        return False
+    if _leading_fraction_before(records, end - 1):
+        return False
+    if (
+        word in _ITN_TENS
+        and _adjacent(records, end)
+        and records[end].low in _ITN_ORDINAL_UNITS
+    ):
+        return False
+    if (
+        word in _ITN_TENS
+        and _adjacent(records, end)
+        and records[end].low in _ITN_OH_WORDS
+    ):
+        # "twenty oh five" was all words before this rule: "oh" joins a
+        # run only after a digit or a teen, so the tens word would
+        # convert alone and strand the "oh" ("20 oh five").
+        return False
+    return True
+
+
 def _try_cardinal(
-    records: list[_Token], run: list[str], end: int
+    records: list[_Token],
+    run: list[str],
+    end: int,
+    *,
+    lone_ten_up: bool = True,
+    interim: bool = False,
 ) -> str | None:
     """The written form of a run that reads as ONE cardinal, or None.
 
@@ -1130,11 +1211,19 @@ def _try_cardinal(
     standing in front of a street suffix is an address number, and an
     address number is written bare (wh-itn-thousands-commas). Nothing
     else about the position changes what this rule converts.
+
+    A run of one word converts only when that word is from ten to ninety
+    and `lone_ten_up` is true (apply_itn passes false for an utterance
+    that carries "literal"). `interim` is apply_itn's keyword; see
+    _lone_word_converts.
     """
     words = _value_words(run)
     if words is None:
         return None
-    if len(words) < 2:
+    if len(words) < 2 and not (
+        lone_ten_up
+        and _lone_word_converts(records, words[0], end, interim=interim)
+    ):
         return None
     values = _parse_cardinal(words)
     if values is None or len(values) != 1:
@@ -1436,7 +1525,11 @@ def _try_date_ordinal(
 
 
 def _match_number_phrase(
-    records: list[_Token], start: int
+    records: list[_Token],
+    start: int,
+    *,
+    lone_ten_up: bool = True,
+    interim: bool = False,
 ) -> tuple[str | None, int]:
     """The written form for the phrase at `start`, and the index after
     the tokens it consumed.
@@ -1487,7 +1580,9 @@ def _match_number_phrase(
     digits = _try_digit_sequence(run)
     if digits is not None:
         return digits, end
-    cardinal = _try_cardinal(records, run, end)
+    cardinal = _try_cardinal(
+        records, run, end, lone_ten_up=lone_ten_up, interim=interim
+    )
     if cardinal is not None:
         return cardinal, end
     # Rule 6 is last on purpose (boss ruling, 2026-08-25). Every rule
@@ -1507,7 +1602,7 @@ def _match_number_phrase(
     return None, _absorbed_refusal_end(records, end)
 
 
-def apply_itn(text: str) -> str:
+def apply_itn(text: str, *, interim: bool = False) -> str:
     """Rewrite spoken number phrases as the written forms users expect.
 
     - Cardinals: 'fifty nine' -> '59', 'eight thousand' -> '8000'
@@ -1524,12 +1619,22 @@ def apply_itn(text: str) -> str:
       street' -> '1234 main street'
     - Dates, month anchored: 'january third' -> 'january 3rd'
 
-    A lone number word never converts (see the command-safety note
-    above). Every other character, including whitespace, is returned
-    unchanged.
+    A lone number word below ten never converts (see the command-safety
+    note above); a lone word from ten to ninety converts unless the
+    utterance carries the word "literal". Every other character,
+    including whitespace, is returned unchanged.
+
+    `interim` is True for the text of an interim decode, which can still
+    grow. Then a tens word (twenty to ninety) that is the last word
+    stays a word -- "backspace twenty" stays "backspace twenty", because
+    the next decode can make it "backspace twenty three" -- and every
+    other result is the same as with the default False. Pass the
+    default for final text (wh-itn-lone-number-ten.1.1).
     """
     if not text:
         return ""
+
+    lone_ten_up = _LITERAL_WORD.search(text) is None
 
     words, separators, records = _tokenize(text)
 
@@ -1547,7 +1652,9 @@ def apply_itn(text: str) -> str:
         if dated is not None:
             replacement, end = dated
         else:
-            replacement, end = _match_number_phrase(records, index)
+            replacement, end = _match_number_phrase(
+                records, index, lone_ten_up=lone_ten_up, interim=interim
+            )
         if replacement is None:
             for skipped in range(index, end):
                 pieces.append(words[skipped] + separators[skipped])

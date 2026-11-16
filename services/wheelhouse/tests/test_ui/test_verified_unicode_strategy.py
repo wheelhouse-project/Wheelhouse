@@ -26,6 +26,17 @@ from ui.strategies.specific import VerifiedUnicodeStrategy
 _STRAT_MOD = "ui.strategies.specific"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_element_compare():
+    """Elements here are mocks; a real UIA compare on a mock overflows the stack.
+
+    Mock enclosing elements are child elements, never the focused control
+    (wh-line-start-space-capital.1.1).
+    """
+    with patch("ui.uia_text_reader.auto.ControlsAreSame", return_value=False):
+        yield
+
+
 def _make_focused_control(hwnd: int = 4242):
     """Build a mock UIA control whose top-level window has the given HWND."""
     top_level = MagicMock()
@@ -1384,6 +1395,116 @@ class TestVerifiedUnicodeStrategyEmptyTiptapPrompt:
         assert result.success is True
         mock_send.assert_called_once_with("Hello")
         assert bm._buffer == "Hello"
+
+
+class TestVerifiedUnicodeStrategyNewEmptyParagraph:
+    """wh-line-start-space-capital: a new line in the Claude desktop message box.
+
+    UIA reports the caret in a new empty paragraph at the end of the
+    previous line. A line without a period gave ' this' (space, no capital).
+    """
+
+    def test_first_word_after_new_line_has_no_space_and_capital(
+        self, text_perfector, window_manager
+    ):
+        clipboard = _make_clipboard_ops()
+        bm = ShadowBufferManager()  # invalid: the insert re-reads the prompt
+        strategy = VerifiedUnicodeStrategy(
+            bm, text_perfector, clipboard, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with patch("ui.shadow_buffer.auto") as mock_auto, patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, len("This"), None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=4242
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            mock_auto.UIAutomationInitializerInThread.return_value.__enter__ = MagicMock()
+            mock_auto.UIAutomationInitializerInThread.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
+            text_pattern = MagicMock()
+            focused = MagicMock()
+            focused.GetPattern.side_effect = (
+                lambda pid: text_pattern
+                if pid is mock_auto.PatternId.TextPattern else None
+            )
+            doc_range = MagicMock()
+            doc_range.GetText.return_value = "It should not be there\n"
+            text_pattern.DocumentRange = doc_range
+            sel_range = MagicMock()
+            sel_range.GetText.return_value = ""
+            sel_range.GetEnclosingControl.return_value = MagicMock(
+                ClassName="is-empty"
+            )
+            text_pattern.GetSelection.return_value = [sel_range]
+            cursor_range = MagicMock()
+            cursor_range.GetText.return_value = "It should not be there"
+            doc_range.Clone.return_value = cursor_range
+            mock_auto.GetFocusedControl.return_value = focused
+
+            result = strategy.insert("this", context)
+
+        assert result.success is True
+        mock_send.assert_called_once_with("This")
+
+    def test_claude_box_shape_has_no_space_and_capital(
+        self, text_perfector, window_manager
+    ):
+        """Measured Claude desktop box: class '', raw own text is a line break."""
+        clipboard = _make_clipboard_ops()
+        bm = ShadowBufferManager()
+        strategy = VerifiedUnicodeStrategy(
+            bm, text_perfector, clipboard, window_manager
+        )
+        context = _make_context(hwnd=4242)
+
+        with patch("ui.shadow_buffer.auto") as mock_auto, patch(
+            f"{_STRAT_MOD}.type_string_verified",
+            return_value=(True, len("Foo"), None),
+        ) as mock_send, patch(
+            f"{_STRAT_MOD}.win32gui.GetForegroundWindow", return_value=4242
+        ), patch(
+            f"{_STRAT_MOD}.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ), patch(
+            "ui.hwnd_utils.normalize_hwnd_for_foreground_compare",
+            side_effect=_patched_normalize,
+        ):
+            mock_auto.UIAutomationInitializerInThread.return_value.__enter__ = MagicMock()
+            mock_auto.UIAutomationInitializerInThread.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
+            text_pattern = MagicMock()
+            focused = MagicMock()
+            focused.GetPattern.side_effect = (
+                lambda pid: text_pattern
+                if pid is mock_auto.PatternId.TextPattern else None
+            )
+            doc_range = MagicMock()
+            doc_range.GetText.return_value = "Hello world\n"
+            text_pattern.DocumentRange = doc_range
+            sel_range = MagicMock()
+            sel_range.GetText.return_value = ""
+            sel_range.GetEnclosingControl.return_value = MagicMock(ClassName="")
+            text_pattern.GetSelection.return_value = [sel_range]
+            text_pattern.pattern.RangeFromChild.return_value.GetText.return_value = "\n"
+            cursor_range = MagicMock()
+            cursor_range.GetText.return_value = "Hello world"
+            doc_range.Clone.return_value = cursor_range
+            mock_auto.GetFocusedControl.return_value = focused
+
+            result = strategy.insert("foo", context)
+
+        assert result.success is True
+        mock_send.assert_called_once_with("Foo")
 
 
 class TestVerifiedUnicodeStrategyDispatchDiagnostics:
